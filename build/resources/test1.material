@@ -1,0 +1,44 @@
+
+material SomeSimpleMaterial
+{
+   technique
+   {
+      pass
+      {
+         point_sprites on
+         point_size 10
+         lighting off
+         
+         ambient vertexcolour
+         diffuse vertexcolour
+         
+      }
+   }
+}
+
+material PointTest
+{
+    technique
+    {
+		pass
+		{
+			cull_hardware none
+			cull_software none
+			point_sprites on
+			//point_size_attenuation on linear
+			//point_size_min 0.5
+			//point_size_max 1.25
+			point_size 1
+			//alpha_rejection greater_equal 128
+			scene_blend add
+			ambient 0.2 0.2 0.0 1.0
+			//diffuse 1.0 0.2 0.0 1.0
+
+			texture_unit
+			{
+				texture GLX_icon.png
+				colour_op add
+			}
+		}
+    }
+}

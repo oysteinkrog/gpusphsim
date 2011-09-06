@@ -1,0 +1,93 @@
+material Pointcloud
+{
+   technique
+   {
+      pass
+      {
+         diffuse vertexcolour
+
+         specular vertexcolour
+
+         ambient vertexcolour
+
+         point_size 0.05
+
+         point_sprites on
+
+         point_size_attenuation on
+      }
+   }
+}
+
+material Cuda/Droplet
+{
+   technique
+   {
+      pass
+      {
+         ambient 1 1 1
+         point_sprites on
+         point_size_attenuation on
+         point_size 0.5
+         lighting off
+         alpha_rejection greater_equal 128
+         texture_unit
+         {
+            texture droplet2.png
+         }
+      }
+   }
+}
+
+material FluidParticleTest
+{
+	technique
+	{
+		pass
+		{
+			point_sprites on
+			
+			point_size 1.0
+			
+			point_size_attenuation on
+			
+			vertex_program test glsl
+			{
+				source test.vert
+
+			}
+		}		
+    }
+}
+
+
+
+material FluidParticle
+{
+	technique
+	{
+		pass
+		{
+			point_sprites on
+			
+			point_size 1.0
+			
+			point_size_attenuation on
+			
+			vertex_program nv_fluidVP glsl
+			{
+				source fluid.vert
+				param_named pointRadius float 300.0
+				param_named pointScale float 3.0
+
+			}
+	       	fragment_program nv_fluidFP glsl
+			{ 		       	
+				//source fluid.frag				
+			}
+		}		
+    }
+}
+
+
+

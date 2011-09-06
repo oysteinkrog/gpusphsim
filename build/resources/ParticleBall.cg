@@ -1,0 +1,125 @@
+void ParticleBall_VS(
+	float4 position				: POSITION,
+	//float3 normal				: NORMAL,
+	float4 color				: COLOR,
+	float2 uv					: TEXCOORD0,
+	
+	out float4 oPosition		: POSITION,
+	out float4 oColor			: COLOR,
+	out float3 oUv				: TEXCOORD0,
+	out float3 oLightDir		: TEXCOORD1,
+	out float3 oHalfAngle		: TEXCOORD2,
+	out float4 oLightPosition0	: TEXCOORD3,
+	out float4 oLightPosition1	: TEXCOORD4,
+	out float4 oLightPosition2	: TEXCOORD5,
+	out float3 oNormal			: TEXCOORD6,
+	out float oPointSize		: PSIZE,
+	
+	uniform float pointRadius,
+	uniform float pointScale,
+	
+ 	uniform float4 lightPosition,				// object space
+ 	uniform float3 eyePosition,					// object 
+	
+    uniform float4x4 worldViewProjMatrix,
+    
+ 	uniform float4x4 texWorldViewProjMatrix0,
+ 	uniform float4x4 texWorldViewProjMatrix1,
+ 	uniform float4x4 texWorldViewProjMatrix2
+)
+{
+	// calculate output position
+	oPosition = mul(worldViewProjMatrix, vec4(position.xyz, 1.0));
+
+	// pass the main uvs straight through unchanged
+	oUv.xy = uv;
+	oUv.z = oPosition.z;
+	
+	// pass color through as well
+	oColor = color;
+	
+	// pass through normals
+	//oNormal = normal;
+	
+	float dist = length(oPosition);
+	oPointSize = pointRadius * (pointScale / dist);
+
+	// calculate tangent space light vector
+	// Get object space light direction
+	oLightDir = normalize(lightPosition.xyz - (position * lightPosition.w).xyz);
+
+	// Calculate half-angle in tangent space
+	float3 eyeDir = normalize(eyePosition - position.xyz);
+	oHalfAngle = normalize(eyeDir + oLightDir);	
+
+	// Calculate the position of vertex in light space
+	oLightPosition0 = mul(texWorldViewProjMatrix0, position);
+	oLightPosition1 = mul(texWorldViewProjMatrix1, position);
+	oLightPosition2 = mul(texWorldViewProjMatrix2, position);
+	
+    return;
+}
+
+/********* pixel shaders ********/
+
+void ParticleBall_PS(
+    float4 position			: POSITION,
+    float4 color			: COLOR,
+	
+	float3 uv				: TEXCOORD0,
+	float3 OSlightDir		: TEXCOORD1,
+	float3 OShalfAngle		: TEXCOORD2,
+	float4 LightPosition0	: TEXCOORD3,
+	float4 LightPosition1	: TEXCOORD4,
+	float4 LightPosition2	: TEXCOORD5,
+	float3 normal			: TEXCOORD6,
+
+	out float4 oColour		: COLOR
+	) 
+{
+    const vec3 lightDir = vec3(0.577, 0.577, 0.577);
+
+    // calculate normal from texture coordinates
+    vec3 N;
+    N.xy = uv.xy*vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+    float mag = dot(N.xy, N.xy);
+    if (mag > 1.0) discard;   // kill pixels outside circle
+    N.z = sqrt(1.0-mag);
+
+    // calculate lighting
+    float diffuse = 0.5 + 0.5* max(0.0, dot(lightDir, N));
+	
+    float alpha = 0.5;
+    oColour = float4(color.rgb * diffuse,alpha);
+}
+
+void ParticleBallSnow_PS(
+    float4 position			: POSITION,
+    float4 color			: COLOR,
+	
+	float3 uv				: TEXCOORD0,
+	float3 OSlightDir		: TEXCOORD1,
+	float3 OShalfAngle		: TEXCOORD2,
+	float4 LightPosition0	: TEXCOORD3,
+	float4 LightPosition1	: TEXCOORD4,
+	float4 LightPosition2	: TEXCOORD5,
+	float3 normal			: TEXCOORD6,
+
+	out float4 oColour		: COLOR
+	) 
+{
+    const vec3 lightDir = vec3(0.577, 0.577, 0.577);
+
+    // calculate normal from texture coordinates
+    vec3 N;
+    N.xy = uv.xy*vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+    float mag = dot(N.xy, N.xy);
+    if (mag > 1.0) discard;   // kill pixels outside circle
+    N.z = sqrt(1.0-mag);
+
+    // calculate lighting
+    float diffuse = 0.8 + 0.8* max(0.0, dot(lightDir, N));
+	
+    float alpha = 0.5;
+    oColour = float4(color.rgb * diffuse,alpha);
+}

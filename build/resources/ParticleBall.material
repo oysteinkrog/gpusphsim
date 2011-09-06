@@ -1,0 +1,63 @@
+vertex_program shader/ParticleBall_VS cg
+{
+	source ParticleBall.cg
+	profiles vs_1_1 arbvp1
+	entry_point ParticleBall_VS
+   
+	default_params
+	{		
+  		param_named_auto lightPosition				light_position_object_space 0
+  		param_named_auto eyePosition				camera_position_object_space
+ 
+  		param_named_auto worldViewProjMatrix		worldviewproj_matrix
+  		param_named_auto texWorldViewProjMatrix0	texture_worldviewproj_matrix 0
+  		param_named_auto texWorldViewProjMatrix1	texture_worldviewproj_matrix 1
+  		param_named_auto texWorldViewProjMatrix2	texture_worldviewproj_matrix 2
+ 		
+		param_named		pointRadius		float	100
+		param_named		pointScale		float	400
+	}
+}
+
+fragment_program shader/ParticleBall_PS cg
+{
+	source ParticleBall.cg
+	profiles ps_2_0 arbfp1
+	entry_point ParticleBall_PS
+}
+
+fragment_program shader/ParticleBallSnow_PS cg
+{
+	source ParticleBall.cg
+	profiles ps_2_0 arbfp1
+	entry_point ParticleBallSnow_PS
+}
+
+material shader/ParticleBall
+{
+	technique
+	{
+		pass
+		{
+			point_sprites on			
+			point_size 10
+			point_size_attenuation on
+ 			vertex_program_ref shader/ParticleBall_VS {}
+ 			fragment_program_ref shader/ParticleBall_PS {}
+		}
+	}
+}
+material shader/ParticleBallSnow
+{
+	technique
+	{
+		pass
+		{
+			point_sprites on			
+			point_size 10
+			point_size_attenuation on
+ 			vertex_program_ref shader/ParticleBall_VS {}
+ 			fragment_program_ref shader/ParticleBallSnow_PS {}
+		}
+	}
+}
