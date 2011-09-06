@@ -21,11 +21,11 @@
 #include <SdkTrays.h>
 #include <SdkCameraMan.h>
 
-#include "OgreTerrain.h"
-#include "OgreTerrainGroup.h"
-#include "OgreTerrainQuadTreeNode.h"
-#include "OgreTerrainMaterialGeneratorA.h"
-#include "OgreTerrainPaging.h"
+#include <Terrain\OgreTerrain.h>
+#include <Terrain\OgreTerrainGroup.h>
+#include <Terrain\OgreTerrainQuadTreeNode.h>
+#include <Terrain\OgreTerrainMaterialGeneratorA.h>
+//#include <Terrain\OgreTerrainPaging.h>
 
 #include "SnowTerrain.h"
 #include "OgreCudaHelper.h"

@@ -44,22 +44,13 @@ BaseApplication::BaseApplication(void)
 	mInputManager(0),
 	mMouse(0),
 	mKeyboard(0),
-	mDragLook(false),
-	mGUI(NULL),
-	mPlatform(NULL)
+	mDragLook(false)
 {
 }
 
 //-------------------------------------------------------------------------------------
 BaseApplication::~BaseApplication(void)
 {
-// 	mGUI->shutdown();
-// 	delete mGUI;
-// 	mGUI = 0;   
-// 	mPlatform->shutdown();
-// 	delete mPlatform;
-// 	mPlatform = 0;
-
 	if (mTrayMgr) delete mTrayMgr;
 	if (mCameraMan) delete mCameraMan;
 
@@ -160,12 +151,6 @@ void BaseApplication::createFrameListener(void)
 
 	//Register as a Window listener
 	Ogre::WindowEventUtilities::addWindowEventListener(mWindow, this);
-
-	//Init MyGUI
-// 	mPlatform = new MyGUI::OgrePlatform();
-// 	mPlatform->initialise(mWindow, mSceneMgr); // mWindow is Ogre::RenderWindow*, mSceneManager is Ogre::SceneManager*
-// 	mGUI = new MyGUI::Gui();
-// 	mGUI->initialise();
 
 	mTrayMgr = new OgreBites::SdkTrayManager("InterfaceName", mWindow, mMouse, this);
 	mTrayMgr->showFrameStats(OgreBites::TL_BOTTOMLEFT);
@@ -340,9 +325,6 @@ bool BaseApplication::frameRenderingQueued(const Ogre::FrameEvent& evt)
 //-------------------------------------------------------------------------------------
 bool BaseApplication::keyPressed( const OIS::KeyEvent &arg )
 {
-	if(mGUI != NULL)
-		MyGUI::InputManager::getInstance().injectKeyPress(MyGUI::KeyCode::Enum(arg.key), arg.text);
-
 	if (mTrayMgr->isDialogVisible()) return true;   // don't process any more keys if dialog is up
 
 	if (arg.key == OIS::KC_F)   // toggle visibility of advanced frame stats
@@ -437,17 +419,12 @@ bool BaseApplication::keyPressed( const OIS::KeyEvent &arg )
 
 bool BaseApplication::keyReleased( const OIS::KeyEvent &arg )
 {
-	if(mGUI != NULL)
-		MyGUI::InputManager::getInstance().injectKeyRelease(MyGUI::KeyCode::Enum(arg.key));
-
 	mCameraMan->injectKeyUp(arg);
 	return true;
 }
 
 bool BaseApplication::mouseMoved( const OIS::MouseEvent &arg )
 {
-	if(mGUI != NULL)
-		MyGUI::InputManager::getInstance().injectMouseMove(arg.state.X.abs, arg.state.Y.abs, arg.state.Z.abs);
     if (mTrayMgr->injectMouseMove(arg)) return true;
 	mCameraMan->injectMouseMove(arg);
 	return true;
@@ -455,9 +432,6 @@ bool BaseApplication::mouseMoved( const OIS::MouseEvent &arg )
 
 bool BaseApplication::mousePressed( const OIS::MouseEvent &arg, OIS::MouseButtonID id )
 {
-	if(mGUI != NULL)
-		MyGUI::InputManager::getInstance().injectMousePress(arg.state.X.abs, arg.state.Y.abs, MyGUI::MouseButton::Enum(id));
-
     if (mTrayMgr->injectMouseDown(arg, id)) return true;
 
 	if (mDragLook && id == OIS::MB_Left)
@@ -472,9 +446,6 @@ bool BaseApplication::mousePressed( const OIS::MouseEvent &arg, OIS::MouseButton
 
 bool BaseApplication::mouseReleased( const OIS::MouseEvent &arg, OIS::MouseButtonID id )
 {
-	if(mGUI != NULL)
-		MyGUI::InputManager::getInstance().injectMouseRelease(arg.state.X.abs, arg.state.Y.abs, MyGUI::MouseButton::Enum(id));
-
     if (mTrayMgr->injectMouseUp(arg, id)) return true;
 
 	if (mDragLook && id == OIS::MB_Left)

@@ -20,13 +20,13 @@
 
 #include <SdkTrays.h>
 #include <SdkCameraMan.h>
-#include "OgreTerrain.h"
-#include "OgreTerrainGroup.h"
-#include "OgreTerrainQuadTreeNode.h"
-#include "OgreTerrainMaterialGeneratorA.h"
-#include "OgreTerrainPaging.h"
+#include <Terrain\OgreTerrain.h>
+#include <Terrain\OgreTerrainGroup.h>
+#include <Terrain\OgreTerrainQuadTreeNode.h>
+#include <Terrain\OgreTerrainMaterialGeneratorA.h>
+//#include <Terrain\OgreTerrainPaging.h>
 
-#include "OgreHardwareVertexBuffer.h"
+#include <OgreHardwareVertexBuffer.h>
 
 namespace SnowSim
 {

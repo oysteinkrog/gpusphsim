@@ -16,20 +16,16 @@ namespace SnowSim
 		, mScreenCaptureFrame(0)
 		, mScreenCapture(false)
 	{
-		mSnowGui = new SnowGui(mSnowConfig);
 	}
 
 	//-------------------------------------------------------------------------------------
 	SnowApplication::~SnowApplication(void)
 	{
-		delete mSnowGui;
 	}
 
 	void SnowApplication::setupResources(void)
 	{
 		BaseApplication::setupResources();
-
-		mSnowGui->setupResources();
 	}
 
 	//-------------------------------------------------------------------------------------
@@ -38,9 +34,6 @@ namespace SnowSim
 		if(mDestroyed) return;
 
 		mDestroyed = true;
-
-		// Destroy GUI
-		mSnowGui->destroyScene(mGUI, mWindow, mSceneMgr);
 
 		// Destroy fluid
 		mSnowFluid->destroyScene(mWindow, mSceneMgr);
@@ -95,9 +88,6 @@ namespace SnowSim
 		// Create fluid
 		mSnowFluid->createScene(mWindow, mSceneMgr, mSnowTerrain, primaryLight);
 		//mCamera->lookAt(mSnowFluid->mParticlesNode->getPosition());;
-
-		// Create GUI
-		mSnowGui->createScene(mGUI, mSceneMgr, mSnowTerrain, mSnowFluid);
 
 		// Place camera 
 		Vector3 cameraPos =mSnowConfig->sceneSettings.cameraPosition;

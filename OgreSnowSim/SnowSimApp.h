@@ -3,7 +3,6 @@
 
 #include "SnowTerrain.h"
 #include "SnowFluid.h"
-#include "SnowGui.h"
 
 #include "BaseApplication.h"
 #if OGRE_PLATFORM == OGRE_PLATFORM_WIN32
@@ -49,7 +48,6 @@ namespace SnowSim
 
 		SnowTerrain* mSnowTerrain;
 		SnowFluid*	mSnowFluid;
-		SnowGui*	mSnowGui;
 
 		// Shadows...
 		enum ShadowMode

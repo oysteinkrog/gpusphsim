@@ -46,7 +46,7 @@
 				AdditionalOptions="/MP4"
 				Optimization="0"
 				WholeProgramOptimization="false"
-				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;..\SPHSimLib;&quot;..\..\build-boost\boost_1_42_0&quot;;&quot;..\..\build-ogre\mygui-trunk\MyGUIEngine\include&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Input\OIS&quot;;&quot;..\..\build-ogre\mygui-trunk\Common&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Base\Ogre&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\BaseLayout&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x64\sdk\include\MYGUI&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\OgreMain\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\Direct3D9\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\src\GLSL\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\include&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OGRE\Terrain&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OGRE\Paging&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OGRE&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OIS&quot;;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
+				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;&quot;$(BOOST_HOME)&quot;;..\SPHSimLib;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
 				PreprocessorDefinitions="WIN32;_DEBUG;_WINDOWS"
 				MinimalRebuild="false"
 				ExceptionHandling="1"
@@ -71,10 +71,10 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="OgreMain_d.lib OIS_d.lib OgreTerrain_d.lib OgrePaging_d.lib RenderSystem_Direct3D9_d.lib cudart.lib cutil32D.lib cudpp32d.lib"
+				AdditionalDependencies="OgreMain_d.lib OIS_d.lib OgreTerrain_d.lib OgrePaging_d.lib RenderSystem_Direct3D9_d.lib RenderSystem_GL_d.lib cudart.lib cutil32D.lib cudpp32.lib"
 				OutputFile="$(OutDir)\$(ProjectName).exe"
 				LinkIncremental="2"
-				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;..\..\build-boost\boost_1_42_0\stage_x32\lib&quot;;&quot;..\..\build-ogre\ogre-1.7-deps-win_x32\lib\$ConfigurationName)\&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\lib\$ConfigurationName)&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\sdk\lib\$ConfigurationName)&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\$ConfigurationName)\opt&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\$ConfigurationName)&quot;"
+				AdditionalLibraryDirectories="&quot;$(BOOST_HOME)\stage\lib&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\opt&quot;"
 				GenerateDebugInformation="true"
 				ProgramDatabaseFile="$(TargetDir)$(TargetName).pdb"
 				SubSystem="1"
@@ -103,7 +103,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine=""
+				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
 			/>
 		</Configuration>
 		<Configuration
@@ -135,7 +135,7 @@
 				AdditionalOptions="/MP4"
 				Optimization="0"
 				WholeProgramOptimization="false"
-				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;..\SPHSimLib;&quot;..\..\build-boost\boost_1_42_0&quot;;&quot;..\..\build-ogre\mygui-trunk\MyGUIEngine\include&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Input\OIS&quot;;&quot;..\..\build-ogre\mygui-trunk\Common&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Base\Ogre&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\BaseLayout&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x64\sdk\include\MYGUI&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\OgreMain\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\Direct3D9\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\src\GLSL\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\include&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OGRE\Terrain&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OGRE\Paging&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OGRE&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OIS&quot;;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
+				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;&quot;$(BOOST_HOME)&quot;;..\SPHSimLib;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
 				PreprocessorDefinitions="WIN32;_DEBUG;_WINDOWS;_CRT_SECURE_NO_DEPRECATE"
 				MinimalRebuild="false"
 				ExceptionHandling="1"
@@ -160,10 +160,10 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="Common_d.lib MyGUI.OgrePlatform_d.lib MyGUIEngineStatic_d.lib freetype2311_D.lib OIS_d.lib OgreMain_d.lib OgreTerrain_d.lib OgrePaging_d.lib RenderSystem_Direct3D9_d.lib RenderSystem_GL_d.lib cudart.lib cutil64D.lib glew64.lib glut64.lib cudpp64d.lib"
+				AdditionalDependencies="Common_d.lib OIS_d.lib OgreMain_d.lib OgreTerrain_d.lib OgrePaging_d.lib RenderSystem_Direct3D9_d.lib RenderSystem_GL_d.lib cudart.lib cutil64D.lib glew64.lib glut64.lib cudpp64d.lib"
 				OutputFile="$(OutDir)\$(ProjectName).exe"
 				LinkIncremental="2"
-				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\x64&quot;;&quot;..\..\build-boost\boost_1_42_0\stage_x32\lib&quot;;&quot;..\..\build-ogre\ogre-1.7-deps-win_x32\lib\$(ConfigurationName)\&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\lib\$(ConfigurationName)&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\sdk\lib\$(ConfigurationName)&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\$(ConfigurationName)\opt&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\$(ConfigurationName)&quot;"
+				AdditionalLibraryDirectories="&quot;$(BOOST_HOME)\stage\lib&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\opt&quot;"
 				GenerateDebugInformation="true"
 				ProgramDatabaseFile="$(TargetDir)$(TargetName).pdb"
 				SubSystem="1"
@@ -194,7 +194,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine=""
+				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
 			/>
 		</Configuration>
 		<Configuration
@@ -229,7 +229,7 @@
 				FavorSizeOrSpeed="1"
 				OmitFramePointers="true"
 				WholeProgramOptimization="false"
-				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;..\SPHSimLib;&quot;..\..\build-boost\boost_1_42_0&quot;;&quot;..\..\build-ogre\mygui-trunk\MyGUIEngine\include&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Input\OIS&quot;;&quot;..\..\build-ogre\mygui-trunk\Common&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Base\Ogre&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\BaseLayout&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x64\sdk\include\MYGUI&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\OgreMain\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\Direct3D9\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\src\GLSL\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\include&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OGRE\Terrain&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OGRE\Paging&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OGRE&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\include\OIS&quot;;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
+				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;&quot;$(BOOST_HOME)&quot;;..\SPHSimLib;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
 				PreprocessorDefinitions="WIN32;NDEBUG;_WINDOWS"
 				StringPooling="true"
 				MinimalRebuild="false"
@@ -256,10 +256,10 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="OgreMain.lib OIS.lib OgreTerrain.lib OgrePaging.lib RenderSystem_Direct3D9.lib cudart.lib cutil32.lib cudpp32.lib"
+				AdditionalDependencies="OgreMain.lib OIS.lib OgreTerrain.lib OgrePaging.lib RenderSystem_Direct3D9.lib RenderSystem_GL_d.lib cudart.lib cutil32.lib cudpp32.lib"
 				OutputFile="$(OutDir)\$(ProjectName).exe"
 				LinkIncremental="2"
-				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;..\..\build-boost\boost_1_42_0\stage_x32\lib&quot;;&quot;..\..\build-ogre\ogre-1.7-deps-win_x32\lib\Release&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\release\opt&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\release&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\lib\Release&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\sdk\lib\Release&quot;;$(NOINHERIT)"
+				AdditionalLibraryDirectories="&quot;$(BOOST_HOME)\stage\lib&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\opt&quot;"
 				GenerateDebugInformation="false"
 				ProgramDatabaseFile="$(TargetDir)$(TargetName).pdb"
 				SubSystem="1"
@@ -288,7 +288,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine=""
+				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
 			/>
 		</Configuration>
 		<Configuration
@@ -324,7 +324,7 @@
 				FavorSizeOrSpeed="1"
 				OmitFramePointers="true"
 				WholeProgramOptimization="false"
-				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;..\SPHSimLib;&quot;..\..\build-boost\boost_1_42_0&quot;;&quot;..\..\build-ogre\mygui-trunk\MyGUIEngine\include&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Input\OIS&quot;;&quot;..\..\build-ogre\mygui-trunk\Common&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\Base\Ogre&quot;;&quot;..\..\build-ogre\mygui-trunk\Common\BaseLayout&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x64\sdk\include\MYGUI&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\OgreMain\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\Direct3D9\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\src\GLSL\include&quot;;&quot;..\..\build-ogre\ogre-1.7-svn\RenderSystems\GL\include&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OGRE\Terrain&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OGRE\Paging&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OGRE&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x64\include\OIS&quot;;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
+				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;;&quot;$(BOOST_HOME)&quot;;..\SPHSimLib;include;&quot;$(OGRE_HOME)\include\OIS&quot;;&quot;$(OGRE_HOME)\include\OGRE&quot;;&quot;$(OGRE_HOME)\Samples\Common\include&quot;"
 				PreprocessorDefinitions="WIN32;NDEBUG;_WINDOWS"
 				StringPooling="true"
 				MinimalRebuild="false"
@@ -355,7 +355,7 @@
 				AdditionalDependencies="Common.lib MyGUI.OgrePlatform.lib MyGUIEngineStatic.lib OgreMain.lib freetype2311.lib OIS.lib OgreTerrain.lib OgrePaging.lib RenderSystem_Direct3D9.lib RenderSystem_GL.lib cudart.lib cutil64.lib cudpp64.lib"
 				OutputFile="$(OutDir)\$(ProjectName).exe"
 				LinkIncremental="2"
-				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\x64&quot;;&quot;..\..\build-boost\boost_1_42_0\stage_x32\lib&quot;;&quot;..\..\build-ogre\ogre-1.7-deps-win_x32\lib\$(ConfigurationName)\&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\lib\$(ConfigurationName)&quot;;&quot;..\..\build-ogre\mygui-trunk-build_x32\sdk\lib\$(ConfigurationName)&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\$(ConfigurationName)\opt&quot;;&quot;..\..\build-ogre\ogre-svn-1.7-install_x32\lib\$(ConfigurationName)&quot;"
+				AdditionalLibraryDirectories="&quot;$(BOOST_HOME)\stage\lib&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\opt&quot;"
 				GenerateDebugInformation="false"
 				ProgramDatabaseFile="$(TargetDir)$(TargetName).pdb"
 				SubSystem="1"
@@ -384,7 +384,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine=""
+				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
 			/>
 		</Configuration>
 	</Configurations>
@@ -411,26 +411,6 @@
 				</File>
 				<File
 					RelativePath="SnowTerrain.h"
-					>
-				</File>
-			</Filter>
-			<Filter
-				Name="Gui"
-				>
-				<File
-					RelativePath=".\SnowGui.cpp"
-					>
-				</File>
-				<File
-					RelativePath=".\SnowGui.h"
-					>
-				</File>
-				<File
-					RelativePath=".\SnowGuiConfigPanel.cpp"
-					>
-				</File>
-				<File
-					RelativePath=".\SnowGuiConfigPanel.h"
 					>
 				</File>
 			</Filter>

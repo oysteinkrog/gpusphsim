@@ -71,7 +71,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="cudart.lib cutil32D.lib cudpp32d.lib"
+				AdditionalDependencies="cudart.lib cutil32D.lib cudpp32.lib"
 				LinkIncremental="2"
 				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\Win32&quot;"
 				GenerateDebugInformation="true"
@@ -150,7 +150,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="cudart.lib cutil64D.lib cudpp64d.lib"
+				AdditionalDependencies="cudart.lib cutil64D.lib cudpp64.lib"
 				LinkIncremental="2"
 				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\x64&quot;"
 				GenerateDebugInformation="true"
