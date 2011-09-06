@@ -103,7 +103,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
+				CommandLine="xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\cg.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreMain_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgrePaging_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreProperty_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreRTShaderSystem_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreTerrain_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OIS_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\Plugin_CgProgramManager_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_Direct3D9_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_GL_d.dll $(OutDir)"
 			/>
 		</Configuration>
 		<Configuration
@@ -194,7 +194,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
+				CommandLine="xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\cg.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreMain_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgrePaging_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreProperty_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreRTShaderSystem_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreTerrain_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OIS_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\Plugin_CgProgramManager_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_Direct3D9_d.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_GL_d.dll $(OutDir)"
 			/>
 		</Configuration>
 		<Configuration
@@ -256,7 +256,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="OgreMain.lib OIS.lib OgreTerrain.lib OgrePaging.lib RenderSystem_Direct3D9.lib RenderSystem_GL_d.lib cudart.lib cutil32.lib cudpp32.lib"
+				AdditionalDependencies="OgreMain.lib OIS.lib OgreTerrain.lib OgrePaging.lib RenderSystem_Direct3D9.lib RenderSystem_GL.lib cudart.lib cutil32.lib cudpp32.lib"
 				OutputFile="$(OutDir)\$(ProjectName).exe"
 				LinkIncremental="2"
 				AdditionalLibraryDirectories="&quot;$(BOOST_HOME)\stage\lib&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\opt&quot;"
@@ -288,7 +288,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
+				CommandLine="xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\cg.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreMain.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgrePaging.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreRTShaderSystem.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreProperty.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreTerrain.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OIS.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\Plugin_CgProgramManager.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_Direct3D9.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_GL.dll $(OutDir)"
 			/>
 		</Configuration>
 		<Configuration
@@ -352,7 +352,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="Common.lib MyGUI.OgrePlatform.lib MyGUIEngineStatic.lib OgreMain.lib freetype2311.lib OIS.lib OgreTerrain.lib OgrePaging.lib RenderSystem_Direct3D9.lib RenderSystem_GL.lib cudart.lib cutil64.lib cudpp64.lib"
+				AdditionalDependencies="Common.lib OgreMain.lib OIS.lib OgreTerrain.lib OgrePaging.lib RenderSystem_Direct3D9.lib RenderSystem_GL.lib cudart.lib cutil64.lib cudpp64.lib"
 				OutputFile="$(OutDir)\$(ProjectName).exe"
 				LinkIncremental="2"
 				AdditionalLibraryDirectories="&quot;$(BOOST_HOME)\stage\lib&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\$(PlatformName)&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\&quot;;&quot;$(OGRE_HOME)\lib\$(ConfigurationName)\opt&quot;"
@@ -384,7 +384,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
-				CommandLine="xcopy $(OGRE_HOME)\bin\$(ConfigurationName)\* $(OutDir)"
+				CommandLine="xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\cg.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreMain.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgrePaging.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreRTShaderSystem.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreProperty.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OgreTerrain.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\OIS.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\Plugin_CgProgramManager.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_Direct3D9.dll $(OutDir)&#x0D;&#x0A;xcopy /Y $(OGRE_HOME)\bin\$(ConfigurationName)\RenderSystem_GL.dll $(OutDir)"
 			/>
 		</Configuration>
 	</Configurations>
