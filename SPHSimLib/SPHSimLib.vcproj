@@ -36,7 +36,7 @@
 			/>
 			<Tool
 				Name="Cudart Build Rule"
-				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Include="$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
 				Arch1="13"
 				Arch2="20"
 				Arch3="0"
@@ -59,9 +59,11 @@
 				AdditionalOptions="/MP4"
 				Optimization="0"
 				AdditionalIncludeDirectories="&quot;$(DXSDK_DIR)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;;&quot;$(CUDA_PATH)\include&quot;"
-				MinimalRebuild="false"
+				MinimalRebuild="true"
 				BasicRuntimeChecks="3"
 				RuntimeLibrary="3"
+				EnableFunctionLevelLinking="true"
+				FloatingPointModel="2"
 				WarningLevel="3"
 				Detect64BitPortabilityProblems="true"
 				DebugInformationFormat="4"
@@ -109,7 +111,7 @@
 			/>
 			<Tool
 				Name="Cudart Build Rule"
-				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Include="$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
 				Arch1="13"
 				Arch2="20"
 				Arch3="0"
@@ -186,7 +188,7 @@
 			/>
 			<Tool
 				Name="Cudart Build Rule"
-				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Include="$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
 				Arch1="13"
 				Arch2="20"
 				Arch3="0"
@@ -261,7 +263,7 @@
 			/>
 			<Tool
 				Name="Cudart Build Rule"
-				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Include="$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
 				Arch1="13"
 				Arch2="20"
 				Arch3="0"
@@ -338,7 +340,7 @@
 			/>
 			<Tool
 				Name="Cudart Build Rule"
-				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Include="$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
 				Arch1="13"
 				Arch2="20"
 				Arch3="0"
@@ -411,7 +413,7 @@
 			/>
 			<Tool
 				Name="Cudart Build Rule"
-				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Include="$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
 				Arch1="13"
 				Arch2="20"
 				Arch3="0"
@@ -584,14 +586,6 @@
 			</File>
 			<File
 				RelativePath=".\cuPrintf.cuh"
-				>
-			</File>
-			<File
-				RelativePath=".\radixsort.cu"
-				>
-			</File>
-			<File
-				RelativePath=".\radixsort.h"
 				>
 			</File>
 			<File

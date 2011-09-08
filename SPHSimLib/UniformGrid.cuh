@@ -1,9 +1,18 @@
 #ifndef __UniformGrid_cuh__
 #define __UniformGrid_cuh__
 
+#ifdef USE_B40C_SORT
+#include <b40c/radix_sort/enactor.cuh>
+#include <b40c/util/ping_pong_storage.cuh>
+using namespace b40c;
+#endif
+
 #include "SimCudaAllocator.h"
-#include "radixsort.h"
+
+#ifdef USE_CUDPP
 #include "cudpp/cudpp.h"
+#endif
+
 #include <cutil.h>
 
 #include "UniformGrid.cuh"
@@ -95,12 +104,15 @@ private:
 
 	GridParams dGridParams;
 
-	bool mUseCUDPPSort;
-	RadixSort* mRadixSorter;
+#ifdef USE_CUDPP
 	CUDPPHandle m_sortHandle;
+#endif
 
+#ifdef USE_B40C_SORT
+	util::PingPongStorage<unsigned int,unsigned int>* m_b40c_storage;	
+	b40c::radix_sort::Enactor* m_b40c_sorting_enactor;
+#endif
 	int mSortBitsPrecision;
-
 };
 
 #endif

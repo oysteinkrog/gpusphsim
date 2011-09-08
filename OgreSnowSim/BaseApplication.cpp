@@ -201,11 +201,8 @@ void BaseApplication::setupResources(void)
 {
 	// Load resource paths from config file
 	Ogre::ConfigFile cf;
-#ifdef _DEBUG
-	cf.load("resources_d.cfg");
-#else
+
 	cf.load("resources.cfg");
-#endif
 
 	// Go through all sections & settings in the file
 	Ogre::ConfigFile::SectionIterator seci = cf.getSectionIterator();

@@ -27,7 +27,7 @@
 			OutputDirectory="$(SolutionDir)\build\Win_32_$(ConfigurationName)"
 			IntermediateDirectory="$(ConfigurationName)"
 			ConfigurationType="1"
-			CharacterSet="0"
+			CharacterSet="2"
 			>
 			<Tool
 				Name="VCPreBuildEventTool"
@@ -38,6 +38,10 @@
 			<Tool
 				Name="Cudart Build Rule"
 				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				GPUDebugInfo="true"
+				Arch1="13"
+				PtxAsOptionV="true"
+				Runtime="1"
 			/>
 			<Tool
 				Name="VCXMLDataGeneratorTool"
@@ -56,7 +60,8 @@
 				MinimalRebuild="true"
 				BasicRuntimeChecks="3"
 				RuntimeLibrary="3"
-				UsePrecompiledHeader="0"
+				EnableFunctionLevelLinking="true"
+				FloatingPointModel="2"
 				WarningLevel="3"
 				DebugInformationFormat="4"
 			/>
@@ -74,6 +79,7 @@
 				AdditionalDependencies="cudart.lib cutil32D.lib cudpp32.lib"
 				LinkIncremental="2"
 				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\Win32&quot;"
+				IgnoreDefaultLibraryNames="LIBCMTD"
 				GenerateDebugInformation="true"
 				SubSystem="1"
 				TargetMachine="1"
@@ -116,6 +122,8 @@
 			<Tool
 				Name="Cudart Build Rule"
 				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Arch1="13"
+				PtxAsOptionV="true"
 			/>
 			<Tool
 				Name="VCXMLDataGeneratorTool"
@@ -135,6 +143,8 @@
 				MinimalRebuild="true"
 				BasicRuntimeChecks="3"
 				RuntimeLibrary="3"
+				EnableFunctionLevelLinking="true"
+				FloatingPointModel="2"
 				UsePrecompiledHeader="0"
 				WarningLevel="3"
 				DebugInformationFormat="3"
@@ -150,9 +160,10 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="cudart.lib cutil64D.lib cudpp64.lib"
+				AdditionalDependencies="cudart.lib cutil64D.lib cudpp64d.lib"
 				LinkIncremental="2"
 				AdditionalLibraryDirectories="&quot;$(NVSDKCOMPUTE_ROOT)\c\common\lib&quot;;&quot;$(CUDA_PATH)\lib\x64&quot;"
+				IgnoreDefaultLibraryNames="LIBCMTD"
 				GenerateDebugInformation="true"
 				SubSystem="1"
 				TargetMachine="17"
@@ -196,6 +207,8 @@
 			<Tool
 				Name="Cudart Build Rule"
 				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Arch1="13"
+				PtxAsOptionV="true"
 			/>
 			<Tool
 				Name="VCXMLDataGeneratorTool"
@@ -212,6 +225,7 @@
 				EnableIntrinsicFunctions="true"
 				AdditionalIncludeDirectories="../SPHSimLib;&quot;$(DXSDK_DIR)\include&quot;;&quot;$(CUDA_PATH)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;"
 				PreprocessorDefinitions="_WIN32;WIN32;NDEBUG;_CONSOLE"
+				MinimalRebuild="true"
 				RuntimeLibrary="2"
 				EnableFunctionLevelLinking="true"
 				FloatingPointModel="2"
@@ -279,6 +293,8 @@
 			<Tool
 				Name="Cudart Build Rule"
 				Include="$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include"
+				Arch1="13"
+				PtxAsOptionV="true"
 			/>
 			<Tool
 				Name="VCXMLDataGeneratorTool"
@@ -296,6 +312,7 @@
 				EnableIntrinsicFunctions="true"
 				AdditionalIncludeDirectories="../SPHSimLib;&quot;$(DXSDK_DIR)\include&quot;;&quot;$(CUDA_PATH)\include&quot;;&quot;$(NVSDKCOMPUTE_ROOT)\c\common\inc&quot;"
 				PreprocessorDefinitions="_WIN32;WIN32;NDEBUG;_CONSOLE"
+				MinimalRebuild="true"
 				RuntimeLibrary="2"
 				EnableFunctionLevelLinking="true"
 				FloatingPointModel="2"

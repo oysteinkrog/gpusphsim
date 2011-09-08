@@ -10,6 +10,7 @@ namespace SimLib
 		mElements = elements;
 		mMemSize = elements*sizeof(float);
 
+#ifdef USE_CUDPP
 		// Scan configuration
 		CUDPPConfiguration config;
 		config.algorithm = CUDPP_SCAN;
@@ -17,6 +18,7 @@ namespace SimLib
 		config.datatype = CUDPP_FLOAT;  
 		config.options = CUDPP_OPTION_BACKWARD | CUDPP_OPTION_INCLUSIVE;
 		cudppPlan(&scanPlan, config, elements, 1, 0);
+#endif
 
 		d_odata; CUDA_SAFE_CALL(cudaMalloc( (void**) &d_odata, mMemSize));
 // 		h_idata = (float*)malloc(mMemSize); memset(h_idata,0, mMemSize);
@@ -26,7 +28,9 @@ namespace SimLib
 
 	CudaMax::~CudaMax()
 	{
+#ifdef USE_CUDPP
 		cudppDestroyPlan(scanPlan);
+#endif
 		CUDA_SAFE_CALL(cudaFree(d_odata));
 // 		free(h_odata);
 // 		free(h_idata);
@@ -34,13 +38,14 @@ namespace SimLib
 
 	float CudaMax::FindMax(float* d_idata)
 	{
+#ifdef USE_CUDPP
 		cudppScan(scanPlan, d_odata, d_idata, mElements);
+#endif
 
 		float maxval;
 
 		// just copy the max val, not the entire buffer
 		CUDA_SAFE_CALL( cudaMemcpy( &maxval, d_odata, 1*sizeof(float), cudaMemcpyDeviceToHost) );
-
 
 // 		CUDA_SAFE_CALL( cudaMemcpy( h_idata, d_idata, mMemSize, cudaMemcpyDeviceToHost) );
 // 		CUDA_SAFE_CALL( cudaMemcpy( h_odata, d_odata, mMemSize, cudaMemcpyDeviceToHost) );

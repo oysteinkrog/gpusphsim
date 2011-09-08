@@ -1,9 +1,22 @@
+#define USE_CUDPP
+//#define USE_THRUST_SORT
+//#define USE_B40C_SORT
+
 #include "UniformGrid.cuh"
 #include "CudaUtils.cuh"
 
 #include <cmath>
 #include <cstdio>
+
+#ifdef USE_THRUST_SORT
+#include <thrust/device_vector.h>
+#include <thrust/sort.h>
+#include <thrust/random.h>
+#endif
+
+
 #include <iostream>
+#include <iomanip>
 
 using namespace std;
 
@@ -16,7 +29,6 @@ using namespace SimLib;
 UniformGrid::UniformGrid(SimLib::SimCudaAllocator* simCudaAllocator)
 	: mSimCudaAllocator(simCudaAllocator)
 	, mAlloced(false)
-	, mUseCUDPPSort(true)
 {
 	mGPUTimer = new ocu::GPUTimer();
 
@@ -55,26 +67,32 @@ void UniformGrid::Alloc(uint numParticles, float cellWorldSize, float gridWorldS
 	// number of cells is given by the resolution (~how coarse the grid of the world is)
 	mNumCells = (int)ceil(dGridParams.grid_res.x*dGridParams.grid_res.y*dGridParams.grid_res.z);
 
-
 	// Allocate grid buffers
 	mGridParticleBuffers->AllocBuffers(mNumParticles);
 	mGridCellBuffers->AllocBuffers(mNumCells);
 
 	// Allocate the radix sorter
-	if(mUseCUDPPSort)
-	{
-		// Create the CUDPP radix sort
-		CUDPPConfiguration sortConfig;
-		sortConfig.algorithm = CUDPP_SORT_RADIX;
-		sortConfig.datatype = CUDPP_UINT;
-		sortConfig.op = CUDPP_ADD;
-		sortConfig.options = CUDPP_OPTION_KEY_VALUE_PAIRS;
-		cudppPlan(&m_sortHandle, sortConfig, mNumParticles, 1, 0);
-	}
-	else
-	{
-		mRadixSorter = new RadixSort(mNumParticles * sizeof(uint));
-	}
+#ifdef USE_THRUST_SORT
+// 	thrust::device_ptr<uint> keys(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>());
+// 	thrust::device_ptr<uint> vals(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());
+#endif
+#ifdef USE_B40C_SORT
+	m_b40c_sorting_enactor = new b40c::radix_sort::Enactor();
+	m_b40c_sorting_enactor->ENACTOR_DEBUG = false;
+
+	m_b40c_storage = new util::PingPongStorage<unsigned int,unsigned int>(
+		mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(),
+		mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());	
+#endif
+#ifdef USE_CUDPP	
+	// Create the CUDPP radix sort
+	CUDPPConfiguration sortConfig;
+	sortConfig.algorithm = CUDPP_SORT_RADIX;
+	sortConfig.datatype = CUDPP_UINT;
+	sortConfig.op = CUDPP_ADD;
+	sortConfig.options = CUDPP_OPTION_KEY_VALUE_PAIRS;
+	cudppPlan(&m_sortHandle, sortConfig, mNumParticles, 1, 0);
+#endif
 
 	//Copy the grid parameters to the GPU	
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cGridParams, &dGridParams, sizeof(GridParams) ) );
@@ -88,14 +106,12 @@ void UniformGrid::Free()
 	if(!mAlloced)
 		return;
 
-	if(mUseCUDPPSort)
-	{
-		cudppDestroyPlan(m_sortHandle);	m_sortHandle=NULL;
-	}
-	else
-	{
-		delete mRadixSorter; mRadixSorter = NULL;
-	}
+#ifdef USE_THRUST_SORT
+
+#endif
+#ifdef USE_CUDPP
+	cudppDestroyPlan(m_sortHandle);	m_sortHandle=NULL;
+#endif
 
 	mGridParticleBuffers->FreeBuffers();
 	mGridCellBuffers->FreeBuffers();
@@ -196,24 +212,23 @@ float UniformGrid::Sort(bool doTiming)
 	{
 		mGPUTimer->start();
 	}
+#ifdef USE_THRUST_SORT
+	thrust::device_ptr<uint> keys(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>());
+	thrust::device_ptr<uint> vals(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());
+	thrust::sort_by_key(keys, vals+mNumParticles, vals);	
+#endif
+#ifdef USE_B40C_SORT
+	m_b40c_sorting_enactor->Sort<b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
+#endif
+#ifdef USE_CUDPP
+	cudppSort(
+		m_sortHandle,
+		mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(), 
+		mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>(),
+		mSortBitsPrecision, 
+		mNumParticles);	
+#endif
 
-	if(mUseCUDPPSort)
-	{
-		cudppSort(
-			m_sortHandle, 
-			mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(), 
-			mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>(),
-			mSortBitsPrecision, 
-			mNumParticles);
-	}
-	else
-	{
-		mRadixSorter->sort(
-			mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(),
-			mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>(),
-			mNumParticles,
-			mSortBitsPrecision);
-	}
 
 
 
