@@ -111,7 +111,7 @@ namespace SimLib { namespace Sim { namespace SnowSPH {
 class SimSnowSPH : public SimBase
 {
 public:
-	SimSnowSPH(SimLib::SimCudaAllocator* SimCudaAllocator);
+	SimSnowSPH(SimLib::SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper* simCudaHelper);
 	~SimSnowSPH();
 
 	void Clear();

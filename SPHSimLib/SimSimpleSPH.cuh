@@ -101,7 +101,7 @@ namespace SimLib { namespace Sim { namespace SimpleSPH {
 class SimSimpleSPH : public SimBase
 {
 public:
-	SimSimpleSPH(SimLib::SimCudaAllocator* SimCudaAllocator);
+	SimSimpleSPH(SimLib::SimCudaAllocator* SimCudaAllocator, SimLib::SimCudaHelper* simCudaHelper);
 	~SimSimpleSPH();
 
 	void Clear();

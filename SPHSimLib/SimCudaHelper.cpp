@@ -19,38 +19,13 @@ namespace SimLib
 {
 	SimCudaHelper::SimCudaHelper()
 	{
+		mDeviceProp = new cudaDeviceProp();
 	}
 
 	SimCudaHelper::~SimCudaHelper()
 	{
 	}
 
-
-	int SimCudaHelper::Init(int cudaDevice)
-	{
-		cout << "*** Initializing CUDA system ***\n";
-
-		cudaError res;
-		int count;
-		//cudaDeviceProp p;
-
-		res = cudaGetDeviceCount(&count);
-		CheckError("cudaGetDeviceCount failed");
-
-		if(cudaDevice >= count) 
-		{
-			cout << "SimCudaHelper::Initialize: Cuda device " << cudaDevice << " does not exist, trying to use " << count << " instead\n";
-			cudaDevice = count;
-		}
-		PrintDevices(cudaDevice);
-
-		// 		if(device >= count || device < 0)
-		// 		{
-		// 			device = cutGetMaxGflopsDeviceId();		
-		// 		}
-		return cudaDevice;
-
-	}
 	void SimCudaHelper::Initialize(int cudaDevice)
 	{
 		cudaDevice = Init(cudaDevice);
@@ -66,6 +41,35 @@ namespace SimLib
 			cout << "CUDA: Successful cudaSetDevice, using device " << cudaDevice << "\n";
 		}
 	}
+
+	int SimCudaHelper::Init(int cudaDevice)
+	{
+		cout << "*** Initializing CUDA system ***\n";
+
+		cudaError res;
+		int count;
+		
+		res = cudaGetDeviceCount(&count);
+		CheckError("cudaGetDeviceCount failed");
+
+		if(cudaDevice >= count) 
+		{
+			cout << "SimCudaHelper::Initialize: Cuda device " << cudaDevice << " does not exist, trying to use " << count << " instead\n";
+			cudaDevice = count;
+		}
+
+		PrintDevices(cudaDevice);
+
+		cudaGetDeviceProperties(mDeviceProp, cudaDevice);
+
+		// 		if(device >= count || device < 0)
+		// 		{
+		// 			device = cutGetMaxGflopsDeviceId();		
+		// 		}
+		return cudaDevice;
+
+	}
+
 
 #ifdef SPHSIMLIB_3D_SUPPORT
 
@@ -153,6 +157,11 @@ namespace SimLib
 		if(cudaSuccess != err) {
 			cout << "SimCudaHelper: " << msg << " " << cudaGetErrorString(err) << "\n";
 		}                         
+	}
+
+	bool SimCudaHelper::IsFermi() 
+	{
+		return mDeviceProp->major == 2;
 	}
 
 	int SimCudaHelper::PrintDevices(int deviceSelected)

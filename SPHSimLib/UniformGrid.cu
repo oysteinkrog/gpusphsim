@@ -26,8 +26,9 @@ __device__ __constant__	GridParams		cGridParams;
 
 using namespace SimLib;
 
-UniformGrid::UniformGrid(SimLib::SimCudaAllocator* simCudaAllocator)
+UniformGrid::UniformGrid(SimLib::SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper	*simCudaHelper)
 	: mSimCudaAllocator(simCudaAllocator)
+	, mSimCudaHelper(simCudaHelper)
 	, mAlloced(false)
 {
 	mGPUTimer = new ocu::GPUTimer();
@@ -164,12 +165,16 @@ float UniformGrid::Hash(bool doTiming, float_vec* dParticlePositions, uint numPa
 
 	int threadsPerBlock;
 
-	// Used 14 registers, 64+16 bytes smem, 144 bytes cmem[0]
-	threadsPerBlock = 128;
-
-#ifdef SPHSIMLIB_FERMI
-	threadsPerBlock = 192;
-#endif
+	//TODO; this is not correct, need to calculate based on actual device parameters...
+	if(mSimCudaHelper->IsFermi())
+	{
+		threadsPerBlock = 192;
+	}
+	else 
+	{
+		// Used 14 registers, 64+16 bytes smem, 144 bytes cmem[0]
+		threadsPerBlock = 128;
+	}
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);

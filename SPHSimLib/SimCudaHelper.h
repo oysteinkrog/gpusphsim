@@ -1,7 +1,7 @@
 #ifndef __SimCudaHelper_h__
 #define __SimCudaHelper_h__
 
-#if !defined(__CUDACC__)
+
 
 #include "Config.h" 
 //#define SPHSIMLIB_3D_SUPPORT
@@ -9,6 +9,7 @@
 #include <cutil.h>
 #include <cutil_inline.h>
 
+#if !defined(__CUDACC__)
 #ifdef SPHSIMLIB_3D_SUPPORT
 #include <GL/glew.h>
 #include <GL/glu.h>
@@ -16,10 +17,11 @@
 #include <cuda_gl_interop.h>
 #include <cutil_gl_inline.h>
 #endif
+#endif
 
+#if !defined(__CUDACC__)
 #ifdef SPHSIMLIB_3D_SUPPORT
 #ifdef _WIN32
-
 #include <d3dx9.h>
 
 // includes, cuda
@@ -27,11 +29,9 @@
 #include <builtin_types.h>
 #include <cuda_runtime_api.h>
 #include <cuda_d3d9_interop.h>
-
-
 #endif
 #endif
-
+#endif
 
 namespace SimLib
 {
@@ -42,9 +42,11 @@ namespace SimLib
 		~SimCudaHelper();
 
 		void Initialize(int cudaDevice);
+
+#if !defined(__CUDACC__)
 #ifdef SPHSIMLIB_3D_SUPPORT
-		void InitializeGL(int cudaGLDevice);
-		void InitializeD3D9(int cudaGLDevice, IDirect3DDevice9 *pDxDevice);
+		void InitializeGL(int cudaDevice);
+		void InitializeD3D9(int cudaDevice, IDirect3DDevice9 *pDxDevice);
 
 		// CUDA REGISTER
 		static cudaError_t RegisterGLBuffer(GLuint vbo);
@@ -62,20 +64,20 @@ namespace SimLib
 		static cudaError_t UnmapBuffer(void **devPtr, GLuint bufObj);
 
 #endif
+#endif
 
 		int PrintDevices(int deviceSelected);
-
+		
+		bool IsFermi();
 	private:
 
 		int Init(int cudaDevice);
 		void CheckError(const char *msg);
 		void CheckError(cudaError_t err, const char *msg);
 
-
+		cudaDeviceProp* mDeviceProp;
 	};
 }
 
-
-#endif
 
 #endif

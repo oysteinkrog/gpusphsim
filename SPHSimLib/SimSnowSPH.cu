@@ -43,11 +43,11 @@ __device__ __constant__	SnowSPHPrecalcParams	cPrecalcParams;
 #include "K_SnowSPH.cu"
 #include "K_UniformGrid_Update.cu"
 
-SimSnowSPH::SimSnowSPH(SimLib::SimCudaAllocator* SimCudaAllocator)
-: SimBase(SimCudaAllocator)
+SimSnowSPH::SimSnowSPH(SimLib::SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper* simCudaHelper)
+: SimBase(simCudaAllocator, simCudaHelper)
 , mAlloced(false)
 {
-	mSPHBuffers = new SimLib::BufferManager<SnowSPHBuffers>(SimCudaAllocator);
+	mSPHBuffers = new SimLib::BufferManager<SnowSPHBuffers>(mSimCudaAllocator);
 
 	mSPHBuffers->SetBuffer(BufferXSPHSorted,			new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
 	mSPHBuffers->SetBuffer(BufferSphForceSorted,		new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
@@ -357,14 +357,18 @@ float SimSnowSPH::BuildDataStruct(bool doTiming)
 	SnowSPHData dParticleDataSorted = GetParticleDataSorted();
 
 	uint threadsPerBlock;
-	// Used 7 registers, 192+16 bytes smem, 156 bytes cmem[0], 4 bytes cmem[1]
-	threadsPerBlock = 256;
 
-#ifdef SPHSIMLIB_FERMI
-	//Used 7 registers, 160+16 bytes smem, 140 bytes cmem[0], 4 bytes cmem[1]
-	threadsPerBlock = 256;
-#endif
-
+	//TODO; this is not correct, need to calculate based on actual device parameters...
+	if(mSimCudaHelper->IsFermi())
+	{
+		//Used 7 registers, 160+16 bytes smem, 140 bytes cmem[0], 4 bytes cmem[1]
+		threadsPerBlock = 256;
+	}
+	else {
+		// Used 7 registers, 192+16 bytes smem, 156 bytes cmem[0], 4 bytes cmem[1]
+		threadsPerBlock = 256;
+	}
+	
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
 
@@ -374,7 +378,6 @@ float SimSnowSPH::BuildDataStruct(bool doTiming)
 		threadsPerBlock += 32;
 		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
 	}
-
 
 	//dynamically allocated shared memory (per block)
 	uint smemSize = sizeof(uint)*(numThreads+1);
@@ -519,13 +522,17 @@ float SimSnowSPH::ComputeStep2(bool doTiming)
 	threadsPerBlock = 128;
 #endif
 #else
-	// Used 38 registers, 168 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
-	threadsPerBlock = 448;
-#endif
-
-#ifdef SPHSIMLIB_FERMI
-	//sm_20:Used 38 registers, 168 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
-	threadsPerBlock = 416;
+	//TODO; this is not correct, need to calculate based on actual device parameters...
+	if(mSimCudaHelper->IsFermi())
+	{
+		//sm_20:Used 38 registers, 168 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
+		threadsPerBlock = 416;
+	}
+	else 
+	{
+		// Used 38 registers, 168 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
+		threadsPerBlock = 448;
+	}
 #endif
 
 	uint numThreads, numBlocks;
@@ -576,14 +583,19 @@ float SimSnowSPH::ComputeStep3(bool doTiming)
 	threadsPerBlock = 64;
 #endif
 #else
-	//sm_13: Used 55 registers, 144+16 bytes smem, 160 bytes cmem[0], 4 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 64;
+	//TODO; this is not correct, need to calculate based on actual device parameters...
+	if(mSimCudaHelper->IsFermi())
+	{
+		//sm_20: Used 32 registers, 176+0 bytes lmem, 168 bytes cmem[0], 24 bytes cmem[2], 8 bytes cmem[14]
+		threadsPerBlock = 256;
+	}
+	else 
+	{
+		//sm_13: Used 55 registers, 144+16 bytes smem, 160 bytes cmem[0], 4 bytes cmem[1], 8 bytes cmem[14]
+		threadsPerBlock = 64;
+	}
 #endif
 
-#ifdef SPHSIMLIB_FERMI
-	//sm_20: Used 32 registers, 176+0 bytes lmem, 168 bytes cmem[0], 24 bytes cmem[2], 8 bytes cmem[14]
-	threadsPerBlock = 256;
-#endif
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
@@ -631,13 +643,17 @@ float SimSnowSPH::Integrate(bool doTiming, bool progress, float deltaTime, bool 
 
 	int threadsPerBlock;
 
-	//sm_13: Used 27 registers, 256+16 bytes smem, 144 bytes cmem[0], 16 bytes cmem[1]
-	threadsPerBlock = 256;
-
-#ifdef SPHSIMLIB_FERMI
-	//sm_20: Used 29 registers, 280 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
-	threadsPerBlock = 256;
-#endif
+	//TODO; this is not correct, need to calculate based on actual device parameters...
+	if(mSimCudaHelper->IsFermi())
+	{
+		//sm_20: Used 29 registers, 280 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
+		threadsPerBlock = 256;
+	}
+	else 
+	{
+		//sm_13: Used 27 registers, 256+16 bytes smem, 144 bytes cmem[0], 16 bytes cmem[1]
+		threadsPerBlock = 256;
+	}
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);

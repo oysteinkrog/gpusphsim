@@ -12,14 +12,15 @@ __global__ void FermiCacheOverride()
 {
 }
 
-SimBase::SimBase(SimCudaAllocator* SimCudaAllocator)
-	: mSimCudaAllocator(SimCudaAllocator)
+SimBase::SimBase(SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper* simCudaHelper)
+	: mSimCudaAllocator(simCudaAllocator)
+	, mSimCudaHelper(simCudaHelper)
 	, mAlloced(false)
 	, mNumParticles(0)
 {
 	mGPUTimer = new ocu::GPUTimer();
 
-	mBaseBuffers = new BufferManager<BaseBufferId>(SimCudaAllocator);
+	mBaseBuffers = new BufferManager<BaseBufferId>(mSimCudaAllocator);
 	mBaseBuffers->SetBuffer(BufferPosition,			new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
 	mBaseBuffers->SetBuffer(BufferVelocity,			new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
 	mBaseBuffers->SetBuffer(BufferVeleval,			new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
@@ -29,7 +30,7 @@ SimBase::SimBase(SimCudaAllocator* SimCudaAllocator)
 	mBaseBuffers->SetBuffer(BufferVelevalSorted,	new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
 	mBaseBuffers->SetBuffer(BufferColorSorted,		new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
 
-	mUniformGrid = new UniformGrid(mSimCudaAllocator);
+	mUniformGrid = new UniformGrid(mSimCudaAllocator, mSimCudaHelper);
 
 	mSettings = new SimSettings();
 	mSettings->AddCallback(this);
@@ -38,9 +39,14 @@ SimBase::SimBase(SimCudaAllocator* SimCudaAllocator)
 	mSettings->AddSetting("Grid World Size", 256, 0, 0, "World Units");
 	mSettings->AddSetting("Grid Cell Size", 10, 0, 0, "World Units");
 
-#ifdef SPHSIMLIB_FERMI
-	cudaFuncSetCacheConfig(FermiCacheOverride, cudaFuncCachePreferL1);
-#endif
+	//TODO; this is not correct, need to calculate based on actual device parameters...
+	if(mSimCudaHelper->IsFermi())
+	{
+		cudaFuncSetCacheConfig(FermiCacheOverride, cudaFuncCachePreferL1);
+	}
+	else 
+	{
+	}
 
 }
 

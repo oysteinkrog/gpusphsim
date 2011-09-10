@@ -21,15 +21,21 @@
 
 namespace SimLib
 {
-	SimulationSystem::SimulationSystem(bool simplesph)
+	SimulationSystem::SimulationSystem(bool simpleSph = FALSE, SimCudaHelper *cudaHelper = NULL)
 	: mInitialized(false)
 	, mBuffersMapped(false)
 	, mCudaTiming(false)
 	, mHaveTerrainData(false)
 	, hTerrainData(NULL)
+	, mSimCudaHelper(cudaHelper)
 	{
-		mParticleSimType = simplesph ? SimulationSimpleSPH : SimulationSnowSPH;
+		mParticleSimType = simpleSph ? SimulationSimpleSPH : SimulationSnowSPH;
 		mSimCudaAllocator = new SimCudaAllocator();
+		if(cudaHelper == NULL)
+		{
+			mSimCudaHelper = new SimCudaHelper();
+			mSimCudaHelper->Initialize(0);
+		}
 	};
 
 	SimulationSystem::~SimulationSystem()
@@ -57,7 +63,8 @@ namespace SimLib
 	}
 
 	void SimulationSystem::Init()
-	{
+	{		
+
 		mSimulationSteps = 0;
 
 		if(mInitialized)
@@ -71,12 +78,12 @@ namespace SimLib
 		{
 		case SimulationSimpleSPH:
 			{
-				mParticleSim = new Sim::SimpleSPH::SimSimpleSPH(mSimCudaAllocator);
+				mParticleSim = new Sim::SimpleSPH::SimSimpleSPH(mSimCudaAllocator, mSimCudaHelper);
 			}
 			break;
 		case SimulationSnowSPH:
 			{
-				mParticleSim = new Sim::SnowSPH::SimSnowSPH(mSimCudaAllocator);
+				mParticleSim = new Sim::SnowSPH::SimSnowSPH(mSimCudaAllocator, mSimCudaHelper);
 			}
 			break;
 // 		case SimulationDEM:
@@ -219,7 +226,6 @@ namespace SimLib
 		unmapRenderingBuffers();
 
 		mSimulationSteps++;
-
 	}
  
 	void SimulationSystem::SetScene(int scene) 

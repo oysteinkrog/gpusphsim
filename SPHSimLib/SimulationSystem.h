@@ -23,7 +23,7 @@ namespace SimLib
 	class SimulationSystem 
 	{
 	public:
-		SimulationSystem(bool simpleSPH);
+		SimulationSystem(bool simpleSPH, SimCudaHelper *cudaHelper);
 		~SimulationSystem();
 
 		void SetExternalBuffer(SimLib::Sim::BaseBufferId id, SimBuffer* buffer);
@@ -50,6 +50,7 @@ namespace SimLib
 
 	private:
 		SimCudaAllocator* mSimCudaAllocator;
+		SimCudaHelper* mSimCudaHelper;
 
 		ParticleSimType mParticleSimType;
 

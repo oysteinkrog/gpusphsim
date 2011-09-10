@@ -23,9 +23,9 @@ void pause()
 // 	cout << "Press Enter to continue . . .\n";
 // 	cin.ignore(std::numeric_limits<streamsize>::max(),'\n');
 }
-void testFluidSimLive()
+void testFluidSimLive(SimLib::SimCudaHelper* simCudaHelper)
 {
-	SimulationSystem *system = new SimulationSystem(true);
+	SimulationSystem *system = new SimulationSystem(true, simCudaHelper);
 	system->Init();
 
 	system->GetSettings()->SetValue("Timestep", 0.002);
@@ -93,9 +93,9 @@ void testFluidSimLive()
 	pause();
 }
 
-void testFluidSim()
+void testFluidSim(SimLib::SimCudaHelper* simCudaHelper)
 {
-	SimulationSystem *system = new SimulationSystem(true);
+	SimulationSystem *system = new SimulationSystem(true, simCudaHelper);
 	system->Init();
 
 	system->GetSettings()->SetValue("Timestep", 0.002);
@@ -136,9 +136,9 @@ void testFluidSim()
 	pause();
 }
 
-void testPerformanceScaling()
+void testPerformanceScaling(SimLib::SimCudaHelper* simCudaHelper)
 {
-	SimulationSystem *system = new SimulationSystem(true);
+	SimulationSystem *system = new SimulationSystem(true, simCudaHelper);
 	system->Init();
 
 	system->GetSettings()->SetValue("Timestep", 0.0005);
@@ -213,9 +213,9 @@ int main(int argc, char *argv[])
 	//Sleep(1000);
 
 
-//	testPerformanceScaling();
-	//testFluidSimLive();
-	testFluidSim();
+//	testPerformanceScaling(simCudaHelper);
+	//testFluidSimLive(simCudaHelper);
+	testFluidSim(simCudaHelper);
 	//testKernel();
 	
 }

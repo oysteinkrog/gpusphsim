@@ -1,7 +1,7 @@
 #ifndef __OgreSimBufferMesh_h__
 #define __OgreSimBufferMesh_h__
 
-#include "Ogre.h"
+#include <Ogre.h>
 #include "OgreCudaHelper.h"
 
 typedef unsigned int uint;

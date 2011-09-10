@@ -8,6 +8,7 @@ using namespace b40c;
 #endif
 
 #include "SimCudaAllocator.h"
+#include "SimCudaHelper.h"
 
 #ifdef USE_CUDPP
 #include "cudpp/cudpp.h"
@@ -65,7 +66,7 @@ struct GridData
 class UniformGrid
 {
 public:
-	UniformGrid(SimLib::SimCudaAllocator* SimCudaAllocator);
+	UniformGrid(SimLib::SimCudaAllocator* SimCudaAllocator,	SimLib::SimCudaHelper *simCudaHelper);
 	~UniformGrid();
 
 	void Alloc(uint numParticles, float cellWorldSize, float gridWorldSize);
@@ -101,6 +102,7 @@ private:
 	ocu::GPUTimer *mGPUTimer;
 
 	SimLib::SimCudaAllocator* mSimCudaAllocator;
+	SimLib::SimCudaHelper	*mSimCudaHelper;
 
 	GridParams dGridParams;
 

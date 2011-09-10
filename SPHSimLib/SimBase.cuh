@@ -5,6 +5,7 @@
 #include "SimBufferCuda.h"
 #include "SimSettings.h"
 
+#include "SimCudaHelper.h"
 #include "SimCudaAllocator.h"
 #include "UniformGrid.cuh"
 #include "K_Common.cuh"
@@ -56,7 +57,7 @@ struct ParticleData
 class SimBase : public SettingsChangeCallback
 {
 public:
-	SimBase(SimLib::SimCudaAllocator* SimCudaAllocator);
+	SimBase(SimLib::SimCudaAllocator* SimCudaAllocator, SimLib::SimCudaHelper* simCudaHelper);
 	virtual ~SimBase();
 
 	virtual void Clear();
@@ -83,6 +84,8 @@ protected:
 
 
 	SimCudaAllocator	*mSimCudaAllocator;
+	SimLib::SimCudaHelper	*mSimCudaHelper;
+
 	ocu::GPUTimer	*mGPUTimer;
 
 	uint			mNumParticles;
