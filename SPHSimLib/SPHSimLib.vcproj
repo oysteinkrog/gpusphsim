@@ -63,7 +63,6 @@
 				BasicRuntimeChecks="3"
 				RuntimeLibrary="3"
 				EnableFunctionLevelLinking="true"
-				FloatingPointModel="2"
 				WarningLevel="3"
 				Detect64BitPortabilityProblems="true"
 				DebugInformationFormat="4"
@@ -506,6 +505,10 @@
 			</File>
 			<File
 				RelativePath=".\SimCudaHelper.h"
+				>
+			</File>
+			<File
+				RelativePath=".\SimDeviceConfig.h"
 				>
 			</File>
 			<File
