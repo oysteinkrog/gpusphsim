@@ -6,12 +6,12 @@
 #include "OgreCudaHelper.h"
 #include "OgreSimRenderable.h"
 
-namespace SnowSim
+namespace OgreSim
 {
 	class OgreSimBuffer : public SimLib::SimBuffer
 	{
 	public:
-		OgreSimBuffer::OgreSimBuffer(SnowSim::OgreSimRenderable *particlesMesh, SnowSim::OgreCudaHelper *OgreCudaHelper);
+		OgreSimBuffer::OgreSimBuffer(OgreSim::OgreSimRenderable *particlesMesh, OgreSim::OgreCudaHelper *OgreCudaHelper);
 		~OgreSimBuffer();
 
 		void SetOgreVertexBuffer(Ogre::HardwareVertexBufferSharedPtr  ogreVertexBuffer);
@@ -25,11 +25,11 @@ namespace SnowSim
 		virtual size_t GetSize();
 
 	private:
-		SnowSim::OgreSimRenderable *mParticlesMesh;
-		SnowSim::OgreCudaHelper *mOgreCudaHelper;
+		OgreSim::OgreSimRenderable *mParticlesMesh;
+		OgreSim::OgreCudaHelper *mOgreCudaHelper;
 		Ogre::HardwareVertexBufferSharedPtr mOgreVertexBuffer;
 	};
-	
+
 }
 
 #endif

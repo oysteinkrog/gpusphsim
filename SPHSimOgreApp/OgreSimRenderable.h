@@ -6,7 +6,7 @@
 
 typedef unsigned int uint;
 
-namespace SnowSim
+namespace OgreSim
 {
 	class OgreSimBuffer;
 
@@ -25,9 +25,9 @@ namespace SnowSim
 		void createMaterial();
 		void fillHardwareBuffers();
 		virtual Ogre::Real getBoundingRadius(void) const;
-		virtual Ogre::Real getSquaredViewDepth(const Ogre::Camera *) const;    
+		virtual Ogre::Real getSquaredViewDepth(const Ogre::Camera *) const;
 		int mWidth;
-		int mHeight;         
+		int mHeight;
 
 	private:
 		OgreCudaHelper* mOgreCudaHelper;

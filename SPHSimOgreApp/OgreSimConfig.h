@@ -1,10 +1,10 @@
-#ifndef __SnowSim_h_
-#define __SnowSim_h_
+#ifndef __OgreSim_h_
+#define __OgreSim_h_
 
 #include <Ogre.h>
 #include "SimulationSystem.h"
 
-namespace SnowSim
+namespace OgreSim
 {
 	struct GeneralSettings
 	{
@@ -41,7 +41,7 @@ namespace SnowSim
 		bool terrainCollisions;
 	};
 
-	
+
 	typedef std::vector<Ogre::String> TextureLayerFileList;
 	typedef std::vector<Ogre::Real> TextureLayerSizeList;
 
@@ -73,7 +73,7 @@ namespace SnowSim
 	class Config
 	{
 	public:
-		Config(const std::string& configFileName = "SnowSim.cfg");
+		Config(const std::string& configFileName = "SPHSimOgreApp.cfg");
 		~Config();
 
 		GeneralSettings generalSettings;

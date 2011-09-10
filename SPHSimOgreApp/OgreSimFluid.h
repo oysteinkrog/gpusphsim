@@ -1,7 +1,7 @@
-#ifndef __SnowFluid_h_
-#define __SnowFluid_h_
+#ifndef __OgreSimFluid_h_
+#define __OgreSimFluid_h_
 
-#include "SnowSimConfig.h"
+#include "OgreSimConfig.h"
 #include "OgreCudaHelper.h"
 
 #include <OgrePlatform.h>
@@ -27,7 +27,7 @@
 #include <Terrain\OgreTerrainMaterialGeneratorA.h>
 //#include <Terrain\OgreTerrainPaging.h>
 
-#include "SnowTerrain.h"
+#include "OgreSimTerrain.h"
 #include "OgreCudaHelper.h"
 #include "OgreSimBuffer.h"
 
@@ -35,15 +35,15 @@
 #include "SimulationSystem.h"
 
 
-namespace SnowSim
+namespace OgreSim
 {
-	class SnowFluid : public Ogre::FrameListener//, public OIS::KeyListener, public OIS::MouseListener
+	class OgreSimFluid : public Ogre::FrameListener//, public OIS::KeyListener, public OIS::MouseListener
 	{
 	public:
-		SnowFluid(SnowSim::Config *config);
-		~SnowFluid(void);
+		OgreSimFluid(OgreSim::Config *config);
+		~OgreSimFluid(void);
 
-		void createScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr, SnowTerrain* terrain, Ogre::Light* terrainLight);
+		void createScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr, OgreSimTerrain* terrain, Ogre::Light* terrainLight);
 		void destroyScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr);
 
 		bool frameRenderingQueued(const Ogre::FrameEvent& evt);
@@ -59,14 +59,14 @@ namespace SnowSim
 
 	private:
 		Ogre::RenderWindow* mRenderWindow;
-		void SnowFluid::setParticleMaterial(Ogre::String particleMaterial);
-		void configureTerrain(SnowTerrain* terrain);
-		
+		void OgreSimFluid::setParticleMaterial(Ogre::String particleMaterial);
+		void configureTerrain(OgreSimTerrain* terrain);
+
 		void SetScene(int scene);
 		void FillTestData(int scene, SimLib::Sim::ParticleData &hParticles) ;
 
-		SnowSim::Config *mSnowConfig;
-		SnowSim::OgreCudaHelper* mOgreCudaHelper;
+		OgreSim::Config *mSnowConfig;
+		OgreSim::OgreCudaHelper* mOgreCudaHelper;
 		SimLib::SimCudaHelper* mSimCudaHelper;
 
 		int lastScene;
@@ -89,4 +89,4 @@ namespace SnowSim
 
 	};
 }
-#endif // #ifndef __SnowFluid_h_
+#endif // #ifndef __OgreSimFluid_h_

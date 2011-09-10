@@ -1,27 +1,27 @@
-#include "SnowFluid.h"
+#include "OgreSimFluid.h"
 
 using namespace Ogre;
 using namespace OgreBites;
 
-namespace SnowSim
+namespace OgreSim
 {
-	SnowFluid::SnowFluid(SnowSim::Config *snowConfig)
+	OgreSimFluid::OgreSimFluid(OgreSim::Config *snowConfig)
 	: mSnowConfig(snowConfig)
 	, mParticleSystem(NULL)
 	, mProgress(true)
 	{
 		mSimCudaHelper = new SimLib::SimCudaHelper();
-		mOgreCudaHelper = new SnowSim::OgreCudaHelper(mSnowConfig, mSimCudaHelper);
+		mOgreCudaHelper = new OgreSim::OgreCudaHelper(mSnowConfig, mSimCudaHelper);
 		mOgreCudaHelper->Initialize();
 	}
 
 
-	SnowFluid::~SnowFluid()
+	OgreSimFluid::~OgreSimFluid()
 	{
 	}
 
 
-	void SnowFluid::destroyScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr)
+	void OgreSimFluid::destroyScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr)
 	{
 		if(mParticleSystem)
 		{
@@ -31,7 +31,7 @@ namespace SnowSim
 		mRenderWindow = NULL;
 	}
 
-	void SnowFluid::configureTerrain(SnowTerrain* terrain)
+	void OgreSimFluid::configureTerrain(OgreSimTerrain* terrain)
 	{
 		if(terrain == NULL) return;
 
@@ -43,14 +43,14 @@ namespace SnowSim
 		Vector4* terrainNormalData = terrain->getTerrainNormalData();
 
 		if(terrainHeightData != 0 && terrainNormalData != 0)
-			mParticleSystem->SetTerrainData(make_float3(terrainPosition.x,terrainPosition.y,terrainPosition.z), terrainHeightData, (float4*)terrainNormalData, terrainSize, terrainWorldSize); 
+			mParticleSystem->SetTerrainData(make_float3(terrainPosition.x,terrainPosition.y,terrainPosition.z), terrainHeightData, (float4*)terrainNormalData, terrainSize, terrainWorldSize);
 
 		//OGRE_FREE(terrainHeightData, MEMCATEGORY_GENERAL);
 		//OGRE_FREE(terrainNormalData, MEMCATEGORY_GENERAL);
 
 	}
 
-	void SnowFluid::setParticleMaterial(Ogre::String particleMaterial)
+	void OgreSimFluid::setParticleMaterial(Ogre::String particleMaterial)
 	{
 		// Set a material for particles
 		mParticlesEntity->setMaterial(particleMaterial);
@@ -69,7 +69,7 @@ namespace SnowSim
 		}
 
 	}
-	void SnowFluid::createScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr, SnowTerrain* terrain, Ogre::Light* terrainLight)
+	void OgreSimFluid::createScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr, OgreSimTerrain* terrain, Ogre::Light* terrainLight)
 	{
 		mRenderWindow = renderWindow;
 		if(mSnowConfig->fluidSettings.enabled)
@@ -78,7 +78,7 @@ namespace SnowSim
 			mParticleSystem = new SimLib::SimulationSystem(mSnowConfig->fluidSettings.simpleSPH);
 
 			mParticlesEntity = new OgreSimRenderable(mOgreCudaHelper, 1024);
-			
+
 			// Add particles to scene
 			mParticlesNode = mSceneMgr->getRootSceneNode()->createChildSceneNode();
 			mParticlesNode->attachObject(mParticlesEntity);
@@ -100,8 +100,8 @@ namespace SnowSim
 				String value = iter.getNext();
 				float val =  StringConverter::parseReal(value);
 
-				
-				if(!StringUtil::startsWith(name, "//")) 
+
+				if(!StringUtil::startsWith(name, "//"))
 					mParticleSystem->GetSettings()->SetValue(name, val);
 			}
 
@@ -110,7 +110,7 @@ namespace SnowSim
 
 			mParticlesEntity->Resize(mNumParticles);
 			setParticleMaterial(mSnowConfig->generalSettings.fluidShader);
-		
+
 
 			// create material for fluid cube/grid
 			Ogre::MaterialPtr gridMaterial = MaterialManager::getSingleton().create("FluidGridMaterial", Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);
@@ -118,7 +118,7 @@ namespace SnowSim
 			//gridMaterial->createTechnique()->createPass();
 			gridMaterial->getTechnique(0)->setLightingEnabled(false);
 			gridMaterial->getTechnique(0)->getPass(0)->setDiffuse(0, 0, 1, 0);
-			gridMaterial->getTechnique(0)->getPass(0)->setAmbient(0, 0, 1); 
+			gridMaterial->getTechnique(0)->getPass(0)->setAmbient(0, 0, 1);
 			gridMaterial->getTechnique(0)->getPass(0)->setSelfIllumination(0, 0, 1);
 			gridMaterial->load();
 
@@ -155,17 +155,17 @@ namespace SnowSim
 		SetScene(mSnowConfig->sceneSettings.fluidScene);
 	}
 
-	bool SnowFluid::frameStarted(const FrameEvent &evt)
+	bool OgreSimFluid::frameStarted(const FrameEvent &evt)
 	{
 		return true;
 	}
 
-	bool SnowFluid::frameEnded(const FrameEvent &evt)
+	bool OgreSimFluid::frameEnded(const FrameEvent &evt)
 	{
 		return true;
 	}
 
-	bool SnowFluid::frameRenderingQueued(const Ogre::FrameEvent& evt)
+	bool OgreSimFluid::frameRenderingQueued(const Ogre::FrameEvent& evt)
 	{
 		if(mParticleSystem)
 		{
@@ -175,8 +175,8 @@ namespace SnowSim
 	}
 
 
-	void SnowFluid::SetScene(int scene) 
-	{	
+	void OgreSimFluid::SetScene(int scene)
+	{
 		if(!mParticleSystem) return;
 
 		lastScene = scene;
@@ -185,7 +185,7 @@ namespace SnowSim
 	}
 
 
-	bool SnowFluid::keyPressed (OIS::Keyboard* keyboard, const OIS::KeyEvent &evt)
+	bool OgreSimFluid::keyPressed (OIS::Keyboard* keyboard, const OIS::KeyEvent &evt)
 	{
 		switch (evt.key)
 		{

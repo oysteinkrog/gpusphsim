@@ -2,9 +2,9 @@
 <VisualStudioProject
 	ProjectType="Visual C++"
 	Version="9,00"
-	Name="OgreSnowSim"
+	Name="SPHSimOgreApp"
 	ProjectGUID="{C98A1DE7-2D22-45B2-ADB3-5187664CB6EC}"
-	RootNamespace="OgreSnowSim"
+	RootNamespace="SPHSimOgreApp"
 	TargetFrameworkVersion="196613"
 	>
 	<Platforms>
@@ -399,22 +399,22 @@
 			Name="Scene"
 			>
 			<File
-				RelativePath=".\SnowSimApp.cpp"
+				RelativePath=".\OgreSimApp.cpp"
 				>
 			</File>
 			<File
-				RelativePath=".\SnowSimApp.h"
+				RelativePath=".\OgreSimApp.h"
 				>
 			</File>
 			<Filter
 				Name="Terrain"
 				>
 				<File
-					RelativePath="SnowTerrain.cpp"
+					RelativePath="OgreSimTerrain.cpp"
 					>
 				</File>
 				<File
-					RelativePath="SnowTerrain.h"
+					RelativePath="OgreSimTerrain.h"
 					>
 				</File>
 			</Filter>
@@ -422,11 +422,11 @@
 				Name="Fluid"
 				>
 				<File
-					RelativePath=".\SnowFluid.cpp"
+					RelativePath=".\OgreSimFluid.cpp"
 					>
 				</File>
 				<File
-					RelativePath=".\SnowFluid.h"
+					RelativePath=".\OgreSimFluid.h"
 					>
 				</File>
 			</Filter>
@@ -463,11 +463,11 @@
 			Name="Config"
 			>
 			<File
-				RelativePath=".\SnowSimConfig.cpp"
+				RelativePath=".\OgreSimConfig.cpp"
 				>
 			</File>
 			<File
-				RelativePath=".\SnowSimConfig.h"
+				RelativePath=".\OgreSimConfig.h"
 				>
 			</File>
 		</Filter>
@@ -492,21 +492,21 @@
 				UniqueIdentifier="{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}"
 				>
 				<File
-					RelativePath=".\res\OgreSnowSim.ico"
-					>
-				</File>
-				<File
-					RelativePath=".\res\OgreSnowSim.rc"
-					>
-				</File>
-				<File
 					RelativePath=".\res\Resource.h"
+					>
+				</File>
+				<File
+					RelativePath=".\res\SPHSimOgreApp.ico"
+					>
+				</File>
+				<File
+					RelativePath=".\res\SPHSimOgreApp.rc"
 					>
 				</File>
 			</Filter>
 		</Filter>
 		<File
-			RelativePath="..\build\resources\SnowSim.cfg"
+			RelativePath="..\build\resources\SPHSimOgreApp.cfg"
 			>
 		</File>
 	</Files>

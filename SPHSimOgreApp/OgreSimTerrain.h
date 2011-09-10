@@ -1,7 +1,7 @@
-#ifndef __SnowTerrain_h_
-#define __SnowTerrain_h_
+#ifndef __OgreSimTerrain_h_
+#define __OgreSimTerrain_h_
 
-#include "SnowSimConfig.h"
+#include "OgreSimConfig.h"
 #include "OgreCudaHelper.h"
 
 #include <OgreCamera.h>
@@ -28,14 +28,14 @@
 
 #include <OgreHardwareVertexBuffer.h>
 
-namespace SnowSim
+namespace OgreSim
 {
 
-	class SnowTerrain : public Ogre::FrameListener//, public OIS::KeyListener, public OIS::MouseListener
+	class OgreSimTerrain : public Ogre::FrameListener//, public OIS::KeyListener, public OIS::MouseListener
 	{
 	public:
-		SnowTerrain(SnowSim::Config *config);
-		~SnowTerrain(void);
+		OgreSimTerrain(OgreSim::Config *config);
+		~OgreSimTerrain(void);
 
 		void createScene(Ogre::SceneManager* mSceneMgr, Ogre::Light* terrainLight);
 		void destroyScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr);
@@ -62,14 +62,14 @@ namespace SnowSim
 	protected:
 		void defineTerrain(long x, long y, bool flat = false);
 		void initBlendMaps(Ogre::Terrain* terrain);
-		
+
 		Ogre::Terrain* createTerrain();
 
 	private:
 		Ogre::Vector4* convertNormalsToFloats(Ogre::PixelBox* terrainNormals, bool compressed);
 		Ogre::ManualObject* createDebugNormals(Ogre::SceneManager* mSceneMgr);
 
-		SnowSim::Config *mSnowConfig;
+		OgreSim::Config *mSnowConfig;
 
 		Ogre::uint mTerrainSize;
 		Ogre::Real mTerrainWorldSize;
@@ -90,4 +90,4 @@ namespace SnowSim
 	};
 
 }
-#endif // #ifndef __SnowTerrain_h_
+#endif // #ifndef __OgreSimTerrain_h_

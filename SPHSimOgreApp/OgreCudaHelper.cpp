@@ -11,9 +11,9 @@
 
 using namespace Ogre;
 
-namespace SnowSim
+namespace OgreSim
 {
-	OgreCudaHelper::OgreCudaHelper(SnowSim::Config *config, SimLib::SimCudaHelper *simCudaHelper)
+	OgreCudaHelper::OgreCudaHelper(OgreSim::Config *config, SimLib::SimCudaHelper *simCudaHelper)
 	{
 		mSnowConfig = config;
 		mSimCudaHelper = simCudaHelper;
@@ -86,7 +86,7 @@ namespace SnowSim
 				GLHardwareVertexBuffer* bufferGL = static_cast<GLHardwareVertexBuffer*>(hardwareBuffer.getPointer());
 				GLuint bufferGL_ID = bufferGL->getGLBufferId();
 
-				mSimCudaHelper->UnregisterGLBuffer(bufferGL_ID);				
+				mSimCudaHelper->UnregisterGLBuffer(bufferGL_ID);
 			}
 			break;
 		case D3D9:
@@ -102,7 +102,7 @@ namespace SnowSim
 			assert(false);
 		}
 	}
-	
+
 	void OgreCudaHelper::MapBuffer(void **devPtr, Ogre::HardwareVertexBufferSharedPtr hardwareBuffer)
 	{
 		switch(mRenderingMode)

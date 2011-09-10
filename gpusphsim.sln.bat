@@ -5,4 +5,4 @@ set THRUST_HOME="H:\thrust-1.4.0"
 rem set CUDPP_INCLUDE="%NVSDKCOMPUTE_ROOT%\c\common\inc"
 rem set CUDPP_LIB="%NVSDKCOMPUTE_ROOT%\c\common\lib"
 set BACK40_HOME="H:\gpusphsim\back40computing"
-OgreSnowSim.sln
+gpusphsim.sln

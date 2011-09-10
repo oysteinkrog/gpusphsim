@@ -3,7 +3,7 @@
 
 
 #define SPHSIMLIB_3D_SUPPORT
-#include "SnowSimConfig.h"
+#include "OgreSimConfig.h"
 
 //#include <cutil_inline.h>
 //#include <cutil_gl_inline.h>
@@ -17,13 +17,13 @@
 
 #include "SimCudaHelper.h"
 
-namespace SnowSim
+namespace OgreSim
 {
 
 	class OgreCudaHelper
 	{
 	public:
-		OgreCudaHelper::OgreCudaHelper(SnowSim::Config *config, SimLib::SimCudaHelper *simCudaHelper);
+		OgreCudaHelper::OgreCudaHelper(OgreSim::Config *config, SimLib::SimCudaHelper *simCudaHelper);
 		~OgreCudaHelper();
 
 		void Initialize();
@@ -34,10 +34,10 @@ namespace SnowSim
 
 		// CUDA MAPPING
 		void MapBuffer(void **devPtr, Ogre::HardwareVertexBufferSharedPtr bufObj);
-		void UnmapBuffer(void **devPtr, Ogre::HardwareVertexBufferSharedPtr bufObj); 
+		void UnmapBuffer(void **devPtr, Ogre::HardwareVertexBufferSharedPtr bufObj);
 
 	private:
-		SnowSim::Config *mSnowConfig;
+		OgreSim::Config *mSnowConfig;
 		SimLib::SimCudaHelper *mSimCudaHelper;
 
 		enum RenderingMode

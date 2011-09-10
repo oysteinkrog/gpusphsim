@@ -1,8 +1,8 @@
-#include "SnowSimConfig.h"
+#include "OgreSimConfig.h"
 
 using namespace Ogre;
 
-namespace SnowSim {
+namespace OgreSim {
 
 	Config::Config(const std::string& configFileName)
 		: mCfg(NULL)
@@ -75,7 +75,7 @@ namespace SnowSim {
 			String name = iter.peekNextKey();
 			Ogre::StringUtil::toLowerCase(name);
 			String value = iter.getNext();
-			
+
 			if(name == "skyboxmaterial")
 			{
 				sceneSettings.skyBoxMaterial = value;
@@ -87,7 +87,7 @@ namespace SnowSim {
 			else if(name == "cameraposition")
 			{
 				sceneSettings.cameraPosition = StringConverter::parseVector3(value);
-			}	
+			}
 			else if(name == "cameraorientation")
 			{
 				sceneSettings.cameraOrientation = StringConverter::parseQuaternion(value);
@@ -128,7 +128,7 @@ namespace SnowSim {
 			String name = iter.peekNextKey();
 			Ogre::StringUtil::toLowerCase(name);
 			String value = iter.getNext();
-			
+
 			if(name == "simplesph")
 			{
 				fluidSettings.simpleSPH = StringConverter::parseBool(value);
@@ -236,7 +236,7 @@ namespace SnowSim {
 
 			setting = "textureLayerDiffSpecFile"+Ogre::StringConverter::toString(i);
 			Ogre::String textureLayerDiffSpecFile = mCfg->getSetting(setting, "Terrain");
-			
+
 			setting = "textureLayerSize"+Ogre::StringConverter::toString(i);
 			Ogre::Real textureLayerSize = StringConverter::parseReal(mCfg->getSetting(setting, "Terrain"));
 

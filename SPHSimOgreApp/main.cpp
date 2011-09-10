@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <time.h>
 
-#include "SnowSimApp.h"
+#include "OgreSimApp.h"
 
 using namespace Ogre;
 using namespace OgreBites;
@@ -68,7 +68,7 @@ void showWin32Console()
  //#endif
 		{
 			// Create application object
-			SnowSim::SnowApplication app;
+			OgreSim::SnowApplication app;
 
 			app.go();
 

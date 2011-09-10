@@ -1,15 +1,15 @@
-#ifndef __SnowSimApp_h_
-#define __SnowSimApp_h_
+#ifndef __OgreSimApp_h_
+#define __OgreSimApp_h_
 
-#include "SnowTerrain.h"
-#include "SnowFluid.h"
+#include "OgreSimTerrain.h"
+#include "OgreSimFluid.h"
 
 #include "BaseApplication.h"
 #if OGRE_PLATFORM == OGRE_PLATFORM_WIN32
 #include "../res/resource.h"
 #endif
 
-namespace SnowSim
+namespace OgreSim
 {
 	class SnowApplication : public BaseApplication
 	{
@@ -46,8 +46,8 @@ namespace SnowSim
 		bool mSimulationPaused;
 		bool mDestroyed;
 
-		SnowTerrain* mSnowTerrain;
-		SnowFluid*	mSnowFluid;
+		OgreSimTerrain* mOgreSimTerrain;
+		OgreSimFluid*	mOgreSimFluid;
 
 		// Shadows...
 		enum ShadowMode
@@ -73,4 +73,4 @@ namespace SnowSim
 
 }
 
-#endif // #ifndef __SnowSim_h_
+#endif // #ifndef __OgreSim_h_

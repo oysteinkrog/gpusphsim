@@ -28,7 +28,7 @@ LANGUAGE LANG_DANISH, SUBLANG_DEFAULT
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-IDI_APPICON               ICON                    "OgreSnowSim.ico"
+IDI_APPICON               ICON                    "SPHSimOgreApp.ico"
 #endif    // Danish resources
 /////////////////////////////////////////////////////////////////////////////
 
@@ -75,10 +75,10 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APP_TITLE           "SnowSim"
+    IDS_APP_TITLE           "SPHSimOgreApp"
 END
 
-IDI_APPICON             ICON                    "OgreSnowSim.ico"
+IDI_APPICON             ICON                    "SPHSimOgreApp.ico"
 #endif    // English (U.S.) resources
 /////////////////////////////////////////////////////////////////////////////
 

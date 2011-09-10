@@ -1,4 +1,4 @@
-#include "SnowTerrain.h"
+#include "OgreSimTerrain.h"
 
 #define TERRAIN_PAGE_MIN_X 0
 #define TERRAIN_PAGE_MIN_Y 0
@@ -11,9 +11,9 @@
 using namespace Ogre;
 using namespace OgreBites;
 
-namespace SnowSim
+namespace OgreSim
 {
-	SnowTerrain::SnowTerrain(SnowSim::Config *snowConfig)
+	OgreSimTerrain::OgreSimTerrain(OgreSim::Config *snowConfig)
 	: mSnowConfig(snowConfig)
 	, mTerrainGlobals(NULL)
 	, mTerrainGroup(NULL)
@@ -32,48 +32,48 @@ namespace SnowSim
 		mTerrainPos = snowConfig->sceneSettings.terrainPosition;
 
 	// 	Ogre::Image combined;
-	// 
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_base.bmp", "terrain_1024_alpine3_shader_base_SPEC.bmp", 
+	//
+	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_base.bmp", "terrain_1024_alpine3_shader_base_SPEC.bmp",
 	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
 	// 	combined.save("terrain_1024_alpine3_shader_base_diffusespecular.png");
-	// 
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_base_NORM.tga", "terrain_1024_alpine3_shader_base_DISP.bmp", 
+	//
+	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_base_NORM.tga", "terrain_1024_alpine3_shader_base_DISP.bmp",
 	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
 	// 	combined.save("terrain_1024_alpine3_shader_base_normalheight.png");
-	// 
-	// 
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_white.bmp", "terrain_1024_alpine3_shader_white_SPEC.bmp", 
+	//
+	//
+	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_white.bmp", "terrain_1024_alpine3_shader_white_SPEC.bmp",
 	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
 	// 	combined.save("terrain_1024_alpine3_shader_white_diffusespecular.png");
-	// 
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_white_NORM.tga", "terrain_1024_alpine3_shader_white_DISP.bmp", 
+	//
+	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_white_NORM.tga", "terrain_1024_alpine3_shader_white_DISP.bmp",
 	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
 	// 	combined.save("terrain_1024_alpine3_shader_white_normalheight.png");
 
 		// Update terrain at max 20fps
-		
+
 
 		mTerrainGlobals = OGRE_NEW TerrainGlobalOptions();
 
 	}
 
-	SnowTerrain::~SnowTerrain()
+	OgreSimTerrain::~OgreSimTerrain()
 	{
 		OGRE_DELETE mTerrainGlobals;
 	}
 
-	void SnowTerrain::destroyScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr)
+	void OgreSimTerrain::destroyScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr)
 	{
 		OGRE_DELETE mTerrainGroup;
 	}
 
-	Ogre::TerrainMaterialGeneratorA::SM2Profile* SnowTerrain::getMaterialProfile()
+	Ogre::TerrainMaterialGeneratorA::SM2Profile* OgreSimTerrain::getMaterialProfile()
 	{
 		return static_cast<TerrainMaterialGeneratorA::SM2Profile*>(mTerrainGlobals->getDefaultMaterialGenerator()->getActiveProfile());
 	}
 
 	//-------------------------------------------------------------------------------------
-	void SnowTerrain::createScene(Ogre::SceneManager* sceneMgr, Light* terrainLight)
+	void OgreSimTerrain::createScene(Ogre::SceneManager* sceneMgr, Light* terrainLight)
 	{
 		mSceneMgr = sceneMgr;
 
@@ -154,7 +154,7 @@ namespace SnowSim
 
 	}
 
-	bool SnowTerrain::frameRenderingQueued(const Ogre::FrameEvent& evt)
+	bool OgreSimTerrain::frameRenderingQueued(const Ogre::FrameEvent& evt)
 	{
 		if(!mTerrainGroup) return true;
 
@@ -181,7 +181,7 @@ namespace SnowSim
 	// 		{
 	// 			mInfoLabel->setCaption("Updating textures, patience...");
 	// 		}
-	// 
+	//
 	// 	}
 	// 	else
 	// 	{
@@ -196,7 +196,7 @@ namespace SnowSim
 		return true;
 	}
 
-	void SnowTerrain::defineTerrain(long x, long y, bool flat)
+	void OgreSimTerrain::defineTerrain(long x, long y, bool flat)
 	{
 		if (flat)
 		{
@@ -209,7 +209,7 @@ namespace SnowSim
 				mTerrainGroup->defineTerrain(x, y, mSnowConfig->terrainSettings.heightDataFile);
 				mTerrainGroup->loadTerrain(x,y, true);
 			}
-			else 
+			else
 			{
 				Image *img = new Image();
 
@@ -219,7 +219,7 @@ namespace SnowSim
 					size_t size = stream->size();
 					img->loadRawData(stream, mTerrainSize-1, mTerrainSize-1, 1, PixelFormat::PF_FLOAT32_R);
 
-					// height data must be square			
+					// height data must be square
 					assert(img->getWidth() == img->getHeight());
 
 					// resize the height data if it's the wrong size
@@ -235,9 +235,9 @@ namespace SnowSim
 				}
 				else if(StringUtil::endsWith(mSnowConfig->terrainSettings.heightDataFile, "png")||StringUtil::endsWith(mSnowConfig->terrainSettings.heightDataFile, "bmp"))
 				{
- 					img->load(mSnowConfig->terrainSettings.heightDataFile, ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);		
+ 					img->load(mSnowConfig->terrainSettings.heightDataFile, ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);
 
-					// height data must be square			
+					// height data must be square
 					assert(img->getWidth() == img->getHeight());
 
 					// resize the height data if it's the wrong size
@@ -250,14 +250,14 @@ namespace SnowSim
 
 
 			}
-		
-			
+
+
 			mTerrainsImported = true;
 		}
 	}
 
 
-	void SnowTerrain::initBlendMaps(Terrain* terrain)
+	void OgreSimTerrain::initBlendMaps(Terrain* terrain)
 	{
 		TextureLayerFileList blendImages = mSnowConfig->terrainSettings.textureBlendFileList;
 
@@ -291,7 +291,7 @@ namespace SnowSim
 		}
 	}
 
-	void SnowTerrain::SaveTerrains(bool onlyIfModified)
+	void OgreSimTerrain::SaveTerrains(bool onlyIfModified)
 	{
 		if(!mTerrainGroup) return;
 
@@ -300,7 +300,7 @@ namespace SnowSim
 	}
 
 
-	bool SnowTerrain::keyPressed (const OIS::KeyEvent &evt)
+	bool OgreSimTerrain::keyPressed (const OIS::KeyEvent &evt)
 	{
 		switch (evt.key)
 		{
@@ -326,7 +326,7 @@ namespace SnowSim
 	}
 
 
-	void SnowTerrain::dumpTextures()
+	void OgreSimTerrain::dumpTextures()
 	{
 		if(!mTerrainGroup) return;
 
@@ -343,7 +343,7 @@ namespace SnowSim
 	}
 
 
-	float* SnowTerrain::getTerrainHeightData()
+	float* OgreSimTerrain::getTerrainHeightData()
 	{
 		Terrain *t =  mTerrainGroup->getTerrain(0,0);
 
@@ -353,7 +353,7 @@ namespace SnowSim
 		return terrainHeightData;
 	}
 
-	Vector4* SnowTerrain::getTerrainNormalData()
+	Vector4* OgreSimTerrain::getTerrainNormalData()
 	{
 		PixelBox* terrainNormals;
 
@@ -376,7 +376,7 @@ namespace SnowSim
 
 			Vector4* floats = convertNormalsToFloats(terrainNormals, true);
 			//OGRE_FREE(terrainNormals->data, Ogre::MEMCATEGORY_GENERAL);
-			
+
 			// need to swap z and y vector due to different vertical axis in normal map and world space!
 			for(size_t i = 0;i<mTerrainSize*mTerrainSize;i++)
 			{
@@ -412,20 +412,20 @@ namespace SnowSim
 		}
 
 
-		
+
 	}
 
-	int SnowTerrain::getTerrainSize()
+	int OgreSimTerrain::getTerrainSize()
 	{
 		return mTerrainSize;
 	}
 
-	Real SnowTerrain::getTerrainWorldSize()
+	Real OgreSimTerrain::getTerrainWorldSize()
 	{
 		return mTerrainWorldSize;
 	}
 
-	Terrain* SnowTerrain::getTerrain()
+	Terrain* OgreSimTerrain::getTerrain()
 	{
 		if(!mTerrainGroup) return NULL;
 
@@ -458,12 +458,12 @@ namespace SnowSim
 				PixelBox pBox(w, h, d, f, tmpData);
 				buf->blitToMemory(pBox);
 				OGRE_FREE(tmpData, MEMCATEGORY_GENERAL);
-				
+
 			}
 		}
 		return NULL;
 	}
-	Vector4* SnowTerrain::convertNormalsToFloats(PixelBox* terrainNormals, bool compressed)
+	Vector4* OgreSimTerrain::convertNormalsToFloats(PixelBox* terrainNormals, bool compressed)
 	{
 		const size_t srcPixelSize = PixelUtil::getNumElemBytes(terrainNormals->format);
 		const size_t dstPixelSize = PixelUtil::getNumElemBytes(PF_FLOAT32_RGBA);
@@ -484,7 +484,7 @@ namespace SnowSim
 			PixelUtil::unpackColour(&r,&g,&b,&a, terrainNormals->format, static_cast<void*>(&pixelsBuffer[i]));
 			float fr,fg,fb;
 			if(compressed)
-			{			
+			{
 				//(signed) float packed/compressed into uint8, unpack
 				fr = ((float)(r))/(0.5f * 255.0f) - 1.0f;
 				fg = ((float)(g))/(0.5f * 255.0f) - 1.0f;
@@ -504,7 +504,7 @@ namespace SnowSim
 		return terrainNormalDataCorrected;
 	}
 
-	ManualObject* SnowTerrain::createDebugNormals(Ogre::SceneManager* mSceneMgr)
+	ManualObject* OgreSimTerrain::createDebugNormals(Ogre::SceneManager* mSceneMgr)
 	{
 		ManualObject* manual = mSceneMgr->createManualObject("NormalsDebug");
 

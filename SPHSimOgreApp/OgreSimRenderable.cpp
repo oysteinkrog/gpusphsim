@@ -1,7 +1,7 @@
 #include "OgreSimRenderable.h"
 #include "OgreSimBuffer.h"
 
-namespace SnowSim
+namespace OgreSim
 {
 	OgreSimRenderable::OgreSimRenderable(OgreCudaHelper *ogreCudaHelper, uint numParticles)
 			: mOgreCudaHelper(ogreCudaHelper)
@@ -19,7 +19,7 @@ namespace SnowSim
 		// set bounding box
 		//mBox = Ogre::AxisAlignedBox( Ogre::Vector3(0, 0, 0), Ogre::Vector3(mVolumeSize, mVolumeSize, mVolumeSize) );
 		mBox.setInfinite();
-		
+
 		Resize(numParticles);
 
 		Ogre::MaterialPtr material = Ogre::MaterialManager::getSingleton().create("CudaVertexBufferMaterial", Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);
@@ -102,15 +102,15 @@ namespace SnowSim
 		size_t currOffset = 0;
 		mRenderOp.vertexData->vertexDeclaration->addElement(0, currOffset, Ogre::VET_FLOAT4, Ogre::VES_POSITION);
 		currOffset += Ogre::VertexElement::getTypeSize(Ogre::VET_FLOAT4);
-		
+
 		// allocate the vertex buffer
 		mVertexBufferPosition = Ogre::HardwareBufferManager::getSingleton().createVertexBuffer(
 			mRenderOp.vertexData->vertexDeclaration->getVertexSize(0),
-			mRenderOp.vertexData->vertexCount, 
+			mRenderOp.vertexData->vertexCount,
 			Ogre::HardwareBuffer::HBU_DISCARDABLE,
-			false);		
+			false);
 
-		// bind positions to 0	
+		// bind positions to 0
 		mRenderOp.vertexData->vertexBufferBinding->setBinding(0, mVertexBufferPosition);
 
 
@@ -124,9 +124,9 @@ namespace SnowSim
 		// allocate the color buffer
 		mVertexBufferColor = Ogre::HardwareBufferManager::getSingleton().createVertexBuffer(
 			mRenderOp.vertexData->vertexDeclaration->getVertexSize(0),
-			mRenderOp.vertexData->vertexCount, 
+			mRenderOp.vertexData->vertexCount,
 			Ogre::HardwareBuffer::HBU_DISCARDABLE,
-			false);		
+			false);
 
 		// bind colors to 1
 		mRenderOp.vertexData->vertexBufferBinding->setBinding(1, mVertexBufferColor);

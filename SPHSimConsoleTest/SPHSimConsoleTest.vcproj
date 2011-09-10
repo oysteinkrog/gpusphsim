@@ -2,9 +2,9 @@
 <VisualStudioProject
 	ProjectType="Visual C++"
 	Version="9,00"
-	Name="ConsoleTest"
+	Name="SPHSimConsoleTest"
 	ProjectGUID="{110ACBCC-44F5-414E-BDA7-CB3FF9548F49}"
-	RootNamespace="ConsoleTest"
+	RootNamespace="SPHSimConsoleTest"
 	Keyword="Win32Proj"
 	TargetFrameworkVersion="196613"
 	>

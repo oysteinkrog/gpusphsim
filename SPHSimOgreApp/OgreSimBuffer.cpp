@@ -1,8 +1,8 @@
 #include "OgreSimBuffer.h"
 
-namespace SnowSim
+namespace OgreSim
 {
-	OgreSimBuffer::OgreSimBuffer(SnowSim::OgreSimRenderable *particlesMesh, SnowSim::OgreCudaHelper *OgreCudaHelper)
+	OgreSimBuffer::OgreSimBuffer(OgreSim::OgreSimRenderable *particlesMesh, OgreSim::OgreCudaHelper *OgreCudaHelper)
 		: mParticlesMesh(particlesMesh)
 		, mOgreVertexBuffer(NULL)
 		, mOgreCudaHelper(OgreCudaHelper)
@@ -43,7 +43,7 @@ namespace SnowSim
 
 	void OgreSimBuffer::UnmapBuffer()
 	{
-		mOgreCudaHelper->UnmapBuffer((void**)&mPtr, mOgreVertexBuffer);		
+		mOgreCudaHelper->UnmapBuffer((void**)&mPtr, mOgreVertexBuffer);
 		mMapped = false;
 	}
 
@@ -56,7 +56,7 @@ namespace SnowSim
 	{
 		if(size == mAllocedSize)
 			return;
-		
+
 		mParticlesMesh->Resize(size/sizeof(float4));
 	}
 

@@ -2,16 +2,16 @@
 #include <stdlib.h>
 #include <time.h>
 
-#include "SnowSimApp.h"
+#include "OgreSimApp.h"
 
 using namespace Ogre;
 using namespace OgreBites;
 
-namespace SnowSim 
+namespace OgreSim
 {
 
 	//-------------------------------------------------------------------------------------
-	SnowApplication::SnowApplication(void) 
+	SnowApplication::SnowApplication(void)
 		: mSimulationPaused(false)
 		, mScreenCaptureFrame(0)
 		, mScreenCapture(false)
@@ -36,24 +36,24 @@ namespace SnowSim
 		mDestroyed = true;
 
 		// Destroy fluid
-		mSnowFluid->destroyScene(mWindow, mSceneMgr);
+		mOgreSimFluid->destroyScene(mWindow, mSceneMgr);
 
 		// Destroy terrain
-		mSnowTerrain->destroyScene(mWindow, mSceneMgr);
+		mOgreSimTerrain->destroyScene(mWindow, mSceneMgr);
 
-		delete mSnowTerrain;
-		delete mSnowFluid;
+		delete mOgreSimTerrain;
+		delete mOgreSimFluid;
 	}
 
 	//-------------------------------------------------------------------------------------
 	void SnowApplication::createScene(void)
-	{	
+	{
 		mDestroyed = false;
 
 		srand ( time(NULL) );
 
-		mSnowTerrain = new SnowTerrain(mSnowConfig);
-		mSnowFluid = new SnowFluid(mSnowConfig);
+		mOgreSimTerrain = new OgreSimTerrain(mSnowConfig);
+		mOgreSimFluid = new OgreSimFluid(mSnowConfig);
 
  		MaterialManager::getSingleton().setDefaultTextureFiltering(TFO_ANISOTROPIC);
  		MaterialManager::getSingleton().setDefaultAnisotropy(7);
@@ -62,14 +62,14 @@ namespace SnowSim
  		//Vector3 lightdir(0.55, -0.3, 0.75);
  		Vector3 lightdir(00, -0.85, 0);
  		lightdir.normalise();
-	 
+
 	 	// PRIMARY LIGHT
  		Light* primaryLight = mSceneMgr->createLight("PrimaryLight");
  		primaryLight->setType(Light::LT_DIRECTIONAL);
  		primaryLight->setDirection(lightdir);
  		primaryLight->setDiffuseColour(ColourValue::White);
  		primaryLight->setSpecularColour(ColourValue(0.4, 0.4, 0.4));
-	 
+
  		mSceneMgr->setAmbientLight(ColourValue(0.2, 0.2, 0.2));
 
  		mWindow->getViewport(0)->setBackgroundColour(mSnowConfig->sceneSettings.backgroundColor);
@@ -83,22 +83,22 @@ namespace SnowSim
 
 		// Create terrain
 		if(mSnowConfig->terrainSettings.enabled)
-  			mSnowTerrain->createScene(mSceneMgr, primaryLight);
+  			mOgreSimTerrain->createScene(mSceneMgr, primaryLight);
 
 		// Create fluid
-		mSnowFluid->createScene(mWindow, mSceneMgr, mSnowTerrain, primaryLight);
-		//mCamera->lookAt(mSnowFluid->mParticlesNode->getPosition());;
+		mOgreSimFluid->createScene(mWindow, mSceneMgr, mOgreSimTerrain, primaryLight);
+		//mCamera->lookAt(mOgreSimFluid->mParticlesNode->getPosition());;
 
-		// Place camera 
+		// Place camera
 		Vector3 cameraPos =mSnowConfig->sceneSettings.cameraPosition;
 		if(mSnowConfig->sceneSettings.cameraRelativeToFluid && mSnowConfig->fluidSettings.enabled)
-			cameraPos += mSnowFluid->mParticlesNode->getPosition();
+			cameraPos += mOgreSimFluid->mParticlesNode->getPosition();
 
 		mCamera->setPosition(cameraPos);
 		//mCamera->setDirection(0,100,0);
 		mCamera->setOrientation(mSnowConfig->sceneSettings.cameraOrientation);
-	// 	mCamera->setPosition(mSnowTerrain->mTerrainPos + Vector3(1683, 50, 2116));
-	// 	mCamera->lookAt(mSnowTerrain->mTerrainPos);
+	// 	mCamera->setPosition(mOgreSimTerrain->mTerrainPos + Vector3(1683, 50, 2116));
+	// 	mCamera->lookAt(mOgreSimTerrain->mTerrainPos);
 	// 	mCamera->setNearClipDistance(5);
 	// 	mCamera->setNearClipDistance(0.5);
 	// 	mCamera->setFarClipDistance(500);
@@ -123,7 +123,7 @@ namespace SnowSim
 	{
 		if(mDestroyed) return false;
 
-		mSnowFluid->frameStarted(evt);
+		mOgreSimFluid->frameStarted(evt);
 		return BaseApplication::frameStarted(evt);
 	}
 
@@ -131,7 +131,7 @@ namespace SnowSim
 	{
 		if(mDestroyed) return false;
 
-		mSnowFluid->frameEnded(evt);
+		mOgreSimFluid->frameEnded(evt);
 		return BaseApplication::frameEnded(evt);
 
 	}
@@ -148,8 +148,8 @@ namespace SnowSim
 		}
 
  		if(!mSimulationPaused) {
-			mSnowTerrain->frameRenderingQueued(evt);
-			mSnowFluid->frameRenderingQueued(evt);
+			mOgreSimTerrain->frameRenderingQueued(evt);
+			mOgreSimFluid->frameRenderingQueued(evt);
 		}
 
 		return BaseApplication::frameRenderingQueued(evt);  // don't forget the parent updates!
@@ -159,14 +159,14 @@ namespace SnowSim
 	bool SnowApplication::keyPressed (const OIS::KeyEvent &evt)
 	{
 		// toggle visibility of help dialog
-		if (evt.key == OIS::KC_H || evt.key == OIS::KC_F1)   
+		if (evt.key == OIS::KC_H || evt.key == OIS::KC_F1)
 		{
 			if (!mTrayMgr->isDialogVisible())  mTrayMgr->showOkDialog("Help", "");
 			else mTrayMgr->closeDialog();
 		}
 
 		// don't process any more keys if dialog is up
-		if (mTrayMgr->isDialogVisible()) return true;   
+		if (mTrayMgr->isDialogVisible()) return true;
 
 
 		switch (evt.key)
@@ -177,7 +177,7 @@ namespace SnowSim
 				mWindow->writeContentsToTimestampedFile("screenshot", ".png");
 			}
 			break;
-		case OIS::KC_F:   
+		case OIS::KC_F:
 			{
 				mTrayMgr->toggleAdvancedFrameStats();
 			}
@@ -219,9 +219,9 @@ namespace SnowSim
 			if (mKeyboard->isKeyDown(OIS::KC_LCONTROL) || mKeyboard->isKeyDown(OIS::KC_RCONTROL))
 			{
 				Ogre::LogManager::getSingleton().logMessage(LogMessageLevel::LML_CRITICAL, "Saving terrain");
-				mSnowTerrain->SaveTerrains(false);
+				mOgreSimTerrain->SaveTerrains(false);
 			}
-			break;		
+			break;
 		case OIS::KC_F9:
 			mScreenCapture = !mScreenCapture;
 			if(mScreenCapture)
@@ -230,12 +230,12 @@ namespace SnowSim
 		case OIS::KC_F10:
 			// dump
 			{
-				mSnowTerrain->dumpTextures();
+				mOgreSimTerrain->dumpTextures();
 			}
 		case OIS::KC_F11:
 			// dump
 			{
-				mSnowTerrain->getTerrain();
+				mOgreSimTerrain->getTerrain();
 			}
 		case OIS::KC_P:
 			// dump
@@ -246,9 +246,9 @@ namespace SnowSim
 		}
 
 
-		mSnowTerrain->keyPressed(evt);
+		mOgreSimTerrain->keyPressed(evt);
 
-		mSnowFluid->keyPressed(mKeyboard, evt);
+		mOgreSimFluid->keyPressed(mKeyboard, evt);
 
 		return BaseApplication::keyPressed(evt);
 	}
@@ -307,7 +307,7 @@ namespace SnowSim
 	// 	{
 	// 		mMode = (Mode)mEditMenu->getSelectionIndex();
 	// 	}
-	// 	else 
+	// 	else
 			if (menu == mShadowsMenu)
 		{
 			mShadowMode = (ShadowMode)mShadowsMenu->getSelectionIndex();
@@ -343,7 +343,7 @@ namespace SnowSim
 			p->getTextureUnitState("diffuse")->setTextureName(textureName);
 
 			Vector4 splitPoints;
-			const PSSMShadowCameraSetup::SplitPointList& splitPointList = 
+			const PSSMShadowCameraSetup::SplitPointList& splitPointList =
 				static_cast<PSSMShadowCameraSetup*>(mPSSMSetup.get())->getSplitPoints();
 			for (int i = 0; i < 3; ++i)
 			{
@@ -364,7 +364,7 @@ namespace SnowSim
 
 	void SnowApplication::configureShadows(bool enabled, bool depthShadows)
 	{
-		TerrainMaterialGeneratorA::SM2Profile* matProfile = mSnowTerrain->getMaterialProfile();
+		TerrainMaterialGeneratorA::SM2Profile* matProfile = mOgreSimTerrain->getMaterialProfile();
 
 		matProfile->setReceiveDynamicShadowsEnabled(enabled);
 	#ifdef SHADOWS_IN_LOW_LOD_MATERIAL
