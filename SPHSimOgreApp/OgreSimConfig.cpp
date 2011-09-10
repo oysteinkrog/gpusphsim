@@ -67,6 +67,10 @@ namespace OgreSim {
 		// defaults
 		//sceneSettings.skyBoxMaterial = "Examples/CloudyNoonSkyBox";
 
+		sceneSettings.cameraPosition = Ogre::Vector3(0,0,0);
+		sceneSettings.fluidPosition = Ogre::Vector3(0,0,0);
+		sceneSettings.terrainPosition = Ogre::Vector3(0,0,0);
+		sceneSettings.cameraOrientation = Ogre::Quaternion(0,0,0,0);
 		sceneSettings.fluidScene = 9;
 
 		Ogre::ConfigFile::SettingsIterator iter = mCfg->getSettingsIterator("Scene");
