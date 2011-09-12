@@ -30,10 +30,12 @@ public:
 	static __device__ __host__ float Gradient_Constant(float smoothing_length)
 	{
 		//TODO
+		return 0.0f;
 	}
 
 	static __device__ __host__ float Gradient_Variable(float smoothing_length, float smoothing_length_pow2, float3 r, float rlen)
 	{
+		return 0.0f;
 	}
 
 };
