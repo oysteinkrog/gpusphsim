@@ -1,6 +1,6 @@
 #include "CudaMax.cuh"
 
-#include <cutil.h>
+#include "cutil.h"
 
 namespace SimLib
 {

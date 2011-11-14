@@ -1,16 +1,13 @@
-Microsoft Visual Studio Solution File, Format Version 10.00
-# Visual Studio 2008
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SPHSimOgreApp", "SPHSimOgreApp\SPHSimOgreApp.vcproj", "{C98A1DE7-2D22-45B2-ADB3-5187664CB6EC}"
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio 2010
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SPHSimOgreApp", "SPHSimOgreApp\SPHSimOgreApp.vcxproj", "{C98A1DE7-2D22-45B2-ADB3-5187664CB6EC}"
 	ProjectSection(ProjectDependencies) = postProject
 		{67D5C322-B23F-46AC-9199-6AE167E78807} = {67D5C322-B23F-46AC-9199-6AE167E78807}
 	EndProjectSection
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SPHSimLib", "SPHSimLib\SPHSimLib.vcproj", "{67D5C322-B23F-46AC-9199-6AE167E78807}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SPHSimLib", "SPHSimLib\SPHSimLib.vcxproj", "{67D5C322-B23F-46AC-9199-6AE167E78807}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ConsoleTest", "SPHSimConsoleTest\SPHSimConsoleTest.vcproj", "{110ACBCC-44F5-414E-BDA7-CB3FF9548F49}"
-	ProjectSection(ProjectDependencies) = postProject
-		{67D5C322-B23F-46AC-9199-6AE167E78807} = {67D5C322-B23F-46AC-9199-6AE167E78807}
-	EndProjectSection
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SPHSimConsoleTest", "SPHSimConsoleTest\SPHSimConsoleTest.vcxproj", "{110ACBCC-44F5-414E-BDA7-CB3FF9548F49}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

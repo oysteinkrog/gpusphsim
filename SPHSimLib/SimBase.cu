@@ -6,8 +6,7 @@
 using namespace SimLib;
 
 namespace SimLib { namespace Sim { 
-
-
+	
 __global__ void FermiCacheOverride()
 {
 }

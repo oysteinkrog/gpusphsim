@@ -1,19 +1,14 @@
-#define USE_CUDPP
-//#define USE_THRUST_SORT
+//#define USE_CUDPP
+#define USE_THRUST_SORT
 //#define USE_B40C_SORT
 
 #include "UniformGrid.cuh"
 #include "CudaUtils.cuh"
+#include "cutil.h"
+
 
 #include <cmath>
 #include <cstdio>
-
-#ifdef USE_THRUST_SORT
-#include <thrust/device_vector.h>
-#include <thrust/sort.h>
-#include <thrust/random.h>
-#endif
-
 
 #include <iostream>
 #include <iomanip>
@@ -47,9 +42,9 @@ UniformGrid::~UniformGrid()
 {
 	Free();
 
-	delete mGPUTimer;
-	delete mGridCellBuffers;
-	delete mGridParticleBuffers;
+	delete mGPUTimer; mGPUTimer = NULL;
+	delete mGridCellBuffers; mGridCellBuffers = NULL;
+	delete mGridParticleBuffers; mGridParticleBuffers = NULL;
 }
 
 void UniformGrid::Alloc(uint numParticles, float cellWorldSize, float gridWorldSize)
@@ -74,8 +69,8 @@ void UniformGrid::Alloc(uint numParticles, float cellWorldSize, float gridWorldS
 
 	// Allocate the radix sorter
 #ifdef USE_THRUST_SORT
-// 	thrust::device_ptr<uint> keys(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>());
-// 	thrust::device_ptr<uint> vals(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());
+	mThrustKeys = new thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>());
+	mThrustVals = new thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());
 #endif
 #ifdef USE_B40C_SORT
 	m_b40c_sorting_enactor = new b40c::radix_sort::Enactor();
@@ -108,7 +103,12 @@ void UniformGrid::Free()
 		return;
 
 #ifdef USE_THRUST_SORT
-
+	delete mThrustKeys; mThrustKeys = NULL;
+	delete mThrustVals; mThrustVals = NULL;
+#endif
+#ifdef USE_B40C_SORT
+	delete m_b40c_sorting_enactor;
+	delete m_b40c_storage;
 #endif
 #ifdef USE_CUDPP
 	cudppDestroyPlan(m_sortHandle);	m_sortHandle=NULL;
@@ -218,12 +218,11 @@ float UniformGrid::Sort(bool doTiming)
 		mGPUTimer->start();
 	}
 #ifdef USE_THRUST_SORT
-	thrust::device_ptr<uint> keys(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>());
-	thrust::device_ptr<uint> vals(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());
-	thrust::sort_by_key(keys, vals+mNumParticles, vals);	
+	thrust::sort_by_key(*mThrustKeys, *mThrustVals+mNumParticles, *mThrustVals);	
 #endif
 #ifdef USE_B40C_SORT
-	m_b40c_sorting_enactor->Sort<b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
+	m_b40c_sorting_enactor->Sort<0, 24, b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
+	m_b40c_sorting_enactor->Sort<0, 24, b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
 #endif
 #ifdef USE_CUDPP
 	cudppSort(

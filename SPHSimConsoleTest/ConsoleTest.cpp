@@ -8,7 +8,7 @@
 #include <conio.h> 
 
 #undef SPHSIMLIB_3D_SUPPORT
-#include "SimulationSystem.h"
+#include <SimulationSystem.h>
 
 using namespace std;
 using namespace SimLib;

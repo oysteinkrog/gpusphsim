@@ -5,9 +5,6 @@
 #define SPHSIMLIB_3D_SUPPORT
 #include "OgreSimConfig.h"
 
-//#include <cutil_inline.h>
-//#include <cutil_gl_inline.h>
-
 #include <OgreHardwareBufferManager.h>
 #include <OgreHardwareVertexBuffer.h>
 #include <RenderSystems\GL\OgreGLRenderSystem.h>
@@ -15,7 +12,7 @@
 #include <RenderSystems\Direct3D9\OgreD3D9RenderSystem.h>
 #include <RenderSystems\Direct3D9\OgreD3D9HardwareVertexBuffer.h>
 
-#include "SimCudaHelper.h"
+#include <SimCudaHelper.h>
 
 namespace OgreSim
 {

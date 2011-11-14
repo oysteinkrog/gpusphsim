@@ -1,7 +1,7 @@
 #ifndef __K_Coloring_cu__
 #define __K_Coloring_cu__
 
-#include <cutil_math.h>
+#include "cutil_math.h"
 
 #include "K_Coloring.cuh"
 

@@ -3,7 +3,7 @@
 #include <memory.h>
 
 #include <cuda_runtime_api.h>
-#include <cutil.h>
+#include "cutil.h"
 #include <driver_types.h>
 
 typedef unsigned int uint;

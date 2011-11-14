@@ -5,7 +5,7 @@
 
 #include "SimSnowSPH.cuh"
 
-#include <cutil.h>
+#include "cutil.h"
 #include "host_defines.h"
 #include "builtin_types.h"
 

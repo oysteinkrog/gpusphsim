@@ -2,7 +2,7 @@
 #define __K_SnowSPH_cu__
 
 #include "K_Common.cuh"
-#include <cutil_math.h>
+#include "cutil_math.h"
 #include "vector_types.h"
 
 using namespace SimLib;

@@ -6,8 +6,8 @@
 
 //#include "SimulationSystem.h"
 
-#include <cutil.h>
-#include <cutil_math.h>
+#include "cutil.h"
+#include "cutil_math.h"
 #include "vector_functions.h"
 
 #include <stdio.h>

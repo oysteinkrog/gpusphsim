@@ -2,8 +2,11 @@
 #define __SimCudaAllocator_h__
 
 #include <map>
-#include <cutil.h>
-#include <cutil_math.h>
+
+
+#include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
+#include <driver_types.h>
 
 namespace SimLib
 {

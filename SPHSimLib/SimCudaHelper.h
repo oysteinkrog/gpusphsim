@@ -2,20 +2,16 @@
 #define __SimCudaHelper_h__
 
 
-
 #include "Config.h" 
 //#define SPHSIMLIB_3D_SUPPORT
 
-#include <cutil.h>
-#include <cutil_inline.h>
 
 #if !defined(__CUDACC__)
 #ifdef SPHSIMLIB_3D_SUPPORT
-#include <GL/glew.h>
-#include <GL/glu.h>
 
+#include "GL/glew.h"
 #include <cuda_gl_interop.h>
-#include <cutil_gl_inline.h>
+
 #endif
 #endif
 
@@ -27,6 +23,7 @@
 // includes, cuda
 #include <cuda.h>
 #include <builtin_types.h>
+#include <driver_types.h>
 #include <cuda_runtime_api.h>
 #include <cuda_d3d9_interop.h>
 #endif

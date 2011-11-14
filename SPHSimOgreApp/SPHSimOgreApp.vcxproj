@@ -1,0 +1,481 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug_SM13_Only|Win32">
+      <Configuration>Debug_SM13_Only</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_SM13_Only|x64">
+      <Configuration>Debug_SM13_Only</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{C98A1DE7-2D22-45B2-ADB3-5187664CB6EC}</ProjectGuid>
+    <RootNamespace>SPHSimOgreApp</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.31118.1</_ProjectFileVersion>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(SolutionDir)\build\Win_32_$(Configuration)\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'">$(SolutionDir)\build\Win_32_$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(Configuration)_$(Platform)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'">$(Configuration)_$(Platform)\</IntDir>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'">true</LinkIncremental>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)\build\Win_64_$(Configuration)\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'">$(SolutionDir)\build\Win_64_$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(Configuration)_$(Platform)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'">$(Configuration)_$(Platform)\</IntDir>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'">true</LinkIncremental>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(SolutionDir)\build\Win_32_$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(Configuration)_$(Platform)\</IntDir>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</LinkIncremental>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)\build\Win_64_$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(Configuration)_$(Platform)\</IntDir>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</LinkIncremental>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" />
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'" />
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" />
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'" />
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>Disabled</Optimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <AdditionalIncludeDirectories>$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\Samples\Common\include;$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MinimalRebuild>true</MinimalRebuild>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>OgreMain_d.lib;OIS_d.lib;OgreTerrain_d.lib;OgrePaging_d.lib;RenderSystem_Direct3D9_d.lib;RenderSystem_GL_d.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib32;$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreSpecificDefaultLibraries>LIBCMTD;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <SubSystem>Console</SubSystem>
+      <OptimizeReferences>
+      </OptimizeReferences>
+      <EnableCOMDATFolding>
+      </EnableCOMDATFolding>
+      <TargetMachine>MachineX86</TargetMachine>
+      <Profile>false</Profile>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
+</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|Win32'">
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>Disabled</Optimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MinimalRebuild>true</MinimalRebuild>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>OgreMain_d.lib;OIS_d.lib;OgreTerrain_d.lib;OgrePaging_d.lib;RenderSystem_Direct3D9_d.lib;RenderSystem_GL_d.lib;cudart.lib;cutil32D.lib;cudpp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib32;$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreSpecificDefaultLibraries>LIBCMTD;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <SubSystem>Console</SubSystem>
+      <OptimizeReferences>
+      </OptimizeReferences>
+      <EnableCOMDATFolding>
+      </EnableCOMDATFolding>
+      <TargetMachine>MachineX86</TargetMachine>
+      <Profile>false</Profile>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
+</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+    </Midl>
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>Disabled</Optimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_CRT_SECURE_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MinimalRebuild>false</MinimalRebuild>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Common_d.lib;OIS_d.lib;OgreMain_d.lib;OgreTerrain_d.lib;OgrePaging_d.lib;RenderSystem_Direct3D9_d.lib;RenderSystem_GL_d.lib;cudart.lib;cutil64D.lib;glew64.lib;glut64.lib;cudpp64d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib64;$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreSpecificDefaultLibraries>LIBCMTD;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <SubSystem>Console</SubSystem>
+      <OptimizeReferences>
+      </OptimizeReferences>
+      <EnableCOMDATFolding>
+      </EnableCOMDATFolding>
+      <RandomizedBaseAddress>false</RandomizedBaseAddress>
+      <DataExecutionPrevention>
+      </DataExecutionPrevention>
+      <TargetMachine>MachineX64</TargetMachine>
+      <Profile>false</Profile>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
+</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug_SM13_Only|x64'">
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+    </Midl>
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>Disabled</Optimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_CRT_SECURE_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MinimalRebuild>false</MinimalRebuild>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Common_d.lib;OIS_d.lib;OgreMain_d.lib;OgreTerrain_d.lib;OgrePaging_d.lib;RenderSystem_Direct3D9_d.lib;RenderSystem_GL_d.lib;cudart.lib;cutil64D.lib;glew64.lib;glut64.lib;cudpp64d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib64;$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreSpecificDefaultLibraries>LIBCMTD;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <SubSystem>Console</SubSystem>
+      <OptimizeReferences>
+      </OptimizeReferences>
+      <EnableCOMDATFolding>
+      </EnableCOMDATFolding>
+      <RandomizedBaseAddress>false</RandomizedBaseAddress>
+      <DataExecutionPrevention>
+      </DataExecutionPrevention>
+      <TargetMachine>MachineX64</TargetMachine>
+      <Profile>false</Profile>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9_d.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
+</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>Full</Optimization>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <OmitFramePointers>true</OmitFramePointers>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <StringPooling>true</StringPooling>
+      <MinimalRebuild>false</MinimalRebuild>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>OgreMain.lib;OIS.lib;OgreTerrain.lib;OgrePaging.lib;RenderSystem_Direct3D9.lib;RenderSystem_GL.lib;cudart.lib;cutil32.lib;cudpp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib32;$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <SubSystem>Console</SubSystem>
+      <OptimizeReferences>
+      </OptimizeReferences>
+      <EnableCOMDATFolding>
+      </EnableCOMDATFolding>
+      <TargetMachine>MachineX86</TargetMachine>
+      <Profile>false</Profile>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
+</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+    </Midl>
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>Full</Optimization>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <OmitFramePointers>true</OmitFramePointers>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <StringPooling>true</StringPooling>
+      <MinimalRebuild>false</MinimalRebuild>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <EnableEnhancedInstructionSet>NotSet</EnableEnhancedInstructionSet>
+      <FloatingPointModel>Fast</FloatingPointModel>
+      <FloatingPointExceptions>false</FloatingPointExceptions>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Common.lib;OgreMain.lib;OIS.lib;OgreTerrain.lib;OgrePaging.lib;RenderSystem_Direct3D9.lib;RenderSystem_GL.lib;cudart.lib;cutil64.lib;cudpp64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib64;$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <SubSystem>Console</SubSystem>
+      <OptimizeReferences>
+      </OptimizeReferences>
+      <EnableCOMDATFolding>
+      </EnableCOMDATFolding>
+      <TargetMachine>MachineX64</TargetMachine>
+      <Profile>false</Profile>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
+</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="OgreSimApp.cpp" />
+    <ClCompile Include="OgreSimTerrain.cpp" />
+    <ClCompile Include="OgreSimFluid.cpp" />
+    <ClCompile Include="OgreCudaHelper.cpp" />
+    <ClCompile Include="OgreSimBuffer.cpp" />
+    <ClCompile Include="OgreSimRenderable.cpp" />
+    <ClCompile Include="OgreSimConfig.cpp" />
+    <ClCompile Include="BaseApplication.cpp" />
+    <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="OgreSimApp.h" />
+    <ClInclude Include="OgreSimTerrain.h" />
+    <ClInclude Include="OgreSimFluid.h" />
+    <ClInclude Include="OgreCudaHelper.h" />
+    <ClInclude Include="OgreSimBuffer.h" />
+    <ClInclude Include="OgreSimRenderable.h" />
+    <ClInclude Include="OgreSimConfig.h" />
+    <ClInclude Include="BaseApplication.h" />
+    <ClInclude Include="res\Resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="res\SPHSimOgreApp.ico" />
+    <None Include="..\build\resources\SPHSimOgreApp.cfg" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="res\SPHSimOgreApp.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SPHSimLib\SPHSimLib.vcxproj">
+      <Project>{67d5c322-b23f-46ac-9199-6ae167e78807}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

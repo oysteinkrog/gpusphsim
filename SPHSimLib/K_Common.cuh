@@ -1,7 +1,8 @@
 #ifndef FLUID_SYSTEM_KERNELS_CUH
 #define FLUID_SYSTEM_KERNELS_CUH
 
-#include <cutil_math.h>
+
+#include "cutil_math.h"
 
 #include "Config.h"
 

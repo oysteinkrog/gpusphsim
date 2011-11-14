@@ -14,7 +14,11 @@ using namespace b40c;
 #include "cudpp/cudpp.h"
 #endif
 
-#include <cutil.h>
+#ifdef USE_THRUST_SORT
+#include <thrust/device_vector.h>
+#include <thrust/sort.h>
+#include <thrust/random.h>
+#endif
 
 #include "UniformGrid.cuh"
 #include "K_Common.cuh"
@@ -78,9 +82,16 @@ public:
 
 	GridData GetGridData(){
 		GridData gridData;
-		gridData.cell_indexes_start = mGridCellBuffers->Get(CellIndexesStart)->GetPtr<uint>();
+#ifdef USE_B40C_SORT
+		// if using b40c the results of the sort "ping-pong" between two buffers
+		// we select the "current" results using the pingpongstorage selector.
+		gridData.sort_hashes = m_b40c_storage->d_keys[m_b40c_storage->selector];
+		gridData.sort_indexes = m_b40c_storage->d_values[m_b40c_storage->selector];
+#else
 		gridData.sort_hashes = mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>();
 		gridData.sort_indexes = mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>();
+#endif
+		gridData.cell_indexes_start = mGridCellBuffers->Get(CellIndexesStart)->GetPtr<uint>();
 		gridData.cell_indexes_end = mGridCellBuffers->Get(CellIndexesStop)->GetPtr<uint>();
 		return gridData;
 	}
@@ -113,6 +124,11 @@ private:
 #ifdef USE_B40C_SORT
 	util::PingPongStorage<unsigned int,unsigned int>* m_b40c_storage;	
 	b40c::radix_sort::Enactor* m_b40c_sorting_enactor;
+#endif
+
+#ifdef USE_THRUST_SORT
+	thrust::device_ptr<uint>* mThrustKeys;
+	thrust::device_ptr<uint>* mThrustVals;
 #endif
 	int mSortBitsPrecision;
 };
