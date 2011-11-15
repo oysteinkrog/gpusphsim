@@ -49,7 +49,7 @@ void testFluidSimLive(SimLib::SimCudaHelper* simCudaHelper)
 	cout << setw(15) << "Avg Total";
 	cout << "\n";
 
-	double totalavg;
+	double totalavg=0;
 	double fpshistory[100] = {0};
 	GPUTimer *timer = new GPUTimer();
 
