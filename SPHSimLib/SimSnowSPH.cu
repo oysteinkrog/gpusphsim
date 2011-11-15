@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "K_Common.cu"
 #include "SimSnowSPH.cuh"
 
 #include "cutil.h"
@@ -185,8 +186,6 @@ void SimSnowSPH::Alloc(uint numParticles)
 	// call base class
 	SimBase::Alloc(numParticles);
 
-	mCudaMaxScan = new CudaMax(numParticles);
-
 	mSPHBuffers->AllocBuffers(numParticles);
 
 	BindTextures();
@@ -205,8 +204,6 @@ void SimSnowSPH::Free()
 	delete [] hNeighborList.neighbors;
 	CUDA_SAFE_CALL(mSimCudaAllocator->Free(dNeighborList.neighbors));
 #endif
-
-	delete mCudaMaxScan; mCudaMaxScan = NULL;
 
 	UnbindTextures();
 
@@ -262,6 +259,9 @@ void SimSnowSPH::Simulate(bool doTiming, bool progress, bool gridWallCollisions,
 	time_ComputeStep3 = ComputeStep3(doTiming);
 
 	time_integrateForces = Integrate(doTiming, progress, mSettings->GetValue("Timestep"), gridWallCollisions, terrainCollisions, fluidWorldPosition, dTerrainData);
+	
+	thrust::device_ptr<float> dev_ptr(mSPHBuffers->Get(BufferCFLSorted)->GetPtr<float>());
+	float maxVel = thrust::reduce(dev_ptr, dev_ptr + mNumParticles, -1.0f,  thrust::maximum<float>());;
 
 // 	float cflVelocityTerm = mCudaMaxScan->FindMax(mSPHBuffers->Get(BufferCFLSorted)->GetPtr<float>());
 // 	float cflVelocityTimeStep = 0.1*hFluidParams.smoothing_length / cflVelocityTerm;

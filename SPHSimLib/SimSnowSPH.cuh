@@ -15,8 +15,6 @@
 
 typedef unsigned int uint;
 
-#include "CudaMax.cuh"
-
 namespace SimLib { namespace Sim { namespace SnowSPH { 
 
 
@@ -130,8 +128,6 @@ public:
 private:
 	bool mAlloced;
 	bool mParams;
-
-	CudaMax *mCudaMaxScan;
 
 protected:
 	void SettingChanged(std::string settingName);

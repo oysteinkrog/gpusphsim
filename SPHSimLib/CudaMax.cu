@@ -2,6 +2,9 @@
 
 #include "cutil.h"
 
+#include "thrust/host_vector.h"
+#include "thrust/device_vector.h"
+
 namespace SimLib
 {
 
@@ -32,23 +35,13 @@ namespace SimLib
 		cudppDestroyPlan(scanPlan);
 #endif
 		CUDA_SAFE_CALL(cudaFree(d_odata));
-// 		free(h_odata);
-// 		free(h_idata);
 	}
 
 	float CudaMax::FindMax(float* d_idata)
 	{
-#ifdef USE_CUDPP
-		cudppScan(scanPlan, d_odata, d_idata, mElements);
-#endif
+		thrust::device_ptr<float> dev_ptr(d_idata);
 
-		float maxval;
-
-		// just copy the max val, not the entire buffer
-		CUDA_SAFE_CALL( cudaMemcpy( &maxval, d_odata, 1*sizeof(float), cudaMemcpyDeviceToHost) );
-
-// 		CUDA_SAFE_CALL( cudaMemcpy( h_idata, d_idata, mMemSize, cudaMemcpyDeviceToHost) );
-// 		CUDA_SAFE_CALL( cudaMemcpy( h_odata, d_odata, mMemSize, cudaMemcpyDeviceToHost) );
+		float maxval = thrust::reduce(dev_ptr, dev_ptr + n, -1.0f,  thrust::maximum<float>());;
 
 		return maxval;
 	}

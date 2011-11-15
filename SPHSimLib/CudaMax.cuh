@@ -16,10 +16,6 @@ namespace SimLib
 		float FindMax(float* d_idata);
 	private:
 
-#ifdef USE_CUDPP
-		CUDPPHandle scanPlan;
-#endif
-
 		size_t mMemSize;
 		size_t mElements;
 
