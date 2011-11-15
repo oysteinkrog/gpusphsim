@@ -1,7 +1,7 @@
 #ifndef __UniformGrid_cuh__
 #define __UniformGrid_cuh__
 
-#ifdef USE_B40C_SORT
+#ifdef SPHSIMLIB_USE_B40C_SORT
 #include <b40c/radix_sort/enactor.cuh>
 #include <b40c/util/ping_pong_storage.cuh>
 using namespace b40c;
@@ -10,11 +10,11 @@ using namespace b40c;
 #include "SimCudaAllocator.h"
 #include "SimCudaHelper.h"
 
-#ifdef USE_CUDPP
+#ifdef SPHSIMLIB_USE_CUDPP_SORT
 #include "cudpp/cudpp.h"
 #endif
 
-#ifdef USE_THRUST_SORT
+#ifdef SPHSIMLIB_USE_THRUST_SORT
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
 #include <thrust/random.h>
@@ -82,7 +82,7 @@ public:
 
 	GridData GetGridData(){
 		GridData gridData;
-#ifdef USE_B40C_SORT
+#ifdef SPHSIMLIB_USE_B40C_SORT
 		// if using b40c the results of the sort "ping-pong" between two buffers
 		// we select the "current" results using the pingpongstorage selector.
 		gridData.sort_hashes = m_b40c_storage->d_keys[m_b40c_storage->selector];
@@ -117,16 +117,16 @@ private:
 
 	GridParams dGridParams;
 
-#ifdef USE_CUDPP
+#ifdef SPHSIMLIB_USE_CUDPP_SORT
 	CUDPPHandle m_sortHandle;
 #endif
 
-#ifdef USE_B40C_SORT
-	util::PingPongStorage<unsigned int,unsigned int>* m_b40c_storage;	
+#ifdef SPHSIMLIB_USE_B40C_SORT
+	b40c::util::PingPongStorage<unsigned int,unsigned int>* m_b40c_storage;	
 	b40c::radix_sort::Enactor* m_b40c_sorting_enactor;
 #endif
 
-#ifdef USE_THRUST_SORT
+#ifdef SPHSIMLIB_USE_THRUST_SORT
 	thrust::device_ptr<uint>* mThrustKeys;
 	thrust::device_ptr<uint>* mThrustVals;
 #endif

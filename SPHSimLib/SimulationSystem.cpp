@@ -19,12 +19,14 @@
 #include "SimSimpleSPH.cuh"
 #include "SimDEM.cuh"
 
+#include "K_Common.cu"
+
 namespace SimLib
 {
-	SimulationSystem::SimulationSystem(bool simpleSph = FALSE, SimCudaHelper *cudaHelper = NULL)
+	SimulationSystem::SimulationSystem(bool simpleSph = FALSE, SimCudaHelper *cudaHelper = NULL, bool doKernelTiming=FALSE)
 	: mInitialized(false)
 	, mBuffersMapped(false)
-	, mCudaTiming(false)
+	, mCudaTiming(doKernelTiming)
 	, mHaveTerrainData(false)
 	, hTerrainData(NULL)
 	, mSimCudaHelper(cudaHelper)

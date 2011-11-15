@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "K_Common.cu"
 #include "SimSimpleSPH.cuh"
 
 #include "cutil.h"

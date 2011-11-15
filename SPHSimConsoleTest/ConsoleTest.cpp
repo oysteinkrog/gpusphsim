@@ -1,19 +1,17 @@
 
+#include <SimulationSystem.h>
 
-#include <cuda_runtime_api.h>
 #include <iostream>
 #include <iomanip>
 #include <numeric>
 #include <limits>
 #include <conio.h> 
 
-#undef SPHSIMLIB_3D_SUPPORT
-#include <SimulationSystem.h>
-
 using namespace std;
 using namespace SimLib;
 using namespace ocu;
 
+#define MEASURE_KERNEL_TIMING true
 void pause()
 {
 	_getch(); 
@@ -23,9 +21,10 @@ void pause()
 // 	cout << "Press Enter to continue . . .\n";
 // 	cin.ignore(std::numeric_limits<streamsize>::max(),'\n');
 }
+
 void testFluidSimLive(SimLib::SimCudaHelper* simCudaHelper)
 {
-	SimulationSystem *system = new SimulationSystem(true, simCudaHelper);
+	SimulationSystem *system = new SimulationSystem(true, simCudaHelper, MEASURE_KERNEL_TIMING);
 	system->Init();
 
 	system->GetSettings()->SetValue("Timestep", 0.002);
@@ -82,7 +81,7 @@ void testFluidSimLive(SimLib::SimCudaHelper* simCudaHelper)
 		cout << setw(15) << setprecision(1) <<  totalavg;
 		cout << "\r";
 	}
-	CUDA_SAFE_CALL(cudaThreadSynchronize());	
+	cudaThreadSynchronize();	
 
 	// 	totalTimer->stop();
 	// 	double totalTime = totalTimer->elapsed_ms();
@@ -95,7 +94,7 @@ void testFluidSimLive(SimLib::SimCudaHelper* simCudaHelper)
 
 void testFluidSim(SimLib::SimCudaHelper* simCudaHelper)
 {
-	SimulationSystem *system = new SimulationSystem(true, simCudaHelper);
+	SimulationSystem *system = new SimulationSystem(true, simCudaHelper, MEASURE_KERNEL_TIMING);
 	system->Init();
 
 	system->GetSettings()->SetValue("Timestep", 0.002);
@@ -124,7 +123,7 @@ void testFluidSim(SimLib::SimCudaHelper* simCudaHelper)
 	{
 		system->Simulate(true, true);
 	}
-	CUDA_SAFE_CALL(cudaThreadSynchronize());
+	cudaThreadSynchronize();
 
 	
 	totalTimer->stop();
@@ -138,7 +137,7 @@ void testFluidSim(SimLib::SimCudaHelper* simCudaHelper)
 
 void testPerformanceScaling(SimLib::SimCudaHelper* simCudaHelper)
 {
-	SimulationSystem *system = new SimulationSystem(true, simCudaHelper);
+	SimulationSystem *system = new SimulationSystem(true, simCudaHelper, MEASURE_KERNEL_TIMING);
 	system->Init();
 
 	system->GetSettings()->SetValue("Timestep", 0.0005);
@@ -154,7 +153,7 @@ void testPerformanceScaling(SimLib::SimCudaHelper* simCudaHelper)
 	system->GetSettings()->Print();
 	cout << "\n";
 
-	uint startParticles = 256*1024;
+	uint startParticles = 1*1024;
 	uint endParticles = 512*1024;
 
 	int ITERATIONS = 1000;
@@ -180,7 +179,7 @@ void testPerformanceScaling(SimLib::SimCudaHelper* simCudaHelper)
 			system->Simulate(true, true);
 			//cout << "\r" << i << "/" << ITERATIONS;
 		}
-		CUDA_SAFE_CALL(cudaThreadSynchronize());	
+		cudaThreadSynchronize();	
 
 		totalTimer->stop();
 		double totalTime = totalTimer->elapsed_ms();
@@ -213,9 +212,9 @@ int main(int argc, char *argv[])
 	//Sleep(1000);
 
 
-//	testPerformanceScaling(simCudaHelper);
-	//testFluidSimLive(simCudaHelper);
-	testFluidSim(simCudaHelper);
+	//testPerformanceScaling(simCudaHelper);
+	testFluidSimLive(simCudaHelper);
+	//testFluidSim(simCudaHelper);
 	//testKernel();
 	
 }

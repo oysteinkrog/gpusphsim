@@ -1,4 +1,4 @@
-	#ifndef __K_SPH_Kernels_gaussian_cu__
+#ifndef __K_SPH_Kernels_gaussian_cu__
 #define __K_SPH_Kernels_gaussian_cu__
 
 // from "PhD Thesis: Application of the Smoothed Particle Hydrodynamics model SPHysics to free-surface hydrodynamics

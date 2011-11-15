@@ -1,7 +1,6 @@
 
 #include <stdio.h>
 #include <memory.h>
-#include <cutil.h>
 #include <cuda_runtime_api.h>
 #include <vector_types.h>
 

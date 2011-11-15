@@ -23,7 +23,7 @@ namespace SimLib
 	class SimulationSystem 
 	{
 	public:
-		SimulationSystem(bool simpleSPH, SimCudaHelper *cudaHelper);
+		SimulationSystem(bool simpleSPH, SimCudaHelper *cudaHelper, bool doKernelTiming);
 		~SimulationSystem();
 
 		void SetExternalBuffer(SimLib::Sim::BaseBufferId id, SimBuffer* buffer);

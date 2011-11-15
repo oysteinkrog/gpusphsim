@@ -1,21 +1,15 @@
-//#define USE_CUDPP
-#define USE_THRUST_SORT
-//#define USE_B40C_SORT
-
 #include "UniformGrid.cuh"
 #include "CudaUtils.cuh"
 #include "cutil.h"
 
-
 #include <cmath>
 #include <cstdio>
-
 #include <iostream>
 #include <iomanip>
 
 using namespace std;
 
-__device__ __constant__	GridParams		cGridParams;
+__device__ __constant__	GridParams	cGridParams;
 
 #include "K_UniformGrid_Hash.cu"
 
@@ -68,11 +62,11 @@ void UniformGrid::Alloc(uint numParticles, float cellWorldSize, float gridWorldS
 	mGridCellBuffers->AllocBuffers(mNumCells);
 
 	// Allocate the radix sorter
-#ifdef USE_THRUST_SORT
+#ifdef SPHSIMLIB_USE_THRUST_SORT
 	mThrustKeys = new thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>());
 	mThrustVals = new thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());
 #endif
-#ifdef USE_B40C_SORT
+#ifdef SPHSIMLIB_USE_B40C_SORT
 	m_b40c_sorting_enactor = new b40c::radix_sort::Enactor();
 	m_b40c_sorting_enactor->ENACTOR_DEBUG = false;
 
@@ -80,7 +74,7 @@ void UniformGrid::Alloc(uint numParticles, float cellWorldSize, float gridWorldS
 		mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(),
 		mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());	
 #endif
-#ifdef USE_CUDPP	
+#ifdef SPHSIMLIB_USE_CUDPP_SORT	
 	// Create the CUDPP radix sort
 	CUDPPConfiguration sortConfig;
 	sortConfig.algorithm = CUDPP_SORT_RADIX;
@@ -102,15 +96,15 @@ void UniformGrid::Free()
 	if(!mAlloced)
 		return;
 
-#ifdef USE_THRUST_SORT
+#ifdef SPHSIMLIB_USE_THRUST_SORT
 	delete mThrustKeys; mThrustKeys = NULL;
 	delete mThrustVals; mThrustVals = NULL;
 #endif
-#ifdef USE_B40C_SORT
+#ifdef SPHSIMLIB_USE_B40C_SORT
 	delete m_b40c_sorting_enactor;
 	delete m_b40c_storage;
 #endif
-#ifdef USE_CUDPP
+#ifdef SPHSIMLIB_USE_CUDPP_SORT
 	cudppDestroyPlan(m_sortHandle);	m_sortHandle=NULL;
 #endif
 
@@ -217,14 +211,18 @@ float UniformGrid::Sort(bool doTiming)
 	{
 		mGPUTimer->start();
 	}
-#ifdef USE_THRUST_SORT
-	thrust::sort_by_key(*mThrustKeys, *mThrustVals+mNumParticles, *mThrustVals);	
+
+#ifdef SPHSIMLIB_USE_THRUST_SORT
+	//thrust::sort_by_key(*mThrustKeys, (*mThrustVals)+mNumParticles, *mThrustVals);	
+    thrust::sort_by_key(thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>()),
+                        thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>() + mNumParticles),
+                        thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>()));
 #endif
-#ifdef USE_B40C_SORT
+#ifdef SPHSIMLIB_USE_B40C_SORT
 	m_b40c_sorting_enactor->Sort<0, 24, b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
 	m_b40c_sorting_enactor->Sort<0, 24, b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
 #endif
-#ifdef USE_CUDPP
+#ifdef SPHSIMLIB_USE_CUDPP_SORT
 	cudppSort(
 		m_sortHandle,
 		mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(), 
@@ -232,9 +230,6 @@ float UniformGrid::Sort(bool doTiming)
 		mSortBitsPrecision, 
 		mNumParticles);	
 #endif
-
-
-
 
 	//CUT_CHECK_ERROR("Kernel execution failed");
 

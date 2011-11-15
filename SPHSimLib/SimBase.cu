@@ -92,7 +92,7 @@ void SimBase::Alloc(uint numParticles)
 	hNeighborList.neighbors = new uint[hNeighborList.MAX_NEIGHBORS * hNeighborList.numParticles];
 	memset(hNeighborList.neighbors, 0 , hNeighborList.MAX_NEIGHBORS * hNeighborList.numParticles * sizeof(uint));
 
-	CUDA_SAFE_CALL(mSimCudaAllocator->Allocate((void**) &(dNeighborList.neighbors), dNeighborList.MAX_NEIGHBORS * dNeighborList.numParticles * sizeof(uint)));
+	CUDA_SAFE_CALL(un->Allocate((void**) &(dNeighborList.neighbors), dNeighborList.MAX_NEIGHBORS * dNeighborList.numParticles * sizeof(uint)));
 	dNeighborList.neighbors_pitch = dNeighborList.MAX_NEIGHBORS;
 
 	//size_t pitchInBytes;

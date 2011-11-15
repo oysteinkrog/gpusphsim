@@ -1,6 +1,8 @@
 #ifndef __K_UniformGrid_Utils_cu__
 #define __K_UniformGrid_Utils_cu__
 
+#include "K_Common.cu"
+
 namespace UniformGridUtils
 {
 	// find the grid cell from a position in world space
