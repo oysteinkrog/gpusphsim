@@ -1,0 +1,7 @@
+*.sdf
+*.opensdf
+*.ncb
+*.suo
+*.user
+*.vcxproj.user
+ipch
