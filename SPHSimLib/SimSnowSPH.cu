@@ -15,6 +15,10 @@
 
 #include "timer.h"
 
+#include <thrust/device_vector.h>
+#include <thrust/sort.h>
+#include <thrust/random.h>
+
 #ifdef USE_TEX
 // Grid textures and constants
 texture<uint, 1, cudaReadModeElementType> neighbors_tex;

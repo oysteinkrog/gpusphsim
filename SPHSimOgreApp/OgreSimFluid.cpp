@@ -75,7 +75,7 @@ namespace OgreSim
 		if(mSnowConfig->fluidSettings.enabled)
 		{
 
-			mParticleSystem = new SimLib::SimulationSystem(mSnowConfig->fluidSettings.simpleSPH, mSimCudaHelper);
+			mParticleSystem = new SimLib::SimulationSystem(mSnowConfig->fluidSettings.simpleSPH, mSimCudaHelper, false);
 
 			mParticlesEntity = new OgreSimRenderable(mOgreCudaHelper, 1024);
 

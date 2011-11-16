@@ -7,6 +7,13 @@
 #include <iostream>
 #include <iomanip>
 
+
+#ifdef SPHSIMLIB_USE_B40C_SORT
+#include <b40c/radix_sort/enactor.cuh>
+#include <b40c/util/ping_pong_storage.cuh>
+using namespace b40c;
+#endif
+
 using namespace std;
 
 __device__ __constant__	GridParams	cGridParams;
@@ -68,11 +75,9 @@ void UniformGrid::Alloc(uint numParticles, float cellWorldSize, float gridWorldS
 #endif
 #ifdef SPHSIMLIB_USE_B40C_SORT
 	m_b40c_sorting_enactor = new b40c::radix_sort::Enactor();
-	m_b40c_sorting_enactor->ENACTOR_DEBUG = false;
+	((b40c::radix_sort::Enactor*)m_b40c_sorting_enactor)->ENACTOR_DEBUG = false;
 
-	m_b40c_storage = new util::PingPongStorage<unsigned int,unsigned int>(
-		mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(),
-		mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());	
+	m_b40c_storage = new b40c::util::PingPongStorage<unsigned int,unsigned int>(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>(), mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>());	
 #endif
 #ifdef SPHSIMLIB_USE_CUDPP_SORT	
 	// Create the CUDPP radix sort
@@ -112,6 +117,24 @@ void UniformGrid::Free()
 	mGridCellBuffers->FreeBuffers();
 
 	mAlloced = false;
+}
+
+GridData UniformGrid::GetGridData()
+{
+	GridData gridData;
+#ifdef SPHSIMLIB_USE_B40C_SORT
+	// if using b40c the results of the sort "ping-pong" between two buffers
+	// we select the "current" results using the pingpongstorage selector.
+	b40c::util::PingPongStorage<unsigned int,unsigned int>* storage = ((b40c::util::PingPongStorage<unsigned int,unsigned int>*)m_b40c_storage);
+	gridData.sort_hashes = storage->d_keys[storage->selector];
+	gridData.sort_indexes = storage->d_values[storage->selector];
+#else
+	gridData.sort_hashes = mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>();
+	gridData.sort_indexes = mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>();
+#endif
+	gridData.cell_indexes_start = mGridCellBuffers->Get(CellIndexesStart)->GetPtr<uint>();
+	gridData.cell_indexes_end = mGridCellBuffers->Get(CellIndexesStop)->GetPtr<uint>();
+	return gridData;
 }
 
 void UniformGrid::Clear()
@@ -213,14 +236,14 @@ float UniformGrid::Sort(bool doTiming)
 	}
 
 #ifdef SPHSIMLIB_USE_THRUST_SORT
-	//thrust::sort_by_key(*mThrustKeys, (*mThrustVals)+mNumParticles, *mThrustVals);	
-    thrust::sort_by_key(thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>()),
-                        thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>() + mNumParticles),
-                        thrust::device_ptr<uint>(mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>()));
+	thrust::sort_by_key(*mThrustKeys, (*mThrustKeys)+mNumParticles, *mThrustVals);	
 #endif
 #ifdef SPHSIMLIB_USE_B40C_SORT
-	m_b40c_sorting_enactor->Sort<0, 24, b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
-	m_b40c_sorting_enactor->Sort<0, 24, b40c::radix_sort::SMALL_SIZE>(*m_b40c_storage, mNumParticles);
+	
+	b40c::util::PingPongStorage<unsigned int,unsigned int>* storage = ((b40c::util::PingPongStorage<unsigned int,unsigned int>*)m_b40c_storage);
+	b40c::radix_sort::Enactor* enactor = ((b40c::radix_sort::Enactor*)m_b40c_sorting_enactor);
+	enactor->Sort<0, 24, b40c::radix_sort::SMALL_SIZE>(*storage, mNumParticles);
+	
 #endif
 #ifdef SPHSIMLIB_USE_CUDPP_SORT
 	cudppSort(

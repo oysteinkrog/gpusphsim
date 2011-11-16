@@ -11,7 +11,8 @@ using namespace std;
 using namespace SimLib;
 using namespace ocu;
 
-#define MEASURE_KERNEL_TIMING true
+#define MEASURE_KERNEL_TIMING false
+
 void pause()
 {
 	_getch(); 
@@ -212,8 +213,8 @@ int main(int argc, char *argv[])
 	//Sleep(1000);
 
 
-	//testPerformanceScaling(simCudaHelper);
-	testFluidSimLive(simCudaHelper);
+	testPerformanceScaling(simCudaHelper);
+	//testFluidSimLive(simCudaHelper);
 	//testFluidSim(simCudaHelper);
 	//testKernel();
 	

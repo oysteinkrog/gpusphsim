@@ -1,11 +1,7 @@
 #ifndef __UniformGrid_cuh__
 #define __UniformGrid_cuh__
 
-#ifdef SPHSIMLIB_USE_B40C_SORT
-#include <b40c/radix_sort/enactor.cuh>
-#include <b40c/util/ping_pong_storage.cuh>
-using namespace b40c;
-#endif
+#include "Config.h"
 
 #include "SimCudaAllocator.h"
 #include "SimCudaHelper.h"
@@ -80,21 +76,7 @@ public:
 	float Hash(bool doTiming, float_vec* dParticlePositions, uint numParticles);
 	float Sort(bool doTiming);
 
-	GridData GetGridData(){
-		GridData gridData;
-#ifdef SPHSIMLIB_USE_B40C_SORT
-		// if using b40c the results of the sort "ping-pong" between two buffers
-		// we select the "current" results using the pingpongstorage selector.
-		gridData.sort_hashes = m_b40c_storage->d_keys[m_b40c_storage->selector];
-		gridData.sort_indexes = m_b40c_storage->d_values[m_b40c_storage->selector];
-#else
-		gridData.sort_hashes = mGridParticleBuffers->Get(SortHashes)->GetPtr<uint>();
-		gridData.sort_indexes = mGridParticleBuffers->Get(SortIndexes)->GetPtr<uint>();
-#endif
-		gridData.cell_indexes_start = mGridCellBuffers->Get(CellIndexesStart)->GetPtr<uint>();
-		gridData.cell_indexes_end = mGridCellBuffers->Get(CellIndexesStop)->GetPtr<uint>();
-		return gridData;
-	}
+	GridData GetGridData();
 
 	uint GetNumCells(){return mNumCells;}
 	GridParams& GetGridParams(){return dGridParams;}
@@ -122,8 +104,8 @@ private:
 #endif
 
 #ifdef SPHSIMLIB_USE_B40C_SORT
-	b40c::util::PingPongStorage<unsigned int,unsigned int>* m_b40c_storage;	
-	b40c::radix_sort::Enactor* m_b40c_sorting_enactor;
+	void* m_b40c_storage;	
+	void* m_b40c_sorting_enactor;
 #endif
 
 #ifdef SPHSIMLIB_USE_THRUST_SORT
