@@ -77,8 +77,7 @@ public:
 	float Sort(bool doTiming);
 
 	GridData GetGridData();
-
-	uint GetNumCells(){return mNumCells;}
+	unsigned int GetNumCells(){return mNumCells;}
 	GridParams& GetGridParams(){return dGridParams;}
 
 private:
@@ -87,8 +86,8 @@ private:
 	SimLib::BufferManager<UniformGridBuffers> *mGridParticleBuffers;
 	SimLib::BufferManager<UniformGridBuffers> *mGridCellBuffers;
 
-	uint mNumParticles;
-	uint mNumCells;
+	unsigned int mNumParticles;
+	unsigned int mNumCells;
 
 	bool mAlloced;
 
@@ -103,7 +102,7 @@ private:
 	CUDPPHandle m_sortHandle;
 #endif
 
-#ifdef SPHSIMLIB_USE_B40C_SORT
+#if (defined SPHSIMLIB_USE_B40C_SORT || defined SPHSIMLIB_USE_CUDA_B40C_SORT)
 	void* m_b40c_storage;	
 	void* m_b40c_sorting_enactor;
 #endif
