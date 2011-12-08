@@ -17,6 +17,14 @@
       <Configuration>EmuDebug</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseDebug|Win32">
+      <Configuration>ReleaseDebug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseDebug|x64">
+      <Configuration>ReleaseDebug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
     <ProjectConfiguration Include="Release|Win32">
       <Configuration>Release</Configuration>
       <Platform>Win32</Platform>
@@ -35,24 +43,39 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <PlatformToolset>v90</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
     <PlatformToolset>v90</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <PlatformToolset>v90</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <PlatformToolset>v90</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <PlatformToolset>v90</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>false</WholeProgramOptimization>
@@ -62,6 +85,7 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <PlatformToolset>v90</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -73,6 +97,9 @@
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
@@ -80,6 +107,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
@@ -93,9 +123,13 @@
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)\build\Win_64_$(Configuration)\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(Configuration)_$(Platform)\</IntDir>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(SolutionDir)\build\Win_32_$(Configuration)\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">$(SolutionDir)\build\Win_32_$(Configuration)\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(Configuration)_$(Platform)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">$(Configuration)_$(Platform)\</IntDir>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)\build\Win_64_$(Configuration)\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">$(SolutionDir)\build\Win_64_$(Configuration)\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(Configuration)_$(Platform)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">$(Configuration)_$(Platform)\</IntDir>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">$(SolutionDir)\build\Win_32_$(Configuration)\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">$(Configuration)_$(Platform)\</IntDir>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">$(SolutionDir)\build\Win_64_$(Configuration)\</OutDir>
@@ -113,11 +147,17 @@
     <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'" />
     <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">AllRules.ruleset</CodeAnalysisRuleSet>
     <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'" />
     <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AllRules.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRuleSet Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">AllRules.ruleset</CodeAnalysisRuleSet>
     <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'" />
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <Cudart_Build_Rule>
@@ -141,6 +181,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
       <Include>$(BACK40_HOME);$(CUDA_PATH)\include</Include>
@@ -168,11 +209,12 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BACK40_HOME)\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <MinimalRebuild>false</MinimalRebuild>
+      <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
       <Include>$(BACK40_HOME);$(CUDA_PATH)\include</Include>
@@ -196,11 +238,41 @@
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BACK40_HOME)\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <MinimalRebuild>false</MinimalRebuild>
+      <MinimalRebuild>true</MinimalRebuild>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+    </ClCompile>
+    <CudaCompile>
+      <Include>$(BACK40_HOME);$(CUDA_PATH)\include</Include>
+      <Optimization>O3</Optimization>
+      <CodeGeneration>compute_13,sm_13</CodeGeneration>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">
+    <Cudart_Build_Rule>
+      <Include>$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include</Include>
+      <Arch1>13</Arch1>
+      <Arch2>20</Arch2>
+      <Arch3>0</Arch3>
+      <MaxRegCount>63</MaxRegCount>
+      <ExtraNvccOptions>-ftz=true -prec-div=false -prec-sqrt=false -Xptxas -dlcm=ca</ExtraNvccOptions>
+      <Optimization>3</Optimization>
+      <Runtime>2</Runtime>
+    </Cudart_Build_Rule>
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>MaxSpeed</Optimization>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BACK40_HOME)\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <MinimalRebuild>true</MinimalRebuild>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
       <Include>$(BACK40_HOME);$(CUDA_PATH)\include</Include>
@@ -228,11 +300,46 @@
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BACK40_HOME)\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <MinimalRebuild>false</MinimalRebuild>
+      <MinimalRebuild>true</MinimalRebuild>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+    </ClCompile>
+    <CudaCompile>
+      <Include>$(BACK40_HOME);$(CUDA_PATH)\include</Include>
+      <Optimization>O3</Optimization>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_13,sm_13</CodeGeneration>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">
+    <Cudart_Build_Rule>
+      <Include>$(BACK40_HOME);$(NVSDKCOMPUTE_ROOT)\c\common\inc;$(CUDA_PATH)\include</Include>
+      <Arch1>13</Arch1>
+      <Arch2>20</Arch2>
+      <Arch3>0</Arch3>
+      <TargetMachinePlatform>1</TargetMachinePlatform>
+      <MaxRegCount>63</MaxRegCount>
+      <ExtraNvccOptions>-ftz=true -prec-div=false -prec-sqrt=false -Xptxas -dlcm=ca</ExtraNvccOptions>
+      <Optimization>3</Optimization>
+      <Runtime>2</Runtime>
+    </Cudart_Build_Rule>
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+    </Midl>
+    <ClCompile>
+      <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>MaxSpeed</Optimization>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BACK40_HOME)\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <MinimalRebuild>true</MinimalRebuild>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
       <Include>$(BACK40_HOME);$(CUDA_PATH)\include</Include>
@@ -256,11 +363,12 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BACK40_HOME)\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <MinimalRebuild>false</MinimalRebuild>
+      <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
       <Runtime>MDd</Runtime>
@@ -290,11 +398,12 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BACK40_HOME)\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <MinimalRebuild>false</MinimalRebuild>
+      <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
       <Runtime>MDd</Runtime>
@@ -342,14 +451,18 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <CudaCompile Include="timer.cu">
       <FileType>Document</FileType>
     </CudaCompile>
     <CudaCompile Include="SimBase.cu">
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</PtxAsOptionV>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</PtxAsOptionV>
       <FileType>Document</FileType>
     </CudaCompile>
     <Cudart_Build_Rule Include="K_SimDEM.cu">
@@ -358,7 +471,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <CudaCompile Include="SimDEM.cu">
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">K_ParticleSimDEM.cu</AddedDependencies>
@@ -367,8 +482,11 @@
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">K_ParticleSimDEM.cu</AddedDependencies>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">K_ParticleSimDEM.cu</AddedDependencies>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">K_ParticleSimDEM.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">K_ParticleSimDEM.cu</AddedDependencies>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">K_ParticleSimDEM.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">K_ParticleSimDEM.cu</AddedDependencies>
       <FileType>Document</FileType>
     </CudaCompile>
     <Cudart_Build_Rule Include="K_Coloring.cu">
@@ -377,7 +495,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_Boundaries_Common.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -385,7 +505,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_Boundaries_Terrain.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -393,7 +515,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_Boundaries_Walls.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -401,7 +525,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_UniformGrid_Hash.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -409,7 +535,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_UniformGrid_NeighborList.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -417,7 +545,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_UniformGrid_Update.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -425,7 +555,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_UniformGrid_Utils.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -433,7 +565,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <CudaCompile Include="UniformGrid.cu">
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">K_UniformGrid_Hash.cu;K_UniformGrid_NeighborList.cu;K_UniformGrid_Update.cu;K_UniformGrid_Utils.cu</AddedDependencies>
@@ -445,9 +579,13 @@
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">K_UniformGrid_Hash.cu;K_UniformGrid_NeighborList.cu;K_UniformGrid_Update.cu;K_UniformGrid_Utils.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</PtxAsOptionV>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">K_UniformGrid_Hash.cu;K_UniformGrid_NeighborList.cu;K_UniformGrid_Update.cu;K_UniformGrid_Utils.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">K_UniformGrid_Hash.cu;K_UniformGrid_NeighborList.cu;K_UniformGrid_Update.cu;K_UniformGrid_Utils.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</PtxAsOptionV>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">K_UniformGrid_Hash.cu;K_UniformGrid_NeighborList.cu;K_UniformGrid_Update.cu;K_UniformGrid_Utils.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">K_UniformGrid_Hash.cu;K_UniformGrid_NeighborList.cu;K_UniformGrid_Update.cu;K_UniformGrid_Utils.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</PtxAsOptionV>
       <FileType>Document</FileType>
     </CudaCompile>
     <Cudart_Build_Rule Include="K_SimpleSPH.cu">
@@ -464,10 +602,16 @@
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">
       </AddedDependencies>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
       </AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">
+      </AddedDependencies>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+      </AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">
       </AddedDependencies>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SimpleSPH_Integrate.cu">
@@ -476,7 +620,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SimpleSPH_Step1.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -484,7 +630,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SimpleSPH_Step2.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -492,7 +640,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <CudaCompile Include="SimSimpleSPH.cu">
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">K_SimpleSPH.cu;K_SimpleSPH_Step1.cu;K_SimpleSPH_Step2.cu;K_SimpleSPH_Integrate.cu;K_Boundaries_Terrain.cu;K_Boundaries_Walls.cu</AddedDependencies>
@@ -504,9 +654,13 @@
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">K_SimpleSPH.cu;K_SimpleSPH_Step1.cu;K_SimpleSPH_Step2.cu;K_SimpleSPH_Integrate.cu;K_Boundaries_Terrain.cu;K_Boundaries_Walls.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</PtxAsOptionV>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">K_SimpleSPH.cu;K_SimpleSPH_Step1.cu;K_SimpleSPH_Step2.cu;K_SimpleSPH_Integrate.cu;K_Boundaries_Terrain.cu;K_Boundaries_Walls.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">K_SimpleSPH.cu;K_SimpleSPH_Step1.cu;K_SimpleSPH_Step2.cu;K_SimpleSPH_Integrate.cu;K_Boundaries_Terrain.cu;K_Boundaries_Walls.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</PtxAsOptionV>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">K_SimpleSPH.cu;K_SimpleSPH_Step1.cu;K_SimpleSPH_Step2.cu;K_SimpleSPH_Integrate.cu;K_Boundaries_Terrain.cu;K_Boundaries_Walls.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">K_SimpleSPH.cu;K_SimpleSPH_Step1.cu;K_SimpleSPH_Step2.cu;K_SimpleSPH_Integrate.cu;K_Boundaries_Terrain.cu;K_Boundaries_Walls.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</PtxAsOptionV>
       <FileType>Document</FileType>
     </CudaCompile>
     <Cudart_Build_Rule Include="K_SPH_Common.cu">
@@ -515,7 +669,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -523,7 +679,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_cubic.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -531,7 +689,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_gaussian.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -539,7 +699,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_poly6.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -547,7 +709,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_quadratic.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -555,7 +719,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_quartic.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -563,7 +729,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_quintic.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -571,7 +739,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_spiky.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -579,7 +749,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SPH_Kernels_viscosity.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -587,7 +759,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SnowSPH.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -595,7 +769,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SnowSPH_Integrate.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -603,7 +779,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SnowSPH_Step1.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -611,7 +789,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SnowSPH_Step2.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -619,7 +799,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <Cudart_Build_Rule Include="K_SnowSPH_Step3.cu">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -627,7 +809,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
     <CudaCompile Include="SimSnowSPH.cu">
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">K_SnowSPH.cu;K_SnowSPH_Step1.cu;K_SnowSPH_Step2.cu;K_SnowSPH_Step3.cu;K_SnowSPH_Integrate.cu</AddedDependencies>
@@ -639,9 +823,13 @@
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">K_SnowSPH.cu;K_SnowSPH_Step1.cu;K_SnowSPH_Step2.cu;K_SnowSPH_Step3.cu;K_SnowSPH_Integrate.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</PtxAsOptionV>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">K_SnowSPH.cu;K_SnowSPH_Step1.cu;K_SnowSPH_Step2.cu;K_SnowSPH_Step3.cu;K_SnowSPH_Integrate.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">K_SnowSPH.cu;K_SnowSPH_Step1.cu;K_SnowSPH_Step2.cu;K_SnowSPH_Step3.cu;K_SnowSPH_Integrate.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</PtxAsOptionV>
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">K_*.cu;K_SnowSPH.cu;K_SnowSPH_Step1.cu;K_SnowSPH_Step2.cu;K_SnowSPH_Step3.cu;K_SnowSPH_Integrate.cu</AddedDependencies>
+      <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">K_*.cu;K_SnowSPH.cu;K_SnowSPH_Step1.cu;K_SnowSPH_Step2.cu;K_SnowSPH_Step3.cu;K_SnowSPH_Integrate.cu</AddedDependencies>
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</PtxAsOptionV>
+      <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</PtxAsOptionV>
       <FileType>Document</FileType>
     </CudaCompile>
   </ItemGroup>
@@ -654,6 +842,7 @@
       <FileType>Document</FileType>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </CustomBuildStep>
     <None Include="K_Common.cu" />
     <CustomBuildStep Include="K_Coloring.cuh">
@@ -663,7 +852,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </CustomBuildStep>
     <None Include="UniformGrid.cuh" />
     <CustomBuildStep Include="SimSimpleSPH.cuh">
