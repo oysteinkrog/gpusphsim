@@ -29,6 +29,8 @@ namespace SimLib
 	, mCudaTiming(doKernelTiming)
 	, mHaveTerrainData(false)
 	, hTerrainData(NULL)
+	, hTerrainSize(0)
+	, hTerrainPosition(make_float3(0))
 	, mSimCudaHelper(cudaHelper)
 	{
 		mParticleSimType = simpleSph ? SimulationSimpleSPH : SimulationSnowSPH;
@@ -254,23 +256,23 @@ namespace SimLib
 		unmapRenderingBuffers();
 	}
 
-
-	__device__ int2 getTerrainPos(float3 const &pos, int const &dTerrainSize, float const &dTerrainWorldSize)
+	int2 getTerrainPos(float3 const &pos, int const &terrainSize, float const &terrainWorldSize)
 	{            
 		int2 terrainPos;
-		terrainPos.y = floor(pos.z*(dTerrainSize/dTerrainWorldSize));
-		terrainPos.x = floor(pos.x*(dTerrainSize/dTerrainWorldSize));
+		terrainPos.y = floor(pos.z*(terrainSize/terrainWorldSize));
+		terrainPos.x = floor(pos.x*(terrainSize/terrainWorldSize));
 		return terrainPos;
 	}
 
-	__device__ float getTerrainHeight(int const &terrainPosX, int const &terrainPosZ, float const *dTerrainHeights, int const &dTerrainSize)
+	float getTerrainHeight(int const &terrainPosX, int const &terrainPosZ, float const *terrainHeights, int const &terrainSize)
 	{            
-		return dTerrainHeights[((dTerrainSize) * (dTerrainSize) - 1) - (((dTerrainSize) * terrainPosZ)) + terrainPosX];
+		if(terrainHeights == NULL || terrainSize == 0) return 0;
+		return terrainHeights[((terrainSize) * (terrainSize) - 1) - (((terrainSize) * terrainPosZ)) + terrainPosX];
 	}
 
-	__device__ float getTerrainHeight(int2 const &terrainPos, float const *dTerrainHeights, int const &dTerrainSize)
+	float getTerrainHeight(int2 const &terrainPos, float const *terrainHeights, int const &terrainSize)
 	{            
-		return getTerrainHeight(terrainPos.x, terrainPos.y, dTerrainHeights, dTerrainSize);
+		return getTerrainHeight(terrainPos.x, terrainPos.y, terrainHeights, terrainSize);
 	}
 
 	void SimulationSystem::SetFluidPosition(float3 fluidWorldPosition) 
@@ -443,6 +445,9 @@ namespace SimLib
 				}
 			case 9:
 				{
+					SimSettings* settings = GetSettings();
+					float boundaryValue = settings->GetValue("Boundary Distance");
+
 					//small cube in middle
 					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{	
 						for (float z = hGridParams.grid_min.z + hGridParams.grid_size.z / 3.5f ; z <= hGridParams.grid_max.z - hGridParams.grid_size.z / 2.0f; z += spacing ) {
@@ -458,12 +463,11 @@ namespace SimLib
 									// what is the height of the terrain below particle?
 									float terrainHeight = -hTerrainPosition.y - mFluidWorldPosition.y + getTerrainHeight(terrainPos, hTerrainData, hTerrainSize);
 
-
 									float boxBottom = hGridParams.grid_min.y + mFluidWorldPosition.y;
 									float terrainBoxBottomDiff = boxBottom - terrainHeight;
 
 									ppos.y -= terrainBoxBottomDiff;
-									ppos.y += GetSettings()->GetValue("Boundary Distance");
+									ppos.y += boundaryValue;
 								}
 
 
