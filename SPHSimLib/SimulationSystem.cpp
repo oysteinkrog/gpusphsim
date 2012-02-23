@@ -19,7 +19,7 @@
 #include "SimSimpleSPH.cuh"
 #include "SimDEM.cuh"
 
-#include "K_Common.cu"
+#include "K_Common.inl"
 
 namespace SimLib
 {
@@ -49,10 +49,10 @@ namespace SimLib
 
 	void SimulationSystem::PrintMemoryUse()
 	{
-		cout << "Allocated " 
-			<< mSimCudaAllocator->GetAllocedAmount() << " B / " 
+		cout << "Allocated "
+			<< mSimCudaAllocator->GetAllocedAmount() << " B / "
 			<< mSimCudaAllocator->GetAllocedAmount()/1024.0f/1024.0f << " MB / "
-			<< mSimCudaAllocator->GetAllocedAmount()/1024.0f/1024.0f/1024.0f << " GB " 
+			<< mSimCudaAllocator->GetAllocedAmount()/1024.0f/1024.0f/1024.0f << " GB "
 			<< "\n";
 	}
 
@@ -62,21 +62,21 @@ namespace SimLib
 	}
 
 	void SimulationSystem::RemoveExernalBuffer(SimLib::Sim::BaseBufferId id)
-	{	
+	{
 		mExternalSimBuffers.erase(mExternalSimBuffers.find(id));
 	}
 
 	void SimulationSystem::Init()
-	{		
+	{
 
 		mSimulationSteps = 0;
 
 		if(mInitialized)
 		{
-			Free();		
+			Free();
 			mInitialized = false;
 		}
-		
+
 
 		switch(mParticleSimType)
 		{
@@ -93,30 +93,30 @@ namespace SimLib
 // 		case SimulationDEM:
 // 			{
 // 				Sim::DEM::SimDEM *demSim = new Sim::DEM::SimDEM(mSimCudaAllocator);
-// 
+//
 // 				for(std::map<SimLib::Sim::BaseBufferId, SimBuffer*>::const_iterator it = mExternalSimBuffers.begin(); it != mExternalSimBuffers.end(); ++it)
 // 				{
 // 					demSim->SetBuffer(it->first, it->second);
 // 				}
-// 
+//
 // 				//TODO configure DEM
 // 				Sim::DEM::DEMParams demParams;
-// 
+//
 // 				demParams.scale_to_simulation = 2.0f/volumeSize;
-// 
+//
 // 				demParams.particle_radius = 1.0f / 32.0f;
 // 				demParams.collide_dist = 2*demParams.particle_radius;
 // 				demParams.spring = 0.5f;
 // 				demParams.damping = 0.02f;
 // 				demParams.shear = 0.1f;
 // 				demParams.attraction = 0.0f;
-// 
+//
 // 				demParams.gravity = make_float3(0.0f, -9.8f, 0.0f);
-// 
+//
 // 				demParams.boundary_dampening = 256;
 // 				demParams.boundary_stiffness = 20000;
 // 				demParams.boundary_distance = demParams.collide_dist;
-// 
+//
 // 				demSim->SetParams(mNumParticles, volumeSize, demParams);
 // 				particleSim = demSim;
 // 			}
@@ -143,7 +143,7 @@ namespace SimLib
 
 
 	void SimulationSystem::Free()
-	{	
+	{
 		delete mParticleSim;
 		mParticleSim = NULL;
 
@@ -153,7 +153,7 @@ namespace SimLib
 	void SimulationSystem::mapRenderingBuffers()
 	{
 		// Map the rendering buffers (ready for use by CUDA)
-		if(!mBuffersMapped)// && (dParticlesPosVBO != -1 && dParticlesColorVBO != -1)) 
+		if(!mBuffersMapped)// && (dParticlesPosVBO != -1 && dParticlesColorVBO != -1))
 		{
 			bool mapped = true;
 			for(std::map<SimLib::Sim::BaseBufferId, SimBuffer*>::const_iterator it = mExternalSimBuffers.begin(); it != mExternalSimBuffers.end(); ++it)
@@ -168,12 +168,12 @@ namespace SimLib
 	void SimulationSystem::unmapRenderingBuffers()
 	{
 		// Unmap the rendering buffers (ready for use by rendering system)
-		if(mBuffersMapped)// && (dParticlesPosVBO != -1 && dParticlesColorVBO != -1)) 
+		if(mBuffersMapped)// && (dParticlesPosVBO != -1 && dParticlesColorVBO != -1))
 		{
 			bool mapped = true;
 			for(std::map<SimLib::Sim::BaseBufferId, SimBuffer*>::const_iterator it = mExternalSimBuffers.begin(); it != mExternalSimBuffers.end(); ++it)
 			{
-				it->second->UnmapBuffer();				
+				it->second->UnmapBuffer();
 				mapped &= !it->second->IsMapped();
 			}
 			mBuffersMapped = !mapped;
@@ -188,7 +188,7 @@ namespace SimLib
 	}
 
 	void SimulationSystem::SetTerrainData(float3 terrainPosition, float *terrainHeightData, float4* terrainNormalData, int terrainSize, float terrainWorldSize)
-	{	
+	{
 		hTerrainPosition = terrainPosition;
 		hTerrainData = terrainHeightData;
 		hTerrainSize = terrainSize;
@@ -199,10 +199,10 @@ namespace SimLib
 		dTerrainData.world_size = terrainWorldSize;
 
 		CUDA_SAFE_CALL(mSimCudaAllocator->Allocate((void**) &(dTerrainData.heights),	dTerrainData.size * dTerrainData.size * sizeof(float)));
-		CUDA_SAFE_CALL(cudaMemset(dTerrainData.heights,	0,	dTerrainData.size * dTerrainData.size * sizeof(float)));	
+		CUDA_SAFE_CALL(cudaMemset(dTerrainData.heights,	0,	dTerrainData.size * dTerrainData.size * sizeof(float)));
 
 		CUDA_SAFE_CALL(mSimCudaAllocator->Allocate((void**) &(dTerrainData.normals),	dTerrainData.size * dTerrainData.size * sizeof(float4)));
-		CUDA_SAFE_CALL(cudaMemset(dTerrainData.normals,	0,	dTerrainData.size * dTerrainData.size * sizeof(float4)));	
+		CUDA_SAFE_CALL(cudaMemset(dTerrainData.normals,	0,	dTerrainData.size * dTerrainData.size * sizeof(float4)));
 
 		CUDA_SAFE_CALL(cudaMemcpy(dTerrainData.heights, terrainHeightData, dTerrainData.size * dTerrainData.size * sizeof(float), cudaMemcpyHostToDevice));
 		CUDA_SAFE_CALL(cudaMemcpy(dTerrainData.normals, terrainNormalData, dTerrainData.size * dTerrainData.size * sizeof(float4), cudaMemcpyHostToDevice));
@@ -231,8 +231,8 @@ namespace SimLib
 
 		mSimulationSteps++;
 	}
- 
-	void SimulationSystem::SetScene(int scene) 
+
+	void SimulationSystem::SetScene(int scene)
 	{
 		mapRenderingBuffers();
 
@@ -257,7 +257,7 @@ namespace SimLib
 	}
 
 	int2 getTerrainPos(float3 const &pos, int const &terrainSize, float const &terrainWorldSize)
-	{            
+	{
 		int2 terrainPos;
 		terrainPos.y = floor(pos.z*(terrainSize/terrainWorldSize));
 		terrainPos.x = floor(pos.x*(terrainSize/terrainWorldSize));
@@ -265,19 +265,19 @@ namespace SimLib
 	}
 
 	float getTerrainHeight(int const &terrainPosX, int const &terrainPosZ, float const *terrainHeights, int const &terrainSize)
-	{            
+	{
 		if(terrainHeights == NULL || terrainSize == 0) return 0;
 		return terrainHeights[((terrainSize) * (terrainSize) - 1) - (((terrainSize) * terrainPosZ)) + terrainPosX];
 	}
 
 	float getTerrainHeight(int2 const &terrainPos, float const *terrainHeights, int const &terrainSize)
-	{            
+	{
 		return getTerrainHeight(terrainPos.x, terrainPos.y, terrainHeights, terrainSize);
 	}
 
-	void SimulationSystem::SetFluidPosition(float3 fluidWorldPosition) 
-	{ 
-		mFluidWorldPosition = fluidWorldPosition; 
+	void SimulationSystem::SetFluidPosition(float3 fluidWorldPosition)
+	{
+		mFluidWorldPosition = fluidWorldPosition;
 
 		cout << "Fluid World Position: " << fluidWorldPosition.x << " " << fluidWorldPosition.y << " " << fluidWorldPosition.z << "\n";
 	}
@@ -291,10 +291,10 @@ namespace SimLib
 			case 1:
 				{
 					//cube in corner
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z/2.0f; z <= hGridParams.grid_max.z/1.5f; z += spacing ) {
 							for (float x = hGridParams.grid_min.x/2.5f; x <= hGridParams.grid_max.x/2.0f; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -305,20 +305,20 @@ namespace SimLib
 			case 2:
 				{
 					//cube in middle
-					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y/1.5f; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y/1.5f; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z + hGridParams.grid_size.z / 3.5f ; z <= hGridParams.grid_max.z - hGridParams.grid_size.z / 2.0f; z += spacing ) {
 							for (float x = hGridParams.grid_min.x + hGridParams.grid_size.x / 3.5f; x <= hGridParams.grid_max.x  - hGridParams.grid_size.x /2.0f; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
 						}
 					}
 					//equilibrium test
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z; z <=hGridParams.grid_max.z; z += spacing ) {
 							for (float x = hGridParams.grid_min.x; x <= hGridParams.grid_max.x; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -330,10 +330,10 @@ namespace SimLib
 			case 3:
 				{
 					//cube in middle
-					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y / 2.0f ; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y / 2.0f ; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z + hGridParams.grid_size.z / 6.0f ; z <= hGridParams.grid_max.z - hGridParams.grid_size.z / 6.0f; z += spacing ) {
 							for (float x = hGridParams.grid_min.x + hGridParams.grid_size.x / 6.0f; x <= hGridParams.grid_max.x  - hGridParams.grid_size.x / 6.0f; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -341,10 +341,10 @@ namespace SimLib
 					}
 
 					//equilibrium test
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z; z <=hGridParams.grid_max.z; z += spacing ) {
 							for (float x = hGridParams.grid_min.x; x <= hGridParams.grid_max.x; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -355,10 +355,10 @@ namespace SimLib
 			case 4:
 				{
 					//small cube in middle
-					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y/1.5f; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y/1.5f; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z + hGridParams.grid_size.z / 3.5f ; z <= hGridParams.grid_max.z - hGridParams.grid_size.z / 2.0f; z += spacing ) {
 							for (float x = hGridParams.grid_min.x + hGridParams.grid_size.x / 3.5f; x <= hGridParams.grid_max.x  - hGridParams.grid_size.x /2.0f; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -366,24 +366,24 @@ namespace SimLib
 					}
 
 					//equilibrium test
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z; z <=hGridParams.grid_max.z; z += spacing ) {
 							for (float x = hGridParams.grid_min.x; x <= hGridParams.grid_max.x; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
 						}
-					}	
+					}
 				}
 				break;
 			case 5:
 				{
 					//small cube in middle
-					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y/1.5f; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y/1.5f; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z + hGridParams.grid_size.z / 4.0f ; z <= hGridParams.grid_max.z - hGridParams.grid_size.z / 3.0f; z += spacing ) {
 							for (float x = hGridParams.grid_min.x + hGridParams.grid_size.x / 4.0f; x <= hGridParams.grid_max.x  - hGridParams.grid_size.x /3.0f; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -391,10 +391,10 @@ namespace SimLib
 					}
 
 					//equilibrium test
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z; z <=hGridParams.grid_max.z; z += spacing ) {
 							for (float x = hGridParams.grid_min.x; x <= hGridParams.grid_max.x; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -405,10 +405,10 @@ namespace SimLib
 			case 6:
 				{
 					//equilibrium test
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z; z <=hGridParams.grid_max.z; z += spacing ) {
 							for (float x = hGridParams.grid_min.x; x <= hGridParams.grid_max.x; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -419,10 +419,10 @@ namespace SimLib
 			case 7:
 				{
 					//cube in middle
-					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y / 2.0f ; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y + hGridParams.grid_size.y / 2.0f ; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z + hGridParams.grid_size.z / 6.0f ; z <= hGridParams.grid_max.z - hGridParams.grid_size.z / 6.0f; z += spacing ) {
 							for (float x = hGridParams.grid_min.x + hGridParams.grid_size.x / 6.0f; x <= hGridParams.grid_max.x  - hGridParams.grid_size.x / 6.0f; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
@@ -432,7 +432,7 @@ namespace SimLib
 			case 8:
 				{
 					for(int i = 0; i < numParticles; i++)
-					{		
+					{
 						position[i] = make_vec(
 							(float)rand() / (float)(RAND_MAX+1) * hGridParams.grid_size.x,
 							(float)rand() / (float)(RAND_MAX+1) * hGridParams.grid_size.y,
@@ -449,10 +449,10 @@ namespace SimLib
 					float boundaryValue = settings->GetValue("Boundary Distance");
 
 					//small cube in middle
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y - hGridParams.grid_size.y/10.0f; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z + hGridParams.grid_size.z / 3.5f ; z <= hGridParams.grid_max.z - hGridParams.grid_size.z / 2.0f; z += spacing ) {
 							for (float x = hGridParams.grid_min.x + hGridParams.grid_size.x / 3.5f; x <= hGridParams.grid_max.x  - hGridParams.grid_size.x /2.0f; x += spacing ) {
-								if(i>=numParticles) break;			
+								if(i>=numParticles) break;
 
 								float3 ppos = make_float3(x,y,z);
 								int2 terrainPos = getTerrainPos(ppos+mFluidWorldPosition+hTerrainPosition, hTerrainSize, hTerrainWorldSize);
@@ -479,28 +479,28 @@ namespace SimLib
 					}
 
 					//equilibrium test
-					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{	
+					for (float y = hGridParams.grid_min.y; y <= hGridParams.grid_max.y; y += spacing ) 	{
 						for (float z = hGridParams.grid_min.z; z <=hGridParams.grid_max.z; z += spacing ) {
 							for (float x = hGridParams.grid_min.x; x <= hGridParams.grid_max.x; x += spacing ) {
-								if(i>=numParticles) break;				
+								if(i>=numParticles) break;
 								position[i] = make_vec(x,y,z,1);
 								i++;
 							}
 						}
-					}	
+					}
 
 				}
 				break;
 		}
 
-		
+
 
 
 		// safety because we need to use all our particles
 		if(i<numParticles)
 		{
 			for(; i < numParticles; i++)
-			{		
+			{
 				position[i] = make_vec(
 					(float)rand() / (float)(RAND_MAX+1) * hGridParams.grid_size.x,
 					(float)rand() / (float)(RAND_MAX+1) * hGridParams.grid_size.y,

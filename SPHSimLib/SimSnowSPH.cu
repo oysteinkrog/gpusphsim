@@ -3,7 +3,7 @@
 #include <math.h>
 #include <string.h>
 
-#include "K_Common.cu"
+#include "K_Common.inl"
 #include "SimSnowSPH.cuh"
 
 #include "cutil.h"
@@ -45,7 +45,7 @@ __device__ __constant__	SnowSPHFluidParams		cFluidParams;
 __device__ __constant__	SnowSPHPrecalcParams	cPrecalcParams;
 
 //#include "cuPrintf.cu"
-#include "K_SnowSPH.cu"
+#include "K_SnowSPH.inl"
 #include "K_UniformGrid_Update.inl"
 
 SimSnowSPH::SimSnowSPH(SimLib::SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper* simCudaHelper)

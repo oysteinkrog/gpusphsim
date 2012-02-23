@@ -11,13 +11,13 @@
 
 namespace SPH_Kernels
 {
-	#include "K_SPH_Kernels_gaussian.cu"
-	#include "K_SPH_Kernels_quintic.cu"
-	#include "K_SPH_Kernels_quartic.cu"
-	#include "K_SPH_Kernels_quadratic.cu"
-	#include "K_SPH_Kernels_cubic.cu"
-	#include "K_SPH_Kernels_poly6.cu"
-	#include "K_SPH_Kernels_spiky.cu"
-	#include "K_SPH_Kernels_viscosity.cu"
+	#include "K_SPH_Kernels_gaussian.inl"
+	#include "K_SPH_Kernels_quintic.inl"
+	#include "K_SPH_Kernels_quartic.inl"
+	#include "K_SPH_Kernels_quadratic.inl"
+	#include "K_SPH_Kernels_cubic.inl"
+	#include "K_SPH_Kernels_poly6.inl"
+	#include "K_SPH_Kernels_spiky.inl"
+	#include "K_SPH_Kernels_viscosity.inl"
 }
 #endif

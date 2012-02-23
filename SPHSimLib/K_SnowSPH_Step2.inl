@@ -2,8 +2,8 @@
 #define __K_SnowSPH_Force_cu__
 
 #include "K_UniformGrid_Utils.inl"
-#include "K_SPH_Kernels.cu"
-#include "K_SPH_Common.cu"
+#include "K_SPH_Kernels.inl"
+#include "K_SPH_Common.inl"
 #include "K_Common.cuh"
 
 class Step2
@@ -38,7 +38,7 @@ public:
 			float3 gradW = SPH_Kernels::Wcubic::Gradient(cFluidParams.smoothing_length, cPrecalcParams.smoothing_length_pow2,  cPrecalcParams.smoothing_length_pow3, cPrecalcParams.smoothing_length_pow4,   r, rlen, rlen_sq);
 
 			// calculate the velocity tensor sum
-			data.sum_velocity_tensor += outer( 
+			data.sum_velocity_tensor += outer(
 				(veleval_j  - data.veleval_i)/(density_j)
 				, gradW
 				);
@@ -53,7 +53,7 @@ public:
 			// velocity tensor derivative (DELv)
 			matrix3 velocity_tensor_i = cFluidParams.particle_mass * data.sum_velocity_tensor;
 
-			// rate-of-deformation/rate-of-strain tensor (E on wiki(NSE), D in viscoplastic paper) 
+			// rate-of-deformation/rate-of-strain tensor (E on wiki(NSE), D in viscoplastic paper)
 			matrix3 deformation_tensor_i = 0.5*(velocity_tensor_i + transpose(velocity_tensor_i));
 			//matrix3 deformation_tensor_i = (velocity_tensor_i + transpose(velocity_tensor_i));
 
@@ -68,7 +68,7 @@ public:
  			//float n = 0.5f;
  			//float J = 10;
  			//stress_tensor = (1-__expf(-(J+1)*deformation_amount))*(pow(deformation_amount, n-1.0f)+1/deformation_amount)*deformation_amount;
-			
+
 			// newtonian fluid
 			// 3-step says: ( t = 2*µ*D )
 			//stress_tensor = 1*deformation_amount*deformation_tensor_i;
@@ -101,7 +101,7 @@ public:
 //  			if(stress_amount < yield_stress) {
 // 				stress_tensor = 500*deformation_amount*deformation_tensor_i;
 //  			}
-			
+
 			// non-newtonian cross fluid
   			float K = 2.1f;
  			float visco_inf= 1.07;
@@ -120,13 +120,13 @@ public:
 };
 
 __global__ void K_SumStep2(uint			numParticles,
-						NeighborList	dNeighborList, 
+						NeighborList	dNeighborList,
 						SnowSPHData	dParticleDataSorted,
 						GridData		dGridData
-						)								
+						)
 {
-	// particle index	
-	uint index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;		
+	// particle index
+	uint index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
 	if (index >= numParticles) return;
 
 	Step2::Data data;
@@ -143,7 +143,7 @@ __global__ void K_SumStep2(uint			numParticles,
 		<
 		SPHNeighborCalc
 			<Step2::Calc, Step2::Data>
-			, 
+			,
 			Step2::Data
 		>
 	(data, index, position_i, dGridData);

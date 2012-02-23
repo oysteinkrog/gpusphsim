@@ -3,7 +3,7 @@
 #include <math.h>
 #include <string.h>
 
-#include "K_Common.cu"
+#include "K_Common.inl"
 #include "SimSimpleSPH.cuh"
 
 #include "cutil.h"
@@ -39,7 +39,7 @@ __device__ __constant__	GridParams		cGridParams;
 __device__ __constant__	SimpleSPHFluidParams	cFluidParams;
 __device__ __constant__	SimpleSPHPrecalcParams	cPrecalcParams;
 
-#include "K_SimpleSPH.cu"
+#include "K_SimpleSPH.inl"
 #include "K_UniformGrid_Update.inl"
 
 //#include "cuPrintf.cu"

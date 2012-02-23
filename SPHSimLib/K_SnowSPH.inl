@@ -26,9 +26,9 @@ public:
 	} 
 };
 
-#include "K_SnowSPH_Step1.cu"
-#include "K_SnowSPH_Step2.cu"
-#include "K_SnowSPH_Step3.cu"
-#include "K_SnowSPH_Integrate.cu"
+#include "K_SnowSPH_Step1.inl"
+#include "K_SnowSPH_Step2.inl"
+#include "K_SnowSPH_Step3.inl"
+#include "K_SnowSPH_Integrate.inl"
 
 #endif

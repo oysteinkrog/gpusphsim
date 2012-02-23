@@ -2,8 +2,8 @@
 #define __K_SimpleSPH_Step2_cu__
 
 #include "K_UniformGrid_Utils.inl"
-#include "K_SPH_Kernels.cu"
-#include "K_SPH_Common.cu"
+#include "K_SPH_Kernels.inl"
+#include "K_SPH_Common.inl"
 
 
 class Step2

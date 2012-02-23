@@ -8,7 +8,7 @@
 #include "UniformGrid.cuh"
 
 #include "K_Coloring.cuh"
-#include "K_SPH_Kernels.cu"
+#include "K_SPH_Kernels.inl"
 #include "UniformGrid.cuh"
 #include "SimulationSystem.h"
 #include "timer.h"
