@@ -1,9 +1,9 @@
 #ifndef __K_SnowSPH_Integrate_cu__
 #define __K_SnowSPH_Integrate_cu__
 
-#include "K_Coloring.cu"
-#include "K_Boundaries_Terrain.cu"
-#include "K_Boundaries_Walls.cu"
+#include "K_Coloring.inl"
+#include "K_Boundaries_Terrain.inl"
+#include "K_Boundaries_Walls.inl"
 
 template<SPHColoringSource coloringSource, ColoringGradient coloringGradient>
 __global__ void K_Integrate(int			numParticles,

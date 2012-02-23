@@ -4,7 +4,7 @@
 #ifndef __UniformGrid_cu__
 #define __UniformGrid_cu__
 
-#include "K_UniformGrid_Utils.cu"
+#include "K_UniformGrid_Utils.inl"
 
 // Calculate a grid hash value for each particle
 

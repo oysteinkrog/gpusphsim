@@ -1,7 +1,7 @@
 #ifndef __K_SimpleSPH_Step1_cu__
 #define __K_SimpleSPH_Step1_cu__
 
-#include "K_UniformGrid_Utils.cu"
+#include "K_UniformGrid_Utils.inl"
 #include "K_SPH_Kernels.cu"
 #include "K_SPH_Common.cu"
 

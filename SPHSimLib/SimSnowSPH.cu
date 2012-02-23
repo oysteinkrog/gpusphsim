@@ -46,7 +46,7 @@ __device__ __constant__	SnowSPHPrecalcParams	cPrecalcParams;
 
 //#include "cuPrintf.cu"
 #include "K_SnowSPH.cu"
-#include "K_UniformGrid_Update.cu"
+#include "K_UniformGrid_Update.inl"
 
 SimSnowSPH::SimSnowSPH(SimLib::SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper* simCudaHelper)
 : SimBase(simCudaAllocator, simCudaHelper)

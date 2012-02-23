@@ -8,8 +8,8 @@
 using namespace SimLib;
 using namespace SimLib::Sim::SnowSPH;
 
-#include "K_UniformGrid_Utils.cu"
-#include "K_Coloring.cu"
+#include "K_UniformGrid_Utils.inl"
+#include "K_Coloring.inl"
 #include "K_SPH_Common.cuh"
 
 class SnowSPHSystem

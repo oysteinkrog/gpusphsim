@@ -40,7 +40,7 @@ __device__ __constant__	SimpleSPHFluidParams	cFluidParams;
 __device__ __constant__	SimpleSPHPrecalcParams	cPrecalcParams;
 
 #include "K_SimpleSPH.cu"
-#include "K_UniformGrid_Update.cu"
+#include "K_UniformGrid_Update.inl"
 
 //#include "cuPrintf.cu"
 

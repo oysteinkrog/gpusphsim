@@ -465,7 +465,7 @@
       <PtxAsOptionV Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</PtxAsOptionV>
       <FileType>Document</FileType>
     </CudaCompile>
-    <Cudart_Build_Rule Include="K_SimDEM.cu">
+    <Cudart_Build_Rule Include="K_SimDEM.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -489,7 +489,7 @@
       <AddedDependencies Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">K_ParticleSimDEM.cu</AddedDependencies>
       <FileType>Document</FileType>
     </CudaCompile>
-    <Cudart_Build_Rule Include="K_Coloring.cu">
+    <Cudart_Build_Rule Include="K_Coloring.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -499,7 +499,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
-    <Cudart_Build_Rule Include="K_Boundaries_Common.cu">
+    <Cudart_Build_Rule Include="K_Boundaries_Common.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -509,7 +509,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
-    <Cudart_Build_Rule Include="K_Boundaries_Terrain.cu">
+    <Cudart_Build_Rule Include="K_Boundaries_Terrain.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -519,7 +519,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
-    <Cudart_Build_Rule Include="K_Boundaries_Walls.cu">
+    <Cudart_Build_Rule Include="K_Boundaries_Walls.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -529,7 +529,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
-    <Cudart_Build_Rule Include="K_UniformGrid_Hash.cu">
+    <Cudart_Build_Rule Include="K_UniformGrid_Hash.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -539,7 +539,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
-    <Cudart_Build_Rule Include="K_UniformGrid_NeighborList.cu">
+    <Cudart_Build_Rule Include="K_UniformGrid_NeighborList.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -549,7 +549,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
-    <Cudart_Build_Rule Include="K_UniformGrid_Update.cu">
+    <Cudart_Build_Rule Include="K_UniformGrid_Update.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>
@@ -559,7 +559,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">true</ExcludedFromBuild>
     </Cudart_Build_Rule>
-    <Cudart_Build_Rule Include="K_UniformGrid_Utils.cu">
+    <Cudart_Build_Rule Include="K_UniformGrid_Utils.inl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">true</ExcludedFromBuild>

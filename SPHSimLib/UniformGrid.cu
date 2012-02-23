@@ -22,7 +22,7 @@ using namespace std;
 
 __device__ __constant__	GridParams	cGridParams;
 
-#include "K_UniformGrid_Hash.cu"
+#include "K_UniformGrid_Hash.inl"
 
 using namespace SimLib;
 

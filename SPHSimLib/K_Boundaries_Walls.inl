@@ -1,7 +1,7 @@
 #ifndef __K_Boundaries_Walls_cu__
 #define __K_Boundaries_Walls_cu__
 
-#include "K_Boundaries_Common.cu"
+#include "K_Boundaries_Common.inl"
 
 #define EPSILON			0.00001f			//for collision detection
 

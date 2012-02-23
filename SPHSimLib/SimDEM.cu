@@ -32,7 +32,7 @@
 // __device__ __constant__	DEMParams		cDEMParams;
 // __device__ __constant__	GridParams		cGridParams;
 // 
-// #include "K_SimDEM.cu"
+// #include "K_SimDEM.inl"
 // 
 // SimDEM::SimDEM(SimCudaAllocator* SimCudaAllocator)
 // : SimBase(SimCudaAllocator)
