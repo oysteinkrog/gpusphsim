@@ -5,11 +5,7 @@
 
 using namespace SimLib;
 
-namespace SimLib { namespace Sim { 
-	
-__global__ void FermiCacheOverride()
-{
-}
+namespace SimLib { namespace Sim {
 
 SimBase::SimBase(SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper* simCudaHelper)
 	: mSimCudaAllocator(simCudaAllocator)
@@ -37,16 +33,6 @@ SimBase::SimBase(SimCudaAllocator* simCudaAllocator, SimLib::SimCudaHelper* simC
 	mSettings->AddSetting("Particles Number", 16384, 0, 0, "");
 	mSettings->AddSetting("Grid World Size", 256, 0, 0, "World Units");
 	mSettings->AddSetting("Grid Cell Size", 10, 0, 0, "World Units");
-
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{
-		cudaFuncSetCacheConfig(FermiCacheOverride, cudaFuncCachePreferL1);
-	}
-	else 
-	{
-	}
-
 }
 
 SimBase::~SimBase()

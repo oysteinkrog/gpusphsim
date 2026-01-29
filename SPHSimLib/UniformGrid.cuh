@@ -52,6 +52,9 @@ struct GridParams
 	float3			grid_res;
 
 	float3			grid_delta;
+
+	// Bitmask for fast modulo (grid_res - 1, only valid for power-of-2 grids)
+	int3			grid_res_bits;
 };
 
 struct GridData
@@ -111,6 +114,15 @@ private:
 	thrust::device_ptr<uint>* mThrustKeys;
 	thrust::device_ptr<uint>* mThrustVals;
 #endif
+
+#ifdef SPHSIMLIB_USE_CUB_SORT
+	void* d_cub_temp_storage;
+	size_t d_cub_temp_storage_bytes;
+	void* d_cub_double_buffer;  // Opaque pointer to cub::DoubleBuffer<uint>
+	uint* d_cub_alt_keys;
+	uint* d_cub_alt_values;
+#endif
+
 	int mSortBitsPrecision;
 };
 

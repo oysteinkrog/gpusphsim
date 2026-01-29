@@ -167,13 +167,11 @@ void SimSimpleSPH::UpdateParams()
 
 	GridParams hGridParams = mUniformGrid->GetGridParams();
 
-	//Copy the grid parameters to the GPU	
+	//Copy the grid parameters to the GPU
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cGridParams, &hGridParams, sizeof(GridParams) ) );
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
 
 	//Copy the fluid parameters to the GPU
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cFluidParams, &hFluidParams, sizeof(SimpleSPHFluidParams) ) );
-	CUDA_SAFE_CALL(cudaDeviceSynchronize());
 
 	//Copy the precalc parameters to the GPU	
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cPrecalcParams, &hPrecalcParams, sizeof(SimpleSPHPrecalcParams) ) );
@@ -261,9 +259,14 @@ void SimSimpleSPH::Simulate(bool doTiming, bool progress, bool gridWallCollision
 
 	if(doTiming)
 	{
-		char tmp[2048];
-		sprintf(tmp,"%4.4f\t%4.4f\t%4.4f\t%4.4f\t%4.4f\t%4.4f\t\n", time_hashSPHData, time_radixsort, time_updatelists, time_computeDensity, time_ComputeStep2s, time_integrateForces);
-		printf(tmp);
+		// Store timing results
+		mLastTiming.hash_ms = time_hashSPHData;
+		mLastTiming.sort_ms = time_radixsort;
+		mLastTiming.build_ms = time_updatelists;
+		mLastTiming.step1_ms = time_computeDensity;
+		mLastTiming.step2_ms = time_ComputeStep2s;
+		mLastTiming.integrate_ms = time_integrateForces;
+		mLastTiming.total_ms = time_hashSPHData + time_radixsort + time_updatelists + time_computeDensity + time_ComputeStep2s + time_integrateForces;
 	}
 
 }
@@ -344,31 +347,10 @@ float SimSimpleSPH::BuildDataStruct(bool doTiming)
 	SimpleSPHData dParticleData = GetParticleData();
 	SimpleSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	int threadsPerBlock;
-
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{	
-		// sm_20:
-		// Used 13 registers, 184 bytes cmem[0], 24 bytes cmem[2], 8 bytes cmem[14]
-		threadsPerBlock = 256;
-	}
-	else 
-	{
-		// sm_13:
-		// Used 8 registers, 160+16 bytes smem, 140 bytes cmem[0], 4 bytes cmem[1]
-		threadsPerBlock = 256;
-	}
+	int threadsPerBlock = 256;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-
-	while(numBlocks >= 64*1024)
-	{
-		cout << "ALERT: have to rescale threadsPerBlock due to too large grid size >=65536\n";
-		threadsPerBlock += 32;
-		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	}
 
 	//dynamically allocated shared memory (per block)
 	uint smemSize = sizeof(uint)*(numThreads+1);
@@ -458,40 +440,10 @@ float SimSimpleSPH::ComputeStep1(bool doTiming)
 	SimpleSPHData dParticleData = GetParticleData();
 	SimpleSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	uint threadsPerBlock;
-
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST_PRECALC_R
-	//Used 9 registers, 144+16 bytes smem, 156 bytes cmem[0], 8 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 128;
-#else
-	// Used 11 registers, 144+16 bytes smem, 156 bytes cmem[0], 8 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 128;
-#endif
-#else
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{	
-		// sm_2.0 : Used 24 registers, 152 bytes cmem[0], 24 bytes cmem[2], 8 bytes cmem[14]
-		threadsPerBlock = 224;
-	}
-	else 
-	{
-		// Used 22 registers, 128+16 bytes smem, 140 bytes cmem[0], 4 bytes cmem[1]
-		threadsPerBlock = 128;
-	}
-#endif
-
+	uint threadsPerBlock = 256;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-
-	while(numBlocks >= 64*1024)
-	{
-		cout << "ALERT: have to rescale threadsPerBlock due to too large grid size >=65536\n";
-		threadsPerBlock += 32;
-		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	}
 
 	if(doTiming)
 	{
@@ -521,38 +473,10 @@ float SimSimpleSPH::ComputeStep2(bool doTiming)
 	GridData dGridData = mUniformGrid->GetGridData();
 	SimpleSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	uint threadsPerBlock;
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST_PRECALC_R
-	// Used 25 registers, 144+16 bytes smem, 156 bytes cmem[0], 4 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 320;
-#else
-	// Used 27 registers, 144+16 bytes smem, 156 bytes cmem[0], 4 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 64;
-#endif
-#else
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{
-		// sm_2.0 (w/32clamp): Used 32 registers, 28+0 bytes lmem, 152 bytes cmem[0], 24 bytes cmem[2], 8 bytes cmem[14]
-		threadsPerBlock = 128;
-	}
-	else 
-	{
-		// Used 32 registers, 128+16 bytes smem, 140 bytes cmem[0], 4 bytes cmem[1]
-		threadsPerBlock = 128;
-	}
-#endif
+	uint threadsPerBlock = 256;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	
-	while(numBlocks >= 64*1024)
-	{
-		cout << "ALERT: have to rescale threadsPerBlock due to too large grid size >=65536\n";
-		threadsPerBlock += 32;
-		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	}
 
 	if(doTiming)
 	{
@@ -606,24 +530,10 @@ float SimSimpleSPH::Integrate(bool doTiming, bool progress, float deltaTime, boo
 	SimpleSPHData	dParticleData = GetParticleData();
 	SimpleSPHData	dParticleDataSorted = GetParticleDataSorted();
 
-	int threadsPerBlock;
+	int threadsPerBlock = 256;
 
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{
-		//sm_20: Used 26 registers, 248 bytes cmem[0], 24 bytes cmem[2], 8 bytes cmem[14], 28 bytes cmem[16]
-		threadsPerBlock = 416;
-	}
-	else 
-	{
-		//sm_13: Used 23 registers, 224+16 bytes smem, 140 bytes cmem[0], 40 bytes cmem[1]
-		threadsPerBlock = 192;
-	}
-
-	//Used 25 registers, 208+16 bytes smem, 144 bytes cmem[0], 16 bytes cmem[1]
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-
 
 	if(doTiming)
 	{

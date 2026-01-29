@@ -14,6 +14,18 @@
 
 namespace SimLib { namespace Sim {
 
+// Per-kernel timing results structure for benchmarking
+struct SimTimingResult
+{
+	float hash_ms;
+	float sort_ms;
+	float build_ms;
+	float step1_ms;
+	float step2_ms;
+	float integrate_ms;
+	float total_ms;
+};
+
 enum BaseBufferId
 {
 	BufferPosition,
@@ -100,6 +112,12 @@ protected:
 	NeighborList	dNeighborList;
 
 	SimSettings* mSettings;
+
+	// Timing results from last simulation step
+	SimTimingResult mLastTiming;
+
+public:
+	virtual const SimTimingResult& GetLastTimingResult() const { return mLastTiming; }
 };
 
 }} // namespace SimLib { namespace Sim {

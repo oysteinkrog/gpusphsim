@@ -36,9 +36,7 @@ static __inline__ __host__ __device__ float_vec make_vec(float x, float y, float
 
 
 #ifdef SPHSIMLIB_USE_TEXTURES
-#ifndef __DEVICE_EMULATION__
 #define USE_TEX
-#endif
 #else
 #undef USE_TEX 
 #endif

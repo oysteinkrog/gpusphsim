@@ -202,6 +202,86 @@ void testPerformanceScaling(SimLib::SimCudaHelper* simCudaHelper)
 
 void testKernel();
 
+void testKernelPerformance(SimLib::SimCudaHelper* simCudaHelper, bool verify = false)
+{
+	const int WARMUP = 10;
+	const int TIMED = 100;
+	const uint particleCounts[] = {1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288};
+	const int numCounts = sizeof(particleCounts) / sizeof(particleCounts[0]);
+
+	SimulationSystem *system = new SimulationSystem(true, simCudaHelper, true);
+	system->Init();
+
+	// Configure simulation parameters
+	system->GetSettings()->SetValue("Timestep", 0.0005);
+	system->GetSettings()->SetValue("Grid World Size", 1024);
+	system->GetSettings()->SetValue("Simulation Scale", 0.0005);
+	system->GetSettings()->SetValue("Rest Density", 1000);
+	system->GetSettings()->SetValue("Rest Pressure", 0);
+	system->GetSettings()->SetValue("Ideal Gas Constant", 1.5);
+	system->GetSettings()->SetValue("Viscosity", 1);
+	system->GetSettings()->SetValue("Boundary Stiffness", 20000);
+	system->GetSettings()->SetValue("Boundary Dampening", 256);
+
+	// Print CSV header
+	cout << "particles,hash_ms,sort_ms,build_ms,step1_ms,step2_ms,integrate_ms,total_ms,fps\n";
+
+	for (int c = 0; c < numCounts; c++)
+	{
+		uint numParticles = particleCounts[c];
+		system->GetSettings()->SetValue("Particles Number", numParticles);
+		system->SetScene(6);
+
+		// Warmup iterations (not timed)
+		for (int i = 0; i < WARMUP; i++)
+		{
+			system->Simulate(true, true);
+		}
+		cudaDeviceSynchronize();
+
+		// Accumulate timing
+		double total_hash = 0, total_sort = 0, total_build = 0;
+		double total_step1 = 0, total_step2 = 0, total_integrate = 0, total_total = 0;
+
+		for (int i = 0; i < TIMED; i++)
+		{
+			system->Simulate(true, true);
+			const SimLib::Sim::SimTimingResult& t = system->GetLastTimingResult();
+			total_hash += t.hash_ms;
+			total_sort += t.sort_ms;
+			total_build += t.build_ms;
+			total_step1 += t.step1_ms;
+			total_step2 += t.step2_ms;
+			total_integrate += t.integrate_ms;
+			total_total += t.total_ms;
+		}
+		cudaDeviceSynchronize();
+
+		// Compute averages
+		double avg_hash = total_hash / TIMED;
+		double avg_sort = total_sort / TIMED;
+		double avg_build = total_build / TIMED;
+		double avg_step1 = total_step1 / TIMED;
+		double avg_step2 = total_step2 / TIMED;
+		double avg_integrate = total_integrate / TIMED;
+		double avg_total = total_total / TIMED;
+		double fps = 1000.0 / avg_total;
+
+		cout << fixed << setprecision(4);
+		cout << numParticles << ","
+			<< avg_hash << ","
+			<< avg_sort << ","
+			<< avg_build << ","
+			<< avg_step1 << ","
+			<< avg_step2 << ","
+			<< avg_integrate << ","
+			<< avg_total << ","
+			<< setprecision(1) << fps << "\n";
+	}
+
+	delete system;
+}
+
 int main(int argc, char *argv[])
 {
 	SimLib::SimCudaHelper* simCudaHelper = new SimLib::SimCudaHelper();
@@ -213,7 +293,8 @@ int main(int argc, char *argv[])
 	//Sleep(1000);
 
 
-	testPerformanceScaling(simCudaHelper);
+	testKernelPerformance(simCudaHelper);
+	//testPerformanceScaling(simCudaHelper);
 	//testFluidSimLive(simCudaHelper);
 	//testFluidSim(simCudaHelper);
 	//testKernel();

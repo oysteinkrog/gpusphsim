@@ -32,9 +32,7 @@ __global__ void K_Grid_UpdateSorted (
 		sharedHash[0] = dGridData.sort_hashes[index-1];
 	}
 
-#ifndef __DEVICE_EMULATION__
 	__syncthreads ();
-#endif
 
 	// If this particle has a different cell index to the previous
 	// particle then it must be the first particle in the cell,

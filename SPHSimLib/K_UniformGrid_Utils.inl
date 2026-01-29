@@ -5,6 +5,25 @@
 
 namespace UniformGridUtils
 {
+#ifdef SPHSIMLIB_USE_MORTON_HASH
+	// Expand bits for Morton encoding (interleaves zeros between bits)
+	// Input: 10-bit value (0-1023)
+	// Output: 30-bit value with zeros interleaved
+	static __device__ __forceinline__ uint expandBits(uint v)
+	{
+		v = (v | (v << 16)) & 0x030000FF;
+		v = (v | (v <<  8)) & 0x0300F00F;
+		v = (v | (v <<  4)) & 0x030C30C3;
+		v = (v | (v <<  2)) & 0x09249249;
+		return v;
+	}
+
+	// Compute 30-bit Morton code for 3D coordinates (each up to 10 bits)
+	static __device__ __forceinline__ uint mortonEncode3D(uint x, uint y, uint z)
+	{
+		return (expandBits(z) << 2) | (expandBits(y) << 1) | expandBits(x);
+	}
+#endif
 	// find the grid cell from a position in world space
 	static __device__ int3 calcGridCell(float3 const &p, float3 grid_min, float3 grid_delta)
 	{
@@ -24,12 +43,7 @@ namespace UniformGridUtils
 			int gsy = (int)floor(grid_res.y);
 			int gsz = (int)floor(grid_res.z);
 
-// 			//power of 2 wrapping..
-// 			gx = gridPos.x & gsx-1;
-// 			gy = gridPos.y & gsy-1;
-// 			gz = gridPos.z & gsz-1;
-
-			// wrap grid... but since we can not assume size is power of 2 we can't use binary AND/& :/
+			// wrap grid using modulo
 			gx = gridPos.x % gsx;
 			gy = gridPos.y % gsy;
 			gz = gridPos.z % gsz;
@@ -44,8 +58,11 @@ namespace UniformGridUtils
 			gz = gridPos.z;
 		}
 
-		//return  __mul24(__mul24(gz, (int) cGridParams.grid_res.y)+gy, (int) cGridParams.grid_res.x) + gx;
-
+#ifdef SPHSIMLIB_USE_MORTON_HASH
+		// Morton encoding gives better cache locality for 3D neighbor searches
+		// Nearby 3D cells map to nearby 1D indices
+		return mortonEncode3D((uint)gx, (uint)gy, (uint)gz);
+#else
 		//We choose to simply traverse the grid cells along the x, y, and z axes, in that order. The inverse of
 		//this space filling curve is then simply:
 		// index = x + y*width + z*width*height
@@ -53,6 +70,7 @@ namespace UniformGridUtils
 		//each such slice is processed in row-column order.
 		// Standard multiplication is as fast as __mul24 on sm_20+ GPUs
 		return gz * (int)grid_res.y * (int)grid_res.x + gy * (int)grid_res.x + gx;
+#endif
 	}
 
 
