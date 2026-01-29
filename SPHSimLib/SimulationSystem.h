@@ -47,6 +47,8 @@ namespace SimLib
 		}
 		SimSettings* GetSettings() {return mParticleSim->GetSettings();}
 		float GetParticleSize();
+		SimBuffer* GetBuffer(SimLib::Sim::BaseBufferId id) { return mParticleSim->GetBuffer(id); }
+		GridParams& GetGridParams() { return mParticleSim->GetGridParams(); }
 
 	private:
 		SimCudaAllocator* mSimCudaAllocator;

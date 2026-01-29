@@ -43,20 +43,12 @@
 
 inline cudaError cutilDeviceSynchronize()
 {
-#if CUDART_VERSION >= 4000
 	return cudaDeviceSynchronize();
-#else
-	return cudaThreadSynchronize();
-#endif
 }
 
 inline cudaError cutilDeviceReset()
 {
-#if CUDART_VERSION >= 4000
 	return cudaDeviceReset();
-#else
-	return cudaThreadExit();
-#endif
 }
 
 inline void __cutilCondition(int val, char *file, int line) 
@@ -89,14 +81,33 @@ inline int _ConvertSMVer2Cores(int major, int minor)
 		int Cores;
 	} sSMtoCores;
 
-	sSMtoCores nGpuArchCoresPerSM[] = 
-	{ { 0x10,  8 },
-	  { 0x11,  8 },
-	  { 0x12,  8 },
-	  { 0x13,  8 },
-	  { 0x20, 32 },
-	  { 0x21, 48 },
-	  {   -1, -1 } 
+	sSMtoCores nGpuArchCoresPerSM[] =
+	{ { 0x10,   8 },  // Tesla
+	  { 0x11,   8 },
+	  { 0x12,   8 },
+	  { 0x13,   8 },
+	  { 0x20,  32 },  // Fermi
+	  { 0x21,  48 },
+	  { 0x30, 192 },  // Kepler
+	  { 0x32, 192 },
+	  { 0x35, 192 },
+	  { 0x37, 192 },
+	  { 0x50, 128 },  // Maxwell
+	  { 0x52, 128 },
+	  { 0x53, 128 },
+	  { 0x60,  64 },  // Pascal
+	  { 0x61, 128 },
+	  { 0x62, 128 },
+	  { 0x70,  64 },  // Volta
+	  { 0x72,  64 },
+	  { 0x75,  64 },  // Turing
+	  { 0x80,  64 },  // Ampere
+	  { 0x86, 128 },
+	  { 0x87, 128 },
+	  { 0x89, 128 },  // Ada Lovelace
+	  { 0x90, 128 },  // Hopper
+	  { 0x100, 128 }, // Blackwell (sm_100)
+	  {   -1, -1 }
 	};
 
 	int index = 0;
@@ -106,8 +117,9 @@ inline int _ConvertSMVer2Cores(int major, int minor)
 		}
 		index++;
 	}
-	printf("MapSMtoCores undefined SMversion %d.%d!\n", major, minor);
-	return -1;
+	// Default to 128 cores for unknown architectures
+	printf("MapSMtoCores SM %d.%d is undefined (using 128 cores/SM default).\n", major, minor);
+	return 128;
 }
 // end of GPU Architecture definitions
 

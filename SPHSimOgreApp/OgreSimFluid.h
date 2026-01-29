@@ -4,28 +4,15 @@
 #include "OgreSimConfig.h"
 #include "OgreCudaHelper.h"
 
-#include <OgrePlatform.h>
-#include <OgreCamera.h>
-#include <OgreEntity.h>
-#include <OgreLogManager.h>
-#include <OgreRoot.h>
-#include <OgreViewport.h>
-#include <OgreSceneManager.h>
-#include <OgreRenderWindow.h>
+#include <Ogre.h>
+#include <OgreInput.h>
+#include <OgreTrays.h>
+#include <OgreCameraMan.h>
 
-#include <OISEvents.h>
-#include <OISInputManager.h>
-#include <OISKeyboard.h>
-#include <OISMouse.h>
-
-#include <SdkTrays.h>
-#include <SdkCameraMan.h>
-
-#include <Terrain\OgreTerrain.h>
-#include <Terrain\OgreTerrainGroup.h>
-#include <Terrain\OgreTerrainQuadTreeNode.h>
-#include <Terrain\OgreTerrainMaterialGeneratorA.h>
-//#include <Terrain\OgreTerrainPaging.h>
+#include <Terrain/OgreTerrain.h>
+#include <Terrain/OgreTerrainGroup.h>
+#include <Terrain/OgreTerrainQuadTreeNode.h>
+#include <Terrain/OgreTerrainMaterialGeneratorA.h>
 
 #include "OgreSimTerrain.h"
 #include "OgreCudaHelper.h"
@@ -37,7 +24,7 @@
 
 namespace OgreSim
 {
-	class OgreSimFluid : public Ogre::FrameListener//, public OIS::KeyListener, public OIS::MouseListener
+	class OgreSimFluid : public Ogre::FrameListener
 	{
 	public:
 		OgreSimFluid(OgreSim::Config *config);
@@ -47,10 +34,11 @@ namespace OgreSim
 		void destroyScene(Ogre::RenderWindow* renderWindow, Ogre::SceneManager* mSceneMgr);
 
 		bool frameRenderingQueued(const Ogre::FrameEvent& evt);
-		bool frameStarted (const Ogre::FrameEvent &evt);
-		bool frameEnded (const Ogre::FrameEvent &evt);
+		bool frameStarted(const Ogre::FrameEvent &evt);
+		bool frameEnded(const Ogre::FrameEvent &evt);
 
-		bool keyPressed (OIS::Keyboard* keyboard, const OIS::KeyEvent &e);
+		// Updated for Ogre 14.x SDL2 input
+		bool keyPressed(const OgreBites::KeyboardEvent& evt, bool ctrlDown, bool shiftDown);
 
 		Ogre::SceneNode* mParticlesNode;
 		OgreSimRenderable *mParticlesEntity;
@@ -59,11 +47,11 @@ namespace OgreSim
 
 	private:
 		Ogre::RenderWindow* mRenderWindow;
-		void OgreSimFluid::setParticleMaterial(Ogre::String particleMaterial);
+		void setParticleMaterial(Ogre::String particleMaterial);
 		void configureTerrain(OgreSimTerrain* terrain);
 
 		void SetScene(int scene);
-		void FillTestData(int scene, SimLib::Sim::ParticleData &hParticles) ;
+		void FillTestData(int scene, SimLib::Sim::ParticleData &hParticles);
 
 		OgreSim::Config *mSnowConfig;
 		OgreSim::OgreCudaHelper* mOgreCudaHelper;

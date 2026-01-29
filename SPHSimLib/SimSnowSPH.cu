@@ -70,7 +70,7 @@ SimSnowSPH::SimSnowSPH(SimLib::SimCudaAllocator* simCudaAllocator, SimLib::SimCu
 	mSettings->AddSetting("Rest Density", 1000, 0, 10000, "kg / m^3");
 	mSettings->AddSetting("Rest Pressure", 0, 0, 10000, "");
 	mSettings->AddSetting("Ideal Gas Constant", 1.5, 0.001, 10, "");
-	mSettings->AddSetting("Viscosity", 1, 0, 100, "Pa·s");
+	mSettings->AddSetting("Viscosity", 1, 0, 100, "Paï¿½s");
 
  	mSettings->AddSetting("Boundary Stiffness", 20000, 0, 100000, "");
  	mSettings->AddSetting("Boundary Dampening", 256, 0, 10000, "");
@@ -170,11 +170,11 @@ void SimSnowSPH::UpdateParams()
 
 	//Copy the grid parameters to the GPU	
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cGridParams, &hGridParams, sizeof(GridParams) ) );
-	CUDA_SAFE_CALL(cudaThreadSynchronize());
+	CUDA_SAFE_CALL(cudaDeviceSynchronize());
 
-	//Copy the fluid parameters to the GPU	
+	//Copy the fluid parameters to the GPU
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cFluidParams, &hFluidParams, sizeof(SnowSPHFluidParams) ) );
-	CUDA_SAFE_CALL(cudaThreadSynchronize());
+	CUDA_SAFE_CALL(cudaDeviceSynchronize());
 
 	//Copy the precalc parameters to the GPU	
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cPrecalcParams, &hPrecalcParams, sizeof(SnowSPHPrecalcParams) ) );

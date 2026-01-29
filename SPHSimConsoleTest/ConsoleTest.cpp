@@ -82,7 +82,7 @@ void testFluidSimLive(SimLib::SimCudaHelper* simCudaHelper)
 		cout << setw(15) << setprecision(1) <<  totalavg;
 		cout << "\r";
 	}
-	cudaThreadSynchronize();	
+	cudaDeviceSynchronize();
 
 	// 	totalTimer->stop();
 	// 	double totalTime = totalTimer->elapsed_ms();
@@ -124,9 +124,9 @@ void testFluidSim(SimLib::SimCudaHelper* simCudaHelper)
 	{
 		system->Simulate(true, true);
 	}
-	cudaThreadSynchronize();
+	cudaDeviceSynchronize();
 
-	
+
 	totalTimer->stop();
 	double totalTime = totalTimer->elapsed_ms();
 	cout << "Total ms: " << totalTime << "\n";
@@ -180,7 +180,7 @@ void testPerformanceScaling(SimLib::SimCudaHelper* simCudaHelper)
 			system->Simulate(true, true);
 			//cout << "\r" << i << "/" << ITERATIONS;
 		}
-		cudaThreadSynchronize();	
+		cudaDeviceSynchronize();
 
 		totalTimer->stop();
 		double totalTime = totalTimer->elapsed_ms();

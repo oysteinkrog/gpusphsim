@@ -27,7 +27,7 @@ namespace OgreSim
 		material->getTechnique(0)->getPass(0)->setLightingEnabled(false);
 		material->getTechnique(0)->getPass(0)->setDepthWriteEnabled(false);
 		material->getTechnique(0)->getPass(0)->setVertexColourTracking(Ogre::TVC_DIFFUSE);
-		setMaterial("CudaVertexBufferMaterial");
+		setMaterial(material);
 	}
 
 	OgreSimRenderable::~OgreSimRenderable()

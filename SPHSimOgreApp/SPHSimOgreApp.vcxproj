@@ -35,37 +35,37 @@
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>false</WholeProgramOptimization>
-    <PlatformToolset>v90</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>false</WholeProgramOptimization>
-    <PlatformToolset>v90</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>false</WholeProgramOptimization>
-    <PlatformToolset>v90</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>false</WholeProgramOptimization>
-    <PlatformToolset>v90</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>false</WholeProgramOptimization>
-    <PlatformToolset>v90</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>false</WholeProgramOptimization>
-    <PlatformToolset>v90</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -88,7 +88,9 @@
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="UserMacros">
+    <OGRE_HOME>C:\WORK\ogre\install</OGRE_HOME>
+  </PropertyGroup>
   <PropertyGroup>
     <_ProjectFileVersion>10.0.31118.1</_ProjectFileVersion>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(SolutionDir)\build\Win_32_$(Configuration)\</OutDir>
@@ -133,7 +135,7 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
       <WholeProgramOptimization>false</WholeProgramOptimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>true</MinimalRebuild>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -150,7 +152,7 @@
     <Link>
       <AdditionalDependencies>OgreMain_d.lib;OIS_d.lib;OgreTerrain_d.lib;OgrePaging_d.lib;RenderSystem_Direct3D9_d.lib;RenderSystem_GL_d.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
-      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\lib\x64;$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>LIBCMTD;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -184,7 +186,7 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
       <WholeProgramOptimization>false</WholeProgramOptimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\include\OGRE\Bites;$(OGRE_HOME)\include\OGRE\Overlay;$(OGRE_HOME)\include\OGRE\Terrain;$(OGRE_HOME)\include\OGRE\Paging;$(OGRE_HOME)\include\OGRE\RTShaderSystem;$(OGRE_HOME)\include\OGRE\RenderSystems\GL3Plus;C:\WORK\ogre\build\Dependencies\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_CRT_SECURE_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>false</MinimalRebuild>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -200,9 +202,9 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
       <CompileAsManaged>false</CompileAsManaged>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>OgreMain_d.lib;OIS_d.lib;OgreTerrain_d.lib;OgrePaging_d.lib;RenderSystem_Direct3D9_d.lib;RenderSystem_GL_d.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>OgreMain.lib;OgreBites.lib;OgreOverlay.lib;OgreTerrain.lib;OgrePaging.lib;OgreRTShaderSystem.lib;SDL2.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
-      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\lib\x64;$(OGRE_HOME)\lib;C:\WORK\ogre\build\Dependencies\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>LIBCMTD;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -218,16 +220,17 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
       <Profile>false</Profile>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9_d.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\OgreMain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreBites.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreOverlay.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgrePaging.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreTerrain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreRTShaderSystem.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\SDL2.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\RenderSystem_GL3Plus.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\Codec_STBI.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\zlib.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\pugixml.dll" "$(OutDir)"
 </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -240,7 +243,7 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <OmitFramePointers>true</OmitFramePointers>
       <WholeProgramOptimization>false</WholeProgramOptimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <StringPooling>true</StringPooling>
       <MinimalRebuild>true</MinimalRebuild>
@@ -259,7 +262,7 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL_d.dll" "$(OutDir)"
     <Link>
       <AdditionalDependencies>OgreMain.lib;OIS.lib;OgreTerrain.lib;OgrePaging.lib;RenderSystem_Direct3D9.lib;RenderSystem_GL.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
-      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\lib\x64;$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -292,7 +295,7 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <WholeProgramOptimization>false</WholeProgramOptimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <StringPooling>true</StringPooling>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -311,7 +314,7 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
     <Link>
       <AdditionalDependencies>OgreMain.lib;OIS.lib;OgreTerrain.lib;OgrePaging.lib;RenderSystem_Direct3D9.lib;RenderSystem_GL.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
-      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\Release\;$(OGRE_HOME)\lib\Release\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\lib\x64;$(OGRE_HOME)\lib\Release\;$(OGRE_HOME)\lib\Release\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -349,7 +352,7 @@ xcopy /Y "$(OGRE_HOME)\bin\Release\RenderSystem_GL.dll" "$(OutDir)"
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <OmitFramePointers>true</OmitFramePointers>
       <WholeProgramOptimization>false</WholeProgramOptimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\include\OGRE\Bites;$(OGRE_HOME)\include\OGRE\Overlay;$(OGRE_HOME)\include\OGRE\Terrain;$(OGRE_HOME)\include\OGRE\Paging;$(OGRE_HOME)\include\OGRE\RTShaderSystem;$(OGRE_HOME)\include\OGRE\RenderSystems\GL3Plus;C:\WORK\ogre\build\Dependencies\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <StringPooling>true</StringPooling>
       <MinimalRebuild>true</MinimalRebuild>
@@ -368,9 +371,9 @@ xcopy /Y "$(OGRE_HOME)\bin\Release\RenderSystem_GL.dll" "$(OutDir)"
       <CompileAsManaged>false</CompileAsManaged>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>OgreMain.lib;OIS.lib;OgreTerrain.lib;OgrePaging.lib;RenderSystem_Direct3D9.lib;RenderSystem_GL.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>OgreMain.lib;OgreBites.lib;OgreOverlay.lib;OgreTerrain.lib;OgrePaging.lib;OgreRTShaderSystem.lib;SDL2.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
-      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\$(Configuration)\;$(OGRE_HOME)\lib\$(Configuration)\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\lib\x64;$(OGRE_HOME)\lib;C:\WORK\ogre\build\Dependencies\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -383,16 +386,17 @@ xcopy /Y "$(OGRE_HOME)\bin\Release\RenderSystem_GL.dll" "$(OutDir)"
       <Profile>false</Profile>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\cg.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreMain.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgrePaging.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreProperty.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreRTShaderSystem.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OgreTerrain.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\OIS.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\Plugin_CgProgramManager.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_Direct3D9.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\OgreMain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreBites.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreOverlay.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgrePaging.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreTerrain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreRTShaderSystem.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\SDL2.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\RenderSystem_GL3Plus.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\Codec_STBI.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\zlib.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\pugixml.dll" "$(OutDir)"
 </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -406,7 +410,7 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <WholeProgramOptimization>false</WholeProgramOptimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;$(CUDA_PATH)\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OIS;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\Samples\Common\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;$(BOOST_HOME);..\SPHSimLib;include;$(OGRE_HOME)\include\OGRE;$(OGRE_HOME)\include\OGRE\Bites;$(OGRE_HOME)\include\OGRE\Overlay;$(OGRE_HOME)\include\OGRE\Terrain;$(OGRE_HOME)\include\OGRE\Paging;$(OGRE_HOME)\include\OGRE\RTShaderSystem;$(OGRE_HOME)\include\OGRE\RenderSystems\GL3Plus;C:\WORK\ogre\build\Dependencies\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <StringPooling>true</StringPooling>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -424,9 +428,9 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
       <OmitFramePointers>false</OmitFramePointers>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>OgreMain.lib;OIS.lib;OgreTerrain.lib;OgrePaging.lib;RenderSystem_Direct3D9.lib;RenderSystem_GL.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>OgreMain.lib;OgreBites.lib;OgreOverlay.lib;OgreTerrain.lib;OgrePaging.lib;OgreRTShaderSystem.lib;SDL2.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
-      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);$(CUDA_PATH)\lib\$(Platform);$(OGRE_HOME)\lib\Release\;$(OGRE_HOME)\lib\Release\opt;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(BOOST_HOME)\lib$(PlatformArchitecture);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\lib\x64;$(OGRE_HOME)\lib;C:\WORK\ogre\build\Dependencies\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>LIBCMT;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -439,16 +443,17 @@ xcopy /Y "$(OGRE_HOME)\bin\$(Configuration)\RenderSystem_GL.dll" "$(OutDir)"
       <Profile>false</Profile>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /Y "$(OGRE_HOME)\bin\Release\cg.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\OgreMain.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\OgrePaging.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\OgreProperty.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\OgreRTShaderSystem.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\OgreTerrain.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\OIS.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\Plugin_CgProgramManager.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\RenderSystem_Direct3D9.dll" "$(OutDir)"
-xcopy /Y "$(OGRE_HOME)\bin\Release\RenderSystem_GL.dll" "$(OutDir)"
+      <Command>xcopy /Y "$(OGRE_HOME)\bin\OgreMain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreBites.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreOverlay.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgrePaging.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreTerrain.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\OgreRTShaderSystem.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\SDL2.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\RenderSystem_GL3Plus.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\Codec_STBI.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\zlib.dll" "$(OutDir)"
+xcopy /Y "$(OGRE_HOME)\bin\pugixml.dll" "$(OutDir)"
 </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -462,9 +467,11 @@ xcopy /Y "$(OGRE_HOME)\bin\Release\RenderSystem_GL.dll" "$(OutDir)"
     <ClCompile Include="OgreSimConfig.cpp" />
     <ClCompile Include="BaseApplication.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="OgreGLBufferHelper.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OgreSimApp.h" />
+    <ClInclude Include="OgreGLBufferHelper.h" />
     <ClInclude Include="OgreSimTerrain.h" />
     <ClInclude Include="OgreSimFluid.h" />
     <ClInclude Include="OgreCudaHelper.h" />

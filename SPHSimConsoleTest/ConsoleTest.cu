@@ -7,24 +7,26 @@
 
 typedef unsigned int uint;
 
-texture<float, 1, cudaReadModeElementType> a_tex;
-texture<float, 1, cudaReadModeElementType> b_tex;
+// Removed texture references for CUDA 12+ compatibility
+// Using direct memory access instead
 
 __global__ void testKernel(float* a, float* b)
 {
-	uint index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
+	// standard multiplication is as fast as __umul24 on sm_20+
+	uint index = blockIdx.x * blockDim.x + threadIdx.x;
 	if(index > 100) index-=100;
 
 	a[index] = 10;
 
 	__threadfence();
 
-	a[index] = tex1Dfetch(a_tex,index) + 1;
+	// Changed from tex1Dfetch to direct memory access
+	a[index] = a[index] + 1;
 
-	volatile float x = tex1Dfetch(a_tex,index);
-	x = tex1Dfetch(a_tex,index);
-	x = tex1Dfetch(a_tex,index);
-	x = tex1Dfetch(a_tex,index);
+	volatile float x = a[index];
+	x = a[index];
+	x = a[index];
+	x = a[index];
 
 
 	__threadfence();
@@ -34,7 +36,6 @@ __global__ void testKernel(float* a, float* b)
 
 	//volatile float bv = a[index+1];
 	b[index] = a[index+1];
-	//b[index] = tex1Dfetch(a_tex,index+1);
 }
 
 void testKernel()
@@ -53,14 +54,11 @@ void testKernel()
 	memset(ha,0,100*sizeof(float));
 	memset(hb,0,100*sizeof(float));
 
-
-	cudaBindTexture(0, a_tex, da, 100*sizeof(float));
-	cudaBindTexture(0, b_tex, db, 100*sizeof(float));
+	// Removed texture binding - not needed with direct memory access
 
 	testKernel<<<1,101>>>(da,db);
 
-	cudaUnbindTexture(a_tex);
-	cudaUnbindTexture(b_tex);
+	// Removed texture unbinding
 
 	cudaMemcpy(ha,da,100*sizeof(float),cudaMemcpyDeviceToHost);
 	cudaMemcpy(hb,db,100*sizeof(float),cudaMemcpyDeviceToHost);

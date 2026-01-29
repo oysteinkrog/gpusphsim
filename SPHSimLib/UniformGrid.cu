@@ -102,7 +102,7 @@ void UniformGrid::Alloc(uint numParticles, float cellWorldSize, float gridWorldS
 
 	//Copy the grid parameters to the GPU	
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol (cGridParams, &dGridParams, sizeof(GridParams) ) );
-	CUDA_SAFE_CALL(cudaThreadSynchronize());
+	CUDA_SAFE_CALL(cudaDeviceSynchronize());
 
 	mAlloced = true;
 }

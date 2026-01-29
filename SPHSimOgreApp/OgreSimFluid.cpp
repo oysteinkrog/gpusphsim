@@ -1,4 +1,5 @@
 #include "OgreSimFluid.h"
+// OgreBites provides SDLK_* keycodes via OgreInput.h
 
 using namespace Ogre;
 using namespace OgreBites;
@@ -52,14 +53,18 @@ namespace OgreSim
 
 	void OgreSimFluid::setParticleMaterial(Ogre::String particleMaterial)
 	{
-		// Set a material for particles
-		mParticlesEntity->setMaterial(particleMaterial);
+		// Set a material for particles (Ogre 14.x uses MaterialPtr, not string)
+		Ogre::MaterialPtr mat = MaterialManager::getSingleton().getByName(particleMaterial);
+		if (mat)
+		{
+			mParticlesEntity->setMaterial(mat);
+		}
 		// Configure the particle shader (set ball size)
 		Ogre::Technique *technique = mParticlesEntity->getMaterial()->getTechnique(0);
 		Ogre::Pass *pass = technique->getPass(0);
 		GpuProgramParametersSharedPtr params = pass->getVertexProgramParameters();
 
-		if(!params.isNull())
+		if(params)
 		{
 			if (params->_findNamedConstantDefinition("pointRadius"))
 				params->setNamedConstant( "pointRadius", mParticlesNode->getScale().x*(mParticleSystem->GetParticleSize()) );
@@ -93,16 +98,21 @@ namespace OgreSim
 			mParticleSystem->Init();
 
 
-			Ogre::ConfigFile::SettingsIterator iter = mSnowConfig->getCfg()->getSettingsIterator("FluidParams");
-			while(iter.hasMoreElements())
+			// Ogre 14.x: Use range-based iteration for ConfigFile
+			Ogre::ConfigFile* cfg = mSnowConfig->getCfg();
+			auto settings = cfg->getSettingsBySection();
+			auto it = settings.find("FluidParams");
+			if (it != settings.end())
 			{
-				String name = iter.peekNextKey();
-				String value = iter.getNext();
-				float val =  StringConverter::parseReal(value);
+				for (const auto& setting : it->second)
+				{
+					const String& name = setting.first;
+					const String& value = setting.second;
+					float val = StringConverter::parseReal(value);
 
-
-				if(!StringUtil::startsWith(name, "//"))
-					mParticleSystem->GetSettings()->SetValue(name, val);
+					if(!StringUtil::startsWith(name, "//"))
+						mParticleSystem->GetSettings()->SetValue(name, val);
+				}
 			}
 
 			mVolumeSize = mParticleSystem->GetSettings()->GetValue("Grid World Size");
@@ -185,41 +195,41 @@ namespace OgreSim
 	}
 
 
-	bool OgreSimFluid::keyPressed (OIS::Keyboard* keyboard, const OIS::KeyEvent &evt)
+	bool OgreSimFluid::keyPressed(const OgreBites::KeyboardEvent& evt, bool ctrlDown, bool shiftDown)
 	{
-		switch (evt.key)
+		switch (evt.keysym.sym)
 		{
-		case OIS::KC_1:
+		case '1':
 			SetScene(1);
 			break;
-		case OIS::KC_2:
+		case '2':
 			SetScene(2);
 			break;
-		case OIS::KC_3:
+		case '3':
 			SetScene(3);
 			break;
-		case OIS::KC_4:
+		case '4':
 			SetScene(4);
 			break;
-		case OIS::KC_5:
+		case '5':
 			SetScene(5);
 			break;
-		case OIS::KC_6:
+		case '6':
 			SetScene(6);
 			break;
-		case OIS::KC_7:
+		case '7':
 			SetScene(7);
 			break;
-		case OIS::KC_8:
+		case '8':
 			SetScene(8);
 			break;
-		case OIS::KC_9:
+		case '9':
 			SetScene(9);
 			break;
 
 
 		// show fluid grid
-		case OIS::KC_G:
+		case 'g':
 			{
 				if(!mSnowConfig->fluidSettings.enabled)break;
 
@@ -231,12 +241,12 @@ namespace OgreSim
 					mFluidGridNode->attachObject(mFluidGridObject);
 			}
 			break;
-		case OIS::KC_O:
+		case 'o':
 			{
 				mProgress = !mProgress;
 			}
 			break;
-		case OIS::KC_LEFT:
+		case SDLK_LEFT:
 			{
 				Vector3 pos = mParticlesNode->getPosition();
 				pos.x += 10;
@@ -245,7 +255,7 @@ namespace OgreSim
 				mParticleSystem->SetFluidPosition(make_float3(mParticlesNode->getPosition().x, mParticlesNode->getPosition().y, mParticlesNode->getPosition().z));
 			}
 			break;
-		case OIS::KC_RIGHT:
+		case SDLK_RIGHT:
 			{
 				Vector3 pos = mParticlesNode->getPosition();
 				pos.x -= 10;
@@ -254,10 +264,10 @@ namespace OgreSim
 				mParticleSystem->SetFluidPosition(make_float3(mParticlesNode->getPosition().x, mParticlesNode->getPosition().y, mParticlesNode->getPosition().z));
 			}
 			break;
-		case OIS::KC_UP:
+		case SDLK_UP:
 			{
 				Vector3 pos = mParticlesNode->getPosition();
-				if (keyboard->isKeyDown(OIS::KC_LSHIFT) || keyboard->isKeyDown(OIS::KC_RSHIFT))
+				if (shiftDown)
 					pos.y += 10;
 				else
 					pos.z += 10;
@@ -266,10 +276,10 @@ namespace OgreSim
 				mParticleSystem->SetFluidPosition(make_float3(mParticlesNode->getPosition().x, mParticlesNode->getPosition().y, mParticlesNode->getPosition().z));
 			}
 			break;
-		case OIS::KC_DOWN:
+		case SDLK_DOWN:
 			{
 				Vector3 pos = mParticlesNode->getPosition();
-				if (keyboard->isKeyDown(OIS::KC_LSHIFT) || keyboard->isKeyDown(OIS::KC_RSHIFT))
+				if (shiftDown)
 					pos.y -= 10;
 				else
 					pos.z -= 10;
@@ -280,12 +290,12 @@ namespace OgreSim
 			break;
 
 
-		case OIS::KC_PGUP:
+		case SDLK_PAGEUP:
 			{
 				if(!mSnowConfig->fluidSettings.enabled)break;
 
 
-				if (keyboard->isKeyDown(OIS::KC_LSHIFT) || keyboard->isKeyDown(OIS::KC_RSHIFT))
+				if (shiftDown)
 					mNumParticles *=2;
 				else
 					mNumParticles += 1000;
@@ -299,11 +309,11 @@ namespace OgreSim
 			}
 			break;
 
-		case OIS::KC_PGDOWN:
+		case SDLK_PAGEDOWN:
 			{
 				if(!mSnowConfig->fluidSettings.enabled)break;
 
-				if (keyboard->isKeyDown(OIS::KC_LSHIFT) || keyboard->isKeyDown(OIS::KC_RSHIFT))
+				if (shiftDown)
 					mNumParticles /=2;
 				else
 					mNumParticles -= 1000;
@@ -317,10 +327,10 @@ namespace OgreSim
 			}
 			break;
 
-		case OIS::KC_ADD:
+		case SDLK_KP_PLUS:
 			{
 				float timestep = mParticleSystem->GetSettings()->GetValue("Timestep");
-				if (keyboard->isKeyDown(OIS::KC_LSHIFT) || keyboard->isKeyDown(OIS::KC_RSHIFT))
+				if (shiftDown)
 					timestep += 0.0001f;
 				else
 					timestep += 0.00001f;
@@ -328,11 +338,11 @@ namespace OgreSim
 			}
 			break;
 
-		case OIS::KC_SUBTRACT:
+		case SDLK_KP_MINUS:
 			{
 				float timestep = mParticleSystem->GetSettings()->GetValue("Timestep");
 
-				if (keyboard->isKeyDown(OIS::KC_LSHIFT) || keyboard->isKeyDown(OIS::KC_RSHIFT))
+				if (shiftDown)
 					timestep -= 0.0001f;
 				else
 					timestep -= 0.00001f;

@@ -18,7 +18,8 @@ __global__ void K_Integrate(int				numParticles,
 								TerrainData		dTerrainData
 								) 
 {
-	int index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
+	// standard multiplication is as fast as __umul24 on sm_20+
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index >= numParticles) return;
 
 	float3 pos			= make_float3(FETCH_NOTEX(dParticleDataSorted, position, index));

@@ -1,4 +1,5 @@
 #include "OgreSimTerrain.h"
+// OgreBites provides SDLK_* keycodes via OgreInput.h
 
 #define TERRAIN_PAGE_MIN_X 0
 #define TERRAIN_PAGE_MIN_Y 0
@@ -31,28 +32,7 @@ namespace OgreSim
 	{
 		mTerrainPos = snowConfig->sceneSettings.terrainPosition;
 
-	// 	Ogre::Image combined;
-	//
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_base.bmp", "terrain_1024_alpine3_shader_base_SPEC.bmp",
-	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
-	// 	combined.save("terrain_1024_alpine3_shader_base_diffusespecular.png");
-	//
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_base_NORM.tga", "terrain_1024_alpine3_shader_base_DISP.bmp",
-	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
-	// 	combined.save("terrain_1024_alpine3_shader_base_normalheight.png");
-	//
-	//
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_white.bmp", "terrain_1024_alpine3_shader_white_SPEC.bmp",
-	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
-	// 	combined.save("terrain_1024_alpine3_shader_white_diffusespecular.png");
-	//
-	// 	combined.loadTwoImagesAsRGBA("terrain_1024_alpine3_shader_white_NORM.tga", "terrain_1024_alpine3_shader_white_DISP.bmp",
-	// 		Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, Ogre::PF_BYTE_RGBA);
-	// 	combined.save("terrain_1024_alpine3_shader_white_normalheight.png");
-
 		// Update terrain at max 20fps
-
-
 		mTerrainGlobals = OGRE_NEW TerrainGlobalOptions();
 
 	}
@@ -115,7 +95,7 @@ namespace OgreSim
 		size_t textureLayers = std::max(diffSpecList.size(), normalHeightList.size());
 
 		defaultimp.layerList.resize(std::max((size_t)1,textureLayers));
-		for(int i = 0; i < textureLayers; i++)
+		for(size_t i = 0; i < textureLayers; i++)
 		{
 			defaultimp.layerList[i].worldSize =  mTerrainWorldSize;
 			if(diffSpecList.size() >= i)
@@ -169,30 +149,6 @@ namespace OgreSim
 			}
 
 		}
-	// 	if (mTerrainGroup->isDerivedDataUpdateInProgress())
-	// 	{
-	// 		mTrayMgr->moveWidgetToTray(mInfoLabel, TL_TOP, 0);
-	// 		mInfoLabel->show();
-	// 		if (mTerrainsImported)
-	// 		{
-	// 			mInfoLabel->setCaption("Building terrain, please wait...");
-	// 		}
-	// 		else
-	// 		{
-	// 			mInfoLabel->setCaption("Updating textures, patience...");
-	// 		}
-	//
-	// 	}
-	// 	else
-	// 	{
-	// 		mTrayMgr->removeWidgetFromTray(mInfoLabel);
-	// 		mInfoLabel->hide();
-	// 		if (mTerrainsImported)
-	// 		{
-	// 			saveTerrains(true);
-	// 			mTerrainsImported = false;
-	// 		}
-	// 	}
 		return true;
 	}
 
@@ -262,7 +218,7 @@ namespace OgreSim
 		TextureLayerFileList blendImages = mSnowConfig->terrainSettings.textureBlendFileList;
 
 		// load those blendmaps into the layers
-		for(int j = 0;j < terrain->getLayerCount();j++)
+		for(size_t j = 0;j < terrain->getLayerCount();j++)
 		{
 			// skip first layer
 			if(j==0)
@@ -277,7 +233,7 @@ namespace OgreSim
 
 			img.load(blendImages[j],"General");
 			int blendmapsize = terrain->getLayerBlendMapSize();
-			if(img.getWidth() != blendmapsize)
+			if(img.getWidth() != static_cast<size_t>(blendmapsize))
 				img.resize(blendmapsize, blendmapsize);
 
 			float *ptr = blendmap->getBlendPointer();
@@ -300,11 +256,11 @@ namespace OgreSim
 	}
 
 
-	bool OgreSimTerrain::keyPressed (const OIS::KeyEvent &evt)
+	bool OgreSimTerrain::keyPressed(const OgreBites::KeyboardEvent& evt)
 	{
-		switch (evt.key)
+		switch (evt.keysym.sym)
 		{
-			case OIS::KC_N:
+			case 'n':
 				mSnowConfig->terrainSettings.showDebugNormals = !mSnowConfig->terrainSettings.showDebugNormals;
 
 				if(mSceneMgr != NULL)

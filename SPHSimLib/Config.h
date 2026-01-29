@@ -1,6 +1,8 @@
-#define SPHSIMLIB_3D_SUPPORT
+// Disabled for build without DirectX SDK
+//#define SPHSIMLIB_3D_SUPPORT
 #define SPHSIMLIB_VEC_TYPE_FLOAT4
-#define SPHSIMLIB_USE_TEXTURES
+// Disabled for CUDA 12+ compatibility (texture references removed)
+//#define SPHSIMLIB_USE_TEXTURES
 //#define SPHSIMLIB_USE_NEIGHBORLIST
 
 //#define SPHSIMLIB_USE_CUDPP_SORT

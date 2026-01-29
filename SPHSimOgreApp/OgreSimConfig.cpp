@@ -1,3 +1,5 @@
+// Updated for Ogre 14.x - Uses range-based iteration for ConfigFile
+
 #include "OgreSimConfig.h"
 
 using namespace Ogre;
@@ -9,15 +11,16 @@ namespace OgreSim {
 	{
 		Ogre::LogManager::getSingleton().logMessage("*** Loading OgreSnow configuration ***");
 
-		//mCfg->load(configFileName);
 		mCfg = new Ogre::ConfigFile();
-		mCfg->loadFromResourceSystem(configFileName, "Essential");
+		// Load directly from filesystem since resource groups aren't set up yet
+		mCfg->load(configFileName);
 
 		loadConfig();
 	}
 
 	Config::~Config()
 	{
+		delete mCfg;
 	}
 
 	void Config::loadConfig()
@@ -28,32 +31,37 @@ namespace OgreSim {
 		generalSettings.showOgreConfigDialog = true;
 		generalSettings.showOgreGui = true;
 
-		Ogre::ConfigFile::SettingsIterator iter = mCfg->getSettingsIterator("General");
-		while(iter.hasMoreElements())
+		// Ogre 14.x: Use getSettingsBySection() with range-based iteration
+		auto sections = mCfg->getSettingsBySection();
+		auto generalIt = sections.find("General");
+		if (generalIt != sections.end())
 		{
-			String name = iter.peekNextKey();
-			Ogre::StringUtil::toLowerCase(name);
-			String value = iter.getNext();
+			for (const auto& setting : generalIt->second)
+			{
+				String name = setting.first;
+				Ogre::StringUtil::toLowerCase(name);
+				const String& value = setting.second;
 
-			if(name == "cudadevice")
-			{
-				generalSettings.cudadevice = StringConverter::parseUnsignedInt(value);
-			}
-			else if(name == "loglevel")
-			{
-				generalSettings.logLevel = (Ogre::LoggingLevel)StringConverter::parseUnsignedInt(value);
-			}
-			else if(name == "showogreconfigdialog")
-			{
-				generalSettings.showOgreConfigDialog = (Ogre::LoggingLevel)StringConverter::parseBool(value);
-			}
-			else if(name == "showogregui")
-			{
-				generalSettings.showOgreGui = (Ogre::LoggingLevel)StringConverter::parseBool(value);
-			}
-			else if(name == "fluidshader")
-			{
-				generalSettings.fluidShader = value;
+				if(name == "cudadevice")
+				{
+					generalSettings.cudadevice = StringConverter::parseUnsignedInt(value);
+				}
+				else if(name == "loglevel")
+				{
+					generalSettings.logLevel = (Ogre::LoggingLevel)StringConverter::parseUnsignedInt(value);
+				}
+				else if(name == "showogreconfigdialog")
+				{
+					generalSettings.showOgreConfigDialog = StringConverter::parseBool(value);
+				}
+				else if(name == "showogregui")
+				{
+					generalSettings.showOgreGui = StringConverter::parseBool(value);
+				}
+				else if(name == "fluidshader")
+				{
+					generalSettings.fluidShader = value;
+				}
 			}
 		}
 
@@ -65,56 +73,58 @@ namespace OgreSim {
 	void Config::loadSceneConfig()
 	{
 		// defaults
-		//sceneSettings.skyBoxMaterial = "Examples/CloudyNoonSkyBox";
-
 		sceneSettings.cameraPosition = Ogre::Vector3(0,0,0);
 		sceneSettings.fluidPosition = Ogre::Vector3(0,0,0);
 		sceneSettings.terrainPosition = Ogre::Vector3(0,0,0);
 		sceneSettings.cameraOrientation = Ogre::Quaternion(0,0,0,0);
 		sceneSettings.fluidScene = 9;
 
-		Ogre::ConfigFile::SettingsIterator iter = mCfg->getSettingsIterator("Scene");
-		while(iter.hasMoreElements())
+		auto sections = mCfg->getSettingsBySection();
+		auto sceneIt = sections.find("Scene");
+		if (sceneIt != sections.end())
 		{
-			String name = iter.peekNextKey();
-			Ogre::StringUtil::toLowerCase(name);
-			String value = iter.getNext();
+			for (const auto& setting : sceneIt->second)
+			{
+				String name = setting.first;
+				Ogre::StringUtil::toLowerCase(name);
+				const String& value = setting.second;
 
-			if(name == "skyboxmaterial")
-			{
-				sceneSettings.skyBoxMaterial = value;
-			}
-			else if(name == "cameratelativetofluid")
-			{
-				sceneSettings.cameraRelativeToFluid = StringConverter::parseBool(value);
-			}
-			else if(name == "cameraposition")
-			{
-				sceneSettings.cameraPosition = StringConverter::parseVector3(value);
-			}
-			else if(name == "cameraorientation")
-			{
-				sceneSettings.cameraOrientation = StringConverter::parseQuaternion(value);
-			}
-			else if(name == "fluidposition")
-			{
-				sceneSettings.fluidPosition = StringConverter::parseVector3(value);
-			}
-			else if(name == "terrainposition")
-			{
-				sceneSettings.terrainPosition = StringConverter::parseVector3(value);
-			}
-			else if(name == "backgroundcolor")
-			{
-				sceneSettings.backgroundColor = StringConverter::parseColourValue(value);
-			}
-			else if(name == "fluidgridcolor")
-			{
-				sceneSettings.fluidGridColor = StringConverter::parseColourValue(value);
-			}
-			else if(name == "fluidscene")
-			{
-				sceneSettings.fluidScene = StringConverter::parseUnsignedInt(value);
+				if(name == "skyboxmaterial")
+				{
+					sceneSettings.skyBoxMaterial = value;
+				}
+				else if(name == "cameratelativetofluid")
+				{
+					sceneSettings.cameraRelativeToFluid = StringConverter::parseBool(value);
+				}
+				else if(name == "cameraposition")
+				{
+					sceneSettings.cameraPosition = StringConverter::parseVector3(value);
+				}
+				else if(name == "cameraorientation")
+				{
+					sceneSettings.cameraOrientation = StringConverter::parseQuaternion(value);
+				}
+				else if(name == "fluidposition")
+				{
+					sceneSettings.fluidPosition = StringConverter::parseVector3(value);
+				}
+				else if(name == "terrainposition")
+				{
+					sceneSettings.terrainPosition = StringConverter::parseVector3(value);
+				}
+				else if(name == "backgroundcolor")
+				{
+					sceneSettings.backgroundColor = StringConverter::parseColourValue(value);
+				}
+				else if(name == "fluidgridcolor")
+				{
+					sceneSettings.fluidGridColor = StringConverter::parseColourValue(value);
+				}
+				else if(name == "fluidscene")
+				{
+					sceneSettings.fluidScene = StringConverter::parseUnsignedInt(value);
+				}
 			}
 		}
 	}
@@ -126,104 +136,96 @@ namespace OgreSim {
 		fluidSettings.enabled = false;
 		fluidSettings.showFluidGrid = true;
 
-		Ogre::ConfigFile::SettingsIterator iter = mCfg->getSettingsIterator("Fluid");
-		while(iter.hasMoreElements())
+		auto sections = mCfg->getSettingsBySection();
+		auto fluidIt = sections.find("Fluid");
+		if (fluidIt != sections.end())
 		{
-			String name = iter.peekNextKey();
-			Ogre::StringUtil::toLowerCase(name);
-			String value = iter.getNext();
+			for (const auto& setting : fluidIt->second)
+			{
+				String name = setting.first;
+				Ogre::StringUtil::toLowerCase(name);
+				const String& value = setting.second;
 
-			if(name == "simplesph")
-			{
-				fluidSettings.simpleSPH = StringConverter::parseBool(value);
-			}
-			if(name == "enabled")
-			{
-				fluidSettings.enabled = StringConverter::parseBool(value);
-			}
-			if(name == "enablekerneltiming")
-			{
-				fluidSettings.enableKernelTiming = StringConverter::parseBool(value);
-			}
-			else if(name == "showfluidgrid")
-			{
-				fluidSettings.showFluidGrid = StringConverter::parseBool(value);
-			}
-			else if(name == "gridwallcollisions")
-			{
-				fluidSettings.gridWallCollisions = StringConverter::parseBool(value);
-			}
-			else if(name == "terraincollisions")
-			{
-				fluidSettings.terrainCollisions = StringConverter::parseBool(value);
+				if(name == "simplesph")
+				{
+					fluidSettings.simpleSPH = StringConverter::parseBool(value);
+				}
+				if(name == "enabled")
+				{
+					fluidSettings.enabled = StringConverter::parseBool(value);
+				}
+				if(name == "enablekerneltiming")
+				{
+					fluidSettings.enableKernelTiming = StringConverter::parseBool(value);
+				}
+				else if(name == "showfluidgrid")
+				{
+					fluidSettings.showFluidGrid = StringConverter::parseBool(value);
+				}
+				else if(name == "gridwallcollisions")
+				{
+					fluidSettings.gridWallCollisions = StringConverter::parseBool(value);
+				}
+				else if(name == "terraincollisions")
+				{
+					fluidSettings.terrainCollisions = StringConverter::parseBool(value);
+				}
 			}
 		}
 	}
 
 	void Config::loadTerrainConfig()
 	{
-		Ogre::ConfigFile::SettingsIterator iter = mCfg->getSettingsIterator("Terrain");
-
 		// defaults
 		terrainSettings.enabled = false;
 		terrainSettings.showDebugNormals = false;
 		terrainSettings.flat = true;
-		//terrainSettings.heightDataFile = "terrain_2048_alpine3_height_raw32.raw";
-		//terrainSettings.normalsDataFile = "terrain_2048_alpine3_normal.bmp";
 		terrainSettings.worldSize = 2250.0f;
 		terrainSettings.worldScale = 376.0f;
 		terrainSettings.size = 4097;
 
-/*
-		normalheightImages[1] = "terrain_1024_alpine3_shader_white_normalheight.png";
-		normalheightImages[2] = "terrain_1024_alpine3_shader_white_normalheight.png";
-		normalheightImages[3] = "terrain_1024_alpine3_shader_white_normalheight.png";
-
-		blendImages[0] = "";
-		blendImages[1] = "terrain_4096_alpine3_select_thinflowsdeep0.bmp";
-		blendImages[2] = "terrain_4096_alpine3_select_sediment0_sedimente.bmp";
-		blendImages[3] = "terrain_4096_alpine3_select_selection6.bmp";
-*/
-
-
-		iter = mCfg->getSettingsIterator("Terrain");
-		while(iter.hasMoreElements())
+		auto sections = mCfg->getSettingsBySection();
+		auto terrainIt = sections.find("Terrain");
+		if (terrainIt != sections.end())
 		{
-			String name = iter.peekNextKey();
-			Ogre::StringUtil::toLowerCase(name);
-			String value = iter.getNext();
+			for (const auto& setting : terrainIt->second)
+			{
+				String name = setting.first;
+				Ogre::StringUtil::toLowerCase(name);
+				const String& value = setting.second;
 
-			if(name == "enabled")
-			{
-				terrainSettings.enabled = StringConverter::parseBool(value);
-			}
-			else if(name == "showdebugnormals")
-			{
-				terrainSettings.showDebugNormals = StringConverter::parseBool(value);
-			}
-			else if(name == "flat")
-			{
-				terrainSettings.flat = StringConverter::parseBool(value);
-			}
-			else if(name == "size")
-			{
-				terrainSettings.size = StringConverter::parseUnsignedInt(value);
-			}
-			else if(name == "worldsize")
-			{
-				terrainSettings.worldSize = StringConverter::parseReal(value);
-			}
-			else if(name == "worldscale")
-			{
-				terrainSettings.worldScale = StringConverter::parseReal(value);
-			}
-			else if(name == "normalsdatafile")
-			{
-				terrainSettings.normalsDataFile = value;
-			}
-			else if(name == "heightdatafile")
-			{
-				terrainSettings.heightDataFile = value;
+				if(name == "enabled")
+				{
+					terrainSettings.enabled = StringConverter::parseBool(value);
+				}
+				else if(name == "showdebugnormals")
+				{
+					terrainSettings.showDebugNormals = StringConverter::parseBool(value);
+				}
+				else if(name == "flat")
+				{
+					terrainSettings.flat = StringConverter::parseBool(value);
+				}
+				else if(name == "size")
+				{
+					terrainSettings.size = StringConverter::parseUnsignedInt(value);
+				}
+				else if(name == "worldsize")
+				{
+					terrainSettings.worldSize = StringConverter::parseReal(value);
+				}
+				else if(name == "worldscale")
+				{
+					terrainSettings.worldScale = StringConverter::parseReal(value);
+				}
+				else if(name == "normalsdatafile")
+				{
+					terrainSettings.normalsDataFile = value;
+				}
+				else if(name == "heightdatafile")
+				{
+					terrainSettings.heightDataFile = value;
+				}
 			}
 		}
 

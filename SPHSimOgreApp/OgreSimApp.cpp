@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include "OgreSimApp.h"
+// OgreBites provides SDLK_* keycodes via OgreInput.h
 
 using namespace Ogre;
 using namespace OgreBites;
@@ -15,6 +16,11 @@ namespace OgreSim
 		: mSimulationPaused(false)
 		, mScreenCaptureFrame(0)
 		, mScreenCapture(false)
+		, mDestroyed(false)
+		, mOgreSimTerrain(nullptr)
+		, mOgreSimFluid(nullptr)
+		, mShadowMode(SHADOWS_NONE)
+		, mShadowsMenu(nullptr)
 	{
 	}
 
@@ -36,13 +42,20 @@ namespace OgreSim
 		mDestroyed = true;
 
 		// Destroy fluid
-		mOgreSimFluid->destroyScene(mWindow, mSceneMgr);
+		if (mOgreSimFluid)
+		{
+			mOgreSimFluid->destroyScene(mWindow, mSceneMgr);
+			delete mOgreSimFluid;
+			mOgreSimFluid = nullptr;
+		}
 
 		// Destroy terrain
-		mOgreSimTerrain->destroyScene(mWindow, mSceneMgr);
-
-		delete mOgreSimTerrain;
-		delete mOgreSimFluid;
+		if (mOgreSimTerrain)
+		{
+			mOgreSimTerrain->destroyScene(mWindow, mSceneMgr);
+			delete mOgreSimTerrain;
+			mOgreSimTerrain = nullptr;
+		}
 	}
 
 	//-------------------------------------------------------------------------------------
@@ -50,58 +63,50 @@ namespace OgreSim
 	{
 		mDestroyed = false;
 
-		srand ( time(NULL) );
+		srand(time(NULL));
 
 		mOgreSimTerrain = new OgreSimTerrain(mSnowConfig);
 		mOgreSimFluid = new OgreSimFluid(mSnowConfig);
 
- 		MaterialManager::getSingleton().setDefaultTextureFiltering(TFO_ANISOTROPIC);
- 		MaterialManager::getSingleton().setDefaultAnisotropy(7);
+		MaterialManager::getSingleton().setDefaultTextureFiltering(TFO_ANISOTROPIC);
+		MaterialManager::getSingleton().setDefaultAnisotropy(7);
 
 		// Setup lighting
- 		//Vector3 lightdir(0.55, -0.3, 0.75);
- 		Vector3 lightdir(00, -0.85, 0);
- 		lightdir.normalise();
+		Vector3 lightdir(0, -0.85, 0);
+		lightdir.normalise();
 
-	 	// PRIMARY LIGHT
- 		Light* primaryLight = mSceneMgr->createLight("PrimaryLight");
- 		primaryLight->setType(Light::LT_DIRECTIONAL);
- 		primaryLight->setDirection(lightdir);
- 		primaryLight->setDiffuseColour(ColourValue::White);
- 		primaryLight->setSpecularColour(ColourValue(0.4, 0.4, 0.4));
+		// PRIMARY LIGHT - In Ogre 14.x, lights must be attached to SceneNodes
+		Light* primaryLight = mSceneMgr->createLight("PrimaryLight");
+		primaryLight->setType(Light::LT_DIRECTIONAL);
+		primaryLight->setDiffuseColour(ColourValue::White);
+		primaryLight->setSpecularColour(ColourValue(0.4, 0.4, 0.4));
 
- 		mSceneMgr->setAmbientLight(ColourValue(0.2, 0.2, 0.2));
+		// Create a scene node for the light and set direction via the node
+		SceneNode* lightNode = mSceneMgr->getRootSceneNode()->createChildSceneNode();
+		lightNode->attachObject(primaryLight);
+		lightNode->setDirection(lightdir);
 
- 		mWindow->getViewport(0)->setBackgroundColour(mSnowConfig->sceneSettings.backgroundColor);
-		//ColourValue fadeColour(0.9, 0.9, 0.9);
-// 		mSceneMgr->setFog(FOG_LINEAR, fadeColour, 0.0, 500, 5000);
-		//mSceneMgr->setFog(FOG_EXP, fadeColour, 0.005);
-		//mSceneMgr->setFog(FOG_EXP2, fadeColour, 0.003);
+		mSceneMgr->setAmbientLight(ColourValue(0.2, 0.2, 0.2));
+
+		mWindow->getViewport(0)->setBackgroundColour(mSnowConfig->sceneSettings.backgroundColor);
 
 		// Set a skybox
 		mSceneMgr->setSkyBox(mSnowConfig->sceneSettings.skyBoxMaterial.length()>0, mSnowConfig->sceneSettings.skyBoxMaterial);
 
 		// Create terrain
 		if(mSnowConfig->terrainSettings.enabled)
-  			mOgreSimTerrain->createScene(mSceneMgr, primaryLight);
+			mOgreSimTerrain->createScene(mSceneMgr, primaryLight);
 
 		// Create fluid
 		mOgreSimFluid->createScene(mWindow, mSceneMgr, mOgreSimTerrain, primaryLight);
-		//mCamera->lookAt(mOgreSimFluid->mParticlesNode->getPosition());;
 
 		// Place camera
-		Vector3 cameraPos =mSnowConfig->sceneSettings.cameraPosition;
+		Vector3 cameraPos = mSnowConfig->sceneSettings.cameraPosition;
 		if(mSnowConfig->sceneSettings.cameraRelativeToFluid && mSnowConfig->fluidSettings.enabled)
 			cameraPos += mOgreSimFluid->mParticlesNode->getPosition();
 
-		mCamera->setPosition(cameraPos);
-		//mCamera->setDirection(0,100,0);
-		mCamera->setOrientation(mSnowConfig->sceneSettings.cameraOrientation);
-	// 	mCamera->setPosition(mOgreSimTerrain->mTerrainPos + Vector3(1683, 50, 2116));
-	// 	mCamera->lookAt(mOgreSimTerrain->mTerrainPos);
-	// 	mCamera->setNearClipDistance(5);
-	// 	mCamera->setNearClipDistance(0.5);
-	// 	mCamera->setFarClipDistance(500);
+		mCamera->getParentSceneNode()->setPosition(cameraPos);
+		mCamera->getParentSceneNode()->setOrientation(mSnowConfig->sceneSettings.cameraOrientation);
 		mCamera->setNearClipDistance(0.1);
 		mCamera->setFarClipDistance(50000);
 		if (mRoot->getRenderSystem()->getCapabilities()->hasCapability(RSC_INFINITE_FAR_PLANE))
@@ -119,7 +124,7 @@ namespace OgreSim
 		setupControls();
 	}
 
-	bool SnowApplication::frameStarted (const FrameEvent &evt)
+	bool SnowApplication::frameStarted(const FrameEvent &evt)
 	{
 		if(mDestroyed) return false;
 
@@ -127,7 +132,7 @@ namespace OgreSim
 		return BaseApplication::frameStarted(evt);
 	}
 
-	bool SnowApplication::frameEnded (const FrameEvent &evt)
+	bool SnowApplication::frameEnded(const FrameEvent &evt)
 	{
 		if(mDestroyed) return false;
 
@@ -147,7 +152,7 @@ namespace OgreSim
 			mWindow->writeContentsToFile(tmp);
 		}
 
- 		if(!mSimulationPaused) {
+		if(!mSimulationPaused) {
 			mOgreSimTerrain->frameRenderingQueued(evt);
 			mOgreSimFluid->frameRenderingQueued(evt);
 		}
@@ -156,12 +161,12 @@ namespace OgreSim
 	}
 
 
-	bool SnowApplication::keyPressed (const OIS::KeyEvent &evt)
+	bool SnowApplication::keyPressed(const OgreBites::KeyboardEvent& evt)
 	{
 		// toggle visibility of help dialog
-		if (evt.key == OIS::KC_H || evt.key == OIS::KC_F1)
+		if (evt.keysym.sym == 'h' || evt.keysym.sym == SDLK_F1)
 		{
-			if (!mTrayMgr->isDialogVisible())  mTrayMgr->showOkDialog("Help", "");
+			if (!mTrayMgr->isDialogVisible()) mTrayMgr->showOkDialog("Help", "");
 			else mTrayMgr->closeDialog();
 		}
 
@@ -169,20 +174,20 @@ namespace OgreSim
 		if (mTrayMgr->isDialogVisible()) return true;
 
 
-		switch (evt.key)
+		switch (evt.keysym.sym)
 		{
-		case OIS::KC_SYSRQ:
+		case SDLK_PRINTSCREEN:
 			// take a screenshot
 			{
 				mWindow->writeContentsToTimestampedFile("screenshot", ".png");
 			}
 			break;
-		case OIS::KC_F:
+		case 'f':
 			{
 				mTrayMgr->toggleAdvancedFrameStats();
 			}
 			break;
-		case OIS::KC_R:
+		case 'r':
 			// cycle polygon rendering mode
 			{
 				Ogre::String newVal;
@@ -204,41 +209,42 @@ namespace OgreSim
 				}
 
 				mCamera->setPolygonMode(pm);
-//				mDetailsPanel->setParamValue(10, newVal);
 			}
 			break;
-		case OIS::KC_F5:
+		case SDLK_F5:
 			{
 				// refresh all textures
 				Ogre::TextureManager::getSingleton().reloadAll();
 			}
 			break;
 
-		case OIS::KC_S:
+		case 's':
 			// CTRL-S to save
-			if (mKeyboard->isKeyDown(OIS::KC_LCONTROL) || mKeyboard->isKeyDown(OIS::KC_RCONTROL))
+			if (evt.keysym.mod & KMOD_CTRL)
 			{
-				Ogre::LogManager::getSingleton().logMessage(LogMessageLevel::LML_CRITICAL, "Saving terrain");
+				Ogre::LogManager::getSingleton().logMessage("Saving terrain");
 				mOgreSimTerrain->SaveTerrains(false);
 			}
 			break;
-		case OIS::KC_F9:
+		case SDLK_F9:
 			mScreenCapture = !mScreenCapture;
 			if(mScreenCapture)
 				mScreenCaptureFrame = 0;
 			break;
-		case OIS::KC_F10:
+		case SDLK_F10:
 			// dump
 			{
 				mOgreSimTerrain->dumpTextures();
 			}
-		case OIS::KC_F11:
+			break;
+		case SDLK_F11:
 			// dump
 			{
 				mOgreSimTerrain->getTerrain();
 			}
-		case OIS::KC_P:
-			// dump
+			break;
+		case 'p':
+			// pause
 			{
 				mSimulationPaused = !mSimulationPaused;
 			}
@@ -248,7 +254,10 @@ namespace OgreSim
 
 		mOgreSimTerrain->keyPressed(evt);
 
-		mOgreSimFluid->keyPressed(mKeyboard, evt);
+		// Pass modifier key states to fluid (use OgreBites KMOD_ flags)
+		bool ctrlDown = (evt.keysym.mod & KMOD_CTRL) != 0;
+		bool shiftDown = (evt.keysym.mod & KMOD_SHIFT) != 0;
+		mOgreSimFluid->keyPressed(evt, ctrlDown, shiftDown);
 
 		return BaseApplication::keyPressed(evt);
 	}
@@ -273,42 +282,14 @@ namespace OgreSim
 		mTrayMgr->showCursor();
 
 		// make room for the controls
-		//mTrayMgr->showLogo(TL_TOPRIGHT);
 		mTrayMgr->showFrameStats(TL_TOPRIGHT);
 		mTrayMgr->toggleAdvancedFrameStats();
-
-//		mInfoLabel = mTrayMgr->createLabel(TL_TOP, "TInfo", "", 350);
-
-		// 	mEditMenu = mTrayMgr->createLongSelectMenu(TL_BOTTOM, "EditMode", "Edit Mode", 370, 250, 3);
-		// 	mEditMenu->addItem("None");
-		// 	mEditMenu->addItem("Elevation");
-		// 	mEditMenu->addItem("Blend");
-		// 	mEditMenu->selectItem(0);  // no edit mode
-
-		// 	mFlyBox = mTrayMgr->createCheckBox(TL_BOTTOM, "Fly", "Fly");
-		// 	mFlyBox->setChecked(false, false);
-
-	// 	mShadowsMenu = mTrayMgr->createLongSelectMenu(TL_BOTTOM, "Shadows", "Shadows", 370, 250, 3);
-	// 	mShadowsMenu->addItem("None");
-	// 	mShadowsMenu->addItem("Colour Shadows");
-	// 	mShadowsMenu->addItem("Depth Shadows");
-	// 	mShadowsMenu->selectItem(0);  // no edit mode
-
-		// a friendly reminder
-	// 	StringVector names;
-	// 	names.push_back("Help");
-	// 	mTrayMgr->createParamsPanel(TL_TOPLEFT, "Help", 100, names)->setParamValue(0, "H/F1");
 	}
 
 
 	void SnowApplication::itemSelected(SelectMenu* menu)
 	{
-	// 	if (menu == mEditMenu)
-	// 	{
-	// 		mMode = (Mode)mEditMenu->getSelectionIndex();
-	// 	}
-	// 	else
-			if (menu == mShadowsMenu)
+		if (menu == mShadowsMenu)
 		{
 			mShadowMode = (ShadowMode)mShadowsMenu->getSelectionIndex();
 			changeShadows();
@@ -317,15 +298,10 @@ namespace OgreSim
 
 	void SnowApplication::checkBoxToggled(CheckBox* box)
 	{
-	// 	if (box == mFlyBox)
-	// 	{
-	// 		mFly = mFlyBox->isChecked();
-	// 	}
 	}
 
 	void SnowApplication::windowClosed(Ogre::RenderWindow* rw)
 	{
-
 		BaseApplication::windowClosed(rw);
 	}
 
@@ -335,7 +311,7 @@ namespace OgreSim
 		String matName = "DepthShadows/" + textureName;
 
 		MaterialPtr ret = MaterialManager::getSingleton().getByName(matName);
-		if (ret.isNull())
+		if (!ret)
 		{
 			MaterialPtr baseMat = MaterialManager::getSingleton().getByName("Ogre/shadow/depth/integrated/pssm");
 			ret = baseMat->clone(matName);
@@ -388,7 +364,7 @@ namespace OgreSim
 			// 3 textures per directional light (PSSM)
 			mSceneMgr->setShadowTextureCountPerLightType(Ogre::Light::LT_DIRECTIONAL, 3);
 
-			if (mPSSMSetup.isNull())
+			if (!mPSSMSetup)
 			{
 				// shadow camera setup
 				PSSMShadowCameraSetup* pssmSetup = new PSSMShadowCameraSetup();
@@ -398,7 +374,7 @@ namespace OgreSim
 				pssmSetup->setOptimalAdjustFactor(1, 1);
 				pssmSetup->setOptimalAdjustFactor(2, 0.5);
 
-				mPSSMSetup.bind(pssmSetup);
+				mPSSMSetup.reset(pssmSetup);
 
 			}
 			mSceneMgr->setShadowCameraSetup(mPSSMSetup);
@@ -411,7 +387,7 @@ namespace OgreSim
 				mSceneMgr->setShadowTextureConfig(2, 1024, 1024, PF_FLOAT32_R);
 				mSceneMgr->setShadowTextureSelfShadow(true);
 				mSceneMgr->setShadowCasterRenderBackFaces(true);
-				mSceneMgr->setShadowTextureCasterMaterial("PSSM/shadow_caster");
+				mSceneMgr->setShadowTextureCasterMaterial(MaterialManager::getSingleton().getByName("PSSM/shadow_caster"));
 
 				MaterialPtr houseMat = buildDepthShadowMaterial("fw12b.jpg");
 				for (EntityList::iterator i = mHouseList.begin(); i != mHouseList.end(); ++i)
@@ -428,10 +404,10 @@ namespace OgreSim
 				mSceneMgr->setShadowTextureConfig(2, 1024, 1024, PF_X8B8G8R8);
 				mSceneMgr->setShadowTextureSelfShadow(false);
 				mSceneMgr->setShadowCasterRenderBackFaces(false);
-				mSceneMgr->setShadowTextureCasterMaterial(StringUtil::BLANK);
+				mSceneMgr->setShadowTextureCasterMaterial(MaterialPtr());
 			}
 
-			matProfile->setReceiveDynamicShadowsDepth(depthShadows);
+			// setReceiveDynamicShadowsDepth removed in Ogre 14
 			matProfile->setReceiveDynamicShadowsPSSM(static_cast<PSSMShadowCameraSetup*>(mPSSMSetup.get()));
 
 		}

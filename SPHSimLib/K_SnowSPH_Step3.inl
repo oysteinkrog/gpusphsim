@@ -63,7 +63,7 @@ public:
 			//from "Particle-based viscoplastic fluid/solid simulation", also see "SPH survival kit"
 			data.f_pressure  += ( (data.pressure_i/(data.density_i*data.density_i)) + (data.pressure_j/(data.density_j*data.density_j)) ) * SPH_Kernels::Wspiky::Gradient_Variable(cFluidParams.smoothing_length, r, rlen);	
 				
-			// viscosity from mueller paper : f_viscosity = (µ/rho_i)SUM(m_j * (v_j-v_i)/(rho_j)DEL^2Wvis
+			// viscosity from mueller paper : f_viscosity = (ï¿½/rho_i)SUM(m_j * (v_j-v_i)/(rho_j)DEL^2Wvis
 			// we move the mass and the Wvis constants to precalc
 			data.f_viscosity += ( (data.veleval_j  - data. veleval_i ) / (data.density_j * data.density_i) ) * SPH_Kernels::Wviscosity::Laplace_Variable(cFluidParams.smoothing_length, r, rlen);
 
@@ -111,8 +111,8 @@ __global__ void K_SumStep3(uint			numParticles,
 						GridData		dGridData
 						)								
 {
-	// particle index	
-	uint index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;		
+	// particle index (standard multiplication is as fast as __umul24 on sm_20+)
+	uint index = blockIdx.x * blockDim.x + threadIdx.x;		
 	if (index >= numParticles) return;
 
 	Step3::Data data;

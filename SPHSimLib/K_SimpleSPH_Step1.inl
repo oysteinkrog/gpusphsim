@@ -52,8 +52,8 @@ __global__ void K_SumStep1(uint				numParticles,
 							   GridData const	dGridData
 							   )								
 {
-	// particle index	
-	uint index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;		
+	// particle index (standard multiplication is as fast as __umul24 on sm_20+)
+	uint index = blockIdx.x * blockDim.x + threadIdx.x;		
 	if (index >= numParticles) return;
 	
 	Step1::Data data;

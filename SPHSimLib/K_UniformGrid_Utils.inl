@@ -51,7 +51,8 @@ namespace UniformGridUtils
 		// index = x + y*width + z*width*height
 		//This means that we process the grid structure in "depth slice" order, and
 		//each such slice is processed in row-column order.
-		return __mul24(__umul24(gz, grid_res.y), grid_res.x) + __mul24(gy, grid_res.x) + gx;
+		// Standard multiplication is as fast as __mul24 on sm_20+ GPUs
+		return gz * (int)grid_res.y * (int)grid_res.x + gy * (int)grid_res.x + gx;
 	}
 
 
@@ -66,17 +67,17 @@ namespace UniformGridUtils
 )
 	{
 		// get hash (of position) of current cell
-		volatile uint cellHash = UniformGridUtils::calcGridHash<true>(cellPos, cGridParams.grid_res);
+		uint cellHash = UniformGridUtils::calcGridHash<true>(cellPos, cGridParams.grid_res);
 
 		// get start/end positions for this cell/bucket
 		//uint startIndex	= FETCH_NOTEX(dGridData,cell_indexes_start,cellHash);
-		volatile uint startIndex = FETCH(dGridData,cell_indexes_start,cellHash);
+		uint startIndex = FETCH(dGridData,cell_indexes_start,cellHash);
 
 		// check cell is not empty
 		if (startIndex != 0xffffffff)
 		{
 			//uint endIndex = FETCH_NOTEX(dGridData,cell_indexes_end,cellHash);
-			volatile uint endIndex = FETCH(dGridData, cell_indexes_end, cellHash);
+			uint endIndex = FETCH(dGridData, cell_indexes_end, cellHash);
 
 			// iterate over particles in this cell
 			for(uint index_j=startIndex; index_j < endIndex; index_j++)
@@ -97,7 +98,7 @@ namespace UniformGridUtils
 		O::PreCalc(data, index_i);
 
 		// get cell in grid for the given position
-		volatile int3 cell = UniformGridUtils::calcGridCell(position_i, cGridParams.grid_min, cGridParams.grid_delta);
+		int3 cell = UniformGridUtils::calcGridCell(position_i, cGridParams.grid_min, cGridParams.grid_delta);
 
 		// iterate through the 3^3 cells in and around the given position
 		// can't unroll these loops, they are not innermost

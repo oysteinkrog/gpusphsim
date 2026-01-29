@@ -1,17 +1,17 @@
 #ifndef __OgreCudaHelper_h__
 #define __OgreCudaHelper_h__
 
+// Updated for Ogre 14.x - Uses GL3Plus render system (D3D9 is deprecated)
 
 #define SPHSIMLIB_3D_SUPPORT
 #include "OgreSimConfig.h"
 
+#include <Ogre.h>
 #include <OgreHardwareBufferManager.h>
 #include <OgreHardwareVertexBuffer.h>
-#include <RenderSystems\GL\OgreGLRenderSystem.h>
-#include <RenderSystems\GL\OgreGLHardwareVertexBuffer.h>
-#include <RenderSystems\Direct3D9\OgreD3D9RenderSystem.h>
-#include <RenderSystems\Direct3D9\OgreD3D9HardwareVertexBuffer.h>
 
+// For Ogre 14.x, we use GL3Plus (D3D9 support removed as deprecated in Ogre 14)
+// GL3Plus render system headers are included in .cpp file to avoid GL header conflicts
 #include <SimCudaHelper.h>
 
 namespace OgreSim
@@ -20,7 +20,7 @@ namespace OgreSim
 	class OgreCudaHelper
 	{
 	public:
-		OgreCudaHelper::OgreCudaHelper(OgreSim::Config *config, SimLib::SimCudaHelper *simCudaHelper);
+		OgreCudaHelper(OgreSim::Config *config, SimLib::SimCudaHelper *simCudaHelper);
 		~OgreCudaHelper();
 
 		void Initialize();
@@ -39,10 +39,14 @@ namespace OgreSim
 
 		enum RenderingMode
 		{
-			GL = 0,
-			D3D9 = 1,
+			GL3Plus = 0,
+			GL = 1,
+			Unknown = 2
 		};
 		RenderingMode mRenderingMode;
+
+		// Helper to get GL buffer ID from Ogre hardware buffer
+		unsigned int getGLBufferId(Ogre::HardwareVertexBufferSharedPtr hardwareBuffer);
 
 	};
 }

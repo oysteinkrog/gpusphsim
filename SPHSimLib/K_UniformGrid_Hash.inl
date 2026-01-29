@@ -14,8 +14,8 @@ __global__ void K_Grid_Hash (
 							   GridData			dGridData
 							   )
 {			
-	// particle index
-	uint index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
+	// particle index (standard multiplication is as fast as __umul24 on sm_20+)
+	uint index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index >= numParticles) return;
 
 	// particle position

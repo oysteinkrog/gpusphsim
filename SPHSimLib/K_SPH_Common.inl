@@ -35,12 +35,13 @@ public:
 			float3 r = (position_i - position_j) * cFluidParams.scale_to_simulation;
 
 			float rlen_sq = dot(r,r);
-			// |r|
-			float rlen = sqrtf(rlen_sq);
 
-			// is this particle within cutoff?
-			if (rlen <= cFluidParams.smoothing_length) 
+			// is this particle within cutoff? Compare squared distances to avoid sqrt
+			float smoothing_length_sq = cFluidParams.smoothing_length * cFluidParams.smoothing_length;
+			if (rlen_sq <= smoothing_length_sq)
 			{
+				// Only compute sqrt for particles actually within range
+				float rlen = sqrtf(rlen_sq);
 				O::ForNeighbor(data, index_i, index_j, r, rlen, rlen_sq);
 			}
 		}

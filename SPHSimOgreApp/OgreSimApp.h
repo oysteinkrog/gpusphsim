@@ -23,11 +23,11 @@ namespace OgreSim
 		void createScene(void);
 		void destroyScene(void);
 
-		bool frameRenderingQueued(const Ogre::FrameEvent& evt);
-		bool frameStarted (const Ogre::FrameEvent &evt);
-		bool frameEnded (const Ogre::FrameEvent &evt);
+		bool frameRenderingQueued(const Ogre::FrameEvent& evt) override;
+		bool frameStarted(const Ogre::FrameEvent& evt) override;
+		bool frameEnded(const Ogre::FrameEvent& evt) override;
 
-		bool keyPressed (const OIS::KeyEvent &e);
+		bool keyPressed(const OgreBites::KeyboardEvent& evt) override;
 		void windowClosed(Ogre::RenderWindow* rw);
 
 		Ogre::MaterialPtr buildDepthShadowMaterial(const Ogre::String& textureName);
@@ -37,7 +37,7 @@ namespace OgreSim
 		void setupControls();
 		void createFrameListener();
 
-
+		// TrayListener overrides
 		void itemSelected(OgreBites::SelectMenu* menu);
 		void checkBoxToggled(OgreBites::CheckBox* box);
 
@@ -60,12 +60,10 @@ namespace OgreSim
 		ShadowMode mShadowMode;
 
 		OgreBites::SelectMenu* mShadowsMenu;
-		//OgreBites::Label* mInfoLabel;
 		Ogre::ShadowCameraSetupPtr mPSSMSetup;
 
 		typedef std::list<Ogre::Entity*> EntityList;
 		EntityList mHouseList;
-
 
 		bool mScreenCapture;
 		int mScreenCaptureFrame;

@@ -9,7 +9,8 @@
 #include <iomanip>
 #include <numeric>
 #include <limits>
-#include <conio.h> 
+#include <conio.h>
+#include <map>
 
 #include <cuda_runtime_api.h>
 
@@ -73,58 +74,92 @@ namespace SimLib
 
 #ifdef SPHSIMLIB_3D_SUPPORT
 
+	// Static map to track registered graphics resources (GL buffer ID -> CUDA resource)
+	static std::map<GLuint, cudaGraphicsResource*> sGLResourceMap;
+
 	void SimCudaHelper::InitializeGL(int cudaDevice)
 	{
 		cudaDevice = Init(cudaDevice);
-		cudaError res = cudaGLSetGLDevice(cudaDevice);
+		// In modern CUDA (5.0+), cudaGLSetGLDevice is deprecated
+		// Just use cudaSetDevice - the GL interop will work as long as
+		// the GL context is current when registering buffers
+		cudaError res = cudaSetDevice(cudaDevice);
 		if(res != cudaSuccess)
 		{
-			CheckError("cudaGLSetGLDevice failed");
+			CheckError(res, "cudaSetDevice (GL mode) failed");
 		}
-		else 
-		{		
-			cout << "CUDA: Successful cudaGLSetGLDevice\n";
+		else
+		{
+			cout << "CUDA: Successful cudaSetDevice for GL interop, using device " << cudaDevice << "\n";
 		}
 	}
 
+#ifdef SPHSIMLIB_D3D9_SUPPORT
 	void SimCudaHelper::InitializeD3D9(int cudaDevice, IDirect3DDevice9 *pDxDevice)
 	{
 		cudaDevice = Init(cudaDevice);
 		cudaError res = cudaD3D9SetDirect3DDevice(pDxDevice);
 		if(res != cudaSuccess)
 		{
-			CheckError("cudaGLSetGLDevice failed");
+			CheckError(res, "cudaD3D9SetDirect3DDevice failed");
 		}
-		else 
-		{		
+		else
+		{
 			cout << "CUDA: Successful cudaD3D9SetDirect3DDevice\n";
 		}
 	}
+#endif
 
 	cudaError_t SimCudaHelper::MapBuffer(void **devPtr, GLuint bufObj)
 	{
-		return cudaGLMapBufferObject(devPtr, bufObj);
-	}	
+		// Modern CUDA API: use cudaGraphicsMapResources and cudaGraphicsResourceGetMappedPointer
+		auto it = sGLResourceMap.find(bufObj);
+		if (it == sGLResourceMap.end())
+		{
+			*devPtr = nullptr;
+			return cudaErrorInvalidResourceHandle;
+		}
+
+		cudaGraphicsResource* resource = it->second;
+		cudaError_t err = cudaGraphicsMapResources(1, &resource, 0);
+		if (err != cudaSuccess)
+		{
+			*devPtr = nullptr;
+			return err;
+		}
+
+		size_t size;
+		return cudaGraphicsResourceGetMappedPointer(devPtr, &size, resource);
+	}
 
 	cudaError_t SimCudaHelper::UnmapBuffer(void **devPtr, GLuint bufObj)
 	{
-		cudaError err = cudaGLUnmapBufferObject(bufObj);
-		*devPtr = 0;
+		auto it = sGLResourceMap.find(bufObj);
+		if (it == sGLResourceMap.end())
+		{
+			*devPtr = nullptr;
+			return cudaErrorInvalidResourceHandle;
+		}
+
+		cudaGraphicsResource* resource = it->second;
+		cudaError_t err = cudaGraphicsUnmapResources(1, &resource, 0);
+		*devPtr = nullptr;
 		return err;
 	}
 
+#ifdef SPHSIMLIB_D3D9_SUPPORT
 	cudaError_t SimCudaHelper::MapBuffer(void **devPtr, IDirect3DResource9* pResource)
 	{
 		cudaD3D9MapResources(1, &pResource);
 		return cudaD3D9ResourceGetMappedPointer(devPtr, pResource, 0, 0);
-	}	
+	}
 
 	cudaError_t SimCudaHelper::UnmapBuffer(void **devPtr, IDirect3DResource9* pResource)
 	{
 		cudaError err = cudaD3D9UnmapResources(1, &pResource);
 		*devPtr = 0;
 		return err;
-	}	
+	}
 
 	cudaError_t SimCudaHelper::RegisterD3D9Buffer(IDirect3DResource9* pResource)
 	{
@@ -135,14 +170,34 @@ namespace SimLib
 	{
 		return cudaD3D9RegisterResource(pResource, cudaD3D9RegisterFlagsNone);
 	}
+#endif
 	cudaError_t SimCudaHelper::RegisterGLBuffer(GLuint vbo)
 	{
-		return cudaGLRegisterBufferObject(vbo);
+		// Modern CUDA API: use cudaGraphicsGLRegisterBuffer
+		cudaGraphicsResource* resource = nullptr;
+		cudaError_t err = cudaGraphicsGLRegisterBuffer(&resource, vbo, cudaGraphicsMapFlagsWriteDiscard);
+		if (err == cudaSuccess && resource != nullptr)
+		{
+			sGLResourceMap[vbo] = resource;
+		}
+		return err;
 	}
 
 	cudaError_t SimCudaHelper::UnregisterGLBuffer(GLuint vbo)
 	{
-		return cudaGLUnregisterBufferObject(vbo);
+		auto it = sGLResourceMap.find(vbo);
+		if (it == sGLResourceMap.end())
+		{
+			return cudaErrorInvalidResourceHandle;
+		}
+
+		cudaGraphicsResource* resource = it->second;
+		cudaError_t err = cudaGraphicsUnregisterResource(resource);
+		if (err == cudaSuccess)
+		{
+			sGLResourceMap.erase(it);
+		}
+		return err;
 	}
 
 #endif

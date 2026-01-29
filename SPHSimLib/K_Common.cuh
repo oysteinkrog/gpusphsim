@@ -3,6 +3,14 @@
 
 #include "Config.h"
 
+// CUDA 12 compatibility: define uint and ushort types
+#ifndef uint
+typedef unsigned int uint;
+#endif
+#ifndef ushort
+typedef unsigned short ushort;
+#endif
+
 #ifdef SPHSIMLIB_VEC_TYPE_FLOAT4
 typedef float4 float_vec;
 #else

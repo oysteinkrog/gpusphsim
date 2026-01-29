@@ -4,34 +4,22 @@
 #include "OgreSimConfig.h"
 #include "OgreCudaHelper.h"
 
-#include <OgreCamera.h>
-#include <OgreEntity.h>
-#include <OgreLogManager.h>
-#include <OgreRoot.h>
-#include <OgreViewport.h>
-#include <OgreSceneManager.h>
-#include <OgreRenderWindow.h>
-#include <OgreConfigFile.h>
+#include <Ogre.h>
+#include <OgreInput.h>
+#include <OgreTrays.h>
+#include <OgreCameraMan.h>
 
-#include <OISEvents.h>
-#include <OISInputManager.h>
-#include <OISKeyboard.h>
-#include <OISMouse.h>
-
-#include <SdkTrays.h>
-#include <SdkCameraMan.h>
-#include <Terrain\OgreTerrain.h>
-#include <Terrain\OgreTerrainGroup.h>
-#include <Terrain\OgreTerrainQuadTreeNode.h>
-#include <Terrain\OgreTerrainMaterialGeneratorA.h>
-//#include <Terrain\OgreTerrainPaging.h>
+#include <Terrain/OgreTerrain.h>
+#include <Terrain/OgreTerrainGroup.h>
+#include <Terrain/OgreTerrainQuadTreeNode.h>
+#include <Terrain/OgreTerrainMaterialGeneratorA.h>
 
 #include <OgreHardwareVertexBuffer.h>
 
 namespace OgreSim
 {
 
-	class OgreSimTerrain : public Ogre::FrameListener//, public OIS::KeyListener, public OIS::MouseListener
+	class OgreSimTerrain : public Ogre::FrameListener
 	{
 	public:
 		OgreSimTerrain(OgreSim::Config *config);
@@ -43,7 +31,9 @@ namespace OgreSim
 		Ogre::TerrainMaterialGeneratorA::SM2Profile* getMaterialProfile();
 
 		bool frameRenderingQueued(const Ogre::FrameEvent& evt);
-		bool keyPressed (const OIS::KeyEvent &e);
+
+		// Updated for Ogre 14.x SDL2 input
+		bool keyPressed(const OgreBites::KeyboardEvent& evt);
 
 		void SaveTerrains(bool onlyIfModified);
 		void dumpTextures();

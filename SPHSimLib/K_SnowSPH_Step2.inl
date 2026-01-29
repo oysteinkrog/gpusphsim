@@ -70,7 +70,7 @@ public:
  			//stress_tensor = (1-__expf(-(J+1)*deformation_amount))*(pow(deformation_amount, n-1.0f)+1/deformation_amount)*deformation_amount;
 
 			// newtonian fluid
-			// 3-step says: ( t = 2*µ*D )
+			// 3-step says: ( t = 2*ï¿½*D )
 			//stress_tensor = 1*deformation_amount*deformation_tensor_i;
 
 			// non-newtonian POWER-LAW fluid
@@ -125,8 +125,8 @@ __global__ void K_SumStep2(uint			numParticles,
 						GridData		dGridData
 						)
 {
-	// particle index
-	uint index = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
+	// particle index (standard multiplication is as fast as __umul24 on sm_20+)
+	uint index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index >= numParticles) return;
 
 	Step2::Data data;

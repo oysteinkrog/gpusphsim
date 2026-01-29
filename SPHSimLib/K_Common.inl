@@ -82,6 +82,8 @@ static __inline__ __host__ __device__ matrix3 make_matrix3(float_vec r1, float_v
 
 #include <device_functions.h>
 
+#ifdef USE_TEX
+// Only compile texture-based matrix fetch when textures are enabled
 static __inline__ __device__ matrix3 tex1DfetchMatrix3(texture<float4, 1, cudaReadModeElementType> t, int x)
 {
 	float4 r1 = tex1Dfetch(t, x*3);
@@ -90,15 +92,7 @@ static __inline__ __device__ matrix3 tex1DfetchMatrix3(texture<float4, 1, cudaRe
 
 	return make_matrix3(r1,r2,r3);
 }
-
-// static __inline__ __device__ matrix3 tex1Dfetch(texture<matrix3, 1, cudaReadModeElementType> t, int x)
-// {
-// 	float_vec r1 = tex1Dfetch(t, x*3);
-// 	float_vec r2 = tex1Dfetch(t, x*3+1);
-// 	float_vec r3 = tex1Dfetch(t, x*3+2);
-// 
-// 	return make_matrix3(r1,r2,r3);
-// }
+#endif // USE_TEX
 
 #endif
 
