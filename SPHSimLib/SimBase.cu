@@ -71,20 +71,15 @@ void SimBase::Alloc(uint numParticles)
 
 #ifdef SPHSIMLIB_USE_NEIGHBORLIST
 	hNeighborList.MAX_NEIGHBORS = 100;
-	hNeighborList.numParticles = dParticleData.numParticles;
+	hNeighborList.numParticles = numParticles;
 	dNeighborList.MAX_NEIGHBORS = hNeighborList.MAX_NEIGHBORS;
-	dNeighborList.numParticles = dParticleData.numParticles;
+	dNeighborList.numParticles = numParticles;
 
 	hNeighborList.neighbors = new uint[hNeighborList.MAX_NEIGHBORS * hNeighborList.numParticles];
 	memset(hNeighborList.neighbors, 0 , hNeighborList.MAX_NEIGHBORS * hNeighborList.numParticles * sizeof(uint));
 
-	CUDA_SAFE_CALL(un->Allocate((void**) &(dNeighborList.neighbors), dNeighborList.MAX_NEIGHBORS * dNeighborList.numParticles * sizeof(uint)));
+	CUDA_SAFE_CALL(mSimCudaAllocator->Allocate((void**) &(dNeighborList.neighbors), dNeighborList.MAX_NEIGHBORS * dNeighborList.numParticles * sizeof(uint)));
 	dNeighborList.neighbors_pitch = dNeighborList.MAX_NEIGHBORS;
-
-	//size_t pitchInBytes;
-	//CUDA_SAFE_CALL(mSimCudaAllocator->AllocatePitch((void**) &(dNeighborList.neighbors), &pitchInBytes,	dNeighborList.MAX_NEIGHBORS * sizeof(uint), dNeighborList.numParticles));
-	// want pitch in elements, not bytes
-	//dNeighborList.neighbors_pitch = (int)pitchInBytes / sizeof(uint);
 #endif
 
 	// Allocate device particle buffers

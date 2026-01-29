@@ -360,28 +360,10 @@ float SimSnowSPH::BuildDataStruct(bool doTiming)
 	SnowSPHData dParticleData = GetParticleData();
 	SnowSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	uint threadsPerBlock;
+	uint threadsPerBlock = 256;
 
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{
-		//Used 7 registers, 160+16 bytes smem, 140 bytes cmem[0], 4 bytes cmem[1]
-		threadsPerBlock = 256;
-	}
-	else {
-		// Used 7 registers, 192+16 bytes smem, 156 bytes cmem[0], 4 bytes cmem[1]
-		threadsPerBlock = 256;
-	}
-	
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-
-	while(numBlocks >= 64*1024)
-	{
-		cout << "ALERT: have to rescale threadsPerBlock due to too large grid size >=65536\n";
-		threadsPerBlock += 32;
-		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	}
 
 	//dynamically allocated shared memory (per block)
 	uint smemSize = sizeof(uint)*(numThreads+1);
@@ -515,39 +497,10 @@ float SimSnowSPH::ComputeStep2(bool doTiming)
 	GridData dGridData = mUniformGrid->GetGridData();
 	SnowSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	uint threadsPerBlock;
-
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST_PRECALC_R
-	//Used 9 registers, 144+16 bytes smem, 156 bytes cmem[0], 8 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 128;
-#else
-	// Used 11 registers, 144+16 bytes smem, 156 bytes cmem[0], 8 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 128;
-#endif
-#else
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{
-		//sm_20:Used 38 registers, 168 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
-		threadsPerBlock = 416;
-	}
-	else 
-	{
-		// Used 38 registers, 168 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
-		threadsPerBlock = 448;
-	}
-#endif
+	uint threadsPerBlock = 256;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-
-	while(numBlocks >= 64*1024)
-	{
-		cout << "ALERT: have to rescale threadsPerBlock due to too large grid size >=65536\n";
-		threadsPerBlock += 32;
-		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	}
 
 	if(doTiming)
 	{
@@ -577,40 +530,10 @@ float SimSnowSPH::ComputeStep3(bool doTiming)
 	GridData dGridData = mUniformGrid->GetGridData();
 	SnowSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	uint threadsPerBlock;
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST
-#ifdef SPHSIMLIB_USE_NEIGHBORLIST_PRECALC_R
-	//sm_13: Used 25 registers, 144+16 bytes smem, 156 bytes cmem[0], 4 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 320;
-#else
-	//sm_13: Used 27 registers, 144+16 bytes smem, 156 bytes cmem[0], 4 bytes cmem[1], 8 bytes cmem[14]
-	threadsPerBlock = 64;
-#endif
-#else
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{
-		//sm_20: Used 32 registers, 176+0 bytes lmem, 168 bytes cmem[0], 24 bytes cmem[2], 8 bytes cmem[14]
-		threadsPerBlock = 256;
-	}
-	else 
-	{
-		//sm_13: Used 55 registers, 144+16 bytes smem, 160 bytes cmem[0], 4 bytes cmem[1], 8 bytes cmem[14]
-		threadsPerBlock = 64;
-	}
-#endif
-
+	uint threadsPerBlock = 256;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-
-	while(numBlocks >= 64*1024)
-	{
-		cout << "ALERT: have to rescale threadsPerBlock due to too large grid size >=65536\n";
-		threadsPerBlock += 32;
-		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	}
-
 
 	if(doTiming)
 	{
@@ -645,29 +568,10 @@ float SimSnowSPH::Integrate(bool doTiming, bool progress, float deltaTime, bool 
 		mGPUTimer->start();
 	}
 
-	int threadsPerBlock;
-
-	//TODO; this is not correct, need to calculate based on actual device parameters...
-	if(mSimCudaHelper->IsFermi())
-	{
-		//sm_20: Used 29 registers, 280 bytes cmem[0], 36 bytes cmem[2], 8 bytes cmem[14], 4 bytes cmem[16]
-		threadsPerBlock = 256;
-	}
-	else 
-	{
-		//sm_13: Used 27 registers, 256+16 bytes smem, 144 bytes cmem[0], 16 bytes cmem[1]
-		threadsPerBlock = 256;
-	}
+	int threadsPerBlock = 256;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-
-	while(numBlocks >= 64*1024)
-	{
-		cout << "ALERT: have to rescale threadsPerBlock due to too large grid size >=65536\n";
-		threadsPerBlock += 32;
-		computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
-	}
   
 	K_Integrate<Velocity, HSVBlueToRed><<<numBlocks, numThreads>>>(
 		mNumParticles,
