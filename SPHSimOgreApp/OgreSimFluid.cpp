@@ -294,18 +294,24 @@ namespace OgreSim
 			{
 				if(!mSnowConfig->fluidSettings.enabled)break;
 
-
+				uint oldNumParticles = mNumParticles;
 				if (shiftDown)
 					mNumParticles *=2;
 				else
 					mNumParticles += 1000;
 
+				// Adjust timestep to maintain CFL stability.
+				// The smoothing length h scales as N^(-1/3), so when particle count
+				// changes, the max stable timestep (dt < C*h/v_max) changes by the
+				// same factor. Scale the timestep proportionally to avoid instability.
+				float ratio = pow((float)oldNumParticles / (float)mNumParticles, 1.0f/3.0f);
+				float timestep = mParticleSystem->GetSettings()->GetValue("Timestep");
+				mParticleSystem->GetSettings()->SetValue("Timestep", timestep * ratio);
+
 				mParticleSystem->SetNumParticles(mNumParticles);
 				setParticleMaterial(mSnowConfig->generalSettings.fluidShader);
 
 				SetScene(lastScene);
-
-				//mParticlesEntity->setMaterial("shader/ParticleBall");
 			}
 			break;
 
@@ -313,17 +319,21 @@ namespace OgreSim
 			{
 				if(!mSnowConfig->fluidSettings.enabled)break;
 
+				uint oldNumParticles = mNumParticles;
 				if (shiftDown)
 					mNumParticles /=2;
 				else
 					mNumParticles -= 1000;
 
+				// Scale timestep up when reducing particles (inverse of the above)
+				float ratio = pow((float)oldNumParticles / (float)mNumParticles, 1.0f/3.0f);
+				float timestep = mParticleSystem->GetSettings()->GetValue("Timestep");
+				mParticleSystem->GetSettings()->SetValue("Timestep", timestep * ratio);
+
 				mParticleSystem->SetNumParticles(mNumParticles);
 				setParticleMaterial(mSnowConfig->generalSettings.fluidShader);
 
 				SetScene(lastScene);
-
-				//mParticlesEntity->setMaterial("shader/ParticleBall");
 			}
 			break;
 
