@@ -412,3 +412,25 @@
   - VBO copy uses CuPy slice assignment (`pos_arr[:n] = world.position[:n]`) which is a device-to-device memcpy (both sides are CuPy arrays on the same GPU). No host round-trip needed
   - For the initial scene, sand particles use spacing=0.04 (larger than water's 0.02) to get a coarser bed that still looks reasonable and keeps particle count manageable
 ---
+
+## 2026-02-06 - US-015
+- What was implemented:
+  - Extended `K_Step1` kernel in `physics/kernels/step1.cu` to compute the symmetric strain-rate tensor D for GRANULAR particles using SPH velocity gradient with spiky kernel weighting
+  - 6 symmetric components (Dxx, Dyy, Dzz, Dxy, Dxz, Dyz) accumulated in the existing neighbor loop alongside density
+  - PostCalc computes gamma_dot = sqrt(2 * D:D) and writes to `shear_rate_out` array; non-GRANULAR particles get 0
+  - Updated `step1.py` with new `compute_step1()` signature: added velocity, density_in, packed_info inputs and shear_rate_out output; returns (density, shear_rate) tuple
+  - Updated `simulation.py` to pass new arguments to `compute_step1()`, including density_in from previous step (None on first frame)
+  - Updated `test_step1.py` with 3 new strain-rate tests (stationary=0, shear flow>0, non-GRANULAR=0) plus updated all existing density tests for new signature
+- Files changed:
+  - `fallingsand3d/physics/kernels/step1.cu` (modified -- added strain-rate tensor accumulation for GRANULAR)
+  - `fallingsand3d/step1.py` (modified -- new compute_step1 signature with velocity, density_in, packed_info, shear_rate_out)
+  - `fallingsand3d/simulation.py` (modified -- updated step1 call with new arguments)
+  - `fallingsand3d/test_step1.py` (modified -- updated for new signature, added 3 strain-rate tests)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The strain-rate tensor D and density can be computed in a single neighbor loop pass without splitting into separate kernels -- no register pressure issues observed (the kernel compiles and runs fine for 500K particles with 6 extra float accumulators for GRANULAR)
+  - The `density_in` parameter for m_j/rho_j weighting uses the previous step's density. On the first frame, the kernel falls back to rho_j=1000.0f, which is close enough for the initial strain-rate estimate
+  - Using `cupy.ndarray(0, dtype=cupy.float32)` as a null-like placeholder for density_in when it's None works correctly -- the kernel checks `density_in != 0` (pointer check) and uses the fallback
+  - SPH strain-rate approximation with spiky gradient is quite accurate: for a linear shear flow with applied_SR=10.0, interior particles produce gamma_dot=9.56 (4.4% error), well within expected SPH discretization error
+  - The spiky gradient coefficient (`c_precalc.spiky_grad_coeff = -45/(pi*h^6)`) is NEGATIVE, so the gradient vector `gradW = spiky_grad_coeff * (h-r)^2/r * r_vec` points from i toward j (opposite to r = pos_i - pos_j). This is correct for the strain-rate computation since D_ab = sum (m_j/rho_j) * dv_a * gradW_b where dv = v_i - v_j
+---

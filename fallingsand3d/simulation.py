@@ -152,14 +152,19 @@ class Simulation:
             sorted_hashes[:n], self._cell_start, self._cell_end
         )
 
-        # 5. Step1: density summation
+        # 5. Step1: density summation + strain-rate tensor
         step1.compute_step1(
             w.sorted_position[:n],
+            w.sorted_velocity[:n],
             w.sorted_mass[:n],
+            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_packed_info[:n],
             self._cell_start,
             self._cell_end,
             density_out=w.sorted_density,
+            shear_rate_out=w.sorted_shear_rate,
         )
+        w._density_initialized = True
 
         # 6. Step2: pressure + viscosity + XSPH forces
         step2.compute_step2(

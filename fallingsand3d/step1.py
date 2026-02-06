@@ -1,8 +1,13 @@
-"""Step1 kernel: SPH density summation using Poly6 kernel.
+"""Step1 kernel: SPH density summation + strain-rate tensor computation.
 
 Compiles physics/kernels/step1.cu via CuPy RawModule and provides
 a function to launch K_Step1 which computes per-particle density
 from the sorted particle positions and masses using neighbor iteration.
+
+Additionally, for GRANULAR particles, computes the symmetric strain-rate
+tensor D from SPH velocity gradient (spiky kernel) and writes the second
+invariant gamma_dot = sqrt(2 * D:D) to the shear_rate output array.
+Non-GRANULAR particles get shear_rate = 0.
 
 Density formula
 ---------------
@@ -216,34 +221,53 @@ BLOCK_SIZE = 128
 
 def compute_step1(
     position: cupy.ndarray,
+    velocity: cupy.ndarray,
     mass: cupy.ndarray,
+    density_in: Optional[cupy.ndarray],
+    packed_info: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     density_out: Optional[cupy.ndarray] = None,
-) -> cupy.ndarray:
-    """Launch K_Step1 and return density array.
+    shear_rate_out: Optional[cupy.ndarray] = None,
+) -> tuple:
+    """Launch K_Step1 and return (density, shear_rate) arrays.
 
     Parameters
     ----------
     position : cupy.ndarray, (N, 4) float32
         Sorted particle positions.
+    velocity : cupy.ndarray, (N, 4) float32
+        Sorted particle velocities (used for strain-rate computation).
     mass : cupy.ndarray, (N,) float32
         Sorted per-particle masses.
+    density_in : cupy.ndarray or None, (N,) float32
+        Density from previous step for m_j/rho_j weighting in strain-rate.
+        Pass None on first frame (kernel uses rho0=1000 fallback).
+    packed_info : cupy.ndarray, (N,) uint32
+        Sorted packed_info for behavior class check.
     cell_start : cupy.ndarray, (num_cells,) uint32
         Grid cell start indices (0xFFFFFFFF for empty).
     cell_end : cupy.ndarray, (num_cells,) uint32
         Grid cell end indices.
     density_out : cupy.ndarray, optional
         Pre-allocated (N,) float32 output buffer. If None, allocates new.
+    shear_rate_out : cupy.ndarray, optional
+        Pre-allocated (N,) float32 output buffer. If None, allocates new.
 
     Returns
     -------
-    density : cupy.ndarray, (N,) float32
-        Per-particle density (clamped >= 1.0).
+    (density, shear_rate) : tuple of cupy.ndarray, each (N,) float32
+        density: Per-particle density (clamped >= 1.0).
+        shear_rate: Per-particle gamma_dot (0 for non-GRANULAR).
     """
     n = position.shape[0]
     if density_out is None:
         density_out = cupy.empty(n, dtype=cupy.float32)
+    if shear_rate_out is None:
+        shear_rate_out = cupy.empty(n, dtype=cupy.float32)
+
+    # density_in can be None (first frame) -- pass null pointer
+    density_in_ptr = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
 
     module = _get_module()
     kernel = module.get_function("K_Step1")  # type: ignore[union-attr]
@@ -257,11 +281,15 @@ def compute_step1(
         (
             np.uint32(n),
             position,
+            velocity,
             mass,
+            density_in_ptr,
+            packed_info,
             cell_start,
             cell_end,
             density_out,
+            shear_rate_out,
         ),
     )
 
-    return density_out
+    return density_out, shear_rate_out
