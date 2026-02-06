@@ -280,8 +280,9 @@
         "Renders at interactive frame rate with 20K particles"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": "This completes Phase 1. dt=0.001 fixed timestep initially (adaptive comes in US-025). The speed parameter controls how many sim-seconds elapse per wall-second: sim_time_budget = wall_dt * speed. Number of substeps = sim_time_budget / sim_dt. At speed=1.0 with dt=0.001 and 60fps: ~16 substeps per frame. At speed=0.2: ~3 substeps. At speed=5.0: capped at max_substeps=20. The pipeline ordering is canonical — later features insert at documented points."
+      "passes": true,
+      "notes": "This completes Phase 1. dt=0.001 fixed timestep initially (adaptive comes in US-025). The speed parameter controls how many sim-seconds elapse per wall-second: sim_time_budget = wall_dt * speed. Number of substeps = sim_time_budget / sim_dt. At speed=1.0 with dt=0.001 and 60fps: ~16 substeps per frame. At speed=0.2: ~3 substeps. At speed=5.0: capped at max_substeps=20. The pipeline ordering is canonical — later features insert at documented points.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-015",
@@ -592,6 +593,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:53:19.308Z"
+    "updatedAt": "2026-02-06T16:00:39.322Z"
   }
 }
