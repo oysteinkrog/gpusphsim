@@ -1,0 +1,6 @@
+cupy-cuda12x
+glfw
+PyOpenGL
+PyOpenGL-accelerate
+imgui-bundle
+numpy

@@ -165,3 +165,20 @@
   - The mu_max clamp (10000 Pa·s) prevents infinite viscosity when gamma_dot approaches zero. The additional 1e-6 epsilon in the denominator (gamma_dot + 1e-6) provides a second safety net
   - GranularParams struct needs explicit padding fields (_pad0, _pad1) to reach 32 bytes (8 floats) for alignment compatibility with CUDA constant memory
 ---
+
+## 2026-02-06 - US-001
+- What was implemented:
+  - `fallingsand3d/` project skeleton with all required Python modules, CUDA headers, GLSL shaders, requirements.txt, and run.bat
+  - Placeholder files: main.py, world.py, materials.py, renderer.py, gl_cuda_interop.py, camera.py, ui.py, physics/__init__.py, physics/simulation.py
+  - physics/kernels/common.cuh with uint typedef and include guard
+  - shaders/particle.vert and particle.frag with basic pass-through MVP + point size + color
+  - requirements.txt: cupy-cuda12x, glfw, PyOpenGL, PyOpenGL-accelerate, imgui-bundle, numpy
+  - run.bat: pip install + python main.py
+- Files changed:
+  - All files under `fallingsand3d/` (new, 14 files total)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - Windows Python (via cmd.exe) cannot access WSL /tmp paths; use /c/ mounted paths for test scripts
+  - Previous stories (US-003 through US-016) created Python files at the repo root level, not inside fallingsand3d/; those will need to be moved in a future restructuring task
+  - All required packages (cupy, glfw, OpenGL, imgui_bundle) are already installed in the Windows Python environment
+---
