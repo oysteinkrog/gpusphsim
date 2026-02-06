@@ -8,6 +8,9 @@
 - **Numpy structured arrays for C struct packing:** Define `np.dtype([("field", np.float32), ...], align=True)` matching the C struct layout exactly. Assert `dtype.itemsize == sizeof(CStruct)` to catch padding mismatches. Use `array.ctypes.data` for the host pointer when uploading to GPU.
 - **CuPy RawModule with external .cu files:** Read the .cu source from disk and pass to `cupy.RawModule(code=source, options=("--std=c++11", f"-I{kernel_dir}"))`. The `-I` flag lets NVRTC find `#include "common.cuh"` in the same directory. This is better than embedding CUDA source as Python strings for non-trivial kernels.
 - **CUDA float3 struct packing (no trailing pad):** CUDA `float3` is exactly 12 bytes (3 x float32) with no trailing padding. Use `np.dtype([("field", np.float32, (3,))], align=False)` to match. Do NOT use `align=True` for float3 fields -- that would add 4 bytes of padding per field.
+- **Grid neighbor iteration pattern (inline 27-cell loop):** For force kernels, iterate 27 neighbor cells with 3 nested loops (dx,dy,dz in [-1,1]), boundary-check each cell, look up cell_start/cell_end, skip self-interaction (j==i), and check distance within h^2. Use 0xFFFFFFFF sentinel for empty cells. This replaces the C++ template-based IterateParticlesInNearbyCells approach.
+- **Tait EOS pressure with behavior classes:** Compute `p_raw = k * (pow(rho/rho0, 7) - 1)` then clamp per behavior: FLUID allows small tensile `max(p_raw, -0.5*k)`, GRANULAR clamps `max(p_raw, 0)`, GAS uses linear `k_gas * max(rho - rho0, 0)`. The different clamping prevents tensile instability in granular materials.
+- **SPH precalc sign convention:** `pressure_precalc = +45/(pi*h^6)` is POSITIVE because it absorbs the double negative from the SPH momentum equation (negative gradient) and the spiky gradient constant (-45/(pi*h^6)). The force formula `f += pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable(r)` produces correct repulsive forces for positive pressure.
 
 ---
 
@@ -62,4 +65,23 @@
   - The C++ `calcGridCell` uses `make_int3(float3)` which truncates toward zero; porting to CUDA `(int)` cast preserves this behavior; the `np.floor` CPU reference differs for negative inputs but clamping makes them equivalent
   - Grid delta is `grid_res / grid_size` = 50/2 = 25 (not `1/cell_size` which would also be 25 for cell_size=0.04)
   - The original C++ hash kernel uses `wrapEdges=true` (modulo wrapping); the Python port uses clamping instead per acceptance criteria, which is simpler and avoids negative modulo edge cases
+---
+
+## 2026-02-06 - US-012
+- What was implemented:
+  - `physics/kernels/step2.cu` -- K_Step2 kernel: Tait EOS pressure, pressure force (spiky gradient, viscoplastic symmetrization), viscosity force (viscosity Laplacian), XSPH velocity correction (FLUID only). Skips STATIC and SLEEPING particles. Inline 27-cell neighbor iteration with grid cell_start/cell_end.
+  - `step2.py` -- Python module: FluidParams/PrecalcParams numpy dtypes, constant memory upload (c_grid, c_fluid, c_precalc), CuPy RawModule compilation from external .cu file, `compute_step2()` kernel launch wrapper with block size 128.
+  - `test_step2.py` -- Integration tests: compilation, struct sizes, precalc coefficients, rest-density zero-force, compressed repulsive forces (Newton's 3rd law), STATIC skip, SLEEPING skip, XSPH for FLUID, no XSPH for GRANULAR, viscosity opposing relative motion, GRANULAR pressure clamp, 500K particle stress test.
+- Files changed:
+  - `physics/kernels/step2.cu` (new)
+  - `step2.py` (new)
+  - `test_step2.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The C++ Step2 uses template-based neighbor iteration (SPHNeighborCalc + IterateParticlesInNearbyCells) which is elegant but overkill for Python/CuPy; an inline 27-cell loop is simpler and equally performant
+  - The C++ `kernel_viscosity_precalc` includes the viscosity coefficient mu: `viscosity_precalc = mu * 45/(pi*h^6)`, not just the raw Laplacian constant. This is because the viscosity mu varies per material and needs to be baked into the precalc on the host side
+  - Tait EOS with gamma=7 is much stiffer than the linear EOS in the original C++ code (`rest_pressure + gas_stiffness * (rho - rho0)`). At rest density, `pow(1.0, 7) - 1 = 0` so pressure is exactly zero, making rest-density tests straightforward
+  - Grid cell functions had to be renamed (`calcGridCell_step2`) to avoid symbol conflicts since each .cu file is compiled as a separate NVRTC module -- unlike C++ where they share translation units via #include
+  - The `__ldg()` intrinsic for read-only cache loads works with `const*` pointers in the kernel signature. CuPy passes device pointers directly from `cupy.ndarray` objects
+  - For 2-particle test setups, particles must be sorted by grid hash and placed into cell_start/cell_end arrays matching the sorted order, otherwise the kernel won't find neighbors
 ---
