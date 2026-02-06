@@ -1,0 +1,3 @@
+@echo off
+cd /d %~dp0
+C:\Python313\python.exe -c "import sys; sys.path.insert(0,'.'); import cupy; import numpy as np; from test_gas_physics import *; setup_all_modules(); w=make_gas_particles(5,14,temp=1200.0,lifetime=1.0); grid_params=build_grid_params(); cs,ce=allocate_cell_tables(); print('Before:',w['lifetime'].get()); [run_full_pipeline_step(w,grid_params,cs,ce,frame=i) for i in range(10)]; print('After 10 steps:',w['lifetime'].get()); [run_full_pipeline_step(w,grid_params,cs,ce,frame=i) for i in range(10,1010)]; print('After 1010 steps:',w['lifetime'].get()); print('packed_info:',w['packed_info'].get())"
