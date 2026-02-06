@@ -505,8 +505,9 @@
         "Test: no NaN velocities after 30 seconds of multi-material simulation"
       ],
       "priority": 23,
-      "passes": false,
-      "notes": "accuracy IS the CFL number (renamed for user-friendliness). accuracy=0.4 is standard CFL. accuracy=0.2 halves dt for more precision. accuracy=0.8 doubles dt for speed at cost of stability. c_sound for water: sqrt(7) ~ 2.65 m/s -> dt_acoustic ~ 0.0038s. Viscous CFL with mu_max=10000: dt_visc ~ 6.4e-5s — tightest constraint when mu(I) active. Fixed dt mode is useful for debugging, deterministic replays, or when adaptive overhead is unwanted. Speed and accuracy are independent: speed=0.5+accuracy=1.0 = slow-mo with large steps; speed=1.0+accuracy=0.2 = realtime with tiny sub-steps."
+      "passes": true,
+      "notes": "accuracy IS the CFL number (renamed for user-friendliness). accuracy=0.4 is standard CFL. accuracy=0.2 halves dt for more precision. accuracy=0.8 doubles dt for speed at cost of stability. c_sound for water: sqrt(7) ~ 2.65 m/s -> dt_acoustic ~ 0.0038s. Viscous CFL with mu_max=10000: dt_visc ~ 6.4e-5s — tightest constraint when mu(I) active. Fixed dt mode is useful for debugging, deterministic replays, or when adaptive overhead is unwanted. Speed and accuracy are independent: speed=0.5+accuracy=1.0 = slow-mo with large steps; speed=1.0+accuracy=0.2 = realtime with tiny sub-steps.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-026",
@@ -603,6 +604,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T17:26:00.390Z"
+    "updatedAt": "2026-02-06T17:32:23.829Z"
   }
 }
