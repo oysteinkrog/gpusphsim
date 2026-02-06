@@ -299,8 +299,9 @@
         "Step1 kernel still compiles and runs without errors for 500K particles"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": "See PHYSICS.md for strain-rate tensor formulas. Only 6 symmetric components, NOT full 9-component gradient. Uses m_j/rho_j weighting. If register pressure too high (>64 regs), consider splitting density and strain-rate into two separate kernels."
+      "passes": true,
+      "notes": "See PHYSICS.md for strain-rate tensor formulas. Only 6 symmetric components, NOT full 9-component gradient. Uses m_j/rho_j weighting. If register pressure too high (>64 regs), consider splitting density and strain-rate into two separate kernels.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-016",
@@ -593,6 +594,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T16:00:39.322Z"
+    "updatedAt": "2026-02-06T16:06:59.348Z"
   }
 }
