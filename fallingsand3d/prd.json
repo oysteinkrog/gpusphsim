@@ -94,8 +94,9 @@
         "common.cuh compiles without errors when included in a test .cu kernel via CuPy RawModule"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": "This is the single source of truth for all GPU data layouts. All other .cu files include this. Kernel precalc constants (poly6_coeff, spiky_grad_coeff, viscosity_lap_coeff, pressure_precalc, viscosity_precalc) go into SimParams or a separate PrecalcParams in constant memory. See PHYSICS.md for formulas."
+      "passes": true,
+      "notes": "This is the single source of truth for all GPU data layouts. All other .cu files include this. Kernel precalc constants (poly6_coeff, spiky_grad_coeff, viscosity_lap_coeff, pressure_precalc, viscosity_precalc) go into SimParams or a separate PrecalcParams in constant memory. See PHYSICS.md for formulas.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-006",
@@ -583,6 +584,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:03:42.869Z"
+    "updatedAt": "2026-02-06T15:07:22.720Z"
   }
 }
