@@ -171,8 +171,9 @@
         "Sort + reorder completes without errors for 500K particles"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "IMPORTANT: Double-buffer pattern. After sort+reorder, Step1/Step2 read from SORTED buffers. Integrate writes final position/velocity back to UNSORTED arrays using sort_indexes[sorted_i] = original_i. Next frame, Hash reads UNSORTED positions. Pre-allocate sorted_* temp arrays at World init time to avoid memory pool fragmentation. CuPy uses Thrust internally for argsort. PERFORMANCE: Write a single fused CUDA reorder kernel that gathers ALL SoA arrays in one pass (one read of sorted_index, parallel writes to all sorted arrays). This is far more bandwidth-efficient than N separate CuPy fancy-indexing calls."
+      "passes": true,
+      "notes": "IMPORTANT: Double-buffer pattern. After sort+reorder, Step1/Step2 read from SORTED buffers. Integrate writes final position/velocity back to UNSORTED arrays using sort_indexes[sorted_i] = original_i. Next frame, Hash reads UNSORTED positions. Pre-allocate sorted_* temp arrays at World init time to avoid memory pool fragmentation. CuPy uses Thrust internally for argsort. PERFORMANCE: Write a single fused CUDA reorder kernel that gathers ALL SoA arrays in one pass (one read of sorted_index, parallel writes to all sorted arrays). This is far more bandwidth-efficient than N separate CuPy fancy-indexing calls.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-010",
@@ -587,6 +588,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:21:18.628Z"
+    "updatedAt": "2026-02-06T15:27:05.087Z"
   }
 }
