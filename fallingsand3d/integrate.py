@@ -110,12 +110,15 @@ def integrate(
     sorted_health: cupy.ndarray,
     sorted_density: "Optional[cupy.ndarray]" = None,
     sorted_shear_rate: "Optional[cupy.ndarray]" = None,
+    sorted_sleep_counter: "Optional[cupy.ndarray]" = None,
     sort_indexes: "Optional[cupy.ndarray]" = None,
     position_out: "Optional[cupy.ndarray]" = None,
     velocity_out: "Optional[cupy.ndarray]" = None,
     color_out: "Optional[cupy.ndarray]" = None,
+    packed_info_out: "Optional[cupy.ndarray]" = None,
+    sleep_counter_out: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
-    """Launch K_Integrate and return (position_out, velocity_out, color_out).
+    """Launch K_Integrate and return outputs tuple.
 
     All sorted_* inputs are in sorted (grid) order.
     Outputs are written to UNSORTED arrays via sort_indexes[i] mapping.
@@ -135,8 +138,10 @@ def integrate(
         Density from Step1. Used for GRANULAR anti-creep check.
         If None, a zeros array is used (anti-creep won't trigger).
     sorted_shear_rate : cupy.ndarray, optional, (N,) float32
-        Shear rate from Step1. Used for GRANULAR anti-creep check.
-        If None, a zeros array is used (anti-creep won't trigger).
+        Shear rate from Step1. Used for GRANULAR anti-creep and sleep check.
+        If None, a zeros array is used.
+    sorted_sleep_counter : cupy.ndarray, optional, (N,) uint8
+        Sleep counter from previous frame. If None, zeros are used.
     sort_indexes : cupy.ndarray, (N,) uint32
         sort_indexes[sorted_i] = original unsorted index.
     position_out : cupy.ndarray, optional
@@ -145,20 +150,26 @@ def integrate(
         Pre-allocated (M, 4) float32 unsorted output.
     color_out : cupy.ndarray, optional
         Pre-allocated (M, 4) float32 unsorted output.
+    packed_info_out : cupy.ndarray, optional
+        Pre-allocated (M,) uint32 unsorted output for updated packed_info.
+    sleep_counter_out : cupy.ndarray, optional
+        Pre-allocated (M,) uint8 unsorted output for updated sleep counter.
 
     Returns
     -------
-    position_out, velocity_out, color_out : cupy.ndarray
+    position_out, velocity_out, color_out, packed_info_out, sleep_counter_out
     """
     n = sorted_position.shape[0]
     if n == 0:
-        return position_out, velocity_out, color_out
+        return position_out, velocity_out, color_out, packed_info_out, sleep_counter_out
 
-    # Default density/shear_rate to zeros if not provided (anti-creep won't trigger)
+    # Default density/shear_rate/sleep_counter to zeros if not provided
     if sorted_density is None:
         sorted_density = cupy.zeros(n, dtype=cupy.float32)
     if sorted_shear_rate is None:
         sorted_shear_rate = cupy.zeros(n, dtype=cupy.float32)
+    if sorted_sleep_counter is None:
+        sorted_sleep_counter = cupy.zeros(n, dtype=cupy.uint8)
 
     # Allocate outputs if not provided
     if position_out is None:
@@ -170,6 +181,12 @@ def integrate(
     if color_out is None:
         max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         color_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
+    if packed_info_out is None:
+        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
+        packed_info_out = cupy.zeros(max_idx, dtype=cupy.uint32)
+    if sleep_counter_out is None:
+        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
+        sleep_counter_out = cupy.zeros(max_idx, dtype=cupy.uint8)
 
     module = _get_module()
     kernel = module.get_function("K_Integrate")  # type: ignore[union-attr]
@@ -192,11 +209,14 @@ def integrate(
             sorted_health,
             sorted_density,
             sorted_shear_rate,
+            sorted_sleep_counter,
             sort_indexes,
             position_out,
             velocity_out,
             color_out,
+            packed_info_out,
+            sleep_counter_out,
         ),
     )
 
-    return position_out, velocity_out, color_out
+    return position_out, velocity_out, color_out, packed_info_out, sleep_counter_out

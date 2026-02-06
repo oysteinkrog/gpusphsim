@@ -41,6 +41,14 @@
 #define GRANULAR_GAMMA_MIN       0.05f
 #define GRANULAR_RHO_FACTOR      0.95f
 
+/* Sleep system with hysteresis */
+#define V_SLEEP          0.005f
+#define V_SLEEP_SQ       (V_SLEEP * V_SLEEP)
+#define V_WAKE           0.02f
+#define V_WAKE_SQ        (V_WAKE * V_WAKE)
+#define GAMMA_SLEEP      0.01f
+#define SLEEP_THRESHOLD  10
+
 /* ======================================================================
  * Impulse-style SDF boundary collision for axis-aligned box.
  *
@@ -204,11 +212,14 @@ void K_Integrate(
     const float*    __restrict__ sorted_health,         // sorted health
     const float*    __restrict__ sorted_density,        // sorted density (from Step1)
     const float*    __restrict__ sorted_shear_rate,     // sorted shear rate (from Step1)
+    const unsigned char* __restrict__ sorted_sleep_counter, // sorted sleep counter (uint8)
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
     // --- Unsorted outputs (write via sort_indexes) ---
     float4*         __restrict__ position_out,          // unsorted position
     float4*         __restrict__ velocity_out,          // unsorted velocity
-    float4*         __restrict__ color_out              // unsorted color
+    float4*         __restrict__ color_out,             // unsorted color
+    uint*           __restrict__ packed_info_out,       // unsorted packed_info (sleep flag updates)
+    unsigned char*  __restrict__ sleep_counter_out      // unsorted sleep counter
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -230,8 +241,14 @@ void K_Integrate(
         float temp = sorted_temperature[i];
         float hlth = sorted_health[i];
         color_out[orig_idx] = compute_color(mat_id, temp, hlth);
+        packed_info_out[orig_idx] = pi;
+        sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
         return;
     }
+
+    // --- Read sleep counter ---
+    unsigned char sc = sorted_sleep_counter[i];
+    bool was_sleeping = IS_SLEEPING(pi) != 0;
 
     // --- Read particle data ---
     float4 pos4 = sorted_position[i];
@@ -240,6 +257,27 @@ void K_Integrate(
     float4 vel4 = sorted_velocity[i];
     float3 vel = make_float3(vel4.x, vel4.y, vel4.z);
 
+    float temp = sorted_temperature[i];
+    float hlth = sorted_health[i];
+
+    // --- Sleeping particle: check wake condition with hysteresis ---
+    if (was_sleeping) {
+        float vel_sq_wake = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
+        if (vel_sq_wake <= V_WAKE_SQ) {
+            // Still sleeping: write position/velocity unchanged, keep flag and saturate counter
+            position_out[orig_idx] = pos4;
+            velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            color_out[orig_idx] = compute_color(mat_id, temp, hlth);
+            packed_info_out[orig_idx] = pi;  // keep SLEEPING flag set
+            sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
+            return;
+        }
+        // Wake up: clear sleeping flag, reset counter
+        pi = CLEAR_SLEEPING(pi);
+        was_sleeping = false;
+        sc = 0;
+    }
+
     float4 veleval4 = sorted_veleval[i];
     float3 veleval_xsph = make_float3(veleval4.x, veleval4.y, veleval4.z);
 
@@ -247,8 +285,6 @@ void K_Integrate(
     float3 sph_force = make_float3(force4.x, force4.y, force4.z);
 
     float mass_i = sorted_mass[i];
-    float temp = sorted_temperature[i];
-    float hlth = sorted_health[i];
 
     float dt = c_sim.dt;
 
@@ -330,6 +366,24 @@ void K_Integrate(
         c_sim.restitution, c_sim.wall_friction
     );
 
+    // --- Sleep counter update ---
+    // Check if particle should start sleeping (low velocity AND low shear rate)
+    float vel_sq_sleep = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
+    float sr_sleep = sorted_shear_rate[i];
+
+    if (vel_sq_sleep < V_SLEEP_SQ && sr_sleep < GAMMA_SLEEP) {
+        // Conditions met: increment sleep counter (saturate at 255)
+        if (sc < 255) sc++;
+    } else {
+        // Conditions not met: reset counter
+        sc = 0;
+    }
+
+    // Set SLEEPING flag if counter reached threshold
+    if (sc >= SLEEP_THRESHOLD) {
+        pi = SET_SLEEPING(pi);
+    }
+
     // --- Compute color ---
     float4 color = compute_color(mat_id, temp, hlth);
 
@@ -337,4 +391,6 @@ void K_Integrate(
     position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, 1.0f);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);
     color_out[orig_idx] = color;
+    packed_info_out[orig_idx] = pi;
+    sleep_counter_out[orig_idx] = sc;
 }

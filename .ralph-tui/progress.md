@@ -457,3 +457,29 @@
   - The velocity check uses squared magnitude (`vel_sq < threshold_sq`) to avoid a sqrt, consistent with the existing velocity clamp pattern in the kernel
   - The 5000-step no-jitter test confirms that once anti-creep kicks in (first step: tiny velocity + high density + low shear), the particle stays at rest permanently -- no oscillation between clamped/unclamped states
 ---
+
+## 2026-02-06 - US-018
+- What was implemented:
+  - Sleep system with hysteresis in K_Integrate kernel: sleep_counter (uint8) increments when |vel| < v_sleep (0.005) AND shear_rate < gamma_sleep (0.01), resets to 0 when either condition fails
+  - SLEEPING flag set in packed_info when sleep_counter >= sleep_threshold (10), counter saturates at 255
+  - Hysteresis wake condition: sleeping particles only wake when |vel| > v_wake (0.02), not v_sleep -- prevents oscillation between sleep/wake states
+  - Sleeping particles: position written unchanged, velocity zeroed, skip force integration entirely (early return before acceleration/boundary computation)
+  - Sleeping particles still participate in hash/sort/reorder/density (Step1) and contribute to neighbors' force calculations -- only their OWN force integration is skipped
+  - Step2 already had IS_SLEEPING early return (from US-012) -- just never triggered until this story sets the flag
+  - K_Integrate now outputs packed_info and sleep_counter to UNSORTED arrays (2 new output parameters) for persistence across frames
+  - Python wrapper updated: integrate() returns 5-tuple (position, velocity, color, packed_info, sleep_counter) instead of 3-tuple
+  - simulation.py updated to pass sorted_sleep_counter through and write back packed_info/sleep_counter
+  - 7 new tests: counter_increments, counter_resets, hysteresis_wake, skip_force_integration, counter_saturates, density_contribution, sleep_wake_cycle
+- Files changed:
+  - `fallingsand3d/physics/kernels/integrate.cu` (modified -- sleep constants, sleep_counter/packed_info I/O, sleeping early return with hysteresis, sleep counter update logic)
+  - `fallingsand3d/integrate.py` (modified -- sorted_sleep_counter input, packed_info_out/sleep_counter_out outputs, 5-tuple return)
+  - `fallingsand3d/simulation.py` (modified -- pass sorted_sleep_counter and write back packed_info/sleep_counter)
+  - `fallingsand3d/test_integrate.py` (modified -- updated all 22 existing tests for 5-tuple return, added 7 new sleep system tests)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The sleeping early return in K_Integrate must happen AFTER reading velocity (to check wake condition) but BEFORE reading veleval/sph_force/mass (to skip unnecessary global memory reads for sleeping particles). This ordering gives both correct hysteresis behavior and optimal memory bandwidth
+  - When a sleeping particle wakes, the counter must be reset to 0 immediately AND the SLEEPING flag cleared from packed_info before continuing to the normal integration path. If the flag isn't cleared in the same frame, Step2 would still skip the particle next frame even though it's supposed to be awake
+  - The sleep counter update happens AFTER position update and boundary collision, using the FINAL post-boundary velocity for the sleep check. This prevents a particle from being marked sleeping while it's actively bouncing off a wall
+  - Adding packed_info_out and sleep_counter_out to K_Integrate changes the return type from 3-tuple to 5-tuple, requiring updates to ALL callers. The optional parameters with None defaults preserve backward compatibility for tests that don't care about sleep state
+  - For multi-step loop tests, packed_info must be a mutable GPU array (not recreated each step from np constants) so that the SLEEPING flag persists across frames. Same for sleep_counter
+---

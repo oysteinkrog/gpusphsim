@@ -158,7 +158,7 @@ def test_static_skip():
 
     d = make_simple_particles(n, STONE, STATIC, pos=pos, vel=vel)
 
-    pos_out, vel_out, color_out = integrate(**d)
+    pos_out, vel_out, color_out, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -182,7 +182,7 @@ def test_gravity_freefall():
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     pos_h = pos_out.get()
@@ -213,7 +213,7 @@ def test_bounce_floor():
     vel = np.array([[0.0, -5.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     pos_h = pos_out.get()
@@ -228,7 +228,7 @@ def test_bounce_floor():
     pos2 = np.array([[0.0, -0.995, 0.0, 1.0]], dtype=np.float32)
     vel2 = np.array([[0.0, -10.0, 0.0, 0.0]], dtype=np.float32)
     d2 = make_simple_particles(n, WATER, FLUID, pos=pos2, vel=vel2)
-    pos_out2, vel_out2, _ = integrate(**d2)
+    pos_out2, vel_out2, _, _, _ = integrate(**d2)
 
     vel_h2 = vel_out2.get()
     pos_h2 = pos_out2.get()
@@ -266,6 +266,9 @@ def test_bounce_multi_step():
     pos_gpu = cupy.asarray(pos_np)
     vel_gpu = cupy.asarray(vel_np)
 
+    pi_gpu = cupy.full(n, MAKE_PACKED(WATER, FLUID), dtype=cupy.uint32)
+    sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
+
     # Run 2000 steps
     for step in range(2000):
         d = {
@@ -274,13 +277,16 @@ def test_bounce_multi_step():
             "sorted_veleval": vel_gpu.copy(),
             "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
             "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
-            "sorted_packed_info": cupy.full(n, MAKE_PACKED(WATER, FLUID), dtype=cupy.uint32),
+            "sorted_packed_info": pi_gpu,
             "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
             "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sorted_sleep_counter": sc_gpu,
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
             "color_out": cupy.zeros((n, 4), dtype=cupy.float32),
+            "packed_info_out": pi_gpu,
+            "sleep_counter_out": sc_gpu,
         }
         integrate(**d)
 
@@ -309,7 +315,7 @@ def test_gas_buoyancy():
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=temp)
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -339,7 +345,7 @@ def test_gas_drag():
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
 
     d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=293.0)
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -365,7 +371,7 @@ def test_velocity_clamp():
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_sph_force"] = cupy.asarray(sph_force)
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     speed = math.sqrt(vel_h[0, 0]**2 + vel_h[0, 1]**2 + vel_h[0, 2]**2)
@@ -388,7 +394,7 @@ def test_color_computation():
     n = 1
     d = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
     d["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out = integrate(**d)
+    _, _, color_out, _, _ = integrate(**d)
     color_h = color_out.get()
 
     # Water color: (0.2, 0.5, 0.9)
@@ -400,7 +406,7 @@ def test_color_computation():
     # Test 2: hot particle -> red tint
     d2 = make_simple_particles(n, WATER, FLUID, temp=1293.0, health=1.0)
     d2["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out2 = integrate(**d2)
+    _, _, color_out2, _, _ = integrate(**d2)
     color_h2 = color_out2.get()
 
     # Should be more red than base water
@@ -410,7 +416,7 @@ def test_color_computation():
     # Test 3: low health -> faded color
     d3 = make_simple_particles(n, WATER, FLUID, temp=293.0, health=0.5)
     d3["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out3 = integrate(**d3)
+    _, _, color_out3, _, _ = integrate(**d3)
     color_h3 = color_out3.get()
 
     # Should be ~half brightness
@@ -441,7 +447,10 @@ def test_sort_indexes_writeback():
     out_vel = cupy.zeros((n, 4), dtype=cupy.float32)
     out_col = cupy.zeros((n, 4), dtype=cupy.float32)
 
-    integrate(**d, position_out=out_pos, velocity_out=out_vel, color_out=out_col)
+    out_pi = cupy.zeros(n, dtype=cupy.uint32)
+    out_sc = cupy.zeros(n, dtype=cupy.uint8)
+    integrate(**d, position_out=out_pos, velocity_out=out_vel, color_out=out_col,
+              packed_info_out=out_pi, sleep_counter_out=out_sc)
 
     pos_h = out_pos.get()
 
@@ -482,7 +491,7 @@ def test_boundary_all_walls():
     ], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -516,7 +525,7 @@ def test_coulomb_friction():
     vel = np.array([[5.0, -10.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -546,7 +555,7 @@ def test_xsph_position_update():
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_veleval"] = cupy.asarray(veleval)
-    pos_out, vel_out, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -562,7 +571,7 @@ def test_xsph_position_update():
     # Non-FLUID should NOT use XSPH
     d2 = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
     d2["sorted_veleval"] = cupy.asarray(veleval)
-    pos_out2, _, _ = integrate(**d2)
+    pos_out2, _, _, _, _ = integrate(**d2)
     pos_h2 = pos_out2.get()
 
     expected_px2 = DT * 1.0  # no XSPH
@@ -604,6 +613,7 @@ def test_water_pool_no_nan():
     health_gpu = cupy.full(n, 1.0, dtype=cupy.float32)
     sort_idx = cupy.arange(n, dtype=cupy.uint32)
     color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+    sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
 
     for step in range(1000):
         # Apply small random SPH-like forces for realism
@@ -619,10 +629,13 @@ def test_water_pool_no_nan():
             sorted_packed_info=pi_gpu,
             sorted_temperature=temp_gpu,
             sorted_health=health_gpu,
+            sorted_sleep_counter=sc_gpu,
             sort_indexes=sort_idx,
             position_out=pos_gpu,
             velocity_out=vel_gpu,
             color_out=color_gpu,
+            packed_info_out=pi_gpu,
+            sleep_counter_out=sc_gpu,
         )
         veleval_gpu[:] = vel_gpu
 
@@ -673,7 +686,7 @@ def test_granular_anti_creep_settled():
     # Shear rate below gamma_min (0.05)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # All velocities should be exactly zero (anti-creep triggered)
@@ -706,7 +719,7 @@ def test_granular_anti_creep_flowing():
     d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (above threshold)
@@ -741,7 +754,7 @@ def test_granular_anti_creep_low_density():
     d["sorted_density"] = cupy.full(n, 1000.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (density too low for anti-creep)
@@ -775,7 +788,7 @@ def test_granular_anti_creep_high_shear():
     # Shear rate ABOVE gamma_min (0.05)
     d["sorted_shear_rate"] = cupy.full(n, 1.0, dtype=cupy.float32)
 
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (shear rate too high)
@@ -811,6 +824,8 @@ def test_granular_no_jitter_5000_steps():
     shear_rate_gpu = cupy.full(n, 0.01, dtype=cupy.float32)
 
     color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+    pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
+    sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
 
     # Record initial position after first step
     for step in range(5000):
@@ -820,15 +835,18 @@ def test_granular_no_jitter_5000_steps():
             "sorted_veleval": vel_gpu.copy(),
             "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
             "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
-            "sorted_packed_info": cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32),
+            "sorted_packed_info": pi_gpu,
             "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
             "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
             "sorted_density": density_gpu,
             "sorted_shear_rate": shear_rate_gpu,
+            "sorted_sleep_counter": sc_gpu,
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
             "color_out": color_gpu,
+            "packed_info_out": pi_gpu,
+            "sleep_counter_out": sc_gpu,
         }
         integrate(**d)
 
@@ -871,7 +889,7 @@ def test_fluid_unaffected_by_anti_creep():
     d["sorted_density"] = cupy.full(n, 1200.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # FLUID velocity should be preserved (not zeroed)
@@ -881,6 +899,428 @@ def test_fluid_unaffected_by_anti_creep():
         )
 
     print("PASS: test_fluid_unaffected_by_anti_creep")
+
+
+# ===========================================================================
+# Sleep system tests (US-018)
+# ===========================================================================
+
+IS_SLEEPING = lambda p: (p >> 10) & 1
+
+
+def test_sleep_counter_increments():
+    """Sleep counter increments each frame when velocity < v_sleep AND shear_rate < gamma_sleep.
+
+    After 10 frames of being still, SLEEPING flag should be set.
+    """
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 10
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 3] = 1.0
+
+    # Very low velocity (below v_sleep=0.005)
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = 0.001
+
+    pos_gpu = cupy.asarray(pos)
+    vel_gpu = cupy.asarray(vel)
+    pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
+    sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    # Run 15 steps -- counter should reach threshold (10) and set SLEEPING
+    for step in range(15):
+        d = {
+            "sorted_position": pos_gpu,
+            "sorted_velocity": vel_gpu,
+            "sorted_veleval": vel_gpu.copy(),
+            "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+            "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+            "sorted_packed_info": pi_gpu,
+            "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+            "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+            "sorted_shear_rate": cupy.full(n, 0.005, dtype=cupy.float32),
+            "sorted_sleep_counter": sc_gpu,
+            "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+            "position_out": pos_gpu,
+            "velocity_out": vel_gpu,
+            "color_out": color_gpu,
+            "packed_info_out": pi_gpu,
+            "sleep_counter_out": sc_gpu,
+        }
+        integrate(**d)
+
+    sc_h = sc_gpu.get()
+    pi_h = pi_gpu.get()
+
+    # After 15 steps of being still, counter should be >= 10
+    for i in range(n):
+        assert sc_h[i] >= 10, f"Sleep counter too low: {sc_h[i]} for particle {i}"
+        assert IS_SLEEPING(int(pi_h[i])) == 1, (
+            f"Particle {i} should be sleeping: packed_info=0x{pi_h[i]:08x}"
+        )
+
+    print("PASS: test_sleep_counter_increments")
+
+
+def test_sleep_counter_resets():
+    """Sleep counter resets to 0 when velocity > v_sleep or shear_rate > gamma_sleep."""
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 5
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 3] = 1.0
+
+    # Velocity ABOVE v_sleep (0.005) -- should not accumulate sleep counter
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = 0.01  # above v_sleep
+
+    pos_gpu = cupy.asarray(pos)
+    vel_gpu = cupy.asarray(vel)
+    pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
+    sc_gpu = cupy.full(n, np.uint8(5), dtype=cupy.uint8)  # start with counter=5
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    d = {
+        "sorted_position": pos_gpu,
+        "sorted_velocity": vel_gpu,
+        "sorted_veleval": vel_gpu.copy(),
+        "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+        "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+        "sorted_packed_info": pi_gpu,
+        "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+        "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+        "sorted_shear_rate": cupy.full(n, 0.005, dtype=cupy.float32),
+        "sorted_sleep_counter": sc_gpu,
+        "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+        "position_out": pos_gpu,
+        "velocity_out": vel_gpu,
+        "color_out": color_gpu,
+        "packed_info_out": pi_gpu,
+        "sleep_counter_out": sc_gpu,
+    }
+    integrate(**d)
+
+    sc_h = sc_gpu.get()
+    for i in range(n):
+        assert sc_h[i] == 0, (
+            f"Sleep counter should have reset to 0 (velocity above v_sleep), got {sc_h[i]}"
+        )
+
+    print("PASS: test_sleep_counter_resets")
+
+
+def test_sleep_hysteresis_wake():
+    """Sleeping particles wake only when velocity > v_wake (0.02), not at v_sleep (0.005).
+
+    Hysteresis: v_wake > v_sleep prevents oscillation between sleeping and awake states.
+    """
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 2
+
+    # Particle 0: sleeping, velocity between v_sleep and v_wake -> stays asleep
+    # Particle 1: sleeping, velocity above v_wake -> wakes up
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 3] = 1.0
+
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[0, 0] = 0.01   # between v_sleep (0.005) and v_wake (0.02)
+    vel[1, 0] = 0.03   # above v_wake (0.02)
+
+    packed = np.array([
+        SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)),
+        SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)),
+    ], dtype=np.uint32)
+
+    sc = np.array([15, 15], dtype=np.uint8)
+
+    d = {
+        "sorted_position": cupy.asarray(pos),
+        "sorted_velocity": cupy.asarray(vel),
+        "sorted_veleval": cupy.asarray(vel),
+        "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+        "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+        "sorted_packed_info": cupy.asarray(packed),
+        "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+        "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+        "sorted_shear_rate": cupy.full(n, 0.005, dtype=cupy.float32),
+        "sorted_sleep_counter": cupy.asarray(sc),
+        "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+    }
+
+    _, vel_out, _, pi_out, sc_out = integrate(**d)
+    pi_h = pi_out.get()
+    sc_h = sc_out.get()
+    vel_h = vel_out.get()
+
+    # Particle 0: still sleeping (velocity 0.01 <= v_wake 0.02)
+    assert IS_SLEEPING(int(pi_h[0])) == 1, (
+        f"Particle 0 should stay sleeping: pi=0x{pi_h[0]:08x}"
+    )
+    # Sleeping particle has zero velocity output
+    assert abs(vel_h[0, 0]) < 1e-6, f"Sleeping particle vel should be 0, got {vel_h[0, 0]}"
+
+    # Particle 1: woke up (velocity 0.03 > v_wake 0.02)
+    assert IS_SLEEPING(int(pi_h[1])) == 0, (
+        f"Particle 1 should be awake: pi=0x{pi_h[1]:08x}"
+    )
+    assert sc_h[1] == 0, f"Woken particle counter should be 0, got {sc_h[1]}"
+
+    print("PASS: test_sleep_hysteresis_wake")
+
+
+def test_sleeping_skip_force_integration():
+    """Sleeping particles skip force integration -- position unchanged.
+
+    Even with SPH forces and gravity, a sleeping particle's position should not move.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 2
+    # Particle 0: sleeping (should not move)
+    # Particle 1: awake (should move normally)
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[0] = [0.0, 0.0, 0.0, 1.0]
+    pos[1] = [0.5, 0.5, 0.0, 1.0]
+
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[0, 0] = 0.001   # very slow (below v_wake)
+    vel[1, 1] = -1.0     # falling
+
+    packed = np.array([
+        SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)),
+        MAKE_PACKED(WATER, FLUID),
+    ], dtype=np.uint32)
+
+    sph_force = np.zeros((n, 4), dtype=np.float32)
+    sph_force[0] = [100.0, 100.0, 100.0, 0.0]  # large force on sleeping particle
+    sph_force[1] = [0.0, 0.0, 0.0, 0.0]
+
+    d = {
+        "sorted_position": cupy.asarray(pos),
+        "sorted_velocity": cupy.asarray(vel),
+        "sorted_veleval": cupy.asarray(vel),
+        "sorted_sph_force": cupy.asarray(sph_force),
+        "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+        "sorted_packed_info": cupy.asarray(packed),
+        "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+        "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+        "sorted_shear_rate": cupy.full(n, 0.001, dtype=cupy.float32),
+        "sorted_sleep_counter": cupy.array([15, 0], dtype=cupy.uint8),
+        "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+    }
+
+    pos_out, vel_out, _, pi_out, _ = integrate(**d)
+    pos_h = pos_out.get()
+    vel_h = vel_out.get()
+
+    # Sleeping particle: position should be unchanged
+    assert abs(pos_h[0, 0] - 0.0) < 1e-6, f"Sleeping particle moved X: {pos_h[0, 0]}"
+    assert abs(pos_h[0, 1] - 0.0) < 1e-6, f"Sleeping particle moved Y: {pos_h[0, 1]}"
+    # Sleeping particle: velocity should be zero
+    assert abs(vel_h[0, 0]) < 1e-6, f"Sleeping particle has velocity: {vel_h[0, 0]}"
+    assert abs(vel_h[0, 1]) < 1e-6, f"Sleeping particle has velocity: {vel_h[0, 1]}"
+
+    # Awake particle: should have moved due to gravity
+    assert pos_h[1, 1] < 0.5, f"Awake particle should have fallen, pos_y={pos_h[1, 1]}"
+
+    print("PASS: test_sleeping_skip_force_integration")
+
+
+def test_sleep_counter_saturates():
+    """Sleep counter saturates at 255 (uint8 max)."""
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 1
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 3] = 1.0
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = 0.001  # below v_sleep
+
+    pos_gpu = cupy.asarray(pos)
+    vel_gpu = cupy.asarray(vel)
+    pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
+    sc_gpu = cupy.full(n, np.uint8(254), dtype=cupy.uint8)
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    # Run 5 steps starting from counter=254
+    for _ in range(5):
+        d = {
+            "sorted_position": pos_gpu,
+            "sorted_velocity": vel_gpu,
+            "sorted_veleval": vel_gpu.copy(),
+            "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+            "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+            "sorted_packed_info": pi_gpu,
+            "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+            "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+            "sorted_shear_rate": cupy.full(n, 0.005, dtype=cupy.float32),
+            "sorted_sleep_counter": sc_gpu,
+            "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+            "position_out": pos_gpu,
+            "velocity_out": vel_gpu,
+            "color_out": color_gpu,
+            "packed_info_out": pi_gpu,
+            "sleep_counter_out": sc_gpu,
+        }
+        integrate(**d)
+
+    sc_h = sc_gpu.get()
+    assert sc_h[0] == 255, f"Sleep counter should saturate at 255, got {sc_h[0]}"
+
+    print("PASS: test_sleep_counter_saturates")
+
+
+def test_sleeping_particles_density_contribution():
+    """Sleeping particles still participate in hash/sort/density (verified by packed_info being preserved).
+
+    This test verifies that the sleeping flag doesn't prevent the particle from being
+    reordered and having its data read by other kernels. The sleep logic only skips
+    Step2 and force integration, not Step1 density.
+    """
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 4
+    # Mix of sleeping and awake particles
+    packed = np.array([
+        SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)),  # sleeping
+        MAKE_PACKED(SAND, GRANULAR),                 # awake
+        SET_SLEEPING(MAKE_PACKED(WATER, FLUID)),    # sleeping fluid
+        MAKE_PACKED(WATER, FLUID),                   # awake fluid
+    ], dtype=np.uint32)
+
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = [0.0, 0.1, 0.2, 0.3]
+    pos[:, 3] = 1.0
+    vel = np.zeros((n, 4), dtype=np.float32)  # all zero
+
+    d = {
+        "sorted_position": cupy.asarray(pos),
+        "sorted_velocity": cupy.asarray(vel),
+        "sorted_veleval": cupy.asarray(vel),
+        "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+        "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+        "sorted_packed_info": cupy.asarray(packed),
+        "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+        "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+        "sorted_shear_rate": cupy.full(n, 0.001, dtype=cupy.float32),
+        "sorted_sleep_counter": cupy.array([15, 0, 15, 0], dtype=cupy.uint8),
+        "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+    }
+
+    pos_out, _, _, pi_out, sc_out = integrate(**d)
+    pi_h = pi_out.get()
+    pos_h = pos_out.get()
+
+    # Sleeping particles should have SLEEPING flag preserved (and position unchanged)
+    assert IS_SLEEPING(int(pi_h[0])) == 1, "Particle 0 should still be sleeping"
+    assert IS_SLEEPING(int(pi_h[2])) == 1, "Particle 2 should still be sleeping"
+    assert abs(pos_h[0, 0] - 0.0) < 1e-6, "Sleeping particle 0 should not move"
+    assert abs(pos_h[2, 0] - 0.2) < 1e-6, "Sleeping particle 2 should not move"
+
+    # Awake particles should have SLEEPING flag clear
+    assert IS_SLEEPING(int(pi_h[1])) == 0, "Particle 1 should be awake"
+    assert IS_SLEEPING(int(pi_h[3])) == 0, "Particle 3 should be awake"
+
+    # Material IDs should be preserved
+    assert (pi_h[0] & 0xFF) == SAND, "Sleeping particle 0 lost material ID"
+    assert (pi_h[1] & 0xFF) == SAND, "Awake particle 1 lost material ID"
+    assert (pi_h[2] & 0xFF) == WATER, "Sleeping particle 2 lost material ID"
+    assert (pi_h[3] & 0xFF) == WATER, "Awake particle 3 lost material ID"
+
+    print("PASS: test_sleeping_particles_density_contribution")
+
+
+def test_sleep_wake_cycle():
+    """Full sleep/wake cycle: particles sleep after N frames, wake when disturbed.
+
+    Simulates settling (sleep), then external disturbance (wake).
+    """
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 5
+    pos_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+    pos_gpu[:, 3] = 1.0
+
+    # Start with very slow velocity
+    vel_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+    vel_gpu[:, 0] = 0.001  # below v_sleep
+
+    pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
+    sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    # Phase 1: let particles settle and fall asleep (15 steps)
+    for _ in range(15):
+        d = {
+            "sorted_position": pos_gpu,
+            "sorted_velocity": vel_gpu,
+            "sorted_veleval": vel_gpu.copy(),
+            "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+            "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+            "sorted_packed_info": pi_gpu,
+            "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+            "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+            "sorted_shear_rate": cupy.full(n, 0.005, dtype=cupy.float32),
+            "sorted_sleep_counter": sc_gpu,
+            "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+            "position_out": pos_gpu,
+            "velocity_out": vel_gpu,
+            "color_out": color_gpu,
+            "packed_info_out": pi_gpu,
+            "sleep_counter_out": sc_gpu,
+        }
+        integrate(**d)
+
+    # Verify all sleeping
+    pi_h = pi_gpu.get()
+    for i in range(n):
+        assert IS_SLEEPING(int(pi_h[i])) == 1, f"Particle {i} should be sleeping after settling"
+
+    # Phase 2: give particles high velocity to wake them (simulate impact)
+    vel_gpu[:, 0] = 0.05  # above v_wake (0.02)
+
+    for _ in range(1):
+        d = {
+            "sorted_position": pos_gpu,
+            "sorted_velocity": vel_gpu,
+            "sorted_veleval": vel_gpu.copy(),
+            "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+            "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+            "sorted_packed_info": pi_gpu,
+            "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+            "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+            "sorted_shear_rate": cupy.full(n, 0.005, dtype=cupy.float32),
+            "sorted_sleep_counter": sc_gpu,
+            "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+            "position_out": pos_gpu,
+            "velocity_out": vel_gpu,
+            "color_out": color_gpu,
+            "packed_info_out": pi_gpu,
+            "sleep_counter_out": sc_gpu,
+        }
+        integrate(**d)
+
+    # Verify all woken up
+    pi_h = pi_gpu.get()
+    sc_h = sc_gpu.get()
+    for i in range(n):
+        assert IS_SLEEPING(int(pi_h[i])) == 0, (
+            f"Particle {i} should be awake after disturbance"
+        )
+        assert sc_h[i] == 0, f"Particle {i} counter should be 0 after waking, got {sc_h[i]}"
+
+    print("PASS: test_sleep_wake_cycle")
 
 
 def test_500k_stress():
@@ -927,7 +1367,7 @@ def test_500k_stress():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    pos_out, vel_out, color_out = integrate(**d)
+    pos_out, vel_out, color_out, _, _ = integrate(**d)
 
     # Synchronize to catch any CUDA errors
     cupy.cuda.Device().synchronize()
@@ -983,6 +1423,14 @@ if __name__ == "__main__":
         test_granular_anti_creep_high_shear,
         test_granular_no_jitter_5000_steps,
         test_fluid_unaffected_by_anti_creep,
+        # Sleep system tests (US-018)
+        test_sleep_counter_increments,
+        test_sleep_counter_resets,
+        test_sleep_hysteresis_wake,
+        test_sleeping_skip_force_integration,
+        test_sleep_counter_saturates,
+        test_sleeping_particles_density_contribution,
+        test_sleep_wake_cycle,
         test_500k_stress,
     ]
 

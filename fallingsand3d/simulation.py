@@ -181,6 +181,7 @@ class Simulation:
 
         # 7. Integrate: symplectic Euler + SDF boundaries + color update
         #    Writes back to UNSORTED arrays via sort_indexes
+        #    Also updates packed_info (sleep flag) and sleep_counter
         integrate.integrate(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -192,10 +193,13 @@ class Simulation:
             w.sorted_health[:n],
             sorted_density=w.sorted_density[:n],
             sorted_shear_rate=w.sorted_shear_rate[:n],
+            sorted_sleep_counter=w.sorted_sleep_counter[:n],
             sort_indexes=sorted_indices[:n],
             position_out=w.position,
             velocity_out=w.velocity,
             color_out=w.color,
+            packed_info_out=w.packed_info,
+            sleep_counter_out=w.sleep_counter,
         )
 
         self.sim_time += self.dt
