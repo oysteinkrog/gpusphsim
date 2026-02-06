@@ -3,10 +3,10 @@
   "sessionId": "0a9bb7d7-e66b-4aa5-84c0-224e7a9d1534",
   "status": "running",
   "startedAt": "2026-02-06T10:16:15.178Z",
-  "updatedAt": "2026-02-06T17:41:14.789Z",
-  "currentIteration": 25,
+  "updatedAt": "2026-02-06T17:49:49.656Z",
+  "currentIteration": 26,
   "maxIterations": 0,
-  "tasksCompleted": 32,
+  "tasksCompleted": 33,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -167,8 +167,8 @@
       {
         "id": "US-026",
         "title": "ImGui material picker and brush tool",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "US-027",
@@ -446,6 +446,16 @@
       "durationMs": 381760,
       "startedAt": "2026-02-06T17:26:02.051Z",
       "endedAt": "2026-02-06T17:32:23.811Z"
+    },
+    {
+      "iteration": 26,
+      "status": "completed",
+      "taskId": "US-026",
+      "taskTitle": "ImGui material picker and brush tool",
+      "taskCompleted": true,
+      "durationMs": 528117,
+      "startedAt": "2026-02-06T17:32:26.663Z",
+      "endedAt": "2026-02-06T17:41:14.780Z"
     }
   ],
   "skippedTaskIds": [],
