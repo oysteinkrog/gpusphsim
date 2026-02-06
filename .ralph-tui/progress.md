@@ -6,6 +6,8 @@
 - **CUDA constant memory upload pattern (CuPy):** Use `cupy.RawModule(code=KERNEL_SOURCE)` to compile CUDA source containing `__constant__` arrays. Get the device pointer via `module.get_global('c_symbol_name')`, then upload with `cupy.cuda.runtime.memcpy(int(d_ptr), host_array.ctypes.data, nbytes, 1)` where 1=cudaMemcpyHostToDevice. Do NOT use `memcpyToSymbol` -- it's unreliable with NVRTC modules.
 - **Blackwell (sm_120) PTX workaround:** CuPy's NVRTC backend defaults to generating sm_NN cubin, but if the GPU (e.g. sm_120) exceeds the bundled NVRTC's max capability (e.g. sm_90 for CUDA 12.5), the cubin won't load. Fix: set `cupy.cuda.compiler._use_ptx = True` and clear the memoized `_get_arch`/`_get_arch_for_options_for_nvrtc` caches before first compilation. This forces `compute_NN` PTX output which the driver JIT-compiles.
 - **Numpy structured arrays for C struct packing:** Define `np.dtype([("field", np.float32), ...], align=True)` matching the C struct layout exactly. Assert `dtype.itemsize == sizeof(CStruct)` to catch padding mismatches. Use `array.ctypes.data` for the host pointer when uploading to GPU.
+- **CuPy RawModule with external .cu files:** Read the .cu source from disk and pass to `cupy.RawModule(code=source, options=("--std=c++11", f"-I{kernel_dir}"))`. The `-I` flag lets NVRTC find `#include "common.cuh"` in the same directory. This is better than embedding CUDA source as Python strings for non-trivial kernels.
+- **CUDA float3 struct packing (no trailing pad):** CUDA `float3` is exactly 12 bytes (3 x float32) with no trailing padding. Use `np.dtype([("field", np.float32, (3,))], align=False)` to match. Do NOT use `align=True` for float3 fields -- that would add 4 bytes of padding per field.
 
 ---
 
@@ -40,4 +42,24 @@
   - MaterialProps struct padded to 64 bytes (16 fields * 4 bytes each) -- 13 floats + 3 ints fits exactly without extra padding needed
   - Interaction struct is 8 bytes (2 floats) -- total constant memory usage for 32 materials + 32x32 interactions = 10,240 bytes (well under the 64 KB limit)
   - PHYSICS.md doesn't exist in the repo yet -- material property values were defined from the acceptance criteria (water density=1000, acid-metal reaction_rate=0.3) plus reasonable physical constants for a falling-sand game
+---
+
+## 2026-02-06 - US-008
+- What was implemented:
+  - `physics/kernels/common.cuh` -- Shared CUDA header with `GridParams` struct definition and `uint` typedef
+  - `physics/kernels/hash_sort.cu` -- K_CalcHash kernel ported from `SPHSimLib/K_UniformGrid_Utils.inl` (calcGridCell + calcGridHash non-Morton) with boundary clamping
+  - `hash_sort.py` -- Python module: GridParams numpy dtype, constant memory upload, CuPy RawModule compilation from external .cu file, `calc_hash()` kernel launch wrapper
+  - `test_hash_sort.py` -- Integration tests: grid constants, struct layout, compilation, known-position hash, 100K uniform particles, boundary clamping, 500K stress test, CPU reference cross-validation
+- Files changed:
+  - `physics/kernels/common.cuh` (new)
+  - `physics/kernels/hash_sort.cu` (new)
+  - `hash_sort.py` (new)
+  - `test_hash_sort.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - CuPy RawModule can compile external .cu files by reading source from disk and passing `-I{dir}` for includes -- cleaner than inline strings for multi-file kernels
+  - CUDA `float3` is 12 bytes with no trailing pad; numpy dtype must use `align=False` with `(np.float32, (3,))` sub-arrays to match the layout (5 float3 = 60 bytes, not 80)
+  - The C++ `calcGridCell` uses `make_int3(float3)` which truncates toward zero; porting to CUDA `(int)` cast preserves this behavior; the `np.floor` CPU reference differs for negative inputs but clamping makes them equivalent
+  - Grid delta is `grid_res / grid_size` = 50/2 = 25 (not `1/cell_size` which would also be 25 for cell_size=0.04)
+  - The original C++ hash kernel uses `wrapEdges=true` (modulo wrapping); the Python port uses clamping instead per acceptance criteria, which is simpler and avoids negative modulo edge cases
 ---
