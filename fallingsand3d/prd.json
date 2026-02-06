@@ -53,8 +53,9 @@
         "Works on Windows with NVIDIA driver (tested on RTX 5070 Ti)"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "No CPU fallback — if interop fails, debug and fix it. CuPy doesn't wrap GL interop natively; use ctypes to load cudart64_12.dll on Windows. To wrap the mapped device pointer as a CuPy array: mem = cupy.cuda.UnownedMemory(dev_ptr, nbytes, owner=None); memptr = cupy.cuda.MemoryPointer(mem, 0); arr = cupy.ndarray(shape, dtype, memptr). Ensure same CUDA device/context as GLFW GL context (may need cudaGLSetGLDevice early)."
+      "passes": true,
+      "notes": "No CPU fallback — if interop fails, debug and fix it. CuPy doesn't wrap GL interop natively; use ctypes to load cudart64_12.dll on Windows. To wrap the mapped device pointer as a CuPy array: mem = cupy.cuda.UnownedMemory(dev_ptr, nbytes, owner=None); memptr = cupy.cuda.MemoryPointer(mem, 0); arr = cupy.ndarray(shape, dtype, memptr). Ensure same CUDA device/context as GLFW GL context (may need cudaGLSetGLDevice early).",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-004",
@@ -581,6 +582,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T14:54:45.289Z"
+    "updatedAt": "2026-02-06T14:58:49.115Z"
   }
 }
