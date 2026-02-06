@@ -18,7 +18,6 @@ public:
 
 		float3 veleval_j;
 		float density_j;
-		float pressure_j;
 
 		float3 f_viscosity;
 		float3 f_pressure;
@@ -37,7 +36,8 @@ public:
 			// read particle data from sorted arrays
 			data.veleval_i	= FETCH_FLOAT3(data.dParticleDataSorted, veleval, index_i);
 			data.density_i	= FETCH(data.dParticleDataSorted, density, index_i);
-			data.pressure_i	= FETCH(data.dParticleDataSorted, pressure, index_i);
+			// Recompute pressure from density (avoids global memory read from pressure buffer)
+			data.pressure_i	= cFluidParams.rest_pressure + cFluidParams.gas_stiffness * (data.density_i - cFluidParams.rest_density);
 
 			data.f_pressure		= make_float3(0,0,0);
 			data.f_viscosity	= make_float3(0,0,0);
@@ -45,9 +45,10 @@ public:
 
 		static __device__ void ForNeighbor(Data &data, uint const &index_i, uint const &index_j, float3 const &r, float const& rlen, float const &rlen_sq)
 		{
-			data.veleval_j	= FETCH_FLOAT3(data.dParticleDataSorted, veleval, index_j);
-			data.density_j	= FETCH(data.dParticleDataSorted, density,  index_j);
-			data.pressure_j	= FETCH(data.dParticleDataSorted, pressure, index_j);
+			data.veleval_j	= FETCH_READONLY_FLOAT3(data.dParticleDataSorted, veleval, index_j);
+			data.density_j	= FETCH_READONLY(data.dParticleDataSorted, density,  index_j);
+			// Recompute pressure_j from density_j inline (avoids global memory read)
+			float pressure_j = cFluidParams.rest_pressure + cFluidParams.gas_stiffness * (data.density_j - cFluidParams.rest_density);
 
 
 			// pressure  force calc
@@ -59,15 +60,15 @@ public:
 					// in the mueller paper, density_i is placed outside the force defs..., but we calc it here.. easier(atm)
 					// from paper:  f_pressure = -(1/rho_i)* SUM(m_j * ((p_i + p_j) / (2rho_j)) DELWpress
 					// we move the mass the 1/2 and the Wpress constants to precalc.
-					data.f_pressure  += ( (data.pressure_i + data.pressure_j) / (data.density_j * data.density_i) ) * SPH_Kernels::Wspiky::Gradient_Variable(cFluidParams.smoothing_length, r, rlen);
+					data.f_pressure  += ( (data.pressure_i + pressure_j) / (data.density_j * data.density_i) ) * SPH_Kernels::Wspiky::Gradient_Variable(cFluidParams.smoothing_length, r, rlen);
 				}
 				break;
 				//from "Particle-based viscoplastic fluid/solid simulation", also see "SPH survival kit"
 			case SPH_PRESSURE_VISCOPLASTIC:
 				{
-					data.f_pressure  += ( (data.pressure_i/(data.density_i*data.density_i)) + (data.pressure_j/(data.density_j*data.density_j)) ) * SPH_Kernels::Wspiky::Gradient_Variable(cFluidParams.smoothing_length, r, rlen);	
+					data.f_pressure  += ( (data.pressure_i/(data.density_i*data.density_i)) + (pressure_j/(data.density_j*data.density_j)) ) * SPH_Kernels::Wspiky::Gradient_Variable(cFluidParams.smoothing_length, r, rlen);
 					break;
-				}   
+				}
 			}
 
 			// viscosity from mueller paper : f_viscosity = (�/rho_i)SUM(m_j * (v_j-v_i)/(rho_j)DEL^2Wvis
@@ -105,13 +106,15 @@ __global__ void K_SumStep2(uint			numParticles,
 
 	data.dParticleDataSorted = dParticleDataSorted;
 
+	// Sorted position is in simulation space (pre-scaled); un-scale for grid cell lookup
 	float3 position_i = FETCH_FLOAT3(data.dParticleDataSorted, position, index);
+	float3 gridPosition_i = position_i * cPrecalcParams.inv_scale_to_simulation;
 
 	// Do calculations on particles in neighboring cells
 #ifdef SPHSIMLIB_USE_NEIGHBORLIST
 	UniformGridUtils::IterateParticlesInNearbyCells<SPHNeighborCalc<Step2::Calc<symmetrization>, Step2::Data>, Step2::Data>(data, index, position_i, dNeighborList);
 #else
-	UniformGridUtils::IterateParticlesInNearbyCells<SPHNeighborCalc<Step2::Calc<symmetrization>, Step2::Data>, Step2::Data>(data, index, position_i, dGridData);
+	UniformGridUtils::IterateParticlesInNearbyCells<SPHNeighborCalc<Step2::Calc<symmetrization>, Step2::Data>, Step2::Data>(data, index, position_i, gridPosition_i, dGridData);
 #endif
 }
 

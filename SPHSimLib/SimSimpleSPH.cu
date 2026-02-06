@@ -27,8 +27,6 @@ namespace SimLib { namespace Sim { namespace SimpleSPH {
 	texture<float_vec, 1, cudaReadModeElementType> position_tex;
 	texture<float_vec, 1, cudaReadModeElementType> velocity_tex;
 	texture<float_vec, 1, cudaReadModeElementType> veleval_tex;
-	texture<float, 1, cudaReadModeElementType> pressure_tex;
-
 	texture<float_vec, 1, cudaReadModeElementType> sph_force_tex;
 	texture<float_vec, 1, cudaReadModeElementType> color_tex;
 	texture<float, 1, cudaReadModeElementType> density_tex;
@@ -54,10 +52,9 @@ SimSimpleSPH::SimSimpleSPH(SimLib::SimCudaAllocator* simCudaAllocator, SimLib::S
 	mSPHBuffers = new SimLib::BufferManager<SimpleSPHBuffers>(mSimCudaAllocator);
 
 	//mSPHBuffers->SetBuffer(BufferSphForce,				new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
-	//mSPHBuffers->SetBuffer(BufferSphPressure,			new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float)));
 	//mSPHBuffers->SetBuffer(BufferSphDensity,			new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float)));
 	mSPHBuffers->SetBuffer(BufferSphForceSorted,		new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float_vec)));
-	mSPHBuffers->SetBuffer(BufferSphPressureSorted,		new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float)));
+	// Pressure buffer eliminated — pressure is recomputed inline from density in Step2
 	mSPHBuffers->SetBuffer(BufferSphDensitySorted,		new SimBufferCuda(mSimCudaAllocator, Device, sizeof(float)));
 
 	mSettings->AddSetting("Timestep", 0.002, 0, 1, "");
@@ -144,6 +141,8 @@ void SimSimpleSPH::UpdateParams()
 	hFluidParams.friction_static_limit	= mSettings->GetValue("Static Friction Limit");
 
 	hPrecalcParams.smoothing_length_pow2 = hFluidParams.smoothing_length * hFluidParams.smoothing_length;
+	hPrecalcParams.velocity_limit_sq = hFluidParams.velocity_limit * hFluidParams.velocity_limit;
+	hPrecalcParams.inv_scale_to_simulation = 1.0f / hFluidParams.scale_to_simulation;
 	hPrecalcParams.kernel_poly6_coeff = SPH_Kernels::Wpoly6::Kernel_Constant(hFluidParams.smoothing_length);
 	hPrecalcParams.kernel_spiky_grad_coeff = SPH_Kernels::Wspiky::Gradient_Constant(hFluidParams.smoothing_length);
 	hPrecalcParams.kernel_viscosity_lap_coeff = SPH_Kernels::Wviscosity::Laplace_Constant(hFluidParams.smoothing_length);
@@ -282,7 +281,6 @@ void SimSimpleSPH::BindTextures()
 	CUDA_SAFE_CALL(cudaBindTexture(0, color_tex, dParticleDataSorted.color, mNumParticles*sizeof(float_vec)));
 
 	CUDA_SAFE_CALL(cudaBindTexture(0, sph_force_tex, dParticleDataSorted.sph_force, mNumParticles*sizeof(float_vec)));
-	CUDA_SAFE_CALL(cudaBindTexture(0, pressure_tex, dParticleDataSorted.pressure, mNumParticles*sizeof(float)));
 	CUDA_SAFE_CALL(cudaBindTexture(0, density_tex, dParticleDataSorted.density, mNumParticles*sizeof(float)));
 
 #ifdef SPHSIMLIB_USE_NEIGHBORLIST
@@ -303,7 +301,6 @@ void SimSimpleSPH::UnbindTextures()
 	CUDA_SAFE_CALL(cudaUnbindTexture(veleval_tex));
 	CUDA_SAFE_CALL(cudaUnbindTexture(sph_force_tex));
 	CUDA_SAFE_CALL(cudaUnbindTexture(color_tex));
-	CUDA_SAFE_CALL(cudaUnbindTexture(pressure_tex));
 	CUDA_SAFE_CALL(cudaUnbindTexture(density_tex));
 
 #ifdef SPHSIMLIB_USE_NEIGHBORLIST
@@ -323,7 +320,6 @@ SimpleSPHData SimSimpleSPH::GetParticleData()
 	dParticleData.veleval = mBaseBuffers->Get(BufferVeleval)->GetPtr<float_vec>();
 	dParticleData.velocity = mBaseBuffers->Get(BufferVelocity)->GetPtr<float_vec>();
 	//dParticleData.sph_force = mSPHBuffers->Get(BufferSphForce)->GetPtr<float_vec>();
-	//dParticleData.pressure = mSPHBuffers->Get(BufferSphPressure)->GetPtr<float>();
 	//dParticleData.density = mSPHBuffers->Get(BufferSphDensity)->GetPtr<float>();
 	return dParticleData;
 }
@@ -336,7 +332,6 @@ SimpleSPHData SimSimpleSPH::GetParticleDataSorted()
 	dParticleDataSorted.veleval = mBaseBuffers->Get(BufferVelevalSorted)->GetPtr<float_vec>();
 	dParticleDataSorted.velocity = mBaseBuffers->Get(BufferVelocitySorted)->GetPtr<float_vec>();
 	dParticleDataSorted.sph_force = mSPHBuffers->Get(BufferSphForceSorted)->GetPtr<float_vec>();
-	dParticleDataSorted.pressure = mSPHBuffers->Get(BufferSphPressureSorted)->GetPtr<float>();
 	dParticleDataSorted.density = mSPHBuffers->Get(BufferSphDensitySorted)->GetPtr<float>();
 	return dParticleDataSorted;
 }
@@ -440,7 +435,7 @@ float SimSimpleSPH::ComputeStep1(bool doTiming)
 	SimpleSPHData dParticleData = GetParticleData();
 	SimpleSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	uint threadsPerBlock = 256;
+	uint threadsPerBlock = 128;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
@@ -473,7 +468,7 @@ float SimSimpleSPH::ComputeStep2(bool doTiming)
 	GridData dGridData = mUniformGrid->GetGridData();
 	SimpleSPHData dParticleDataSorted = GetParticleDataSorted();
 
-	uint threadsPerBlock = 256;
+	uint threadsPerBlock = 128;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
@@ -530,7 +525,7 @@ float SimSimpleSPH::Integrate(bool doTiming, bool progress, float deltaTime, boo
 	SimpleSPHData	dParticleData = GetParticleData();
 	SimpleSPHData	dParticleDataSorted = GetParticleDataSorted();
 
-	int threadsPerBlock = 256;
+	int threadsPerBlock = 192;
 
 	uint numThreads, numBlocks;
 	computeGridSize(mNumParticles, threadsPerBlock, numBlocks, numThreads);
@@ -540,17 +535,20 @@ float SimSimpleSPH::Integrate(bool doTiming, bool progress, float deltaTime, boo
 		mGPUTimer->start();
 	}
 
-	K_Integrate<Velocity, HSVBlueToRed><<<numBlocks, numThreads>>>(
-		mNumParticles,
-		gridWallCollisions, terrainCollisions,
-		deltaTime,
-		progress,
-		dGridData,
-		dParticleData,
-		dParticleDataSorted,
-		fluidWorldPosition,
-		dTerrainData
-		);
+	// Dispatch correct template specialization based on collision flags
+	#define LAUNCH_INTEGRATE(walls, terrain) \
+		K_Integrate<Velocity, HSVBlueToRed, walls, terrain><<<numBlocks, numThreads>>>( \
+			mNumParticles, deltaTime, progress, dGridData, \
+			dParticleData, dParticleDataSorted, fluidWorldPosition, dTerrainData)
+
+	if (gridWallCollisions) {
+		if (terrainCollisions)	LAUNCH_INTEGRATE(true, true);
+		else					LAUNCH_INTEGRATE(true, false);
+	} else {
+		if (terrainCollisions)	LAUNCH_INTEGRATE(false, true);
+		else					LAUNCH_INTEGRATE(false, false);
+	}
+	#undef LAUNCH_INTEGRATE
 
 	//CUT_CHECK_ERROR("Kernel execution failed");
 

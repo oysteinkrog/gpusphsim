@@ -29,16 +29,15 @@ public:
 		if (index_j != index_i) 
 		{		
 			// get the particle info (in the current grid) to test against
-			float3 position_j = make_float3(FETCH(data.dParticleDataSorted, position, index_j));
+			float3 position_j = FETCH_READONLY_FLOAT3(data.dParticleDataSorted, position, index_j);
 
-			// get the relative distance between the two particles, translate to simulation space
-			float3 r = (position_i - position_j) * cFluidParams.scale_to_simulation;
+			// get the relative distance (positions are already pre-scaled to simulation space)
+			float3 r = position_i - position_j;
 
 			float rlen_sq = dot(r,r);
 
 			// is this particle within cutoff? Compare squared distances to avoid sqrt
-			float smoothing_length_sq = cFluidParams.smoothing_length * cFluidParams.smoothing_length;
-			if (rlen_sq <= smoothing_length_sq)
+			if (rlen_sq <= cPrecalcParams.smoothing_length_pow2)
 			{
 				// Only compute sqrt for particles actually within range
 				float rlen = sqrtf(rlen_sq);

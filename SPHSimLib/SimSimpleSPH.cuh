@@ -23,22 +23,26 @@ namespace SimLib { namespace Sim { namespace SimpleSPH {
 	enum SimpleSPHBuffers
 	{
 		BufferSphForce,
-		BufferSphPressure,
 		BufferSphDensity,
 		BufferSphForceSorted,
-		BufferSphPressureSorted,
 		BufferSphDensitySorted
 	};
 
 	struct SimpleSPHPrecalcParams
 	{
-		// smoothing length^2 
+		// smoothing length^2
 		float			smoothing_length_pow2;
+
+		// velocity_limit^2 for fast squared-distance check
+		float			velocity_limit_sq;
+
+		// 1/scale_to_simulation for un-scaling pre-scaled positions
+		float			inv_scale_to_simulation;
 
 		// precalculated terms for smoothing kernels
 		float			kernel_poly6_coeff;
 		float			kernel_spiky_grad_coeff;
-		float			kernel_viscosity_lap_coeff;	
+		float			kernel_viscosity_lap_coeff;
 		float			kernel_pressure_precalc;
 		float			kernel_viscosity_precalc;
 	};
@@ -88,9 +92,6 @@ namespace SimLib { namespace Sim { namespace SimpleSPH {
 	{
 		// sum of sph forces
 		float_vec* sph_force;
-
-		// sph pressure
-		float* pressure;
 
 		// sph density
 		float* density;

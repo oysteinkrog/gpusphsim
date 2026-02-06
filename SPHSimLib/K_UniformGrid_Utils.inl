@@ -88,14 +88,12 @@ namespace UniformGridUtils
 		uint cellHash = UniformGridUtils::calcGridHash<true>(cellPos, cGridParams.grid_res);
 
 		// get start/end positions for this cell/bucket
-		//uint startIndex	= FETCH_NOTEX(dGridData,cell_indexes_start,cellHash);
-		uint startIndex = FETCH(dGridData,cell_indexes_start,cellHash);
+		uint startIndex = FETCH_READONLY(dGridData,cell_indexes_start,cellHash);
 
 		// check cell is not empty
 		if (startIndex != 0xffffffff)
 		{
-			//uint endIndex = FETCH_NOTEX(dGridData,cell_indexes_end,cellHash);
-			uint endIndex = FETCH(dGridData, cell_indexes_end, cellHash);
+			uint endIndex = FETCH_READONLY(dGridData, cell_indexes_end, cellHash);
 
 			// iterate over particles in this cell
 			for(uint index_j=startIndex; index_j < endIndex; index_j++)
@@ -133,6 +131,36 @@ namespace UniformGridUtils
 
 		O::PostCalc(data, index_i);
 	}
+	// Overload: separate grid-space position for cell lookup and sim-space position_i for neighbor calc
+	template<class O, class D>
+	static __device__ void IterateParticlesInNearbyCells(
+		D 					&data,
+		uint const			&index_i,
+		float3 const		&position_i,
+		float3 const		&gridPosition_i,
+		GridData const		&dGridData)
+	{
+		O::PreCalc(data, index_i);
+
+		// get cell in grid using world-space position
+		int3 cell = UniformGridUtils::calcGridCell(gridPosition_i, cGridParams.grid_min, cGridParams.grid_delta);
+
+		// iterate through the 3^3 cells in and around the given position
+		for(int z=cell.z-1; z<=cell.z+1; ++z)
+		{
+			for(int y=cell.y-1; y<=cell.y+1; ++y)
+			{
+				for(int x=cell.x-1; x<=cell.x+1; ++x)
+				{
+					// pass sim-space position_i for neighbor distance computation
+					IterateParticlesInCell<O,D>(data, make_int3(x,y,z), index_i, position_i, dGridData);
+				}
+			}
+		}
+
+		O::PostCalc(data, index_i);
+	}
+
 	// Iterate over particles found in the neighbor list
 	template<class O, class D>
 	static __device__ void IterateParticlesInNearbyCells(

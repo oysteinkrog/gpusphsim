@@ -53,7 +53,15 @@ static __inline__ __host__ __device__ float_vec make_vec(float x, float y, float
 #define FETCH_FLOAT3(a,t,i) make_float3(FETCH(a,t,i))
 #define FETCH_MATRIX3(a,t,i) a.t[i]
 #define FETCH_MATRIX3_NOTEX(a,t,i) a.t[i]
-//#define FETCH(a, t, i) (a + __mul24(i,sizeof(a)) + (void*)offsetof(a, t))
+#endif
+
+// __ldg() routes scattered reads through the read-only/L2 cache path (sm_35+)
+#if defined(__CUDACC__) && (__CUDA_ARCH__ >= 350 || !defined(__CUDA_ARCH__))
+#define FETCH_READONLY(a, t, i) __ldg(&a.t[i])
+#define FETCH_READONLY_FLOAT3(a, t, i) make_float3(__ldg(&a.t[i]))
+#else
+#define FETCH_READONLY(a, t, i) a.t[i]
+#define FETCH_READONLY_FLOAT3(a, t, i) make_float3(a.t[i])
 #endif
 
 

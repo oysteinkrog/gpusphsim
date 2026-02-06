@@ -39,8 +39,7 @@ public:
 			float density = max(1.0, cFluidParams.particle_mass * cPrecalcParams.kernel_poly6_coeff * data.sum_density);
 			data.dParticleDataSorted.density[index_i]= density;
 
-			// ideal gas equation of state (by Desbrun and Cani in "Smoothed particles: A new paradigm for animating highly deformable bodies")
-			data.dParticleDataSorted.pressure[index_i] = cFluidParams.rest_pressure + cFluidParams.gas_stiffness * (density - cFluidParams.rest_density);
+			// Pressure is recomputed inline in Step2 to eliminate a global memory buffer
 		}
 	};
 };
@@ -59,13 +58,15 @@ __global__ void K_SumStep1(uint				numParticles,
 	Step1::Data data;
 	data.dParticleDataSorted = dParticleDataSorted;
 
+	// Sorted position is in simulation space (pre-scaled); un-scale for grid cell lookup
 	float3 position_i = make_float3(FETCH(dParticleDataSorted, position, index));
+	float3 gridPosition_i = position_i * cPrecalcParams.inv_scale_to_simulation;
 
 	// Do calculations on particles in neighboring cells
 #ifdef SPHSIMLIB_USE_NEIGHBORLIST
-	UniformGridUtils::IterateParticlesInNearbyCells<SPHNeighborCalc<Step1::Calc, Step1::Data>, Step1::Data>(data, index, position_i, dNeighborList);	
+	UniformGridUtils::IterateParticlesInNearbyCells<SPHNeighborCalc<Step1::Calc, Step1::Data>, Step1::Data>(data, index, position_i, dNeighborList);
 #else
-	UniformGridUtils::IterateParticlesInNearbyCells<SPHNeighborCalc<Step1::Calc, Step1::Data>, Step1::Data>(data, index, position_i, dGridData);
+	UniformGridUtils::IterateParticlesInNearbyCells<SPHNeighborCalc<Step1::Calc, Step1::Data>, Step1::Data>(data, index, position_i, gridPosition_i, dGridData);
 #endif
 
 }
