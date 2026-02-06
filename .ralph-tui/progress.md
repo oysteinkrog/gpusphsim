@@ -265,3 +265,25 @@
   - `np.float32(0.3)` is `0.30000001192092896` due to IEEE 754 -- test comparisons use `abs(x - 0.3) < 1e-6` for GPU readback
   - Behavior classes (FLUID=0, GRANULAR=1, GAS=2, STATIC=3) are stored as int in MaterialProps and used to assign physics behavior (EOS type, mu(I) vs constant viscosity, buoyancy)
 ---
+
+## 2026-02-06 - US-007
+- What was implemented:
+  - `world.py` -- World class managing CuPy SoA arrays for all per-particle data: position(float4), velocity(float4), veleval(float4), sph_force(float4), density(float), mass(float), packed_info(uint32), temperature(float), health(float), lifetime(float), shear_rate(float), exposure_heat(float), exposure_corrode(float), color(float4), sleep_counter(uint8)
+  - Constructor takes max_particles (default 500K), allocates all arrays on GPU
+  - `resize(new_max)` method: destructive reallocation, kills all particles
+  - `spawn_sphere(center, radius, material_id, count)`: rejection-sampled random positions in sphere, sets mass=rho0*spacing^3, packed_info via MAKE_PACKED, material-specific temperatures (LAVA=1500K, FIRE=1200K, STEAM=373K, SMOKE=500K), health=1.0
+  - `spawn_cube(min_corner, max_corner, material_id, spacing)`: regular grid positions via numpy meshgrid, transferred to GPU
+  - `kill_in_sphere(center, radius)`: marks particles as DEAD (packed_info=0) using squared-distance check on GPU
+  - `num_active` property: on-demand GPU count of non-zero packed_info entries
+  - `test_world.py` -- Integration tests covering all acceptance criteria
+- Files changed:
+  - `fallingsand3d/world.py` (implemented from placeholder)
+  - `fallingsand3d/test_world.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - Blackwell PTX workaround is needed even for CuPy's internal elementwise kernels (array slice assignment like `arr[sl] = value`), not just user-compiled RawModule/RawKernel code. Any test script using CuPy on sm_120 must apply the workaround before first GPU operation
+  - `_high_water` (allocation high-water mark) must be kept separate from `num_active` (count of live particles). After `kill_in_sphere`, dead particles create scattered holes but the high-water mark doesn't change. New spawns always go at the end (after `_high_water`). Compaction (US-029) will later reclaim holes
+  - Rejection sampling for sphere spawn: generate 2x+128 candidates per batch in [-1,1]^3, filter by r^2<=1. About 52.4% of unit-cube points fall inside unit sphere, so 2x over-generation is usually sufficient in one batch
+  - spawn_cube builds the meshgrid on CPU (numpy) then transfers to GPU (cupy.asarray) -- this is fine because grid generation is cheap and the transfer is a single bulk H2D copy
+  - DEAD particles have packed_info=0, which means material_id=0 (DEAD) and behavior_class=0 (FLUID). The DEAD material in the table has all-zero properties, so even if a dead particle is accidentally processed, it produces zero forces
+---
