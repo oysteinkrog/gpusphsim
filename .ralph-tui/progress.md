@@ -233,3 +233,20 @@
   - `glSwapInterval(0)` disables vsync, allowing uncapped FPS measurement; the original US-002 used `glSwapInterval(1)` which caps at monitor refresh rate
   - The dummy particle fill uses CuPy's `cupy.random.uniform()` column-by-column on the mapped VBO -- this is simpler than a RawKernel for the initial test and still runs entirely on GPU
 ---
+
+## 2026-02-06 - US-005
+- What was implemented:
+  - `fallingsand3d/physics/kernels/common.cuh` -- Complete CUDA common header with all shared definitions: BehaviorClass enum, MaterialProps struct (64 bytes), Interaction struct (8 bytes), GridParams struct, SimParams struct, PrecalcParams struct, packed_info bitfield macros, constant memory declarations (c_materials[32], c_interactions[32][32], c_grid, c_sim, c_precalc), and array type convention documentation
+  - `fallingsand3d/test_common_cuh.py` -- Compilation test verifying struct sizes, enum values, packed_info macro correctness, constant memory symbol resolution, and kernel execution via CuPy RawModule
+- Files changed:
+  - `fallingsand3d/physics/kernels/common.cuh` (rewritten from placeholder)
+  - `fallingsand3d/test_common_cuh.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - CuPy RawModule uses `get_function()` not `get_kernel()` to retrieve kernel handles -- the API differs from the `RawKernel` class
+  - The new MaterialProps struct (US-005 spec) has different fields from the root-level prototype's MaterialProps (US-006): the new one uses eos_stiffness/eos_gamma/behavior_class/color_rgb instead of the old id/gas_stiffness/is_solid/is_flammable/friction_static/friction_kinetic. Both are 64 bytes but serve different design goals (game-oriented material system vs. direct physical properties)
+  - GridParams in fallingsand3d uses `int3 grid_res` (correct for integer arithmetic in hash) vs the root prototype's `float3 grid_res` (which required casts). This is an improvement for the production codebase
+  - SimParams struct naturally aligns to 64 bytes on the GPU (float3 members get 16-byte alignment) -- the actual GPU sizeof is 64 bytes for SimParams
+  - PrecalcParams is kept separate from SimParams to clearly distinguish config parameters (change per scenario) from derived coefficients (recomputed from smoothing_length)
+  - Total constant memory usage: materials 2048 + interactions 8192 + grid 52 + sim 64 + precalc 20 = ~10,376 bytes, well under the 64 KB limit
+---
