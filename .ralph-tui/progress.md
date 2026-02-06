@@ -2,6 +2,7 @@
 
 - **CUDA-GL interop pattern (Python ctypes):** Load `cudart64_12.dll` (Windows) or `libcudart.so.12` (Linux) via `ctypes.CDLL`. Declare `restype`/`argtypes` for each CUDA runtime function. Wrap `cudaGraphicsResource*` as opaque `c_void_p` handles. Always check `cudaGetLastError` after each interop call.
 - **CuPy zero-copy from device pointer:** `cupy.cuda.UnownedMemory(dev_ptr, nbytes, owner=None)` -> `MemoryPointer` -> `cupy.ndarray(shape, dtype, memptr)`. This avoids any host<->device copy when writing to GL-mapped buffers.
+- **Point sprite renderer pattern:** Vertex shader uses `uMV` (model-view) to compute eye-space distance, then `gl_PointSize = clamp(uPointScale / dist, 1, 64)`. Fragment shader uses `gl_PointCoord` mapped to [-1,1] to discard outside unit circle. Pass both `uMVP` and `uMV` as separate uniforms (MVP for position, MV for distance). Use `GL_TRUE` for transpose in `glUniformMatrix4fv` when matrices are row-major (numpy default).
 - **Existing C++ interop reference:** `SPHSimLib/SimCudaHelper.cpp` uses a `std::map<GLuint, cudaGraphicsResource*>` to track registered buffers -- the Python module mirrors this pattern with the `CudaGLBuffer` class.
 - **CUDA constant memory upload pattern (CuPy):** Use `cupy.RawModule(code=KERNEL_SOURCE)` to compile CUDA source containing `__constant__` arrays. Get the device pointer via `module.get_global('c_symbol_name')`, then upload with `cupy.cuda.runtime.memcpy(int(d_ptr), host_array.ctypes.data, nbytes, 1)` where 1=cudaMemcpyHostToDevice. Do NOT use `memcpyToSymbol` -- it's unreliable with NVRTC modules.
 - **Blackwell (sm_120) PTX workaround:** CuPy's NVRTC backend defaults to generating sm_NN cubin, but if the GPU (e.g. sm_120) exceeds the bundled NVRTC's max capability (e.g. sm_90 for CUDA 12.5), the cubin won't load. Fix: set `cupy.cuda.compiler._use_ptx = True` and clear the memoized `_get_arch`/`_get_arch_for_options_for_nvrtc` caches before first compilation. This forces `compute_NN` PTX output which the driver JIT-compiles.
@@ -211,4 +212,24 @@
   - Blackwell (sm_120) PTX workaround is needed for CuPy RawKernel too, not just RawModule -- set `cupy.cuda.compiler._use_ptx = True` and clear memoized caches before first kernel compilation
   - `cudaGraphicsRegisterFlagsWriteDiscard` (value 2) is correct for write-only CUDA access to GL buffers
   - CuPy `UnownedMemory` + `MemoryPointer` + `ndarray` is the zero-copy pattern to wrap a mapped GL buffer as a CuPy array
+---
+
+## 2026-02-06 - US-004
+- What was implemented:
+  - `renderer.py` -- Point sprite renderer: shader compilation from .vert/.frag files, VAO with two VBOs (position float4, color float4), CUDA-GL interop registration via CudaGLBuffer, distance-based gl_PointSize, depth testing
+  - `particle.vert` -- Updated vertex shader: MVP transform for position, MV transform for eye-space distance, gl_PointSize = clamp(uPointScale/dist, 1, 64)
+  - `particle.frag` -- Updated fragment shader: gl_PointCoord circle discard (r^2 > 1.0), depth-based shading (shade = 1 - 0.4*r^2)
+  - `main.py` -- Updated: integrates Renderer, dummy CuPy fill of 500K particles in [-0.5,0.5]^3 cube with random colors, disabled vsync for FPS measurement, glViewport in framebuffer resize callback
+- Files changed:
+  - `fallingsand3d/renderer.py` (implemented from placeholder)
+  - `fallingsand3d/shaders/particle.vert` (updated -- float4 input, distance-based point size)
+  - `fallingsand3d/shaders/particle.frag` (updated -- circle discard, depth shading)
+  - `fallingsand3d/main.py` (updated -- renderer integration, dummy particle fill)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - PyOpenGL's `glUniformMatrix4fv(loc, 1, GL_TRUE, matrix)` with `GL_TRUE` for transpose handles numpy's row-major layout correctly -- OpenGL expects column-major, so the transpose flag converts on upload
+  - VBO position must be float4 (not float3) for CUDA interop compatibility -- the w=1.0 component is set by the fill kernel and the vertex shader reads .xyz
+  - `glGenBuffers(1)` in PyOpenGL returns a numpy scalar, not an int -- cast with `int()` before passing to CudaGLBuffer which expects a plain Python int for ctypes
+  - `glSwapInterval(0)` disables vsync, allowing uncapped FPS measurement; the original US-002 used `glSwapInterval(1)` which caps at monitor refresh rate
+  - The dummy particle fill uses CuPy's `cupy.random.uniform()` column-by-column on the mapped VBO -- this is simpler than a RawKernel for the initial test and still runs entirely on GPU
 ---

@@ -2,16 +2,61 @@
 
 import time
 import glfw
+import numpy as np
 from OpenGL.GL import (
-    glClearColor, glClear, glGetString, glGetError,
+    glClearColor, glClear, glGetString, glGetError, glViewport,
     GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_VERSION, GL_RENDERER, GL_NO_ERROR,
 )
 from camera import OrbitCamera
+from renderer import Renderer
 
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 WINDOW_TITLE = "Falling Sand 3D"
+NUM_PARTICLES = 500_000
+
+
+def _apply_ptx_workaround():
+    """Force CuPy to emit PTX instead of cubin for forward-compat with newer GPUs."""
+    try:
+        import cupy.cuda.compiler as _compiler
+        _compiler._use_ptx = True
+        if hasattr(_compiler._get_arch, '_cache'):
+            _compiler._get_arch._cache = {}
+        if hasattr(_compiler, '_get_arch_for_options_for_nvrtc'):
+            fn = _compiler._get_arch_for_options_for_nvrtc
+            if hasattr(fn, '_cache'):
+                fn._cache = {}
+    except Exception:
+        pass
+
+
+def _fill_particles_dummy(renderer: Renderer):
+    """Fill VBOs with 500K particles in a cube with random colors via CuPy."""
+    import cupy
+
+    _apply_ptx_workaround()
+
+    n = renderer.num_particles
+
+    # Fill position VBO: random positions in [-0.5, 0.5]^3 cube
+    with renderer.cuda_pos as buf:
+        pos_arr = buf.device_pointer_as_cupy_array((n, 4), np.float32)
+        pos_arr[:, 0] = cupy.random.uniform(-0.5, 0.5, n, dtype=cupy.float32)
+        pos_arr[:, 1] = cupy.random.uniform(-0.5, 0.5, n, dtype=cupy.float32)
+        pos_arr[:, 2] = cupy.random.uniform(-0.5, 0.5, n, dtype=cupy.float32)
+        pos_arr[:, 3] = 1.0
+        cupy.cuda.Device().synchronize()
+
+    # Fill color VBO: random bright colors
+    with renderer.cuda_col as buf:
+        col_arr = buf.device_pointer_as_cupy_array((n, 4), np.float32)
+        col_arr[:, 0] = cupy.random.uniform(0.2, 1.0, n, dtype=cupy.float32)
+        col_arr[:, 1] = cupy.random.uniform(0.2, 1.0, n, dtype=cupy.float32)
+        col_arr[:, 2] = cupy.random.uniform(0.2, 1.0, n, dtype=cupy.float32)
+        col_arr[:, 3] = 1.0
+        cupy.cuda.Device().synchronize()
 
 
 def main():
@@ -30,7 +75,7 @@ def main():
         raise RuntimeError("Failed to create GLFW window")
 
     glfw.make_context_current(window)
-    glfw.swap_interval(1)  # vsync
+    glfw.swap_interval(0)  # no vsync for FPS measurement
 
     # Verify OpenGL version
     gl_version = glGetString(GL_VERSION)
@@ -43,8 +88,13 @@ def main():
     # Dark gray background
     glClearColor(0.15, 0.15, 0.15, 1.0)
 
-    camera = OrbitCamera()
+    camera = OrbitCamera(distance=2.0, elevation=20.0)
     camera.set_aspect(WINDOW_WIDTH, WINDOW_HEIGHT)
+
+    # Create renderer and fill with dummy particles
+    renderer = Renderer(NUM_PARTICLES, point_scale=20.0)
+    _fill_particles_dummy(renderer)
+    print(f"Initialized {NUM_PARTICLES:,} particles")
 
     # Input state
     right_pressed = False
@@ -81,7 +131,9 @@ def main():
         camera.zoom(yoffset)
 
     def framebuffer_size_callback(_win, width, height):
-        camera.set_aspect(width, height)
+        if width > 0 and height > 0:
+            glViewport(0, 0, width, height)
+            camera.set_aspect(width, height)
 
     glfw.set_key_callback(window, key_callback)
     glfw.set_mouse_button_callback(window, mouse_button_callback)
@@ -99,9 +151,9 @@ def main():
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        # Camera matrices available for rendering
-        _view = camera.view_matrix()
-        _proj = camera.projection_matrix()
+        view = camera.view_matrix()
+        proj = camera.projection_matrix()
+        renderer.draw(view, proj)
 
         glfw.swap_buffers(window)
 
@@ -113,13 +165,17 @@ def main():
             fps = frame_count / elapsed
             frame_count = 0
             fps_time = now
-            glfw.set_window_title(window, f"{WINDOW_TITLE} | FPS: {fps:.0f}")
+            glfw.set_window_title(
+                window,
+                f"{WINDOW_TITLE} | {NUM_PARTICLES // 1000}K particles | FPS: {fps:.0f}",
+            )
 
         # Check GL errors
         err = glGetError()
         if err != GL_NO_ERROR:
             print(f"GL error: {err}")
 
+    renderer.close()
     glfw.destroy_window(window)
     glfw.terminate()
 
