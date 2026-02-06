@@ -375,8 +375,9 @@
         "Both kernels run without errors for 500K particles"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": "DEFERRED: Depends on US-018 (sleeping). Implement after sleeping is proven. Run order: Integrate (sets JUST_WOKE) -> K_MarkWakeCells (Phase 1) -> K_WakeSleepers (Phase 2) -> clear JUST_WOKE flags. 27 atomicOr per waking particle is cheap."
+      "passes": true,
+      "notes": "DEFERRED: Depends on US-018 (sleeping). Implement after sleeping is proven. Run order: Integrate (sets JUST_WOKE) -> K_MarkWakeCells (Phase 1) -> K_WakeSleepers (Phase 2) -> clear JUST_WOKE flags. 27 atomicOr per waking particle is cheap.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-020",
@@ -597,6 +598,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T16:24:07.842Z"
+    "updatedAt": "2026-02-06T16:30:42.008Z"
   }
 }
