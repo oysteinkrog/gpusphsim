@@ -29,6 +29,7 @@ import build_grid
 import step1
 import step2
 import integrate
+import wake
 
 
 class Simulation:
@@ -65,6 +66,9 @@ class Simulation:
 
         # Grid cell tables (pre-allocated, reused every frame)
         self._cell_start, self._cell_end = build_grid.allocate_cell_tables()
+
+        # Cell wake flags for wake propagation (pre-allocated, cleared each step)
+        self._cell_wake_flags = wake.allocate_cell_wake_flags()
 
         # Compile all kernel modules and upload constant memory
         self._upload_constants()
@@ -116,6 +120,9 @@ class Simulation:
         # --- integrate module: c_sim, c_materials ---
         integrate.upload_sim_params(sim_params)
         integrate.upload_materials(materials_data)
+
+        # --- wake module: c_grid ---
+        wake.upload_grid_params(grid_params)
 
         # --- materials module (its own internal module): c_materials, c_interactions ---
         upload_to_gpu()
@@ -200,6 +207,16 @@ class Simulation:
             color_out=w.color,
             packed_info_out=w.packed_info,
             sleep_counter_out=w.sleep_counter,
+        )
+
+        # 8. Wake propagation: mark cells near just-woke particles,
+        #    wake sleeping neighbors, clear JUST_WOKE flags
+        wake.run_wake_propagation(
+            w.position[:n],
+            w.packed_info[:n],
+            w.sleep_counter[:n],
+            self._cell_wake_flags,
+            num_particles=n,
         )
 
         self.sim_time += self.dt

@@ -146,6 +146,8 @@ __constant__ PrecalcParams c_precalc;
 #define HAS_SPAWN_FLAG(p)   (((p) >> 11) & 1)
 #define SET_SPAWN_FLAG(p)   ((p) | 0x800)
 #define HAS_JUST_WOKE(p)    (((p) >> 12) & 1)
+#define SET_JUST_WOKE(p)    ((p) | 0x1000)
+#define CLEAR_JUST_WOKE(p)  ((p) & ~0x1000)
 #define MAKE_PACKED(mat, beh) (((mat) & 0xFF) | (((beh) & 0x3) << 8))
 
 /* ======================================================================

@@ -16,6 +16,7 @@
 - **Sim/render decoupling pattern:** Each render frame computes `sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps)`, runs that many simulation steps, then renders ONCE. The `speed` parameter controls how many sim-seconds elapse per wall-second. `max_substeps` (default 20) prevents spiral-of-death when sim_dt is very small relative to wall_dt.
 - **Sorted vs unsorted array lifecycle:** Unsorted arrays (indexed by original particle ID) persist across frames. Sorted arrays (indexed by grid-sorted slot) are ephemeral within a single step. The reorder kernel gathers unsorted->sorted, and the integrate kernel scatters sorted->unsorted using `sort_indexes[sorted_slot] = original_id`.
 - **mu(I) rheology two-pass neighbor loop:** For GRANULAR particles, the Step2 kernel does TWO neighbor traversals: (1) first pass computes gamma_dot_i (strain rate magnitude) from SPH velocity gradient, then derives eta_i via mu(I); (2) second pass accumulates viscosity force using harmonic mean eta_ij per pair. For eta_j, the pair-wise strain rate approximation `|v_ij|/|r_ij|` is used since we can't access j's full SPH-computed gamma_dot without an extra array. This avoids storing gamma_dot per particle at the cost of one extra neighbor traversal for GRANULAR only.
+- **Cell-flag wake propagation pattern:** For sleeping-particle systems, use a per-cell uint32 flag array (memset to 0 each frame). Just-woke particles atomicOr(1) on their 3x3x3 neighbor cells, then sleeping particles check their cell's flag to decide whether to wake. This is O(N) with small constant (27 atomics per waker, 1 read per sleeper) instead of O(N*K) neighbor searches. Operates on UNSORTED arrays after Integrate writeback.
 - **Mixed viscosity accumulator pattern:** When GRANULAR particles use per-pair variable viscosity (eta_ij * lap_const baked in), the f_viscosity accumulator has full coefficients already. For FLUID/GAS particles, the accumulator stores raw sums that get multiplied by viscosity_precalc in PostCalc. The `is_granular_i` branch in PostCalc handles this split: GRANULAR adds f_viscosity directly, FLUID/GAS multiplies by viscosity_precalc.
 
 ---
@@ -482,4 +483,32 @@
   - The sleep counter update happens AFTER position update and boundary collision, using the FINAL post-boundary velocity for the sleep check. This prevents a particle from being marked sleeping while it's actively bouncing off a wall
   - Adding packed_info_out and sleep_counter_out to K_Integrate changes the return type from 3-tuple to 5-tuple, requiring updates to ALL callers. The optional parameters with None defaults preserve backward compatibility for tests that don't care about sleep state
   - For multi-step loop tests, packed_info must be a mutable GPU array (not recreated each step from np constants) so that the SLEEPING flag persists across frames. Same for sleep_counter
+---
+
+## 2026-02-06 - US-019
+- What was implemented:
+  - Two-phase cell-flag wake propagation system for sleeping particles
+  - `physics/kernels/wake.cu` -- Three CUDA kernels:
+    - K_MarkWakeCells (Phase 1): just-woke particles atomicOr(1) on their 3x3x3 neighbor cells
+    - K_WakeSleepers (Phase 2): sleeping particles in flagged cells wake up (CLEAR_SLEEPING, reset sleep_counter)
+    - K_ClearJustWoke (Phase 3): clears JUST_WOKE flag from all particles
+  - `wake.py` -- Python module: CuPy RawModule compilation, constant memory upload (c_grid), individual kernel launch wrappers + `run_wake_propagation()` convenience function
+  - Added `SET_JUST_WOKE(p)` and `CLEAR_JUST_WOKE(p)` macros to `common.cuh`
+  - Updated `integrate.cu` to set `SET_JUST_WOKE` flag when a sleeping particle's hysteresis wake condition triggers
+  - Updated `simulation.py` to run wake propagation after Integrate, with pre-allocated `cell_wake_flags` array
+  - 17 integration tests covering: compilation, cell marking (interior/corner/no-flag), wake/no-wake for sleeping particles, JUST_WOKE clearing, impact-wake scenario, far-particle immunity, adjacent/diagonal neighbor wake, 2-cell-away boundary, 500K stress test
+- Files changed:
+  - `fallingsand3d/physics/kernels/common.cuh` (modified -- added SET_JUST_WOKE, CLEAR_JUST_WOKE macros)
+  - `fallingsand3d/physics/kernels/integrate.cu` (modified -- SET_JUST_WOKE on wake)
+  - `fallingsand3d/physics/kernels/wake.cu` (new)
+  - `fallingsand3d/wake.py` (new)
+  - `fallingsand3d/simulation.py` (modified -- wake module import, cell_wake_flags allocation, wake propagation in pipeline)
+  - `fallingsand3d/test_wake.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The wake propagation operates on UNSORTED arrays (after Integrate writeback), not sorted arrays. This is because the JUST_WOKE flag is set during Integrate's writeback to unsorted packed_info. The wake kernels re-compute grid cell from unsorted position using the same grid params
+  - atomicOr(1) on uint32 cell flags is an efficient way to mark cells -- even with 25K just-woke particles doing 27 atomicOr each (675K atomics), it completes in negligible time on modern GPUs
+  - The 3x3x3 cell reach matches the SPH smoothing length h: cell_size=0.04=h, so 1 cell in each direction covers the entire interaction radius. This ensures any sleeping particle within SPH interaction range of a just-woke particle will be woken
+  - The cell_wake_flags array is small (125K uint32 = 500KB) and is memset to 0 every step. This is cheaper than per-particle neighbor iteration for wake propagation
+  - The 500K stress test with 25K just-woke particles shows massive wake propagation: ~99.7% of originally-sleeping particles wake up because the random uniform distribution means most cells have at least one just-woke particle nearby
 ---

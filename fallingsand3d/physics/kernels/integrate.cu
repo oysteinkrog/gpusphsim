@@ -272,8 +272,9 @@ void K_Integrate(
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             return;
         }
-        // Wake up: clear sleeping flag, reset counter
+        // Wake up: clear sleeping flag, set just_woke flag, reset counter
         pi = CLEAR_SLEEPING(pi);
+        pi = SET_JUST_WOKE(pi);
         was_sleeping = false;
         sc = 0;
     }
