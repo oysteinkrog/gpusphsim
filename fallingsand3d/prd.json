@@ -336,8 +336,9 @@
         "Test: no visible vibration or jitter in settled sand pile over 5000 steps"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": "Use density > 0.95*rho0 as a proxy for 'under compression/at rest' instead of computing pressure in Integrate. This avoids duplicating EOS code."
+      "passes": true,
+      "notes": "Use density > 0.95*rho0 as a proxy for 'under compression/at rest' instead of computing pressure in Integrate. This avoids duplicating EOS code.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-018",
@@ -595,6 +596,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T16:08:53.705Z"
+    "updatedAt": "2026-02-06T16:14:50.061Z"
   }
 }
