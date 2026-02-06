@@ -19,6 +19,7 @@
 - **Cell-flag wake propagation pattern:** For sleeping-particle systems, use a per-cell uint32 flag array (memset to 0 each frame). Just-woke particles atomicOr(1) on their 3x3x3 neighbor cells, then sleeping particles check their cell's flag to decide whether to wake. This is O(N) with small constant (27 atomics per waker, 1 read per sleeper) instead of O(N*K) neighbor searches. Operates on UNSORTED arrays after Integrate writeback.
 - **Mixed viscosity accumulator pattern:** When GRANULAR particles use per-pair variable viscosity (eta_ij * lap_const baked in), the f_viscosity accumulator has full coefficients already. For FLUID/GAS particles, the accumulator stores raw sums that get multiplied by viscosity_precalc in PostCalc. The `is_granular_i` branch in PostCalc handles this split: GRANULAR adds f_viscosity directly, FLUID/GAS multiplies by viscosity_precalc.
 - **SPH heat diffusion in Step1 pattern:** Heat diffusion uses the viscosity Laplacian kernel (same as viscous forces): `dTdt_i = kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|)`. The variable part `(h - r)` is accumulated in the neighbor loop, then multiplied by `kappa_i * viscosity_lap_coeff` in PostCalc. `kappa_i = c_materials[mat_id].thermal_conductivity`. dTdt is a sorted-order ephemeral array (like density), written by Step1 and consumed by Integrate. Integrate applies: `T += dTdt*dt - cool_rate*(T-T_ambient)*dt`, clamped to [0, 5000].
+- **GPU freelist atomic stack pattern:** For spawn/kill with scattered dead particles, use a `dead_indices[max_particles]` array (uint32) + `dead_count` atomic counter (uint32). Producers (Reactions) do `atomicAdd(&dead_count, 1)` to push. Consumers (Spawn) claim N slots one at a time: `old = atomicSub(&dead_count, 1); slot = dead_indices[old - 1]`. Per-slot claiming (not batch atomicSub(N)) avoids the race where batch subtraction temporarily drives the counter negative and corrupts concurrent reads. If any single claim fails (old <= 0), restore all previously claimed slots and abort. Don't write back to dead_indices in the same kernel that reads from it (race on the array contents).
 
 ---
 
@@ -588,4 +589,30 @@
   - Corrosion uses `health -= exposure_corrode * dt` which is frame-rate dependent but correctly accumulates over time since exposure_corrode is re-computed each step from Step1's neighbor loop. With dt=0.001 and exposure=10.0, it takes ~100 steps to reduce health from 1.0 to 0.0 -- slightly more due to float32 accumulation error.
   - WATER boiling sets SPAWN_GAS flag (bit 11) but does NOT change material_id -- the spawn kernel (US-023) will handle the actual water->steam conversion. This avoids creating a density mismatch in a single step.
   - The reactions module only needs c_sim (for dt) and c_materials (for material lookups, though currently unused in the kernel -- it reads mat_id from packed_info). No c_grid or c_precalc needed since there's no spatial computation.
+---
+
+## 2026-02-06 - US-023
+- What was implemented:
+  - `fallingsand3d/physics/kernels/spawn.cu` -- K_SpawnGas kernel: for each particle with HAS_SPAWN_FLAG set, claims N=3 slots from a GPU freelist via per-slot atomicSub, writes N steam particles (mass=original/3, T=373K, vel+=upward kick, lifetime=5s), marks source as DEAD. CAS-free per-slot claiming avoids atomic race conditions.
+  - `fallingsand3d/spawn.py` -- Python module: CuPy RawModule compilation from external .cu file with --use_fast_math, constant memory upload (c_sim, c_materials), freelist allocation/reset, `compute_spawn()` kernel launch wrapper with block size 256.
+  - `fallingsand3d/physics/kernels/reactions.cu` -- Modified: K_Reactions now accepts dead_indices/dead_count freelist parameters. When particles die from corrosion or gas lifetime expiry, they are added to the freelist via atomicAdd(&dead_count, 1). Null-pointer-safe (skips freelist if pointers are 0) for backward compatibility.
+  - `fallingsand3d/reactions.py` -- Modified: compute_reactions() accepts optional dead_indices/dead_count params, passes null pointers (np.intp(0)) when not provided.
+  - `fallingsand3d/physics/kernels/common.cuh` -- Added CLEAR_SPAWN_FLAG macro.
+  - `fallingsand3d/simulation.py` -- Updated: imports spawn module, allocates freelist at init, resets freelist each step, passes it to reactions and spawn kernels, uploads c_sim/c_materials to spawn module.
+  - `fallingsand3d/test_spawn.py` -- 16 integration tests: compilation, block size, SPAWN_N=3, water->steam spawn with mass conservation, flag cleared on success, freelist exhausted graceful skip, partial exhaustion skip, scattered freelist indices, source marked DEAD, no-flag unchanged, multiple concurrent spawns, reactions populates freelist (corrosion), reactions populates freelist (gas lifetime), reactions backward compat, end-to-end boil+spawn, 500K stress test.
+- Files changed:
+  - `fallingsand3d/physics/kernels/spawn.cu` (new)
+  - `fallingsand3d/spawn.py` (new)
+  - `fallingsand3d/test_spawn.py` (new)
+  - `fallingsand3d/physics/kernels/reactions.cu` (modified -- freelist params, atomicAdd on death)
+  - `fallingsand3d/reactions.py` (modified -- optional dead_indices/dead_count params)
+  - `fallingsand3d/physics/kernels/common.cuh` (modified -- CLEAR_SPAWN_FLAG macro)
+  - `fallingsand3d/simulation.py` (modified -- spawn module integration, freelist lifecycle)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - Batch atomicSub(&dead_count, N) to claim N freelist slots has a critical race condition: the counter temporarily goes negative (as signed int) / wraps to large uint, causing concurrent threads to read invalid counts from the freelist and either claim overlapping ranges or skip unnecessarily. Per-slot claiming (atomicSub 1 at a time) is correct because each claim is independently atomic and the rollback on failure only restores exactly what was claimed.
+  - Dead particles killed by the spawn kernel (source water) should NOT be added back to the same freelist in the same kernel invocation. The dead_indices array is being concurrently read (to find target slots) and written (to add source back), causing data races. Instead, let compaction (US-029) reclaim dead particles in a later pass.
+  - The WATER boiling -> STEAM spawn is a two-step process across two kernels: (1) Reactions sets SPAWN_GAS flag on boiling water, (2) Spawn kernel consumes the flag and performs the actual material conversion. This separation ensures Reactions doesn't need to know about freelist management.
+  - The freelist (dead_indices + dead_count) is reset to 0 at the start of each simulation step. Reactions populates it (pushing dead particle indices), then Spawn consumes from it (popping to get target slots). This producer-consumer pattern within a single step avoids needing to persist the freelist across frames.
+  - With 10K concurrent spawn operations (each claiming 3 slots via 3 atomicSub calls = 30K atomics), the per-slot claiming approach succeeds deterministically when the freelist has sufficient headroom. The ~30K atomics are negligible on modern GPUs.
 ---

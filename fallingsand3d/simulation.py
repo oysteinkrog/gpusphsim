@@ -30,6 +30,7 @@ import step1
 import step2
 import integrate
 import reactions
+import spawn
 import wake
 
 
@@ -71,6 +72,11 @@ class Simulation:
 
         # Cell wake flags for wake propagation (pre-allocated, cleared each step)
         self._cell_wake_flags = wake.allocate_cell_wake_flags()
+
+        # Freelist for spawn/kill system (pre-allocated, reset each step)
+        self._dead_indices, self._dead_count = spawn.allocate_freelist(
+            world.max_particles
+        )
 
         # Compile all kernel modules and upload constant memory
         self._upload_constants()
@@ -129,6 +135,10 @@ class Simulation:
         reactions.upload_sim_params(sim_params)
         reactions.upload_materials(materials_data)
 
+        # --- spawn module: c_sim, c_materials ---
+        spawn.upload_sim_params(sim_params)
+        spawn.upload_materials(materials_data)
+
         # --- wake module: c_grid ---
         wake.upload_grid_params(grid_params)
 
@@ -185,9 +195,13 @@ class Simulation:
         )
         w._density_initialized = True
 
-        # 5b. Reactions: phase transitions, combustion, corrosion, gas lifetime
+        # 5b. Reset freelist counter for this step
+        spawn.reset_freelist(self._dead_count)
+
+        # 5c. Reactions: phase transitions, combustion, corrosion, gas lifetime
         #     Runs on sorted arrays, modifies packed_info/temperature/health/
         #     lifetime/velocity in-place before Step2 sees them.
+        #     Also populates the freelist when particles die.
         reactions.compute_reactions(
             w.sorted_packed_info[:n],
             w.sorted_temperature[:n],
@@ -197,6 +211,26 @@ class Simulation:
             w.sorted_exposure_heat[:n],
             w.sorted_exposure_corrode[:n],
             frame=self._frame_counter,
+            dead_indices=self._dead_indices,
+            dead_count=self._dead_count,
+        )
+
+        # 5d. Spawn: consume from freelist to spawn steam from boiling water
+        spawn.compute_spawn(
+            w.sorted_packed_info[:n],
+            w.sorted_position[:n],
+            w.sorted_velocity[:n],
+            w.sorted_veleval[:n],
+            w.sorted_mass[:n],
+            w.sorted_temperature[:n],
+            w.sorted_health[:n],
+            w.sorted_lifetime[:n],
+            w.sorted_color[:n],
+            w.sorted_sleep_counter[:n],
+            w.sorted_density[:n],
+            w.sorted_shear_rate[:n],
+            self._dead_indices,
+            self._dead_count,
         )
 
         # 6. Step2: pressure + viscosity + XSPH forces

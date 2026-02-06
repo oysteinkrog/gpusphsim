@@ -1,21 +1,18 @@
-"""Reactions kernel: per-particle phase transitions, combustion, and corrosion.
+"""Spawn/kill kernel: GPU freelist-based particle spawning for phase transitions.
 
-Compiles physics/kernels/reactions.cu via CuPy RawModule and provides
-a function to launch K_Reactions which performs:
-  - ICE -> WATER (temp > 273K)
-  - LAVA -> STONE (temp < 900K)
-  - WATER -> SPAWN_GAS flag (temp > 373K)
-  - STEAM -> WATER (temp < 373K)
-  - WOOD/OIL/GUNPOWDER -> FIRE (exposure_heat threshold)
-  - Corrosion: health -= exposure_corrode * dt
-  - GAS lifetime decay -> DEAD when expired
+Compiles physics/kernels/spawn.cu via CuPy RawModule and provides
+a function to launch K_SpawnGas which:
+  - Scans sorted particles for HAS_SPAWN_FLAG (set by Reactions for boiling water)
+  - For each flagged particle, claims N slots from the GPU freelist via atomicSub
+  - Writes N steam particles to the claimed slots (mass-conserving)
+  - Marks the source water particle as DEAD and adds it to the freelist
+  - Clears the SPAWN_GAS flag regardless of success
 
-Operates on SORTED arrays, runs after Step1 (which computes exposure)
-and before Step2 (which computes forces).
+Operates on SORTED arrays, runs after Reactions and before Step2.
 
 Uses shared constant memory from common.cuh:
-  c_sim       -- SimParams (dt)
-  c_materials -- MaterialProps[32]
+  c_sim       -- SimParams
+  c_materials -- MaterialProps[32] (for steam color/rest_density)
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ def _ensure_ptx_if_needed() -> None:
 
 
 def _get_module() -> "object":
-    """Compile (or return cached) CuPy RawModule from reactions.cu."""
+    """Compile (or return cached) CuPy RawModule from spawn.cu."""
     global _module
     if _module is not None:
         return _module
@@ -57,7 +54,7 @@ def _get_module() -> "object":
     _ensure_ptx_if_needed()
 
     kernel_dir = os.path.join(os.path.dirname(__file__), "physics", "kernels")
-    cu_path = os.path.join(kernel_dir, "reactions.cu")
+    cu_path = os.path.join(kernel_dir, "spawn.cu")
     with open(cu_path) as f:
         source = f.read()
 
@@ -97,81 +94,109 @@ def upload_materials(materials_data: np.ndarray) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Freelist allocation
+# ---------------------------------------------------------------------------
+
+SPAWN_N = 3  # must match SPAWN_N in spawn.cu
+
+
+def allocate_freelist(max_particles: int) -> tuple:
+    """Allocate GPU freelist arrays.
+
+    Returns
+    -------
+    dead_indices : cupy.ndarray, (max_particles,) uint32
+        Array of dead particle indices (stack).
+    dead_count : cupy.ndarray, (1,) uint32
+        Atomic counter for number of entries in dead_indices.
+    """
+    dead_indices = cupy.zeros(max_particles, dtype=cupy.uint32)
+    dead_count = cupy.zeros(1, dtype=cupy.uint32)
+    return dead_indices, dead_count
+
+
+def reset_freelist(dead_count: cupy.ndarray) -> None:
+    """Reset the freelist counter to 0."""
+    dead_count[:] = 0
+
+
+# ---------------------------------------------------------------------------
 # Kernel launch
 # ---------------------------------------------------------------------------
 
 BLOCK_SIZE = 256
 
 
-def compute_reactions(
+def compute_spawn(
     sorted_packed_info: cupy.ndarray,
+    sorted_position: cupy.ndarray,
+    sorted_velocity: cupy.ndarray,
+    sorted_veleval: cupy.ndarray,
+    sorted_mass: cupy.ndarray,
     sorted_temperature: cupy.ndarray,
     sorted_health: cupy.ndarray,
     sorted_lifetime: cupy.ndarray,
-    sorted_velocity: cupy.ndarray,
-    sorted_exposure_heat: cupy.ndarray,
-    sorted_exposure_corrode: cupy.ndarray,
-    frame: int = 0,
-    dead_indices: Optional[cupy.ndarray] = None,
-    dead_count: Optional[cupy.ndarray] = None,
+    sorted_color: cupy.ndarray,
+    sorted_sleep_counter: cupy.ndarray,
+    sorted_density: cupy.ndarray,
+    sorted_shear_rate: cupy.ndarray,
+    dead_indices: cupy.ndarray,
+    dead_count: cupy.ndarray,
 ) -> None:
-    """Launch K_Reactions kernel.
+    """Launch K_SpawnGas kernel.
 
-    Modifies sorted arrays in-place: packed_info, temperature, health,
-    lifetime, velocity.
+    Processes all particles with HAS_SPAWN_FLAG set, spawning steam particles
+    at freelist slots and marking source particles as DEAD.
+
+    All sorted arrays are modified in-place.
 
     Parameters
     ----------
     sorted_packed_info : cupy.ndarray, (N,) uint32
-        Packed info (material_id + behavior + flags). Modified in-place.
-    sorted_temperature : cupy.ndarray, (N,) float32
-        Particle temperature. Modified in-place.
-    sorted_health : cupy.ndarray, (N,) float32
-        Particle health [0,1]. Modified in-place.
-    sorted_lifetime : cupy.ndarray, (N,) float32
-        Remaining lifetime in seconds. Modified in-place.
+    sorted_position : cupy.ndarray, (N, 4) float32
     sorted_velocity : cupy.ndarray, (N, 4) float32
-        Particle velocity. Modified in-place (gunpowder explosion).
-    sorted_exposure_heat : cupy.ndarray, (N,) float32
-        Heat exposure from Step1 (read-only).
-    sorted_exposure_corrode : cupy.ndarray, (N,) float32
-        Corrosion exposure from Step1 (read-only).
-    frame : int
-        Frame counter for RNG seed (gunpowder explosion direction).
-    dead_indices : cupy.ndarray, optional
-        (max_particles,) uint32 freelist array. Dead particle sorted indices
-        are appended here via atomicAdd on dead_count.
-    dead_count : cupy.ndarray, optional
-        (1,) uint32 atomic counter for freelist size.
+    sorted_veleval : cupy.ndarray, (N, 4) float32
+    sorted_mass : cupy.ndarray, (N,) float32
+    sorted_temperature : cupy.ndarray, (N,) float32
+    sorted_health : cupy.ndarray, (N,) float32
+    sorted_lifetime : cupy.ndarray, (N,) float32
+    sorted_color : cupy.ndarray, (N, 4) float32
+    sorted_sleep_counter : cupy.ndarray, (N,) uint8
+    sorted_density : cupy.ndarray, (N,) float32
+    sorted_shear_rate : cupy.ndarray, (N,) float32
+    dead_indices : cupy.ndarray, (max_particles,) uint32
+        Freelist of dead particle indices.
+    dead_count : cupy.ndarray, (1,) uint32
+        Atomic counter for freelist size.
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
         return
 
     module = _get_module()
-    kernel = module.get_function("K_Reactions")  # type: ignore[union-attr]
+    kernel = module.get_function("K_SpawnGas")  # type: ignore[union-attr]
 
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
-
-    # Pass null (0) pointers when freelist not provided
-    d_dead_indices = dead_indices if dead_indices is not None else np.intp(0)
-    d_dead_count = dead_count if dead_count is not None else np.intp(0)
 
     kernel(
         grid,
         block,
         (
             np.uint32(n),
-            np.uint32(frame),
             sorted_packed_info,
+            sorted_position,
+            sorted_velocity,
+            sorted_veleval,
+            sorted_mass,
             sorted_temperature,
             sorted_health,
             sorted_lifetime,
-            sorted_velocity,
-            sorted_exposure_heat,
-            sorted_exposure_corrode,
-            d_dead_indices,
-            d_dead_count,
+            sorted_color,
+            sorted_sleep_counter,
+            sorted_density,
+            sorted_shear_rate,
+            dead_indices,
+            dead_count,
         ),
     )

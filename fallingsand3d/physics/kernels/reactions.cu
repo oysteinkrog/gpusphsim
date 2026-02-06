@@ -87,7 +87,10 @@ void K_Reactions(
     float4*         __restrict__ velocity,          // particle velocity (for explosion)
     // --- Sorted inputs (read-only, from Step1) ---
     const float*    __restrict__ exposure_heat,     // heat exposure accumulator
-    const float*    __restrict__ exposure_corrode   // corrosion exposure accumulator
+    const float*    __restrict__ exposure_corrode,  // corrosion exposure accumulator
+    // --- Freelist output (for spawn system) ---
+    uint*           __restrict__ dead_indices,      // array of dead particle indices
+    uint*           __restrict__ dead_count          // atomic counter
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -189,9 +192,13 @@ void K_Reactions(
     if (exp_corrode > 0.0f) {
         hlth -= exp_corrode * dt;
         if (hlth <= 0.0f) {
-            // Particle dies from corrosion
+            // Particle dies from corrosion -- add to freelist
             packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
             health[i] = 0.0f;
+            if (dead_indices != 0 && dead_count != 0) {
+                uint idx = atomicAdd(dead_count, 1u);
+                dead_indices[idx] = i;
+            }
             return;
         }
         health[i] = hlth;
@@ -202,10 +209,14 @@ void K_Reactions(
     if (behavior == GAS && lt > 0.0f) {
         lt -= dt;
         if (lt <= 0.0f) {
-            // Gas particle expired
+            // Gas particle expired -- add to freelist
             packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
             lifetime[i] = 0.0f;
             health[i] = 0.0f;
+            if (dead_indices != 0 && dead_count != 0) {
+                uint idx = atomicAdd(dead_count, 1u);
+                dead_indices[idx] = i;
+            }
             return;
         }
         lifetime[i] = lt;
