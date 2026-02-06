@@ -114,8 +114,9 @@
         "IDs 16-31 are zeroed (reserved for future materials)"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "Use numpy structured arrays to pack the C structs. Ensure struct padding matches common.cuh exactly (compile-test with sizeof). Upload via module.get_global('c_materials') to get device pointer, then cupy.cuda.runtime.memcpy(dst, src, size, cudaMemcpyHostToDevice). Do NOT use memcpyToSymbol — it's unreliable with NVRTC modules."
+      "passes": true,
+      "notes": "Use numpy structured arrays to pack the C structs. Ensure struct padding matches common.cuh exactly (compile-test with sizeof). Upload via module.get_global('c_materials') to get device pointer, then cupy.cuda.runtime.memcpy(dst, src, size, cudaMemcpyHostToDevice). Do NOT use memcpyToSymbol — it's unreliable with NVRTC modules.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-007",
@@ -584,6 +585,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:07:24.389Z"
+    "updatedAt": "2026-02-06T15:11:58.141Z"
   }
 }
