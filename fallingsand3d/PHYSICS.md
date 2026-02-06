@@ -67,10 +67,12 @@ rho_i = max(rho_i, 1.0)
 ```
 
 - Self-interaction included (j == i contributes, with r=0)
+- **STATIC neighbors skipped** (prevents wall density inflation / sticking)
 - Per-particle mass `m_j` from sorted mass array (supports multi-material)
 - Density clamped to minimum 1.0
+- Heat diffusion and exposure also skip STATIC neighbors
 
-**Source**: `step1.cu:138-142` (inner loop), `step1.cu:217-218` (PostCalc)
+**Source**: `step1.cu:138-150` (inner loop), `step1.cu:224-225` (PostCalc)
 
 ### 2.2 Parent comparison
 
@@ -93,21 +95,39 @@ For cubic lattice at spacing `dx = 0.02`, mass `m = 0.008`, h=0.04:
 
 ## 3. Step 2: Pressure, Viscosity, XSPH
 
-### 3.1 Tait EOS Pressure
-
-```
-FLUID:    p = k * ((rho/rho_0)^7 - 1),   clamped to >= -0.5*k
-GRANULAR: p = k * ((rho/rho_0)^7 - 1),   clamped to >= 0
-GAS:      p = k_gas * max(rho - rho_0, 0)
-```
+### 3.1 EOS Pressure (per-material gamma)
 
 Per-material parameters from `c_materials[mat_id]`:
-- `rho_0 = rest_density` (Water: 1000)
-- `k = eos_stiffness` (Water: 3.0)
+- `rho_0 = rest_density`
+- `k = eos_stiffness`
+- `gamma = eos_gamma`
 
-**Source**: `step2.cu:63-81`
+```
+gamma==1 (Linear, "Game SPH"):
+  p = k * max(rho/rho_0 - 1, 0)
+
+gamma!=1 (Tait):
+  p = k * (pow(rho/rho_0, gamma) - 1)
+
+GAS:      p = k * max(rho - rho_0, 0)
+```
+
+All FLUID and GRANULAR pressure clamped >= 0 (no tensile pressure).
+
+| Material | k | gamma | EOS |
+|----------|-----|-------|------|
+| WATER | 100.0 | 1.0 | Linear |
+| OIL | 80.0 | 1.0 | Linear |
+| ACID | 90.0 | 1.0 | Linear |
+| LAVA | 30.0 | 7.0 | Tait |
+| SAND | 20.0 | 7.0 | Tait |
+| DIRT | 18.0 | 7.0 | Tait |
+
+**Source**: `step2.cu:63-82`
 
 ### 3.2 Pressure Force (SPH momentum equation)
+
+**STATIC neighbors skipped** in force loop (combined with density skipping, eliminates wall-sticking artifacts).
 
 Standard SPH:
 ```
@@ -232,15 +252,15 @@ set `v_new = 0`
 ### 4.3 Position Update
 
 ```
-FLUID:   pos_new = pos + dt * (v_new + veleval_xsph - v_old)
-                 = pos + dt * v_new + dt * epsilon * xsph_sum
+FLUID:   pos_new = pos + dt * veleval_xsph     (XSPH-smoothed velocity)
 Others:  pos_new = pos + dt * v_new
 ```
 
-The XSPH correction: since `veleval_xsph = v_old + epsilon * xsph_sum`,
-the subtraction `veleval_xsph - v_old = epsilon * xsph_sum`.
+FLUID uses XSPH-corrected velocity (`veleval_xsph = v_old + epsilon * xsph_sum`)
+for position advection. This smooths compression artifacts at larger dt (Game SPH).
+All other behaviors use `v_new` directly.
 
-**Source**: `integrate.cu:378-393`
+**Source**: `integrate.cu:378-392`
 
 ### 4.4 Parent Integration (Leapfrog)
 
@@ -266,7 +286,9 @@ if pos outside plane:
         v_tangent *= (1 - min(mu * |v_n| / |v_t|, 1))   [Coulomb friction]
 ```
 
-**Source**: `integrate.cu:70-174`
+Wall friction: `mu = 0` for FLUID (prevents wall sticking), `c_sim.wall_friction` for others.
+
+**Source**: `integrate.cu:70-174`, `integrate.cu:395-400`
 
 ---
 
@@ -326,16 +348,16 @@ f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
 | m (particle mass) | 0.02 | 0.02 | Matched to parent (was 0.008 = rho0*dx^3) |
 | dx (particle spacing) | 0.02 | ~0.02 | Same |
 | rho_0 (rest density) | 1000 | 1000 | Same; SPH density ≈ 2500 at rest (see §7) |
-| k (EOS stiffness) | 3.0 | 3.0 | Same |
-| gamma (EOS exponent) | 7 | 7 | Same |
+| k (EOS stiffness) | 100.0 (Water) | 3.0 | Game SPH: higher k with linear EOS |
+| gamma (EOS exponent) | 1.0 (FLUID), 7 (GRANULAR) | 7 | Per-material; FLUID uses linear EOS |
 | mu_0 (viscosity) | 3.5 | 3.5 | Same |
 | epsilon (XSPH) | 0.5 | 0.5 | Same (computed but not used in position update) |
 | gravity | -9.8 | -9.8 | Same |
-| dt | adaptive | 0.001 (fixed) | CFL: min(advection, acoustic, viscous) ∈ [1e-5, 0.005] |
+| dt | adaptive | 0.001 (fixed) | CFL: min(acoustic, viscous) ∈ [1e-5, 0.005]; DT_MAX=0.005; CPU-only (no GPU sync) |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
 | integrate | accel = sph + g | accel = sph + g | Both treat step2 output as acceleration |
-| position update | pos += vel_new * dt | pos += vel_new * dt | Same (no XSPH in position) |
+| position update | FLUID: pos += veleval_xsph * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
 | boundaries | impulse SDF | penalty springs | Fundamentally different |
 | velocity_limit | 50 | 200 | Different |
 | accel_max | 5000 | N/A | Only in fallingsand3d |
@@ -450,12 +472,12 @@ The parent multiplies step2 output by `m_j = 0.02` and uses mass=0.02 for densit
    This matches the parent's `output * m_j` convention.
 **Source**: `world.py:27`, `step2.cu:48,393`, `step2.py:49,101`
 
-### 10.3 FIXED: XSPH used in position update (parent does not)
-The child was using XSPH-corrected velocity for FLUID position advection
-(`pos += dt * (vel_new + eps*xsph)`), causing water to behave as a sticky blob.
-The parent uses `pos += vel_new * dt` (no XSPH in position).
-**Fixed**: removed XSPH from position update; all particles use `pos += vel_new * dt`.
-**Source**: `integrate.cu:378-385`
+### 10.3 CHANGED: XSPH re-enabled for FLUID position update (Game SPH)
+Previously XSPH was removed from position update to match parent convention.
+Re-enabled for FLUID only as part of Game SPH approach: FLUID particles use
+`pos += veleval_xsph * dt` which smooths compression artifacts at larger dt.
+Other behaviors still use `pos += vel_new * dt`.
+**Source**: `integrate.cu:378-392`
 
 ### 10.4 FIXED: Viscous CFL using mu_max from inactive materials
 The adaptive timestep computed viscous CFL from ALL materials in the table,
@@ -468,3 +490,79 @@ This gave dt ≈ 6.4e-4 instead of dt ≈ 0.005 (DT_MAX), an 8x penalty.
 Parent uses penalty-force walls (smooth, damped).
 fallingsand3d uses impulse SDF (sharp reflection + friction).
 May cause different settling behavior.
+
+### 10.6 FIXED: Game SPH overhaul (performance + visual quality)
+Water physics had two problems: (1) DT_MAX=0.001 forced ~17 substeps/frame due to
+stiff Tait EOS (gamma=7), and (2) STATIC particles inflated density at interfaces,
+creating pressure spikes and wall-sticking.
+
+Changes:
+1. **Skip STATIC neighbors** in step1 density/heat/exposure and step2 force loops.
+   Prevents wall density inflation. Self-interaction (i==j) preserved for density.
+2. **Per-material EOS gamma**: gamma=1 → linear EOS for FLUID (Water, Oil, Acid).
+   gamma=7 → Tait EOS for GRANULAR (Sand, Dirt, Lava). Removes `powf()` for FLUID.
+3. **FLUID EOS stiffness increased**: Water k=100, Oil k=80, Acid k=90 (was 3-10).
+   Higher k compensates for linear EOS being less stiff than Tait at high compression.
+4. **DT_MAX 0.001 → 0.005**: Linear EOS has constant speed of sound, CFL allows
+   larger timesteps. Expected 3-5 substeps/frame instead of 17.
+5. **XSPH position advection for FLUID**: Smooths compression artifacts at larger dt.
+6. **Zero wall friction for FLUID**: Prevents domain-wall sticking.
+7. **All FLUID pressure clamped >= 0**: No tensile/negative pressure.
+
+**Source**: step1.cu, step2.cu, integrate.cu, materials.py, simulation.py
+
+### 10.7 OPTIMIZATION: Fused sort-reorder-build pipeline
+The per-substep pipeline was restructured for performance (no physics changes):
+1. **Removed redundant indices array**: K_CalcHash no longer writes `indices[idx]=idx`
+   (always identity). sort_perm from argsort is used directly as sorted_indices.
+2. **Reduced reorder from 11→8 arrays**: veleval, color, shear_rate removed from
+   reorder since they're overwritten by K_Step2, K_Integrate, K_Step1 respectively.
+3. **Fused kernel**: K_FusedSortReorderBuild combines hash gather, cell boundary
+   detection, and 8-array reorder into a single kernel launch, replacing
+   K_FusedReorder + K_BuildDataStruct + 2 CuPy fancy-index gathers.
+4. **Reactions/spawn always run**: Previously conditionally skipped for non-reactive
+   materials; now always included for CUDA graph fixed topology (§10.9).
+   Non-reactive threads early-exit with negligible GPU cost.
+5. **Fused wake kernels**: K_WakeSleepers + K_ClearJustWoke merged into
+   K_WakeSleepersAndClearJustWoke (3→2 kernel launches).
+6. **Block size 128→256** for Step1/Step2 kernels.
+
+**Source**: simulation.py, fused_sort_reorder_build.py/.cu, wake.py/.cu
+
+### 10.8 FIXED: GPU→CPU sync every frame in adaptive timestep
+`_compute_adaptive_dt()` used `float(cp.max(...))` on GPU velocity arrays to
+compute advection CFL, forcing a GPU→CPU sync (device→host transfer) every frame.
+With current parameters, the acoustic CFL (dt≈0.05) always exceeds DT_MAX (0.005)
+by 10x, and the velocity-based advection CFL was never binding (velocity_limit=50
+and accel_max=5000 prevent supersonic particles). Removed the advection CFL
+entirely; adaptive dt now uses only acoustic and viscous CFL, both precomputed
+from the materials table at init time — zero GPU sync in the hot path.
+**Source**: `simulation.py:151-175`
+
+### 10.9 OPTIMIZATION: CUDA graph capture for SPH pipeline
+The per-substep pipeline launches ~14 GPU operations (memsets + kernel calls) with
+Python→CUDA round-trip overhead for each. CUDA graph capture records ops 3-14 into
+a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
+
+**Split point**: `cupy.argsort()` uses Thrust internally which calls
+`cudaStreamSynchronize` — incompatible with graph capture. The pipeline splits:
+1. `K_CalcHash` — normal launch
+2. `cupy.argsort + copy` — normal launch (Thrust can't be captured)
+3. Ops 3-14 as single CUDA graph launch (memsets, K_FusedSortReorderBuild,
+   K_Step1, reset_freelist, K_Reactions, K_SpawnGas, K_Step2, K_Integrate,
+   cell_wake_flags memset, K_MarkWakeCells, K_WakeSleepersAndClearJustWoke)
+
+**Design details**:
+- Pre-allocated `_sort_perm` buffer: graph bakes pointer addresses, so argsort
+  result is copied into a stable buffer before graph launch.
+- Device-side frame counter: `K_Reactions` reads `frame` from a `const uint*`
+  device buffer (pointer stable, value updated via `fill()` before each launch).
+- Reactions/spawn always included: graph requires fixed topology. For non-reactive
+  scenes, every thread early-exits in the kernel — negligible GPU time.
+- Graph invalidation: re-captured when `n` (particle count) changes (compaction,
+  preset switch). Grid dimensions and `np.uint32(n)` args are baked.
+- Capture uses a non-default stream (`cupy.cuda.Stream(non_blocking=True)`);
+  replay launches on the default stream.
+
+**Source**: `simulation.py:256-426`, `reactions.cu:80-81`, `reactions.py:106-186`,
+`spawn.py:118-120`

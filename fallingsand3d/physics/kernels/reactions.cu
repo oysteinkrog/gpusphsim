@@ -78,7 +78,7 @@ __device__ inline float hash_to_float(uint h) {
 extern "C" __global__
 void K_Reactions(
     uint            numParticles,
-    uint            frame,           // for RNG seed
+    const uint*     frame_ptr,       // device pointer for RNG seed (graph-safe)
     // --- Sorted arrays (read+write in-place) ---
     uint*           __restrict__ packed_info,       // material_id + behavior + flags
     float*          __restrict__ temperature,       // particle temperature
@@ -169,6 +169,7 @@ void K_Reactions(
         lifetime[i] = GUNPOWDER_FIRE_LIFETIME;
 
         // Random outward burst using wang_hash RNG
+        uint frame = *frame_ptr;
         uint h1 = wang_hash(i + frame * 0x9E3779B9u);
         uint h2 = wang_hash(h1);
         uint h3 = wang_hash(h2);

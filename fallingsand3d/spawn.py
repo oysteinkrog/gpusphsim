@@ -116,8 +116,8 @@ def allocate_freelist(max_particles: int) -> tuple:
 
 
 def reset_freelist(dead_count: cupy.ndarray) -> None:
-    """Reset the freelist counter to 0."""
-    dead_count[:] = 0
+    """Reset the freelist counter to 0 (async memset: graph-capture safe)."""
+    dead_count.data.memset_async(0x00, dead_count.nbytes)
 
 
 # ---------------------------------------------------------------------------

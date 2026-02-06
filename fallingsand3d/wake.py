@@ -135,24 +135,25 @@ def mark_wake_cells(
     kernel(grid, block, (np.uint32(n), position, packed_info, cell_wake_flags))
 
 
-def wake_sleepers(
+def wake_sleepers_and_clear_just_woke(
     position: cupy.ndarray,
     packed_info: cupy.ndarray,
     sleep_counter: cupy.ndarray,
     cell_wake_flags: cupy.ndarray,
     num_particles: Optional[int] = None,
 ) -> None:
-    """Launch K_WakeSleepers (Phase 2).
+    """Launch K_WakeSleepersAndClearJustWoke (Phase 2+3 fused).
 
     For each sleeping particle, if cell_wake_flags[my_cell] != 0,
     clear SLEEPING flag and reset sleep_counter to 0.
+    Also clears the JUST_WOKE flag from all particles.
 
     Parameters
     ----------
     position : cupy.ndarray, (N, 4) float32
         Unsorted particle positions.
     packed_info : cupy.ndarray, (N,) uint32
-        Unsorted packed_info (read+write: SLEEPING flag cleared).
+        Unsorted packed_info (read+write).
     sleep_counter : cupy.ndarray, (N,) uint8
         Unsorted sleep counter (write: reset to 0 on wake).
     cell_wake_flags : cupy.ndarray, (num_cells,) uint32
@@ -165,7 +166,7 @@ def wake_sleepers(
         return
 
     module = _get_module()
-    kernel = module.get_function("K_WakeSleepers")  # type: ignore[union-attr]
+    kernel = module.get_function("K_WakeSleepersAndClearJustWoke")
 
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
@@ -176,34 +177,6 @@ def wake_sleepers(
     )
 
 
-def clear_just_woke(
-    packed_info: cupy.ndarray,
-    num_particles: Optional[int] = None,
-) -> None:
-    """Launch K_ClearJustWoke (Phase 3).
-
-    Clear the JUST_WOKE flag from all particles that have it set.
-
-    Parameters
-    ----------
-    packed_info : cupy.ndarray, (N,) uint32
-        Unsorted packed_info (read+write: JUST_WOKE bit cleared).
-    num_particles : int, optional
-        Number of active particles. Defaults to packed_info.shape[0].
-    """
-    n = num_particles if num_particles is not None else packed_info.shape[0]
-    if n == 0:
-        return
-
-    module = _get_module()
-    kernel = module.get_function("K_ClearJustWoke")  # type: ignore[union-attr]
-
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-
-    kernel(grid, block, (np.uint32(n), packed_info))
-
-
 def run_wake_propagation(
     position: cupy.ndarray,
     packed_info: cupy.ndarray,
@@ -211,12 +184,11 @@ def run_wake_propagation(
     cell_wake_flags: cupy.ndarray,
     num_particles: Optional[int] = None,
 ) -> None:
-    """Run the full 3-phase wake propagation pipeline.
+    """Run the 2-phase wake propagation pipeline.
 
     1. Clear cell_wake_flags to 0
     2. K_MarkWakeCells (Phase 1)
-    3. K_WakeSleepers (Phase 2)
-    4. K_ClearJustWoke (Phase 3)
+    3. K_WakeSleepersAndClearJustWoke (Phase 2+3 fused)
 
     Parameters
     ----------
@@ -235,14 +207,13 @@ def run_wake_propagation(
     if n == 0:
         return
 
-    # Clear cell flags to 0
-    cell_wake_flags.data.memset(0x00, cell_wake_flags.nbytes)
+    # Clear cell flags to 0 (async memset: graph-capture safe)
+    cell_wake_flags.data.memset_async(0x00, cell_wake_flags.nbytes)
 
     # Phase 1: mark cells near just-woke particles
     mark_wake_cells(position, packed_info, cell_wake_flags, n)
 
-    # Phase 2: wake sleeping particles in flagged cells
-    wake_sleepers(position, packed_info, sleep_counter, cell_wake_flags, n)
-
-    # Phase 3: clear JUST_WOKE flag
-    clear_just_woke(packed_info, n)
+    # Phase 2+3 fused: wake sleepers + clear JUST_WOKE flag
+    wake_sleepers_and_clear_just_woke(
+        position, packed_info, sleep_counter, cell_wake_flags, n
+    )

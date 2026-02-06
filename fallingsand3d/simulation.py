@@ -5,7 +5,7 @@ Step2 -> Integrate.  Decouples simulation from rendering via a speed parameter,
 accuracy parameter (CFL number), and substep budget.
 
 Each render frame:
-  1. If adaptive mode: compute dt from CFL constraints (advection, acoustic, viscous)
+  1. If adaptive mode: compute dt from CFL constraints (acoustic, viscous — CPU-only)
   2. Compute sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps)
   3. Run sim_steps simulation substeps
   4. Copy UNSORTED pos/color to mapped VBOs (rendering happens once per frame)
@@ -17,7 +17,6 @@ import math
 import time
 from typing import Optional
 
-import cupy as cp
 import numpy as np
 
 from world import World
@@ -26,9 +25,10 @@ from materials import (
     build_material_array, build_interaction_matrix, upload_to_gpu,
 )
 
+import cupy
+
 import hash_sort
-import fused_reorder
-import build_grid
+import fused_sort_reorder_build
 import step1
 import step2
 import integrate
@@ -38,7 +38,7 @@ import wake
 
 # Adaptive timestep limits
 DT_MIN = 1e-5
-DT_MAX = 0.001
+DT_MAX = 0.005
 
 
 class Simulation:
@@ -88,6 +88,11 @@ class Simulation:
         self._frame_counter = 0
         self.compact_interval = compact_interval
         self.compact_threshold = compact_threshold
+        # --- CUDA graph capture state ---
+        self._sort_perm = cupy.empty(world.max_particles, dtype=cupy.uint32)
+        self._frame_counter_d = cupy.zeros(1, dtype=cupy.uint32)
+        self._cuda_graph = None   # cupy.cuda.Graph or None
+        self._graph_n = 0         # n used when graph was captured
 
         # Precompute acoustic speed from materials table
         self._c_sound = self._compute_c_sound()
@@ -98,7 +103,9 @@ class Simulation:
         self._h = 0.04
 
         # Grid cell tables (pre-allocated, reused every frame)
-        self._cell_start, self._cell_end = build_grid.allocate_cell_tables()
+        from hash_sort import NUM_CELLS
+        self._cell_start = cupy.empty(NUM_CELLS, dtype=cupy.uint32)
+        self._cell_end = cupy.empty(NUM_CELLS, dtype=cupy.uint32)
 
         # Cell wake flags for wake propagation (pre-allocated, cleared each step)
         self._cell_wake_flags = wake.allocate_cell_wake_flags()
@@ -149,23 +156,18 @@ class Simulation:
         return max_eta, rho_min
 
     def _compute_adaptive_dt(self, n: int) -> float:
-        """Compute adaptive dt from CFL constraints.
+        """Compute adaptive dt from CFL constraints (CPU-only, no GPU sync).
 
-        Three constraints:
-          dt_advection = accuracy * h / max(max_v, 1e-6)
-          dt_acoustic  = 0.25 * h / c_sound
-          dt_viscous   = accuracy * rho_min * h^2 / max(max_eta, 1e-6)
-          dt = min(dt_adv, dt_acou, dt_visc) clamped to [DT_MIN, DT_MAX]
+        Two constraints (precomputed from material properties):
+          dt_acoustic = 0.25 * h / c_sound
+          dt_viscous  = accuracy * rho_min * h^2 / max(max_eta, 1e-6)
+          dt = min(dt_acoustic, dt_viscous) clamped to [DT_MIN, DT_MAX]
+
+        The advection CFL (velocity-based) is omitted because velocity_limit
+        and accel_max prevent particles from exceeding the speed of sound,
+        and the acoustic CFL (dt~0.05) is always well above DT_MAX (0.005).
         """
         h = self._h
-
-        # Max velocity magnitude via CuPy reduction
-        vel = self.world.velocity[:n]  # (n, 4) float32
-        vel_sq = vel[:, 0]**2 + vel[:, 1]**2 + vel[:, 2]**2
-        max_v = float(cp.sqrt(cp.max(vel_sq)))
-
-        # Advection CFL
-        dt_advection = self.accuracy * h / max(max_v, 1e-6)
 
         # Acoustic CFL (fixed 0.25 coefficient, not scaled by accuracy)
         dt_acoustic = 0.25 * h / self._c_sound
@@ -173,7 +175,7 @@ class Simulation:
         # Viscous CFL (uses precomputed max_eta and rho_min)
         dt_viscous = self.accuracy * self._rho_min * h * h / max(self._max_eta, 1e-6)
 
-        dt = min(dt_advection, dt_acoustic, dt_viscous)
+        dt = min(dt_acoustic, dt_viscous)
         return max(DT_MIN, min(DT_MAX, dt))
 
     def _upload_dt(self, new_dt: float) -> None:
@@ -216,11 +218,8 @@ class Simulation:
         # --- hash_sort module: c_grid ---
         hash_sort.upload_grid_params(grid_params)
 
-        # --- fused_reorder module: no constant memory needed ---
-        fused_reorder.get_module()  # just compile
-
-        # --- build_grid module: c_grid ---
-        build_grid.upload_grid_params(grid_params)
+        # --- fused_sort_reorder_build module: c_grid ---
+        fused_sort_reorder_build.upload_grid_params(grid_params)
 
         # --- step1 module: c_grid, c_sim, c_precalc, c_materials, c_interactions ---
         step1.upload_grid_params(grid_params)
@@ -254,36 +253,32 @@ class Simulation:
         # --- materials module (its own internal module): c_materials, c_interactions ---
         upload_to_gpu()
 
-    def _sim_step(self, n: int) -> None:
-        """Run one simulation substep on n particles."""
+    def _run_graph_body(self, n: int) -> None:
+        """Execute the graph-capturable portion of the pipeline (ops 3-14).
+
+        This method is called both during graph capture (on capture stream)
+        and can be called directly for debugging. All operations use
+        pre-allocated arrays with stable pointers.
+        """
         w = self.world
+        sort_perm = self._sort_perm[:n]
 
-        # 1. Hash particle positions
-        hashes, indices = hash_sort.calc_hash(w.position[:n])
+        # 3. Memset cell tables before fused kernel (async for graph capture)
+        self._cell_start.data.memset_async(0xFF, self._cell_start.nbytes)
+        self._cell_end.data.memset_async(0x00, self._cell_end.nbytes)
 
-        # 2. Sort by hash (argsort -> gather sorted hashes and indices)
-        sorted_hashes, sorted_indices = hash_sort.sort_by_hash(
-            hashes, indices,
-            sorted_hashes_out=w.sorted_hashes,
-            sorted_indices_out=w.sorted_indices,
-        )
-
-        # 3. Fused reorder: gather all unsorted arrays into sorted order
-        fused_reorder.fused_reorder(
-            n, sorted_indices,
-            w.position, w.velocity, w.veleval,
+        # 4. Fused sort-reorder-build
+        fused_sort_reorder_build.fused_sort_reorder_build(
+            n, sort_perm, w.hashes,
+            w.sorted_hashes, self._cell_start, self._cell_end,
+            w.position, w.velocity,
             w.mass, w.packed_info, w.temperature,
-            w.health, w.lifetime, w.color,
-            w.sleep_counter, w.shear_rate,
-            w.sorted_position, w.sorted_velocity, w.sorted_veleval,
+            w.health, w.lifetime,
+            w.sleep_counter,
+            w.sorted_position, w.sorted_velocity,
             w.sorted_mass, w.sorted_packed_info, w.sorted_temperature,
-            w.sorted_health, w.sorted_lifetime, w.sorted_color,
-            w.sorted_sleep_counter, w.sorted_shear_rate,
-        )
-
-        # 4. Build grid data structure (cell_start / cell_end tables)
-        build_grid.build_data_struct(
-            sorted_hashes[:n], self._cell_start, self._cell_end
+            w.sorted_health, w.sorted_lifetime,
+            w.sorted_sleep_counter,
         )
 
         # 5. Step1: density summation + strain-rate tensor + heat diffusion + exposure
@@ -302,15 +297,11 @@ class Simulation:
             exposure_heat_out=w.sorted_exposure_heat,
             exposure_corrode_out=w.sorted_exposure_corrode,
         )
-        w._density_initialized = True
 
-        # 5b. Reset freelist counter for this step
+        # 5b. Reset freelist counter (graph-safe memset)
         spawn.reset_freelist(self._dead_count)
 
-        # 5c. Reactions: phase transitions, combustion, corrosion, gas lifetime
-        #     Runs on sorted arrays, modifies packed_info/temperature/health/
-        #     lifetime/velocity in-place before Step2 sees them.
-        #     Also populates the freelist when particles die.
+        # 5c. Reactions (always included — zero-cost early-exit for non-reactive)
         reactions.compute_reactions(
             w.sorted_packed_info[:n],
             w.sorted_temperature[:n],
@@ -319,12 +310,12 @@ class Simulation:
             w.sorted_velocity[:n],
             w.sorted_exposure_heat[:n],
             w.sorted_exposure_corrode[:n],
-            frame=self._frame_counter,
+            frame_d=self._frame_counter_d,
             dead_indices=self._dead_indices,
             dead_count=self._dead_count,
         )
 
-        # 5d. Spawn: consume from freelist to spawn steam from boiling water
+        # 5d. Spawn (always included — zero-cost when no SPAWN_GAS flags set)
         spawn.compute_spawn(
             w.sorted_packed_info[:n],
             w.sorted_position[:n],
@@ -355,9 +346,7 @@ class Simulation:
             veleval_out=w.sorted_veleval,
         )
 
-        # 7. Integrate: symplectic Euler + SDF boundaries + color + temperature update
-        #    Writes back to UNSORTED arrays via sort_indexes
-        #    Also updates packed_info (sleep flag), sleep_counter, and temperature
+        # 7. Integrate
         integrate.integrate(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -371,7 +360,7 @@ class Simulation:
             sorted_shear_rate=w.sorted_shear_rate[:n],
             sorted_dTdt=w.sorted_dTdt[:n],
             sorted_sleep_counter=w.sorted_sleep_counter[:n],
-            sort_indexes=sorted_indices[:n],
+            sort_indexes=self._sort_perm[:n],
             position_out=w.position,
             velocity_out=w.velocity,
             color_out=w.color,
@@ -380,8 +369,7 @@ class Simulation:
             temperature_out=w.temperature,
         )
 
-        # 8. Wake propagation: mark cells near just-woke particles,
-        #    wake sleeping neighbors, clear JUST_WOKE flags
+        # 8. Wake propagation (memset + 2 kernels)
         wake.run_wake_propagation(
             w.position[:n],
             w.packed_info[:n],
@@ -389,6 +377,50 @@ class Simulation:
             self._cell_wake_flags,
             num_particles=n,
         )
+
+    def _capture_graph(self, n: int) -> None:
+        """Capture the graph-body into a CUDA graph for replay.
+
+        Creates a non-default capture stream, records all ops 3-14, and
+        stores the resulting Graph object for repeated launch().
+        """
+        s = cupy.cuda.Stream(non_blocking=True)
+        with s:
+            s.begin_capture()
+            self._run_graph_body(n)
+            self._cuda_graph = s.end_capture()
+        self._graph_n = n
+
+    def _sim_step(self, n: int) -> None:
+        """Run one simulation substep on n particles.
+
+        Pipeline:
+          1. K_CalcHash           — normal launch
+          2. cupy.argsort + copy  — normal launch (Thrust can't be captured)
+          3-14. CUDA graph launch — single dispatch for all remaining ops
+        """
+        w = self.world
+
+        # 1. Hash particle positions (normal launch)
+        hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
+
+        # 2. Argsort (normal — Thrust uses internal cudaStreamSynchronize)
+        sort_perm = cupy.argsort(hashes).astype(cupy.uint32)
+
+        # Copy into pre-allocated buffer (stable pointer for graph)
+        self._sort_perm[:n] = sort_perm
+
+        # Update device frame counter (value changes, pointer stays stable)
+        self._frame_counter_d.fill(self._frame_counter)
+
+        # Mark density as initialized (needed for step1 prev_density path)
+        w._density_initialized = True
+
+        # 3-14. Capture or replay CUDA graph
+        if self._cuda_graph is None or self._graph_n != n:
+            self._capture_graph(n)
+        else:
+            self._cuda_graph.launch()
 
         self.sim_time += self.dt
         self._frame_counter += 1

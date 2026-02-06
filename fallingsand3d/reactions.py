@@ -111,9 +111,10 @@ def compute_reactions(
     sorted_velocity: cupy.ndarray,
     sorted_exposure_heat: cupy.ndarray,
     sorted_exposure_corrode: cupy.ndarray,
-    frame: int = 0,
+    frame_d: cupy.ndarray = None,
     dead_indices: Optional[cupy.ndarray] = None,
     dead_count: Optional[cupy.ndarray] = None,
+    frame: Optional[int] = None,
 ) -> None:
     """Launch K_Reactions kernel.
 
@@ -136,13 +137,18 @@ def compute_reactions(
         Heat exposure from Step1 (read-only).
     sorted_exposure_corrode : cupy.ndarray, (N,) float32
         Corrosion exposure from Step1 (read-only).
-    frame : int
-        Frame counter for RNG seed (gunpowder explosion direction).
+    frame_d : cupy.ndarray, optional
+        (1,) uint32 device buffer — frame counter for RNG seed. Passed as
+        device pointer (graph-safe: pointer is stable, value updated each step).
+        Preferred over ``frame`` for graph capture.
     dead_indices : cupy.ndarray, optional
         (max_particles,) uint32 freelist array. Dead particle sorted indices
         are appended here via atomicAdd on dead_count.
     dead_count : cupy.ndarray, optional
         (1,) uint32 atomic counter for freelist size.
+    frame : int, optional
+        Legacy scalar frame counter. If provided and ``frame_d`` is None,
+        a temporary device buffer is created (not graph-safe).
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
@@ -154,6 +160,11 @@ def compute_reactions(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
 
+    # Resolve frame device buffer
+    if frame_d is None:
+        val = frame if frame is not None else 0
+        frame_d = cupy.array([val], dtype=cupy.uint32)
+
     # Pass null (0) pointers when freelist not provided
     d_dead_indices = dead_indices if dead_indices is not None else np.intp(0)
     d_dead_count = dead_count if dead_count is not None else np.intp(0)
@@ -163,7 +174,7 @@ def compute_reactions(
         block,
         (
             np.uint32(n),
-            np.uint32(frame),
+            frame_d,
             sorted_packed_info,
             sorted_temperature,
             sorted_health,
