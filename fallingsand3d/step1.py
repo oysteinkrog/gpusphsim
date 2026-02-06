@@ -1,4 +1,5 @@
-"""Step1 kernel: SPH density summation + strain-rate tensor + heat diffusion.
+"""Step1 kernel: SPH density summation + strain-rate tensor + heat diffusion
++ exposure accumulation.
 
 Compiles physics/kernels/step1.cu via CuPy RawModule and provides
 a function to launch K_Step1 which computes per-particle density
@@ -6,6 +7,10 @@ from the sorted particle positions and masses using neighbor iteration.
 
 Additionally computes heat diffusion dTdt via SPH Laplacian of temperature:
   dTdt = kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r|)
+
+Exposure accumulation via c_interactions table lookup (no branching):
+  exposure_corrode_i += c_interactions[mat_i][mat_j].reaction_rate * W_poly6(r_sq, h_sq)
+  exposure_heat_i += c_interactions[mat_i][mat_j].heat_exchange * max(T_j - T_i, 0) * W_poly6
 
 For GRANULAR particles, computes the symmetric strain-rate tensor D from
 SPH velocity gradient (spiky kernel) and writes the second invariant
@@ -224,6 +229,15 @@ def upload_materials(materials_data: np.ndarray) -> None:
     )
 
 
+def upload_interactions(interactions_data: np.ndarray) -> None:
+    """Upload Interaction[32][32] to ``__constant__ Interaction c_interactions[32][32]``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_interactions")  # type: ignore[union-attr]
+    cupy.cuda.runtime.memcpy(
+        int(d_ptr), interactions_data.ctypes.data, interactions_data.nbytes, 1
+    )
+
+
 # ---------------------------------------------------------------------------
 # Kernel launch
 # ---------------------------------------------------------------------------
@@ -243,8 +257,10 @@ def compute_step1(
     density_out: Optional[cupy.ndarray] = None,
     shear_rate_out: Optional[cupy.ndarray] = None,
     dTdt_out: Optional[cupy.ndarray] = None,
+    exposure_heat_out: Optional[cupy.ndarray] = None,
+    exposure_corrode_out: Optional[cupy.ndarray] = None,
 ) -> tuple:
-    """Launch K_Step1 and return (density, shear_rate, dTdt) arrays.
+    """Launch K_Step1 and return (density, shear_rate, dTdt, exposure_heat, exposure_corrode).
 
     Parameters
     ----------
@@ -271,13 +287,19 @@ def compute_step1(
         Pre-allocated (N,) float32 output buffer. If None, allocates new.
     dTdt_out : cupy.ndarray, optional
         Pre-allocated (N,) float32 output buffer. If None, allocates new.
+    exposure_heat_out : cupy.ndarray, optional
+        Pre-allocated (N,) float32 output buffer. If None, allocates new.
+    exposure_corrode_out : cupy.ndarray, optional
+        Pre-allocated (N,) float32 output buffer. If None, allocates new.
 
     Returns
     -------
-    (density, shear_rate, dTdt) : tuple of cupy.ndarray, each (N,) float32
+    (density, shear_rate, dTdt, exposure_heat, exposure_corrode) : tuple of cupy.ndarray
         density: Per-particle density (clamped >= 1.0).
         shear_rate: Per-particle gamma_dot (0 for non-GRANULAR).
         dTdt: Per-particle temperature rate of change from heat diffusion.
+        exposure_heat: Per-particle heat exposure from interaction table.
+        exposure_corrode: Per-particle corrosion exposure from interaction table.
     """
     n = position.shape[0]
     if density_out is None:
@@ -286,6 +308,10 @@ def compute_step1(
         shear_rate_out = cupy.empty(n, dtype=cupy.float32)
     if dTdt_out is None:
         dTdt_out = cupy.empty(n, dtype=cupy.float32)
+    if exposure_heat_out is None:
+        exposure_heat_out = cupy.empty(n, dtype=cupy.float32)
+    if exposure_corrode_out is None:
+        exposure_corrode_out = cupy.empty(n, dtype=cupy.float32)
 
     # density_in can be None (first frame) -- pass null pointer
     density_in_ptr = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
@@ -312,7 +338,9 @@ def compute_step1(
             density_out,
             shear_rate_out,
             dTdt_out,
+            exposure_heat_out,
+            exposure_corrode_out,
         ),
     )
 
-    return density_out, shear_rate_out, dTdt_out
+    return density_out, shear_rate_out, dTdt_out, exposure_heat_out, exposure_corrode_out

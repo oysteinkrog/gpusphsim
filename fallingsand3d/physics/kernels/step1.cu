@@ -1,5 +1,6 @@
 /*
- * step1.cu -- K_Step1 SPH density summation + strain-rate tensor + heat diffusion kernel.
+ * step1.cu -- K_Step1 SPH density summation + strain-rate tensor + heat diffusion
+ *             + exposure accumulation kernel.
  *
  * Per-particle computation:
  *   density_sum += m_j * (h^2 - |r_ij|^2)^3   for all neighbors j within h
@@ -9,6 +10,11 @@
  *   dTdt += kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|)
  *   where kappa_i = c_materials[mat_id].thermal_conductivity
  *
+ * Exposure accumulation (all particles, via c_interactions table lookup):
+ *   exposure_corrode_i += c_interactions[mat_i][mat_j].reaction_rate * W_poly6(r_sq, h_sq)
+ *   exposure_heat_i += c_interactions[mat_i][mat_j].heat_exchange * max(T_j - T_i, 0) * W_poly6(r_sq, h_sq)
+ *   No if/else branching on material type -- pure table lookup.
+ *
  * For GRANULAR particles only, also computes the symmetric strain-rate tensor D
  * using the SPH velocity gradient with spiky gradient weighting:
  *   D_ab = 0.5 * sum_j (m_j/rho_j) * (dv_a * gradW_b + dv_b * gradW_a)
@@ -17,13 +23,13 @@
  * Operates on SORTED particle arrays (after hash + sort + reorder).
  * Uses 27-cell neighbor iteration with grid cell_start/cell_end tables.
  * Self-interaction IS included for density (j==i NOT skipped).
- * Self-interaction is skipped for strain-rate and heat diffusion (j==i skipped).
+ * Self-interaction is skipped for strain-rate, heat diffusion, and exposure (j==i skipped).
  * Per-particle mass m_j supports multi-material and mass splitting.
  *
  * Ported from SPHSimLib/K_SimpleSPH_Step1.inl + K_SPH_Kernels_poly6.inl.
  * Neighbor iteration ported from SPHSimLib/K_UniformGrid_Utils.inl.
  *
- * Constant memory (c_grid, c_sim, c_precalc, c_materials) declared in common.cuh.
+ * Constant memory (c_grid, c_sim, c_precalc, c_materials, c_interactions) declared in common.cuh.
  */
 
 #include "common.cuh"
@@ -41,7 +47,9 @@ void K_Step1(
     const uint*     __restrict__ cell_end,       // grid cell end indices
     float*          __restrict__ density_out,    // output: density per particle
     float*          __restrict__ shear_rate_out, // output: gamma_dot per particle (0 for non-GRANULAR)
-    float*          __restrict__ dTdt_out        // output: temperature rate of change (heat diffusion)
+    float*          __restrict__ dTdt_out,       // output: temperature rate of change (heat diffusion)
+    float*          __restrict__ exposure_heat_out,    // output: heat exposure from interactions
+    float*          __restrict__ exposure_corrode_out  // output: corrosion exposure from interactions
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -75,6 +83,10 @@ void K_Step1(
 
     // Heat diffusion accumulator: dTdt
     float sum_dTdt = 0.0f;
+
+    // Exposure accumulators (from c_interactions table lookup)
+    float sum_exposure_heat = 0.0f;
+    float sum_exposure_corrode = 0.0f;
 
     // Strain-rate tensor accumulators (6 symmetric components)
     // D_xx, D_yy, D_zz, D_xy, D_xz, D_yz
@@ -129,7 +141,7 @@ void K_Step1(
                         float m_j = __ldg(&mass[index_j]);
                         sum_density += m_j * diff * diff * diff;
 
-                        // --- Heat diffusion: skip self ---
+                        // --- Heat diffusion + exposure: skip self ---
                         if (index_j != index_i) {
                             float rlen = sqrtf(r_sq);
                             float T_j = __ldg(&temperature_in[index_j]);
@@ -139,6 +151,18 @@ void K_Step1(
                             // dTdt += kappa * (m_j / rho_j) * (T_j - T_i) * viscosity_lap_coeff * (h - |r|)
                             float lap_var = h - rlen;
                             sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var;
+
+                            // --- Exposure accumulation: pure table lookup, no branching ---
+                            // W_poly6 variable part: diff^3 = (h^2 - r^2)^3
+                            // Full W_poly6 = poly6_coeff * diff^3, but we use just diff^3
+                            // as the weighting (unnormalized) -- the absolute magnitude
+                            // is tuned via reaction_rate/heat_exchange in the table.
+                            uint pi_j = __ldg(&packed_info[index_j]);
+                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                            float w_poly6_var = diff * diff * diff;  // (h^2 - r^2)^3
+
+                            sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                            sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
                         }
 
                         // --- Strain-rate: skip self, GRANULAR only ---
@@ -196,6 +220,11 @@ void K_Step1(
     // --- PostCalc: heat diffusion dTdt ---
     // dTdt = kappa_i * viscosity_lap_coeff * sum_dTdt
     dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt;
+
+    // --- PostCalc: exposure accumulation ---
+    // Apply poly6_coeff to get properly normalized exposure values
+    exposure_heat_out[index_i] = c_precalc.poly6_coeff * sum_exposure_heat;
+    exposure_corrode_out[index_i] = c_precalc.poly6_coeff * sum_exposure_corrode;
 
     // --- PostCalc: strain-rate magnitude (gamma_dot) ---
     if (is_granular) {

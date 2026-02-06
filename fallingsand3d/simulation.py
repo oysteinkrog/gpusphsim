@@ -105,11 +105,12 @@ class Simulation:
         # --- build_grid module: c_grid ---
         build_grid.upload_grid_params(grid_params)
 
-        # --- step1 module: c_grid, c_sim, c_precalc, c_materials ---
+        # --- step1 module: c_grid, c_sim, c_precalc, c_materials, c_interactions ---
         step1.upload_grid_params(grid_params)
         step1.upload_sim_params(sim_params)
         step1.upload_precalc_params(precalc_params)
         step1.upload_materials(materials_data)
+        step1.upload_interactions(interactions_data)
 
         # --- step2 module: c_grid, c_sim, c_precalc, c_materials, c_granular ---
         step2.upload_grid_params(grid_params)
@@ -160,7 +161,7 @@ class Simulation:
             sorted_hashes[:n], self._cell_start, self._cell_end
         )
 
-        # 5. Step1: density summation + strain-rate tensor + heat diffusion
+        # 5. Step1: density summation + strain-rate tensor + heat diffusion + exposure
         step1.compute_step1(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -173,6 +174,8 @@ class Simulation:
             density_out=w.sorted_density,
             shear_rate_out=w.sorted_shear_rate,
             dTdt_out=w.sorted_dTdt,
+            exposure_heat_out=w.sorted_exposure_heat,
+            exposure_corrode_out=w.sorted_exposure_corrode,
         )
         w._density_initialized = True
 

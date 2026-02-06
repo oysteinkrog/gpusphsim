@@ -542,3 +542,29 @@
   - Metal thermal conductivity (50.0) vs Water (0.6) gives an 83x theoretical ratio in dTdt magnitude, and the actual GPU measurement shows 83.3x -- confirming the SPH discretization is consistent with the material properties
   - Temperature integration is applied in ALL paths of integrate (static early-return, sleeping early-return, normal path) because heat conduction is a physical process that occurs regardless of particle motion state
 ---
+
+## 2026-02-06 - US-021
+- What was implemented:
+  - Exposure accumulation in Step1 neighbor loop via `c_interactions[mat_i][mat_j]` table lookup (pure constant memory, no branching)
+  - `exposure_corrode_i += c_interactions[mat_i][mat_j].reaction_rate * poly6_coeff * (h^2 - r^2)^3`
+  - `exposure_heat_i += c_interactions[mat_i][mat_j].heat_exchange * max(T_j - T_i, 0) * poly6_coeff * (h^2 - r^2)^3`
+  - Self-interaction skipped (j==i) for exposure, same branch as heat diffusion
+  - Exposure values written to sorted float arrays (ephemeral, like density/dTdt)
+  - `upload_interactions()` function in step1.py for c_interactions constant memory
+  - simulation.py uploads c_interactions to step1 module and passes sorted_exposure_heat/sorted_exposure_corrode buffers
+  - 3 new tests: acid-metal corrode, fire-wood heat, water-water no-exposure
+  - Updated 500K stress test with exposure array validation (finite, non-negative)
+- Files changed:
+  - `fallingsand3d/physics/kernels/step1.cu` (modified -- exposure accumulators in neighbor loop, exposure PostCalc output, two new kernel output params)
+  - `fallingsand3d/step1.py` (modified -- upload_interactions(), compute_step1 with exposure_heat_out/exposure_corrode_out, 5-tuple return)
+  - `fallingsand3d/simulation.py` (modified -- c_interactions upload to step1 module, sorted_exposure buffers wired through)
+  - `fallingsand3d/world.py` (modified -- sorted_exposure_heat/sorted_exposure_corrode buffer allocation)
+  - `fallingsand3d/test_step1.py` (modified -- updated all 17 existing tests from 5-tuple to 7-tuple unpacking, added 3 exposure tests, c_interactions upload in setup)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - Exposure accumulation piggybacks on the existing Step1 neighbor loop with minimal register pressure increase -- the kernel compiles and runs fine for 500K particles with 2 extra float accumulators plus 2 extra constant memory reads per neighbor pair
+  - The `c_interactions` table is already declared in common.cuh and compiled into every kernel module, but only step1.cu now reads from it. Each kernel module needs its own `upload_interactions()` call because each CuPy RawModule has its own constant memory symbol space
+  - Using `poly6_coeff * (h^2 - r^2)^3` as the weighting kernel for exposure gives spatial falloff that matches density weighting. The poly6_coeff normalization is applied in PostCalc (same pattern as density)
+  - The `packed_info[index_j]` read for mat_id_j in the exposure block reuses data already loaded for the neighbor -- but since exposure is inside the `index_j != index_i` branch, it requires its own `__ldg()` load. This could be optimized by hoisting the pi_j read to share with strain-rate, but register pressure is not an issue at current kernel complexity
+  - Water-water interaction correctly produces zero exposure because `c_interactions[5][5]` has both reaction_rate=0 and heat_exchange=0 (no self-interaction in the interaction matrix)
+---

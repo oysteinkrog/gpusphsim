@@ -1,4 +1,4 @@
-"""Integration test for step1.py -- K_Step1 density + strain-rate kernel.
+"""Integration test for step1.py -- K_Step1 density + strain-rate + exposure kernel.
 
 Acceptance criteria (density, US-011):
   - K_Step1 iterates 3x3x3 neighbor cells using cell_start/cell_end
@@ -19,6 +19,14 @@ Acceptance criteria (strain-rate, US-015):
   - Non-GRANULAR particles get shear_rate = 0
   - Test: stationary sand -> gamma_dot ~ 0
   - Test: sand in shear flow -> gamma_dot > 0
+
+Acceptance criteria (exposure, US-021):
+  - exposure_corrode_i += c_interactions[mat_i][mat_j].reaction_rate * W_poly6(r_sq, h_sq)
+  - exposure_heat_i += c_interactions[mat_i][mat_j].heat_exchange * max(T_j-T_i, 0) * W_poly6
+  - No if/else branching on material type (pure table lookup via c_interactions)
+  - Test: acid near metal -> metal's exposure_corrode > 0
+  - Test: fire near wood -> wood's exposure_heat > 0
+  - Test: water near water -> exposure_corrode == 0
 
 Requirements: cupy, numpy, an NVIDIA GPU with CUDA 12.x.
 """
@@ -52,11 +60,12 @@ from step1 import (
     compute_step1,
     get_module,
     upload_grid_params as upload_step1_grid_params,
+    upload_interactions as upload_step1_interactions,
     upload_materials as upload_step1_materials,
     upload_precalc_params,
     upload_sim_params,
 )
-from materials import build_material_array
+from materials import build_interaction_matrix, build_material_array
 
 # Simulation constants matching the acceptance criteria
 H = 0.04                # smoothing length
@@ -94,6 +103,9 @@ def _upload_all_params() -> None:
     materials_data = build_material_array()
     upload_step1_materials(materials_data)
 
+    interactions_data = build_interaction_matrix()
+    upload_step1_interactions(interactions_data)
+
 
 def _run_full_pipeline(
     positions_np: np.ndarray,
@@ -119,6 +131,8 @@ def _run_full_pipeline(
     density_cpu : (N,) float32 -- density in sorted order
     shear_rate_cpu : (N,) float32 -- gamma_dot in sorted order
     dTdt_cpu : (N,) float32 -- temperature rate of change in sorted order
+    exposure_heat_cpu : (N,) float32 -- heat exposure in sorted order
+    exposure_corrode_cpu : (N,) float32 -- corrosion exposure in sorted order
     sorted_positions_cpu : (N, 4) float32
     sorted_mass_cpu : (N,) float32
     """
@@ -151,7 +165,7 @@ def _run_full_pipeline(
 
     cell_start, cell_end = build_data_struct(sorted_hashes)
 
-    density, shear_rate, dTdt = compute_step1(
+    density, shear_rate, dTdt, exposure_heat, exposure_corrode = compute_step1(
         sorted_pos, sorted_vel, sorted_mass,
         sorted_density_in, sorted_pi,
         sorted_temp,
@@ -163,6 +177,8 @@ def _run_full_pipeline(
         cupy.asnumpy(density),
         cupy.asnumpy(shear_rate),
         cupy.asnumpy(dTdt),
+        cupy.asnumpy(exposure_heat),
+        cupy.asnumpy(exposure_corrode),
         cupy.asnumpy(sorted_pos),
         cupy.asnumpy(sorted_mass),
     )
@@ -185,10 +201,10 @@ def test_compilation() -> None:
     print("[OK] K_Step1 kernel function found")
 
     # Verify all constant memory symbols accessible
-    for sym in ["c_grid", "c_sim", "c_precalc"]:
+    for sym in ["c_grid", "c_sim", "c_precalc", "c_interactions"]:
         d_ptr = module.get_global(sym)  # type: ignore[union-attr]
         assert int(d_ptr) != 0, f"{sym} symbol not found"
-    print("[OK] c_grid, c_sim, c_precalc constant memory symbols found")
+    print("[OK] c_grid, c_sim, c_precalc, c_interactions constant memory symbols found")
 
 
 def test_block_size() -> None:
@@ -244,7 +260,7 @@ def test_single_isolated_particle() -> None:
 
     mass_arr = np.array([MASS], dtype=np.float32)
 
-    density, shear_rate, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, shear_rate, _, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     expected = POLY6_COEFF * MASS * H_SQ**3  # poly6_coeff * mass * h^6
     actual = density[0]
@@ -278,7 +294,7 @@ def test_two_particles_within_h() -> None:
 
     mass_arr = np.full(2, MASS, dtype=np.float32)
 
-    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     # Self-contribution only
     single_rho = POLY6_COEFF * MASS * H_SQ**3
@@ -315,7 +331,7 @@ def test_two_particles_beyond_h() -> None:
 
     mass_arr = np.full(2, MASS, dtype=np.float32)
 
-    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     single_rho = POLY6_COEFF * MASS * H_SQ**3
 
@@ -346,7 +362,7 @@ def test_per_particle_mass() -> None:
     # Particle 0 has 2x mass
     mass_arr = np.array([MASS * 2.0, MASS], dtype=np.float32)
 
-    density, _, _, _, sorted_mass = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _, _, sorted_mass = _run_full_pipeline(positions, mass_arr)
 
     # Particle with larger mass should generally produce higher self-density
     # But both particles contribute to each other, and mass affects contribution
@@ -372,7 +388,7 @@ def test_density_clamp_minimum() -> None:
 
     mass_arr = np.array([tiny_mass], dtype=np.float32)
 
-    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     assert density[0] >= 1.0, (
         f"Density {density[0]} < 1.0 (clamp failed)"
@@ -407,7 +423,7 @@ def test_uniform_field_rest_density() -> None:
 
     mass_arr = np.full(n, MASS, dtype=np.float32)
 
-    density, _, _, sorted_pos, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _, sorted_pos, _ = _run_full_pipeline(positions, mass_arr)
 
     # Filter to interior particles (at least 2h from edge to avoid boundary effects)
     margin = 2.0 * H  # 0.08
@@ -458,7 +474,7 @@ def test_self_contribution_included() -> None:
     positions[0] = [0.0, 0.0, 0.0, 1.0]
     mass_arr = np.array([MASS], dtype=np.float32)
 
-    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     # Without self-contribution, density would be 0 -> clamped to 1.0
     # With self-contribution, density = poly6_coeff * mass * h^6 which is >> 1.0
@@ -506,7 +522,7 @@ def test_stationary_sand_zero_gamma_dot() -> None:
     # Provide density_in for m_j/rho_j weighting
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    density, shear_rate, _, sorted_pos, _ = _run_full_pipeline(
+    density, shear_rate, _, _, _, sorted_pos, _ = _run_full_pipeline(
         positions, mass_arr, velocities, packed_info, density_in,
     )
 
@@ -556,7 +572,7 @@ def test_shear_flow_nonzero_gamma_dot() -> None:
     packed_info = np.full(n, PACKED_SAND, dtype=np.uint32)
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    density, shear_rate, _, sorted_pos, _ = _run_full_pipeline(
+    density, shear_rate, _, _, _, sorted_pos, _ = _run_full_pipeline(
         positions, mass_arr, velocities, packed_info, density_in,
     )
 
@@ -622,7 +638,7 @@ def test_non_granular_zero_shear_rate() -> None:
     mass_arr = np.full(n, MASS, dtype=np.float32)
     packed_info = np.full(n, PACKED_WATER, dtype=np.uint32)  # FLUID, not GRANULAR
 
-    density, shear_rate, _, _, _ = _run_full_pipeline(
+    density, shear_rate, _, _, _, _, _ = _run_full_pipeline(
         positions, mass_arr, velocities, packed_info,
     )
 
@@ -662,7 +678,7 @@ def test_500k_no_errors() -> None:
     # Random temperatures for stress test
     temperature = rng.uniform(200.0, 1500.0, size=n).astype(np.float32)
 
-    density, shear_rate, dTdt, _, _ = _run_full_pipeline(
+    density, shear_rate, dTdt, exposure_heat, exposure_corrode, _, _ = _run_full_pipeline(
         positions, mass_arr, velocities, packed_info, density_in, temperature,
     )
 
@@ -670,11 +686,17 @@ def test_500k_no_errors() -> None:
     assert density.shape == (n,), f"density shape {density.shape} != ({n},)"
     assert shear_rate.shape == (n,), f"shear_rate shape {shear_rate.shape} != ({n},)"
     assert dTdt.shape == (n,), f"dTdt shape {dTdt.shape} != ({n},)"
+    assert exposure_heat.shape == (n,), f"exposure_heat shape {exposure_heat.shape} != ({n},)"
+    assert exposure_corrode.shape == (n,), f"exposure_corrode shape {exposure_corrode.shape} != ({n},)"
     assert np.all(density >= 1.0), "Some densities < 1.0 (clamp failed)"
     assert np.all(np.isfinite(density)), "NaN or Inf in densities"
     assert np.all(np.isfinite(shear_rate)), "NaN or Inf in shear_rates"
     assert np.all(shear_rate >= 0.0), "Negative shear_rate values found"
     assert np.all(np.isfinite(dTdt)), "NaN or Inf in dTdt"
+    assert np.all(np.isfinite(exposure_heat)), "NaN or Inf in exposure_heat"
+    assert np.all(np.isfinite(exposure_corrode)), "NaN or Inf in exposure_corrode"
+    assert np.all(exposure_heat >= 0.0), "Negative exposure_heat values found"
+    assert np.all(exposure_corrode >= 0.0), "Negative exposure_corrode values found"
 
     mean_rho = float(np.mean(density))
     min_rho = float(np.min(density))
@@ -683,11 +705,14 @@ def test_500k_no_errors() -> None:
     max_sr = float(np.max(shear_rate))
     mean_dTdt = float(np.mean(dTdt))
     max_dTdt = float(np.max(np.abs(dTdt)))
+    mean_exp_h = float(np.mean(exposure_heat))
+    mean_exp_c = float(np.mean(exposure_corrode))
 
     print(f"  500K particles processed (250K FLUID + 250K GRANULAR)")
     print(f"  Density range: [{min_rho:.2f}, {max_rho:.2f}], mean: {mean_rho:.2f}")
     print(f"  Shear rate: mean={mean_sr:.4f}, max={max_sr:.4f}")
     print(f"  dTdt: mean={mean_dTdt:.4f}, max |dTdt|={max_dTdt:.4f}")
+    print(f"  Exposure heat: mean={mean_exp_h:.6e}, corrode: mean={mean_exp_c:.6e}")
     print("[OK] 500K particles: no CUDA errors, all values finite")
 
 
@@ -735,7 +760,7 @@ def test_hot_particle_among_cold() -> None:
 
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    density, shear_rate, dTdt, sorted_pos, _ = _run_full_pipeline(
+    density, shear_rate, dTdt, _, _, sorted_pos, _ = _run_full_pipeline(
         positions, mass_arr, None, packed_info, density_in, temperature,
     )
 
@@ -785,7 +810,7 @@ def test_uniform_temperature_zero_dTdt() -> None:
     temperature = np.full(n, 500.0, dtype=np.float32)
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    _, _, dTdt, _, _ = _run_full_pipeline(
+    _, _, dTdt, _, _, _, _ = _run_full_pipeline(
         positions, mass_arr, None, packed_info, density_in, temperature,
     )
 
@@ -848,7 +873,7 @@ def test_heat_conductivity_material_dependence() -> None:
 
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    _, _, dTdt, sorted_pos, _ = _run_full_pipeline(
+    _, _, dTdt, _, _, sorted_pos, _ = _run_full_pipeline(
         positions, mass_arr, None, packed_info, density_in, temperature,
     )
 
@@ -875,6 +900,145 @@ def test_heat_conductivity_material_dependence() -> None:
     print("[OK] Metal conducts heat much faster than water")
 
 
+# ===================================================================
+# Exposure accumulation tests (US-021)
+# ===================================================================
+
+# Material IDs from materials.py
+MAT_ACID = 8
+MAT_FIRE = 14
+MAT_WOOD = 9
+MAT_SAND = 2
+
+# Behavior classes
+STATIC = 3
+
+# packed_info helpers
+PACKED_ACID = MAT_ACID | (FLUID << 8)
+PACKED_METAL = MAT_METAL | (STATIC << 8)
+PACKED_WOOD = MAT_WOOD | (STATIC << 8)
+PACKED_FIRE = 14 | (2 << 8)  # GAS = 2
+
+
+def test_acid_metal_exposure_corrode() -> None:
+    """Acid particle near metal particle -> metal's exposure_corrode > 0.
+
+    c_interactions[METAL][ACID].reaction_rate = 0.3 (from materials.py).
+    """
+    print("\n--- Acid-metal exposure_corrode test ---")
+    _upload_all_params()
+
+    sep = H * 0.3  # well within smoothing length
+    positions = np.zeros((2, 4), dtype=np.float32)
+    positions[0] = [0.0, 0.0, 0.0, 1.0]    # metal
+    positions[1] = [sep, 0.0, 0.0, 1.0]     # acid
+
+    mass_arr = np.full(2, MASS, dtype=np.float32)
+
+    # Metal at mat_id=10, Acid at mat_id=8
+    packed_info = np.array([PACKED_METAL, PACKED_ACID], dtype=np.uint32)
+    temperature = np.full(2, 293.0, dtype=np.float32)
+
+    _, _, _, exposure_heat, exposure_corrode, _, _ = _run_full_pipeline(
+        positions, mass_arr, None, packed_info, None, temperature,
+    )
+
+    print(f"  Metal exposure_corrode: {exposure_corrode[0]:.6e}")
+    print(f"  Metal exposure_heat:    {exposure_heat[0]:.6e}")
+    print(f"  Acid exposure_corrode:  {exposure_corrode[1]:.6e}")
+
+    # Metal should have nonzero exposure_corrode from acid neighbor
+    # c_interactions[10][8].reaction_rate = 0.3
+    assert exposure_corrode[0] > 0.0, (
+        f"Metal exposure_corrode = {exposure_corrode[0]}, expected > 0"
+    )
+    # Acid also sees metal: c_interactions[8][10].reaction_rate = 0.3 (symmetric)
+    assert exposure_corrode[1] > 0.0, (
+        f"Acid exposure_corrode = {exposure_corrode[1]}, expected > 0"
+    )
+
+    print("[OK] Acid near metal -> metal's exposure_corrode > 0")
+
+
+def test_fire_wood_exposure_heat() -> None:
+    """Fire particle near wood particle -> wood's exposure_heat > 0.
+
+    Fire is at 1200K, wood at 293K. c_interactions[WOOD][FIRE].heat_exchange = 2.0.
+    exposure_heat uses max(T_j - T_i, 0) so wood (cold) gains heat from fire (hot).
+    """
+    print("\n--- Fire-wood exposure_heat test ---")
+    _upload_all_params()
+
+    sep = H * 0.3  # well within smoothing length
+    positions = np.zeros((2, 4), dtype=np.float32)
+    positions[0] = [0.0, 0.0, 0.0, 1.0]    # wood
+    positions[1] = [sep, 0.0, 0.0, 1.0]     # fire
+
+    mass_arr = np.full(2, MASS, dtype=np.float32)
+
+    packed_info = np.array([PACKED_WOOD, PACKED_FIRE], dtype=np.uint32)
+    temperature = np.array([293.0, 1200.0], dtype=np.float32)  # wood cold, fire hot
+
+    _, _, _, exposure_heat, exposure_corrode, _, _ = _run_full_pipeline(
+        positions, mass_arr, None, packed_info, None, temperature,
+    )
+
+    print(f"  Wood exposure_heat:    {exposure_heat[0]:.6e}")
+    print(f"  Wood exposure_corrode: {exposure_corrode[0]:.6e}")
+    print(f"  Fire exposure_heat:    {exposure_heat[1]:.6e}")
+
+    # Wood should have nonzero exposure_heat from fire (T_fire > T_wood)
+    assert exposure_heat[0] > 0.0, (
+        f"Wood exposure_heat = {exposure_heat[0]}, expected > 0 (fire is hotter)"
+    )
+    # Fire sees max(T_wood - T_fire, 0) = max(293 - 1200, 0) = 0 -> exposure_heat_fire = 0
+    assert exposure_heat[1] == 0.0, (
+        f"Fire exposure_heat = {exposure_heat[1]}, expected 0 (wood is colder)"
+    )
+
+    print("[OK] Fire near wood -> wood's exposure_heat > 0, fire's = 0")
+
+
+def test_water_water_no_exposure() -> None:
+    """Water near water -> exposure_corrode == 0 (reaction_rate is 0 in table).
+
+    c_interactions[WATER][WATER] is all zeros (no self-interaction defined).
+    """
+    print("\n--- Water-water zero exposure test ---")
+    _upload_all_params()
+
+    sep = H * 0.3  # well within smoothing length
+    positions = np.zeros((2, 4), dtype=np.float32)
+    positions[0] = [0.0, 0.0, 0.0, 1.0]
+    positions[1] = [sep, 0.0, 0.0, 1.0]
+
+    mass_arr = np.full(2, MASS, dtype=np.float32)
+    packed_info = np.full(2, PACKED_WATER, dtype=np.uint32)
+    temperature = np.full(2, 293.0, dtype=np.float32)
+
+    _, _, _, exposure_heat, exposure_corrode, _, _ = _run_full_pipeline(
+        positions, mass_arr, None, packed_info, None, temperature,
+    )
+
+    print(f"  Water[0] exposure_corrode: {exposure_corrode[0]:.6e}")
+    print(f"  Water[1] exposure_corrode: {exposure_corrode[1]:.6e}")
+    print(f"  Water[0] exposure_heat:    {exposure_heat[0]:.6e}")
+
+    # Water-water interaction has reaction_rate = 0
+    assert exposure_corrode[0] == 0.0, (
+        f"Water exposure_corrode = {exposure_corrode[0]}, expected 0"
+    )
+    assert exposure_corrode[1] == 0.0, (
+        f"Water exposure_corrode = {exposure_corrode[1]}, expected 0"
+    )
+    # Same temperature -> max(T_j - T_i, 0) = 0 -> exposure_heat = 0
+    assert exposure_heat[0] == 0.0, (
+        f"Water exposure_heat = {exposure_heat[0]}, expected 0 (same temp)"
+    )
+
+    print("[OK] Water near water -> exposure_corrode == 0, exposure_heat == 0")
+
+
 def main() -> None:
     test_compilation()
     test_block_size()
@@ -893,6 +1057,9 @@ def main() -> None:
     test_hot_particle_among_cold()
     test_uniform_temperature_zero_dTdt()
     test_heat_conductivity_material_dependence()
+    test_acid_metal_exposure_corrode()
+    test_fire_wood_exposure_heat()
+    test_water_water_no_exposure()
     test_500k_no_errors()
     print("\n=== ALL CHECKS PASSED ===")
 
