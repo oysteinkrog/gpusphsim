@@ -1,0 +1,585 @@
+{
+  "name": "FallingSand3D",
+  "description": "3D falling sand game with particle-based SPH physics. Multi-material simulation (sand, water, lava, etc) with granular mechanics, fluid dynamics, gas buoyancy, and material interactions. Python+CuPy frontend, 100% CUDA physics, 500K+ particles at 60+ FPS on RTX 5070 Ti. Physics reference document: fallingsand3d/PHYSICS.md. Existing SPH code to port from: SPHSimLib/ directory.",
+  "branchName": "feature/falling-sand-3d",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create Python project skeleton and dependencies",
+      "description": "Set up the fallingsand3d/ project directory with all Python files, requirements.txt, and run.bat. Install dependencies: cupy-cuda12x, glfw, PyOpenGL, imgui-bundle, numpy.",
+      "acceptanceCriteria": [
+        "fallingsand3d/ directory exists with main.py, world.py, materials.py, renderer.py, gl_cuda_interop.py, camera.py, ui.py, physics/__init__.py, physics/simulation.py",
+        "physics/kernels/ directory exists with common.cuh placeholder",
+        "shaders/ directory exists with particle.vert and particle.frag placeholders",
+        "requirements.txt lists: cupy-cuda12x, glfw, PyOpenGL, PyOpenGL-accelerate, imgui-bundle, numpy",
+        "run.bat runs: pip install -r requirements.txt && python main.py",
+        "python -c 'import cupy; import glfw; import OpenGL; import imgui_bundle' succeeds without errors"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "This is the foundation. All other tasks depend on this. All paths are relative to fallingsand3d/.",
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-002",
+      "title": "GLFW window with OpenGL context and orbit camera",
+      "description": "Create a GLFW window (1280x720) with OpenGL 4.1+ core profile context. Implement orbit camera with right-drag=orbit, scroll=zoom, middle-drag=pan. Render a colored background to verify GL context works.",
+      "acceptanceCriteria": [
+        "Running main.py opens a 1280x720 window titled 'Falling Sand 3D'",
+        "Window has OpenGL 4.1+ core profile context (verified via glGetString)",
+        "Right-drag rotates camera around origin",
+        "Scroll wheel zooms in/out",
+        "Middle-drag pans the view",
+        "ESC key closes the window",
+        "Window renders a dark gray background (glClearColor) with no GL errors",
+        "FPS counter displayed in window title"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "camera.py handles orbit camera math (spherical coordinates, view/projection matrices). main.py has the GLFW event loop. Camera default: look at origin from distance=3, elevation=30deg."
+    },
+    {
+      "id": "US-003",
+      "title": "CUDA-GL interop via ctypes wrapper",
+      "description": "Create gl_cuda_interop.py with ctypes bindings for cudaGraphicsGLRegisterBuffer, cudaGraphicsMapResources, cudaGraphicsResourceGetMappedPointer, cudaGraphicsUnmapResources. Create an OpenGL VBO, register it with CUDA, and verify a CuPy kernel can write to it.",
+      "acceptanceCriteria": [
+        "gl_cuda_interop.py exports: register_buffer, map_buffer, get_mapped_pointer, unmap_buffer, CudaGLBuffer class",
+        "A test creates a GL VBO of 1M float4s, registers with CUDA, maps it, gets device pointer",
+        "A CuPy RawKernel writes position data (grid pattern) to the mapped pointer",
+        "After unmapping, glDrawArrays(GL_POINTS) renders the grid pattern correctly",
+        "No CUDA errors (checked via cudaGetLastError after each interop call)",
+        "No GL errors (checked via glGetError)",
+        "Works on Windows with NVIDIA driver (tested on RTX 5070 Ti)"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "No CPU fallback — if interop fails, debug and fix it. CuPy doesn't wrap GL interop natively; use ctypes to load cudart64_12.dll on Windows. To wrap the mapped device pointer as a CuPy array: mem = cupy.cuda.UnownedMemory(dev_ptr, nbytes, owner=None); memptr = cupy.cuda.MemoryPointer(mem, 0); arr = cupy.ndarray(shape, dtype, memptr). Ensure same CUDA device/context as GLFW GL context (may need cudaGLSetGLDevice early)."
+    },
+    {
+      "id": "US-004",
+      "title": "Point sprite renderer with 500K particles",
+      "description": "Implement renderer.py with point sprite rendering. Vertex shader transforms position, sets gl_PointSize by distance. Fragment shader draws circles (discard outside radius) with per-particle color. Use two VBOs: position (float4) and color (float4), both CUDA-registered via CudaGLBuffer.",
+      "acceptanceCriteria": [
+        "particle.vert transforms position by MVP matrix, sets gl_PointSize inversely proportional to distance (clamp 1-64px)",
+        "particle.frag discards fragments outside unit circle, outputs color with simple depth-based shading",
+        "Renderer creates and manages position VBO + color VBO, both registered with CUDA via CudaGLBuffer",
+        "A dummy CuPy kernel fills 500K particles in a cube with random colors",
+        "Renders 500K point sprites at >60 FPS",
+        "Points are visible from all camera angles (orbit camera from US-002)",
+        "Depth testing works (closer particles occlude farther ones)",
+        "glEnable(GL_PROGRAM_POINT_SIZE) is set"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "This completes Phase 0 (render pipeline). Position VBO = float4 (x,y,z,w=1). Color VBO = float4 (r,g,b,a). VAO binds both VBOs as vertex attributes. Draw with glDrawArrays(GL_POINTS, 0, num_active)."
+    },
+    {
+      "id": "US-005",
+      "title": "CUDA common header with structs, enums, and constants",
+      "description": "Create physics/kernels/common.cuh with all shared CUDA definitions: MaterialProps struct, Interaction struct, behavior class enums, particle data struct pointers, grid parameters, and constant memory declarations.",
+      "acceptanceCriteria": [
+        "common.cuh defines: enum BehaviorClass { FLUID=0, GRANULAR=1, GAS=2, STATIC=3 }",
+        "common.cuh defines: MaterialProps struct with fields: rest_density(float), eos_stiffness(float), eos_gamma(float), base_viscosity(float), friction_coeff(float), cohesion(float), buoyancy_extra(float), thermal_conductivity(float), heat_capacity(float), temp_melt(float), temp_boil(float), temp_ignite(float), behavior_class(int), color_r(float), color_g(float), color_b(float) — padded to 64 bytes",
+        "common.cuh defines: Interaction struct with reaction_rate(float) and heat_exchange(float), 8 bytes",
+        "common.cuh declares: __constant__ MaterialProps c_materials[32] and __constant__ Interaction c_interactions[32][32]",
+        "common.cuh defines: GridParams struct with grid_min(float3), grid_max(float3), grid_res(int3), grid_delta(float3), num_cells(int)",
+        "common.cuh declares: __constant__ GridParams c_grid",
+        "packed_info layout documented and macros defined: GET_MATERIAL_ID(p)=((p)&0xFF), GET_BEHAVIOR(p)=(((p)>>8)&0x3), IS_SLEEPING(p)=(((p)>>10)&1), SET_SLEEPING(p)=((p)|0x400), CLEAR_SLEEPING(p)=((p)&~0x400), HAS_SPAWN_FLAG(p)=(((p)>>11)&1), SET_SPAWN_FLAG(p)=((p)|0x800), HAS_JUST_WOKE(p)=(((p)>>12)&1), MAKE_PACKED(mat,beh)=((mat&0xFF)|((beh&0x3)<<8))",
+        "All position, velocity, veleval, sph_force arrays use float4 (w component unused, set to 0). Density, mass, temperature, health, lifetime, shear_rate, exposure_heat, exposure_corrode use float. packed_info and sleep_counter use uint32 and uint8 respectively. color uses float4.",
+        "common.cuh defines: SimParams struct with smoothing_length(float), smoothing_length_sq(float), particle_mass(float), particle_spacing(float), gravity(float3), dt(float), restitution(float), wall_friction(float), world_min(float3), world_max(float3)",
+        "common.cuh declares: __constant__ SimParams c_sim",
+        "common.cuh compiles without errors when included in a test .cu kernel via CuPy RawModule"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "This is the single source of truth for all GPU data layouts. All other .cu files include this. Kernel precalc constants (poly6_coeff, spiky_grad_coeff, viscosity_lap_coeff, pressure_precalc, viscosity_precalc) go into SimParams or a separate PrecalcParams in constant memory. See PHYSICS.md for formulas."
+    },
+    {
+      "id": "US-006",
+      "title": "Material property table and interaction matrix in Python",
+      "description": "Create materials.py defining all 16 materials (0=DEAD through 15=GUNPOWDER) as Python dataclasses, plus the 32x32 interaction matrix. Provide upload_to_gpu() function that copies to CUDA constant memory.",
+      "acceptanceCriteria": [
+        "materials.py defines MaterialDef dataclass with all fields matching MaterialProps C struct",
+        "materials.py defines MATERIALS dict with 16 entries: DEAD(0), STONE(1), SAND(2), DIRT(3), GRAVEL(4), WATER(5), OIL(6), LAVA(7), ACID(8), WOOD(9), METAL(10), ICE(11), STEAM(12), SMOKE(13), FIRE(14), GUNPOWDER(15)",
+        "Material property values match the table in PHYSICS.md",
+        "materials.py defines 32x32 interaction matrix with reaction_rate and heat_exchange per pair, matching PHYSICS.md interaction table",
+        "upload_to_gpu() copies MaterialProps[32] to c_materials constant memory using CuPy RawModule symbol lookup",
+        "upload_to_gpu() copies Interaction[32][32] to c_interactions constant memory",
+        "A test kernel reads c_materials[5].rest_density and returns 1000.0 (water)",
+        "A test kernel reads c_interactions[8][10].reaction_rate and returns 0.3 (acid corrodes metal)",
+        "IDs 16-31 are zeroed (reserved for future materials)"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Use numpy structured arrays to pack the C structs. Ensure struct padding matches common.cuh exactly (compile-test with sizeof). Upload via module.get_global('c_materials') to get device pointer, then cupy.cuda.runtime.memcpy(dst, src, size, cudaMemcpyHostToDevice). Do NOT use memcpyToSymbol — it's unreliable with NVRTC modules."
+    },
+    {
+      "id": "US-007",
+      "title": "World particle manager with spawn/kill",
+      "description": "Create world.py managing CuPy arrays for all per-particle SoA data. Support configurable max_particles at startup, spawning particles of a given material in a sphere/cube, and tracking num_active via counter.",
+      "acceptanceCriteria": [
+        "World class takes max_particles as constructor argument (default 500000, configurable at startup)",
+        "World class allocates all SoA arrays as CuPy arrays of max_particles size: position(float4), velocity(float4), veleval(float4), sph_force(float4), density(float), mass(float), packed_info(uint32), temperature(float), health(float), lifetime(float), shear_rate(float), exposure_heat(float), exposure_corrode(float), color(float4), sleep_counter(uint8)",
+        "resize(new_max) method reallocates all arrays (kills all particles, resets state). Used when user changes max_particles from UI.",
+        "spawn_sphere(center, radius, material_id, count) fills particles with random positions in sphere, sets mass=rho0*spacing^3, sets packed_info via MAKE_PACKED(mat_id, behavior_class), sets temperature to 293K (or material default for LAVA=1500K, FIRE=1200K, etc), sets health=1.0",
+        "spawn_cube(min_corner, max_corner, material_id, spacing) fills particles on regular grid with given spacing",
+        "kill_in_sphere(center, radius) marks particles as DEAD (material_id=0 in packed_info)",
+        "num_active property returns count of non-DEAD particles",
+        "Spawning up to max_particles water particles in a cube completes without error",
+        "All arrays are contiguous CuPy float32/uint32/uint8 arrays on GPU (no Python objects)"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Default spacing=0.02 for h=0.04. V_particle = spacing^3 = 8e-6. Water mass = 1000 * 8e-6 = 0.008 kg. DEAD particles have packed_info=0. World bounds = (-1,-1,-1) to (1,1,1). max_particles configurable at startup to fit different GPU VRAM sizes. resize() is destructive (clears everything) — only called from UI settings, not during simulation."
+    },
+    {
+      "id": "US-008",
+      "title": "Port grid hashing kernel",
+      "description": "Create physics/kernels/hash_sort.cu with K_CalcHash kernel. Each thread computes the grid cell for its particle and writes a hash key. Port from existing SPHSimLib/K_UniformGrid_Utils.inl calcGridCell + calcGridHash logic.",
+      "acceptanceCriteria": [
+        "K_CalcHash kernel computes grid cell: cell = int3((pos - grid_min) * grid_delta), clamped to [0, grid_res-1]",
+        "Hash = cell.z * grid_res.y * grid_res.x + cell.y * grid_res.x + cell.x (linear, NOT Morton)",
+        "Grid parameters read from __constant__ GridParams c_grid",
+        "Grid sizing: grid_min=(-1,-1,-1), grid_max=(1,1,1), cell_size=h=0.04, grid_res=50 per axis, grid_delta=(25,25,25), num_cells=125000",
+        "CuPy RawModule compiles hash_sort.cu including common.cuh without errors",
+        "Test: 100K particles uniformly distributed in unit cube produce valid hash values (0 to num_cells-1)",
+        "Test: particles at or outside grid boundaries produce clamped hash values (no out-of-bounds)",
+        "Kernel runs without errors for 500K particles"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Port from SPHSimLib/K_UniformGrid_Utils.inl:calcGridCell and calcGridHash (non-Morton). Upload GridParams to c_grid constant memory from Python before first kernel launch. grid_delta = float3(grid_res) / (grid_max - grid_min)."
+    },
+    {
+      "id": "US-009",
+      "title": "CuPy radix sort and data reorder",
+      "description": "Implement sorting of particles by grid hash using CuPy argsort. After sorting the hash+index arrays, reorder ALL particle SoA arrays into sorted order for coalesced neighbor access. Pre-allocate all temp buffers.",
+      "acceptanceCriteria": [
+        "Sort produces sorted_hash and sorted_index arrays (sorted by hash key) using cupy.argsort or cupy.lexsort",
+        "All SoA arrays (position, velocity, veleval, mass, packed_info, temperature, health, lifetime, color, sleep_counter, shear_rate) are gathered into sorted-order temporary buffers using sorted_index",
+        "sorted_index (the mapping from sorted->original) is preserved for Integrate writeback",
+        "Test: after sort, consecutive particles have same or increasing hash values",
+        "Test: data integrity preserved — sum of all masses before sort equals sum after sort",
+        "Pre-allocated temporary buffers for sorted copies (no per-frame CuPy allocations in hot path)",
+        "Sort + reorder completes without errors for 500K particles"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "IMPORTANT: Double-buffer pattern. After sort+reorder, Step1/Step2 read from SORTED buffers. Integrate writes final position/velocity back to UNSORTED arrays using sort_indexes[sorted_i] = original_i. Next frame, Hash reads UNSORTED positions. Pre-allocate sorted_* temp arrays at World init time to avoid memory pool fragmentation. CuPy uses Thrust internally for argsort. PERFORMANCE: Write a single fused CUDA reorder kernel that gathers ALL SoA arrays in one pass (one read of sorted_index, parallel writes to all sorted arrays). This is far more bandwidth-efficient than N separate CuPy fancy-indexing calls."
+    },
+    {
+      "id": "US-010",
+      "title": "BuildDataStruct kernel (cell start/end tables)",
+      "description": "Create physics/kernels/build_grid.cu with K_BuildDataStruct kernel. For each particle, detect cell boundaries in the sorted hash array and write cell_start[hash] and cell_end[hash].",
+      "acceptanceCriteria": [
+        "K_BuildDataStruct writes cell_indexes_start[hash] = first particle index in that cell",
+        "K_BuildDataStruct writes cell_indexes_end[hash] = one past last particle index in that cell",
+        "Empty cells have cell_indexes_start = 0xFFFFFFFF",
+        "cell_indexes_start and cell_indexes_end arrays allocated as CuPy uint32 arrays of size num_cells (125000)",
+        "cell_indexes_start memset to 0xFFFFFFFF before each frame's kernel launch",
+        "Test: for a known configuration (8 particles in 2 cells), cell_start/end are correct",
+        "Test: sum of (cell_end - cell_start) across all non-empty cells equals num_particles",
+        "Kernel runs without errors for 500K particles",
+        "Block size = 256"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Port from SPHSimLib/K_UniformGrid.inl K_Grid_InsertParticles logic. Each thread i checks: if i==0 or sorted_hash[i] != sorted_hash[i-1], then cell_start[sorted_hash[i]] = i. Similarly for cell_end using sorted_hash[i] != sorted_hash[i+1]."
+    },
+    {
+      "id": "US-011",
+      "title": "Step1 density kernel with neighbor iteration",
+      "description": "Create physics/kernels/step1.cu with K_Step1 kernel. For each particle, iterate 27 neighbor cells, find neighbors within smoothing length h, and compute SPH density using poly6 kernel. Use __ldg() for neighbor reads.",
+      "acceptanceCriteria": [
+        "K_Step1 iterates 3x3x3 neighbor cells using cell_start/cell_end from BuildDataStruct",
+        "For each neighbor j within h: density_sum += m_j * (h_sq - r_sq)^3, where m_j is PER-PARTICLE mass (not constant)",
+        "Final density = max(1.0, poly6_coeff * density_sum) — uses per-particle m_j to support multi-material and mass splitting",
+        "Smoothing length comparison uses squared distance (r_sq < h_sq) to avoid sqrt in cutoff test",
+        "Neighbor position loaded via __ldg() (read-only cache path)",
+        "Self-contribution included (j==i is NOT skipped in density computation)",
+        "Test: uniform particle field at rest density produces rho_i ~= rho0 for all particles (within 10%)",
+        "Test: single isolated particle produces rho_i = mass_i * poly6_coeff * h^6 (W(0,h) = h^6)",
+        "Block size = 128, kernel runs without errors for 500K particles"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "Port neighbor iteration from SPHSimLib/K_UniformGrid_Utils.inl:IterateParticlesInNearbyCells (flatten the template callback into explicit loops). Port poly6 from SPHSimLib/K_SPH_Kernels_poly6.inl. NOTE: self-contribution IS included for density (unlike force kernels). See PHYSICS.md for poly6 formula."
+    },
+    {
+      "id": "US-012",
+      "title": "Step2 pressure, viscosity, and XSPH force kernel",
+      "description": "Create physics/kernels/step2.cu with K_Step2 kernel. Compute Tait EOS pressure, then iterate neighbors to accumulate pressure force (spiky gradient), viscosity force (viscosity Laplacian), and XSPH velocity correction (for FLUID only). Skip STATIC and SLEEPING particles.",
+      "acceptanceCriteria": [
+        "Pressure: p_raw = k * (pow(rho_i/rho0, gamma) - 1). GRANULAR: p_i = max(p_raw, 0). FLUID: p_i = max(p_raw, -0.5*k). GAS: p_i = k_gas * max(rho_i - rho0, 0) with gamma=1",
+        "Pressure force uses POSITIVE precalc (absorbs double negative from SPH momentum eq + spiky coeff): f_press += pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable(r_ij) where grad_spiky_variable = (r/|r|)*(h-|r|)^2 (no coefficient, points away from neighbor)",
+        "pressure_precalc = -kernel_spiky_grad_coeff = +45/(pi*h^6), a POSITIVE constant. See PHYSICS.md sign convention section.",
+        "Viscosity force: f_visc += viscosity_precalc * m_j * (v_j - v_i) / rho_j * lap_visc_variable(r_ij) where lap_visc_variable = (h-|r|), viscosity_precalc = 45/(pi*h^6)",
+        "XSPH correction (FLUID only): xsph_sum += (m_j / (0.5*(rho_i+rho_j))) * (v_j - v_i) * W_poly6(r_ij); written to veleval as epsilon * xsph_sum (epsilon=0.5)",
+        "STATIC particles (behavior_class == 3) are skipped (early return, zero force)",
+        "SLEEPING particles (IS_SLEEPING flag) are skipped (early return, zero force)",
+        "sph_force written as float4 to sorted sph_force buffer; veleval_xsph written to sorted veleval buffer",
+        "Test: two fluid particles at rest density produce approximately zero net force",
+        "Test: compressed fluid particles produce repulsive forces (particles pushed apart)",
+        "Block size = 128, kernel runs without errors for 500K particles"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "Port spiky gradient from SPHSimLib/K_SPH_Kernels_spiky.inl. Port viscosity Laplacian from SPHSimLib/K_SPH_Kernels_viscosity.inl. Self-interaction (j==i) IS skipped for forces (unlike density). gamma=7 for FLUID/GRANULAR, gamma=1 for GAS. See PHYSICS.md for all formulas and XSPH details."
+    },
+    {
+      "id": "US-013",
+      "title": "Integrate kernel with symplectic Euler, SDF boundaries, and color update",
+      "description": "Create physics/kernels/integrate.cu with K_Integrate kernel. Symplectic Euler integration. Impulse-style SDF boundary collisions with Coulomb friction for a box world. Compute particle color from material + temperature + health. Write results to UNSORTED arrays via sort_indexes. Skip STATIC particles.",
+      "acceptanceCriteria": [
+        "Symplectic Euler integration: vel_new = vel + dt * accel (where accel = sph_force/mass + gravity + gas_buoyancy); for FLUID: pos_new = pos + dt * (vel_new + veleval_xsph); for others: pos_new = pos + dt * vel_new",
+        "Impulse-style SDF boundary: 6 planes of box (-1,-1,-1) to (1,1,1). If pos penetrates wall: project out, reflect normal velocity with restitution=0.3, apply Coulomb friction mu_wall=0.5 to tangential velocity",
+        "STATIC particles skipped (early return, position unchanged)",
+        "GAS buoyancy: f_buoy = beta * (T_i - 293) * (0, 9.81, 0) added to force for GAS particles, beta=0.01",
+        "GAS drag: vel *= (1 - c_drag * dt) for GAS particles, c_drag=2.0",
+        "Velocity magnitude clamped to velocity_limit=50.0 (safety net)",
+        "Particle color computed: base_color from c_materials[mat_id], tinted red for hot particles (T>293K), faded by health",
+        "Color written to color array as float4(r,g,b,1)",
+        "Results written to UNSORTED position/velocity/color arrays using sort_indexes[i] mapping",
+        "Test: particle dropped from height bounces off floor boundary and loses energy",
+        "Test: 10K water particles in box settle to a pool at bottom after 1000 steps without NaN",
+        "Block size = 256, kernel runs without errors for 500K particles"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "This is NEW code — impulse-style SDF replaces the spring-damper penalty forces from the existing codebase. Integration is symplectic Euler (NOT true leapfrog — no half-step velocity storage needed). See PHYSICS.md for SDF boundary formulas and color computation formula. sort_indexes[sorted_i] gives the original unsorted index for writeback. Boundary box matches world bounds."
+    },
+    {
+      "id": "US-014",
+      "title": "Full SPH simulation loop with rendering",
+      "description": "Wire up simulation.py to orchestrate the full pipeline: Hash -> Sort -> Build -> Step1 -> Step2 -> Integrate. Decouple simulation from rendering with a speed parameter and substep budget. Connect to renderer. Add basic controls.",
+      "acceptanceCriteria": [
+        "simulation.py loads all .cu kernels via CuPy RawModule with --use_fast_math and --include-path=physics/kernels options",
+        "simulation.py uploads GridParams, SimParams, MaterialProps, Interactions to constant memory at init",
+        "Sim/render decoupled: each render frame computes sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps), then runs that many simulation steps before rendering",
+        "speed parameter (float, default 1.0): 1.0 = realtime, 0.2 = slow-mo, 5.0 = fast-forward. Exposed via UI later (US-026). Keyboard: +/- to adjust speed.",
+        "max_substeps = 20 to prevent spiral-of-death when sim_dt is very small",
+        "Per simulation step (see PHYSICS.md Full Simulation Pipeline): hash -> argsort -> fused_reorder -> build -> step1 -> step2 -> integrate -> [reactions -> spawn -> wake when implemented]",
+        "Rendering happens ONCE per frame (after all substeps): CFL_reduction -> map VBOs -> copy UNSORTED pos/color to VBO -> unmap VBOs -> draw",
+        "Initial scene: 10K water particles in cube at (0,0.5,0) size 0.4 + 10K sand particles in flat bed at y=-0.5 to y=-0.3, x/z spanning -0.8 to 0.8",
+        "Water particles fall, splash into sand, pool at bottom (visual correctness)",
+        "Space bar pauses/resumes simulation (speed=0 when paused)",
+        "R key resets to initial configuration (kills all, re-spawns initial scene)",
+        "Simulation runs without NaN or CUDA errors for 60 seconds of continuous simulation",
+        "Renders at interactive frame rate with 20K particles"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "This completes Phase 1. dt=0.001 fixed timestep initially (adaptive comes in US-025). The speed parameter controls how many sim-seconds elapse per wall-second: sim_time_budget = wall_dt * speed. Number of substeps = sim_time_budget / sim_dt. At speed=1.0 with dt=0.001 and 60fps: ~16 substeps per frame. At speed=0.2: ~3 substeps. At speed=5.0: capped at max_substeps=20. The pipeline ordering is canonical — later features insert at documented points."
+    },
+    {
+      "id": "US-015",
+      "title": "Strain-rate tensor computation in Step1",
+      "description": "Extend Step1 kernel to compute the symmetric strain-rate tensor D for GRANULAR particles. Accumulate 6 components in the neighbor loop using SPH velocity gradient. Compute second invariant gamma_dot and write to shear_rate array.",
+      "acceptanceCriteria": [
+        "Step1 accumulates 6 symmetric D components for GRANULAR particles only (skip for FLUID/GAS/STATIC)",
+        "D tensor uses: dv = v_i - v_j, gradW = spiky gradient (NOT poly6 gradient)",
+        "PostCalc computes gamma_dot = sqrt(2 * (Dxx^2 + Dyy^2 + Dzz^2 + 2*(Dxy^2 + Dxz^2 + Dyz^2)))",
+        "gamma_dot written to sorted shear_rate array",
+        "Non-GRANULAR particles get shear_rate = 0",
+        "Test: stationary sand particles produce gamma_dot approximately 0",
+        "Test: sand particles in shear flow produce gamma_dot > 0",
+        "Step1 kernel still compiles and runs without errors for 500K particles"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": "See PHYSICS.md for strain-rate tensor formulas. Only 6 symmetric components, NOT full 9-component gradient. Uses m_j/rho_j weighting. If register pressure too high (>64 regs), consider splitting density and strain-rate into two separate kernels."
+    },
+    {
+      "id": "US-016",
+      "title": "mu(I) frictional yield viscosity in Step2",
+      "description": "Extend Step2 kernel with mu(I) rheology for GRANULAR particles. Compute inertial number I, friction coefficient mu_I, effective viscosity eta_i (clamped). Use harmonic mean eta_ij for viscosity force between granular particles.",
+      "acceptanceCriteria": [
+        "For GRANULAR: p_eff = max(p_i, 1.0); I = gamma_dot * spacing / sqrt(p_eff / rho_i)",
+        "mu_I = mu_s + (mu_2 - mu_s) / (1 + I0 / max(I, 1e-8))",
+        "eta_i = min(mu_max, mu0 + mu_I * p_eff / (gamma_dot + 1e-6))",
+        "Harmonic mean: eta_ij = 2*eta_i*eta_j / (eta_i + eta_j + 1e-8)",
+        "Viscosity force for GRANULAR uses eta_ij instead of constant mu0",
+        "FLUID and GAS particles still use constant mu0 (unchanged)",
+        "mu_s=0.36, mu_2=0.70, I0=0.3, mu_max=10000 as constants in common.cuh or SimParams",
+        "Test: sand particles dropped in a pile reach stable angle of repose (pile doesn't flatten completely)",
+        "Test: no NaN velocities after 5000 simulation steps with sand",
+        "Step2 kernel runs without errors for 500K particles"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "See PHYSICS.md for mu(I) formulas. The mu_max clamp is critical to prevent infinite viscosity at zero shear rate. spacing = c_sim.particle_spacing = 0.02."
+    },
+    {
+      "id": "US-017",
+      "title": "Velocity clamp and anti-creep for granular",
+      "description": "Add velocity clamping to Integrate kernel for GRANULAR particles. If velocity magnitude is below threshold AND pressure is positive AND shear rate is below threshold, zero the velocity explicitly.",
+      "acceptanceCriteria": [
+        "In Integrate: if behavior==GRANULAR AND length(vel) < v_threshold AND rho_i > rho0*0.95 AND shear_rate < gamma_min: vel = (0,0,0,0)",
+        "v_threshold = 0.01, gamma_min = 0.05 (as constants)",
+        "Test: sand pile that has settled shows zero velocity for interior particles",
+        "Test: pouring new sand on top of settled pile still flows correctly",
+        "Test: no visible vibration or jitter in settled sand pile over 5000 steps"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "Use density > 0.95*rho0 as a proxy for 'under compression/at rest' instead of computing pressure in Integrate. This avoids duplicating EOS code."
+    },
+    {
+      "id": "US-018",
+      "title": "Sleeping system with hysteresis",
+      "description": "Add sleep counter and SLEEPING flag to Integrate kernel. Particles sleep after being still for N frames, with hysteresis (v_wake > v_sleep). Sleeping particles skip Step2 force computation but still participate in hash/sort/density.",
+      "acceptanceCriteria": [
+        "Sleep counter (uint8 in sleep_counter array) increments when length(vel) < v_sleep AND shear_rate < gamma_sleep",
+        "Sleep counter resets to 0 when either condition fails",
+        "SLEEPING flag set in packed_info when sleep_counter >= sleep_threshold (default 10)",
+        "v_sleep = 0.005, v_wake = 0.02, gamma_sleep = 0.01 (hysteresis: wake threshold > sleep threshold)",
+        "To wake: check length(vel) > v_wake (not v_sleep) before clearing SLEEPING flag",
+        "Sleeping particles: included in hash/sort/build, contribute to Step1 density, SKIPPED in Step2 (early return with zero force) and force integration in Integrate",
+        "Test: 50K sand pile — after settling, majority of particles are sleeping (check sleep_counter array)",
+        "Test: sleeping particles still contribute to density correctly",
+        "Test: new particles poured on sleeping pile cause wake-up at contact"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": "DEFERRED: Pure optimization — implement after integration test (US-027) proves correctness without sleeping. sleep_counter is uint8 (max 255, saturates). SLEEPING tested via IS_SLEEPING(packed_info). Set via SET_SLEEPING, clear via CLEAR_SLEEPING macros from common.cuh. Step2 and Integrate already have early-return checks for IS_SLEEPING (added in US-012/013) — they're just never triggered until this story sets the flag."
+    },
+    {
+      "id": "US-019",
+      "title": "Cell-flag wake propagation kernel",
+      "description": "Create physics/kernels/wake.cu with two-phase wake propagation. Phase 1: particles that just woke mark their 3x3x3 neighboring cells via atomicOr. Phase 2: sleeping particles in flagged cells wake up.",
+      "acceptanceCriteria": [
+        "cell_wake_flags array (num_cells uint32) allocated and cleared to 0 each frame",
+        "Phase 1 kernel (K_MarkWakeCells): for each particle that has HAS_JUST_WOKE flag set, atomicOr(1) on its own cell and 26 neighboring cells",
+        "Phase 2 kernel (K_WakeSleepers): for each sleeping particle, if cell_wake_flags[my_cell] != 0: CLEAR_SLEEPING in packed_info, reset sleep_counter to 0",
+        "JUST_WOKE flag set in Integrate when a sleeping particle's wake condition is triggered (vel > v_wake or external force detected)",
+        "JUST_WOKE flag cleared after Phase 1 runs",
+        "Test: drop a fast-moving particle onto sleeping sand pile — sand near impact wakes up",
+        "Test: particles far from impact stay sleeping",
+        "Both kernels run without errors for 500K particles"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": "DEFERRED: Depends on US-018 (sleeping). Implement after sleeping is proven. Run order: Integrate (sets JUST_WOKE) -> K_MarkWakeCells (Phase 1) -> K_WakeSleepers (Phase 2) -> clear JUST_WOKE flags. 27 atomicOr per waking particle is cheap."
+    },
+    {
+      "id": "US-020",
+      "title": "Temperature system with heat diffusion",
+      "description": "Extend Step1 kernel with heat diffusion computation. Each particle accumulates dTdt from neighbors via SPH Laplacian of temperature. Integrate kernel updates temperature.",
+      "acceptanceCriteria": [
+        "Step1 neighbor loop accumulates: dTdt += thermal_conductivity * (m_j/rho_j) * (T_j - T_i) * lap_W_visc(r_ij)",
+        "dTdt written to a temporary float array (sorted order)",
+        "Integrate: temperature += dTdt * dt; temperature -= cool_rate * (T - T_ambient) * dt",
+        "T_ambient = 293.0 (20C), cool_rate = 0.1",
+        "Temperature clamped to [0, 5000] range (prevent runaway)",
+        "Test: hot particle (1000K) placed among cold particles (293K) — dTdt is positive for cold neighbors, negative for hot particle",
+        "Test: after many steps, temperatures converge toward equilibrium",
+        "Temperature affects particle color in Integrate (already implemented in US-013 color computation)"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": "Heat is PARTICLE-BASED (SPH Laplacian in Step1 neighbor loop), not grid-based. Heat moves with the particles (lava flowing carries its heat). No separate grid diffusion solver needed. thermal_conductivity read from c_materials[mat_id]. Metal has high conductivity (~50), stone low (~1), water medium (~5). If adding dTdt accumulation to Step1 causes register pressure issues, split into a separate kernel pass."
+    },
+    {
+      "id": "US-021",
+      "title": "Exposure accumulation and interaction matrix",
+      "description": "Extend Step1 kernel to accumulate exposure_heat and exposure_corrode per particle from neighbors, using the c_interactions constant memory table. Pure table lookup, no per-material branching.",
+      "acceptanceCriteria": [
+        "Step1 neighbor loop: exposure_corrode_i += c_interactions[mat_i][mat_j].reaction_rate * W_poly6(r_sq, h_sq)",
+        "Step1 neighbor loop: exposure_heat_i += c_interactions[mat_i][mat_j].heat_exchange * max(T_j - T_i, 0.0f) * W_poly6(r_sq, h_sq)",
+        "No if/else branching on material type in the neighbor loop (pure table lookup via c_interactions)",
+        "Exposure values written to sorted exposure_heat and exposure_corrode arrays",
+        "Test: acid particle near metal particle — metal's exposure_corrode > 0",
+        "Test: fire particle near wood particle — wood's exposure_heat > 0",
+        "Test: water near water — exposure_corrode == 0 (reaction_rate is 0 in table)",
+        "Step1 kernel still compiles and runs without errors"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": "mat_i = GET_MATERIAL_ID(packed_info_i), mat_j = GET_MATERIAL_ID(packed_info_j). The interaction table is symmetric for heat_exchange but not necessarily for reaction_rate. If register pressure is too high combining density + strain_rate + temperature + exposure all in Step1, split exposure into a separate neighbor pass kernel that runs every 2-4 frames."
+    },
+    {
+      "id": "US-022",
+      "title": "Reactions kernel for phase transitions and corrosion",
+      "description": "Create physics/kernels/reactions.cu with K_Reactions kernel. Per-particle (no neighbor loop): check temperature and exposure thresholds, change material type, update behavior class. Handle small and large density-ratio transitions differently.",
+      "acceptanceCriteria": [
+        "ICE (mat=11, temp > 273K) -> WATER: change material_id to 5, behavior_class to FLUID in packed_info (in-place, small density ratio)",
+        "LAVA (mat=7, temp < 900K) -> STONE: change material_id to 1, behavior_class to STATIC (in-place)",
+        "WATER (mat=5, temp > 373K) -> set SPAWN_GAS flag in packed_info (large density ratio, handled by spawn kernel US-023)",
+        "WOOD (mat=9, exposure_heat > 0.5) -> FIRE: change material_id to 14, behavior_class to GAS, set temperature to 1200K, set lifetime to 1.0s",
+        "OIL (mat=6, exposure_heat > 0.3) -> FIRE: change material_id to 14, behavior_class to GAS, set temperature to 1200K, set lifetime to 1.5s",
+        "GUNPOWDER (mat=15, exposure_heat > 0.1) -> FIRE: change material_id to 14, set lifetime to 0.3s, velocity = random outward burst (explosion)",
+        "Corrosion: health -= exposure_corrode * dt; if health <= 0 -> set material_id to DEAD(0)",
+        "GAS lifetime: lifetime -= dt; if lifetime <= 0 -> set material_id to DEAD(0)",
+        "STEAM (mat=12, temp < 373K) -> WATER: in-place transition",
+        "Exposure accumulators (exposure_heat, exposure_corrode) reset to 0 after use",
+        "Test: simulation with ice and lava produces water and stone transitions",
+        "Test: simulation with acid and metal reduces metal health over time",
+        "Block size = 256, kernel runs without errors"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": "No neighbor loop — just per-particle state machine. All threshold values are approximate and can be tuned. For GUNPOWDER explosion, add random velocity kick using a simple hash-based RNG (e.g., wang_hash(particle_index + frame) to get pseudo-random direction)."
+    },
+    {
+      "id": "US-023",
+      "title": "Spawn/kill system for large phase transitions",
+      "description": "Create physics/kernels/spawn.cu with spawn/kill logic. Water->Steam kills 1 water particle and spawns N steam particles using a GPU freelist of dead particle indices. Freelist built by Reactions kernel, consumed by Spawn kernel via atomicAdd/atomicSub.",
+      "acceptanceCriteria": [
+        "GPU freelist: dead_indices array (uint32, max_particles) and dead_count counter (uint32). Reactions kernel populates the freelist when particles die: atomicAdd(&dead_count, 1) -> idx; dead_indices[idx] = particle_index",
+        "K_SpawnGas kernel: for each particle with HAS_SPAWN_FLAG set, atomicSub(&dead_count, N) to claim N slots. If result >= 0, read dead_indices to get target slots. If result < 0 (pool empty), restore count and skip spawn",
+        "Spawned particles written to the claimed freelist slots: mass = original_mass / N, temperature = 373K, velocity = original_vel + (0, 2.0, 0) upward kick, lifetime = 5.0s",
+        "Source water particle marked DEAD (material_id=0) and added to freelist itself",
+        "Spawned particles get packed_info = MAKE_PACKED(STEAM, GAS)",
+        "Clear SPAWN_GAS flag after processing",
+        "Test: water particle flagged for spawn produces 3 steam particles with correct total mass",
+        "Test: graceful handling when freelist is exhausted (skip spawn, clear flag anyway)",
+        "Test: freelist correctly tracks scattered dead particle indices (not contiguous)",
+        "Kernel runs without errors"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": "IMPORTANT: Dead particles are NOT contiguous — killing creates scattered holes. The atomic freelist (dead_indices stack + dead_count) is efficient for our typical spawn rates (~100-1000 particles/frame). Contention with ~1000 concurrent atomics is negligible on modern GPUs. Prefix-sum compaction is only needed for 50K+ simultaneous spawns, which doesn't happen here. Reactions kernel builds the freelist. Spawn kernel consumes from it. Compaction (US-029) periodically cleans up. See PHYSICS.md Dead Particle Management section."
+    },
+    {
+      "id": "US-024",
+      "title": "Gas particles with buoyancy, drag, and lifetime",
+      "description": "Verify gas particles (STEAM, SMOKE, FIRE) use correct linear EOS (gamma=1), buoyancy force, drag, and lifetime decay. All gas-specific physics should already be implemented in Step2 (EOS), Integrate (buoyancy/drag), and Reactions (lifetime). This story is an integration test.",
+      "acceptanceCriteria": [
+        "Gas pressure uses linear EOS: p = k_gas * max(rho - rho0_gas, 0) — verified in Step2",
+        "Gas buoyancy force applied in Integrate — verified: gas particles rise upward",
+        "Gas drag applied in Integrate — verified: gas particles slow down over time",
+        "FIRE: T=1200K, lifetime ~1s, heats nearby wood via exposure_heat",
+        "SMOKE: T=500K, lifetime ~3s, no chemical interactions",
+        "STEAM: T=373K, condenses to WATER if T drops below 373K (via Reactions)",
+        "Test: spawn 100 fire particles — they rise, slow down, and disappear after ~1 second",
+        "Test: spawn 100 steam particles — they rise and some condense back to water as they cool",
+        "Test: gas particles don't collapse into clumps (linear EOS provides gentle repulsion)",
+        "No NaN or explosions with mixed gas + fluid + granular simulation over 5000 steps"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": "This is mainly a verification/tuning story. The physics code is already in Step2 (EOS branching by behavior_class), Integrate (buoyancy/drag for GAS), and Reactions (lifetime). Tune k_gas, beta, c_drag if behavior looks wrong."
+    },
+    {
+      "id": "US-025",
+      "title": "Adaptive timestep with CFL condition, accuracy and speed controls",
+      "description": "Implement adaptive dt computed on GPU via CuPy reduction. CFL constraints: advection, acoustic, viscous. Make adaptive mode optional (toggle vs fixed dt). Add accuracy parameter that scales the CFL number. Integrate with the speed parameter from US-014 to compute substeps per frame.",
+      "acceptanceCriteria": [
+        "Three user-facing simulation controls: speed (0.1-10.0, default 1.0), accuracy (0.1-1.0, default 0.4), fixed_dt toggle (default OFF, value 0.001 when ON)",
+        "When fixed_dt is OFF (adaptive mode): compute dt from CFL constraints using accuracy as the CFL number",
+        "Max velocity magnitude computed via cupy.max(cupy.linalg.norm(velocity[:num_active], axis=1)) or equivalent reduction",
+        "dt_advection = accuracy * h / max(max_v, 1e-6)",
+        "dt_acoustic = 0.25 * h / c_sound where c_sound = max over active materials of sqrt(k * gamma / rho0)",
+        "dt_viscous = accuracy * rho_min * h^2 / max(max_eta, 1e-6) — REQUIRED because mu(I) can produce eta up to mu_max=10000",
+        "dt = min(dt_advection, dt_acoustic, dt_viscous) clamped to [dt_min=1e-5, dt_max=0.005]",
+        "When fixed_dt is ON: dt = fixed_dt_value (user-set, no CFL computation)",
+        "Substeps per frame = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps=20) — integrates with speed from US-014",
+        "dt passed as kernel argument to all kernels that need it (Step2, Integrate, Reactions)",
+        "Test: simulation stable with water + sand + gas all present simultaneously in adaptive mode",
+        "Test: dt adapts — larger when particles slow, smaller during fast impacts or dense granular regions",
+        "Test: fixed_dt mode produces deterministic results (same input = same output)",
+        "Test: accuracy=0.2 produces more substeps but more stable behavior than accuracy=0.8",
+        "Test: no NaN velocities after 30 seconds of multi-material simulation"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": "accuracy IS the CFL number (renamed for user-friendliness). accuracy=0.4 is standard CFL. accuracy=0.2 halves dt for more precision. accuracy=0.8 doubles dt for speed at cost of stability. c_sound for water: sqrt(7) ~ 2.65 m/s -> dt_acoustic ~ 0.0038s. Viscous CFL with mu_max=10000: dt_visc ~ 6.4e-5s — tightest constraint when mu(I) active. Fixed dt mode is useful for debugging, deterministic replays, or when adaptive overhead is unwanted. Speed and accuracy are independent: speed=0.5+accuracy=1.0 = slow-mo with large steps; speed=1.0+accuracy=0.2 = realtime with tiny sub-steps."
+    },
+    {
+      "id": "US-026",
+      "title": "ImGui material picker and brush tool",
+      "description": "Create ui.py with imgui-bundle integration. Material picker panel with all 15 materials as colored buttons. Brush size slider. Left-click spawns selected material. Shift+click kills particles. Display particle count, FPS, dt.",
+      "acceptanceCriteria": [
+        "ImGui renders via imgui-bundle (imgui.backends.glfw_opengl3) integrated into the GLFW event loop",
+        "Material picker panel: 15 colored buttons (3x5 grid) with material names, selected material highlighted",
+        "Brush size slider (radius 0.02 to 0.3, default 0.1)",
+        "Left-click in 3D viewport: unproject mouse position to 3D ray, spawn particles at ray intersection with y=0 plane (or nearest boundary plane), within brush radius",
+        "Shift+left-click kills particles within brush radius of click point",
+        "Simulation controls panel: speed slider (0.1-10.0 log scale, default 1.0), accuracy slider (0.1-1.0, default 0.4), fixed_dt checkbox + value input, max_particles dropdown (100K/250K/500K/1M)",
+        "Status bar shows: active particle count / max, FPS, simulation dt, substeps/frame, speed, paused state",
+        "Keyboard shortcuts: 1-9 for quick material select (1=STONE, 2=SAND, ..., 9=WOOD), Space=pause, R=reset, +/- adjust speed",
+        "ImGui consumes mouse events when cursor is over UI panels (camera doesn't orbit when clicking UI)"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": "Mouse ray: unproject screen coords through inverse(projection * view) to get world-space ray. Intersect with y=0 plane for spawn point. imgui-bundle provides the GLFW+OpenGL3 backend integration. Call imgui.get_io().want_capture_mouse to check if ImGui wants the mouse. Changing max_particles calls world.resize() which kills all particles and reallocates arrays."
+    },
+    {
+      "id": "US-027",
+      "title": "Full 15-material integration test",
+      "description": "Integration test with all 15 materials interacting. Run the simulation for 10000+ steps and verify no crashes, NaN, or numerical explosions. Verify basic qualitative behavior for each material type.",
+      "acceptanceCriteria": [
+        "Spawn all 15 material types in the scene simultaneously (small batches of each)",
+        "Sand: drops and forms a pile (doesn't flatten completely due to mu(I))",
+        "Water: flows, pools at bottom",
+        "Oil: lower density than water (floats if placed on top of water)",
+        "Lava: very viscous, cools to stone when temperature drops below 900K",
+        "Acid: reduces health of nearby metal/stone/wood particles",
+        "Wood: transitions to FIRE when exposure_heat exceeds threshold",
+        "Ice: melts to water when temperature > 273K",
+        "Metal: high thermal conductivity (heats/cools faster than stone)",
+        "Steam/Smoke/Fire: rise due to buoyancy, disappear after lifetime expires",
+        "Gunpowder: transitions to fire when exposed to fire/lava",
+        "Simulation runs 10000 steps without NaN, CUDA errors, or particles escaping boundaries",
+        "Simulation runs at interactive frame rate with 100K total particles on RTX 5070 Ti",
+        "No particles with position magnitude > 10 (escaped boundary check)"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": "This is the major integration milestone. All Phase 1-3 features working together (except sleeping, which is deferred). Focus on stability over visual perfection. Tune material constants if interactions are unstable. Test at multiple speed values (0.5, 1.0, 3.0) and accuracy settings."
+    },
+    {
+      "id": "US-028",
+      "title": "Acceleration clamping safety net",
+      "description": "Add per-particle acceleration clamping as a safety net against numerical blowups. Clamp max acceleration magnitude in Integrate kernel.",
+      "acceptanceCriteria": [
+        "In Integrate: accel = sph_force / mass + gravity; if length(accel) > accel_max: accel = accel_max * normalize(accel)",
+        "accel_max = 5000.0 (high enough to not affect normal physics, catches only blowups)",
+        "Test: intentionally spawn overlapping particles — they separate without flying to infinity",
+        "Test: normal simulation behavior unchanged (accel_max not reached in typical operation)",
+        "If clamping activates, it's silent (no error, just clamped)"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": "Safety net only. If this activates frequently, it indicates a physics bug that should be fixed properly. accel_max = 5000 means max ~500g — way beyond normal SPH forces."
+    },
+    {
+      "id": "US-029",
+      "title": "Dead particle compaction",
+      "description": "Every N frames, compact the particle arrays by moving DEAD particles to the end. Use CuPy stream compaction. Update num_active counter.",
+      "acceptanceCriteria": [
+        "Compaction runs every 60 frames (configurable) when dead_count > 100",
+        "Non-DEAD particles moved to front of all SoA arrays, DEAD particles to end",
+        "num_active updated to count of alive particles only",
+        "Physics kernels only process [0, num_active) range",
+        "Test: after killing 10K particles and compacting, rendering shows only alive particles",
+        "Test: compaction preserves all particle data (positions, velocities, materials unchanged for alive particles)",
+        "Test: simulation continues correctly after compaction (no index corruption)"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": "Use cupy.nonzero() to find alive particle indices, then gather all arrays. Or use cupy.argsort() on an alive/dead key to partition. Update num_active after compaction. This reclaims dead pool slots for future spawning."
+    },
+    {
+      "id": "US-030",
+      "title": "Preset scenes",
+      "description": "Create 4 preset scenes loadable from ImGui UI: (1) Sand Castle — large sand pile with water, (2) Volcano — lava pool with stone walls, (3) Dam Break — water behind ice wall with heat source, (4) Acid Rain — metal structures with acid dropping.",
+      "acceptanceCriteria": [
+        "ImGui menu has 4 preset buttons in a 'Scenes' panel",
+        "Sand Castle: 100K sand particles as tall pile + 30K water around base",
+        "Volcano: stone ring/crater walls + 50K lava inside + fire particles above",
+        "Dam Break: 100K water behind ice wall, lava heat source on one side to melt ice",
+        "Acid Rain: metal pillars (STATIC) + acid particles spawning from top periodically",
+        "Each preset clears all existing particles and loads new configuration",
+        "Each preset runs at interactive frame rate on RTX 5070 Ti",
+        "Presets can be loaded at any time during simulation"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": "Preset spawn functions go in world.py or a new presets.py. Acid Rain needs periodic spawning (spawn N acid particles per frame at top of world) — add a spawner system or just do it in the Python frame loop."
+    }
+  ],
+  "metadata": {
+    "updatedAt": "2026-02-06T14:52:13.036Z"
+  }
+}
