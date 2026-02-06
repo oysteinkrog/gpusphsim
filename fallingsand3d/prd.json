@@ -191,8 +191,9 @@
         "Block size = 256"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "Port from SPHSimLib/K_UniformGrid.inl K_Grid_InsertParticles logic. Each thread i checks: if i==0 or sorted_hash[i] != sorted_hash[i-1], then cell_start[sorted_hash[i]] = i. Similarly for cell_end using sorted_hash[i] != sorted_hash[i+1]."
+      "passes": true,
+      "notes": "Port from SPHSimLib/K_UniformGrid.inl K_Grid_InsertParticles logic. Each thread i checks: if i==0 or sorted_hash[i] != sorted_hash[i-1], then cell_start[sorted_hash[i]] = i. Similarly for cell_end using sorted_hash[i] != sorted_hash[i+1].",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-011",
@@ -588,6 +589,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:27:05.087Z"
+    "updatedAt": "2026-02-06T15:31:17.959Z"
   }
 }
