@@ -156,11 +156,14 @@ class Renderer:
 
     def close(self) -> None:
         """Release GPU resources."""
+        if self._program == 0:
+            return  # already closed
         self.cuda_col.close()
         self.cuda_pos.close()
         glDeleteBuffers(2, [self._vbo_pos, self._vbo_col])
         glDeleteVertexArrays(1, [self._vao])
         glDeleteProgram(self._program)
+        self._program = 0
 
     def __del__(self) -> None:
         try:

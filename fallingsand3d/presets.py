@@ -299,10 +299,43 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     return total, spawner
 
 
+def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Water Drop: large suspended water block falling under gravity.
+
+    ~200K water particles in a wide block suspended in the upper half of the
+    domain, dropping onto a stone floor. Inspired by the parent project's
+    simple water demo.
+    """
+    _clear_world(world)
+    total = 0
+
+    # Stone floor
+    n = world.spawn_cube(
+        min_corner=(-0.9, -0.95, -0.9),
+        max_corner=(0.9, -0.85, 0.9),
+        material_id=STONE,
+        spacing=0.04,
+    )
+    total += n
+
+    # Large water block suspended high up
+    n = world.spawn_cube(
+        min_corner=(-0.6, 0.0, -0.6),
+        max_corner=(0.6, 0.8, 0.6),
+        material_id=WATER,
+        spacing=0.018,
+    )
+    total += n
+
+    print(f"  Water Drop: {total:,} particles")
+    return total, None
+
+
 # Registry of all presets for UI access
 PRESETS = {
     "Sand Castle": load_sand_castle,
     "Volcano": load_volcano,
     "Dam Break": load_dam_break,
     "Acid Rain": load_acid_rain,
+    "Water Drop": load_water_drop,
 }

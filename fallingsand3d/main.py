@@ -121,6 +121,7 @@ def main():
     cupy.cuda.Device().synchronize()
 
     # Input state for camera
+    left_pressed = False
     right_pressed = False
     middle_pressed = False
     last_mx, last_my = 0.0, 0.0
@@ -158,8 +159,12 @@ def main():
             sim.toggle_fixed_dt()
 
     def mouse_button_callback(_win, button, action, _mods):
-        nonlocal right_pressed, middle_pressed, last_mx, last_my
-        if button == glfw.MOUSE_BUTTON_RIGHT:
+        nonlocal left_pressed, right_pressed, middle_pressed, last_mx, last_my
+        if button == glfw.MOUSE_BUTTON_LEFT:
+            left_pressed = action == glfw.PRESS
+            if left_pressed:
+                last_mx, last_my = glfw.get_cursor_pos(_win)
+        elif button == glfw.MOUSE_BUTTON_RIGHT:
             right_pressed = action == glfw.PRESS
             if right_pressed:
                 last_mx, last_my = glfw.get_cursor_pos(_win)
@@ -174,7 +179,7 @@ def main():
         dy = ypos - last_my
         last_mx, last_my = xpos, ypos
 
-        if right_pressed:
+        if left_pressed or right_pressed:
             camera.orbit(dx, dy)
         elif middle_pressed:
             camera.pan(dx, dy)

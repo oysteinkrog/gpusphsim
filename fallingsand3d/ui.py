@@ -121,7 +121,7 @@ class UI:
 
     def __init__(self, window) -> None:
         self._window = window
-        self._selected_material: int = WATER
+        self._selected_material: Optional[int] = None  # None = camera mode (no brush)
         self._brush_radius: float = 0.1
         self._speed_log: float = 0.0  # log10(speed), maps to 0.1-10.0
         self._max_particles_idx: int = 0  # index into _MAX_PARTICLES_OPTIONS
@@ -188,15 +188,17 @@ class UI:
         if io.want_capture_mouse:
             return
 
-        # Left click = spawn, Shift+left click = kill
+        # Left click: spawn/kill only when a brush is selected
         if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
-            mx, my = glfw.get_cursor_pos(window)
-            if mods & glfw.MOD_SHIFT:
-                self._pending_kill = (mx, my)
-            else:
-                self._pending_spawn = (mx, my)
-            return
+            if self._selected_material is not None:
+                mx, my = glfw.get_cursor_pos(window)
+                if mods & glfw.MOD_SHIFT:
+                    self._pending_kill = (mx, my)
+                else:
+                    self._pending_spawn = (mx, my)
+                return
 
+        # Pass through to user callbacks (camera controls)
         if self._user_mouse_button_cb:
             self._user_mouse_button_cb(window, button, action, mods)
 
@@ -348,7 +350,11 @@ class UI:
                 # Short name for button label
                 label = mat.name[:6]
                 if imgui.button(f"{label}##{mat_id}", btn_size):
-                    self._selected_material = mat_id
+                    # Toggle: click again to deselect (return to camera mode)
+                    if self._selected_material == mat_id:
+                        self._selected_material = None
+                    else:
+                        self._selected_material = mat_id
 
                 imgui.pop_style_color(3)
 
@@ -366,8 +372,12 @@ class UI:
             if changed:
                 self._brush_radius = new_val
 
-            imgui.text(f"Selected: {MATERIALS[self._selected_material].name}")
-            imgui.text("LClick=Spawn  Shift+LClick=Kill")
+            if self._selected_material is not None:
+                imgui.text(f"Brush: {MATERIALS[self._selected_material].name}")
+                imgui.text("LClick=Spawn  Shift+LClick=Kill")
+            else:
+                imgui.text("Brush: None (camera mode)")
+                imgui.text("LDrag=Orbit  MDrag=Pan  Scroll=Zoom")
 
         imgui.end()
 
@@ -494,9 +504,13 @@ class UI:
         if action != glfw.PRESS:
             return False
 
-        # Quick material select: 1-9
+        # Quick material select: 1-9 (toggle off if already selected)
         if key in _QUICK_SELECT:
-            self._selected_material = _QUICK_SELECT[key]
+            mat = _QUICK_SELECT[key]
+            if self._selected_material == mat:
+                self._selected_material = None
+            else:
+                self._selected_material = mat
             return True
 
         return False
