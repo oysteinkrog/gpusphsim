@@ -197,3 +197,18 @@
   - The orbit camera uses the convention: azimuth=0 looks down +Z axis, elevation=0 is horizontal, positive elevation looks up. Pan uses world-up vector for vertical movement
   - `_look_at` and `_perspective` are module-level helper functions (not methods) since they're pure math with no state dependency
 ---
+
+## 2026-02-06 - US-003 (moved into fallingsand3d/)
+- What was implemented:
+  - `fallingsand3d/gl_cuda_interop.py` -- Full ctypes bindings for CUDA-GL interop (register, map, get_mapped_pointer, unmap, CudaGLBuffer class with context manager and CuPy zero-copy helper)
+  - `fallingsand3d/test_gl_cuda_interop.py` -- Integration test: creates GL VBO of 1M float4s, registers with CUDA, writes grid pattern via CuPy RawKernel, renders with glDrawArrays(GL_POINTS), checks all CUDA+GL errors
+- Files changed:
+  - `fallingsand3d/gl_cuda_interop.py` (implemented from placeholder)
+  - `fallingsand3d/test_gl_cuda_interop.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The original US-003 implementation was at repo root level; US-001 created the `fallingsand3d/` project skeleton with placeholders. This iteration moved the implementation into the correct location
+  - Blackwell (sm_120) PTX workaround is needed for CuPy RawKernel too, not just RawModule -- set `cupy.cuda.compiler._use_ptx = True` and clear memoized caches before first kernel compilation
+  - `cudaGraphicsRegisterFlagsWriteDiscard` (value 2) is correct for write-only CUDA access to GL buffers
+  - CuPy `UnownedMemory` + `MemoryPointer` + `ndarray` is the zero-copy pattern to wrap a mapped GL buffer as a CuPy array
+---
