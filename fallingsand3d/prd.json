@@ -256,8 +256,9 @@
         "Block size = 256, kernel runs without errors for 500K particles"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": "This is NEW code — impulse-style SDF replaces the spring-damper penalty forces from the existing codebase. Integration is symplectic Euler (NOT true leapfrog — no half-step velocity storage needed). See PHYSICS.md for SDF boundary formulas and color computation formula. sort_indexes[sorted_i] gives the original unsorted index for writeback. Boundary box matches world bounds."
+      "passes": true,
+      "notes": "This is NEW code — impulse-style SDF replaces the spring-damper penalty forces from the existing codebase. Integration is symplectic Euler (NOT true leapfrog — no half-step velocity storage needed). See PHYSICS.md for SDF boundary formulas and color computation formula. sort_indexes[sorted_i] gives the original unsorted index for writeback. Boundary box matches world bounds.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-014",
@@ -591,6 +592,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:46:32.532Z"
+    "updatedAt": "2026-02-06T15:53:19.308Z"
   }
 }
