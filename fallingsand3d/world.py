@@ -72,6 +72,29 @@ class World:
         # uint8 arrays
         self.sleep_counter = cp.zeros(n, dtype=cp.uint8)
 
+        # --- Sorted temporary buffers (pre-allocated, reused every frame) ---
+        # These are the double-buffer targets: after sort+reorder, physics
+        # kernels (Step1/Step2) read from these.  Integrate writes back to
+        # the unsorted arrays above via sort_indexes.
+        self.sorted_position = cp.zeros((n, 4), dtype=cp.float32)
+        self.sorted_velocity = cp.zeros((n, 4), dtype=cp.float32)
+        self.sorted_veleval = cp.zeros((n, 4), dtype=cp.float32)
+        self.sorted_sph_force = cp.zeros((n, 4), dtype=cp.float32)
+        self.sorted_color = cp.zeros((n, 4), dtype=cp.float32)
+        self.sorted_density = cp.zeros(n, dtype=cp.float32)
+        self.sorted_mass = cp.zeros(n, dtype=cp.float32)
+        self.sorted_temperature = cp.zeros(n, dtype=cp.float32)
+        self.sorted_health = cp.zeros(n, dtype=cp.float32)
+        self.sorted_lifetime = cp.zeros(n, dtype=cp.float32)
+        self.sorted_shear_rate = cp.zeros(n, dtype=cp.float32)
+        self.sorted_packed_info = cp.zeros(n, dtype=cp.uint32)
+        self.sorted_sleep_counter = cp.zeros(n, dtype=cp.uint8)
+        # Sort index arrays (hash + original index, plus sorted versions)
+        self.hashes = cp.zeros(n, dtype=cp.uint32)
+        self.indices = cp.zeros(n, dtype=cp.uint32)
+        self.sorted_hashes = cp.zeros(n, dtype=cp.uint32)
+        self.sorted_indices = cp.zeros(n, dtype=cp.uint32)
+
     def resize(self, new_max: int) -> None:
         """Reallocate all arrays for a new max_particles. Kills all particles."""
         self.max_particles = new_max

@@ -182,3 +182,56 @@ def calc_hash(
     kernel(grid, block, (np.uint32(n), positions, hashes, indices))
 
     return hashes, indices
+
+
+# ---------------------------------------------------------------------------
+# Sort by hash
+# ---------------------------------------------------------------------------
+
+
+def sort_by_hash(
+    hashes: cupy.ndarray,
+    indices: cupy.ndarray,
+    sorted_hashes_out: Optional[cupy.ndarray] = None,
+    sorted_indices_out: Optional[cupy.ndarray] = None,
+) -> Tuple[cupy.ndarray, cupy.ndarray]:
+    """Sort particles by grid hash using CuPy argsort (Thrust radix sort).
+
+    Parameters
+    ----------
+    hashes : cupy.ndarray, shape (N,), dtype uint32
+        Per-particle grid hash values from ``calc_hash()``.
+    indices : cupy.ndarray, shape (N,), dtype uint32
+        Per-particle original indices (0..N-1) from ``calc_hash()``.
+    sorted_hashes_out : cupy.ndarray, optional
+        Pre-allocated output buffer for sorted hashes.  If *None*, allocates.
+    sorted_indices_out : cupy.ndarray, optional
+        Pre-allocated output buffer for sorted original indices.  If *None*,
+        allocates.
+
+    Returns
+    -------
+    sorted_hashes : cupy.ndarray, shape (N,), dtype uint32
+        Hash values in non-decreasing order.
+    sorted_indices : cupy.ndarray, shape (N,), dtype uint32
+        Original particle indices reordered by hash (sorted->original map).
+    """
+    n = hashes.shape[0]
+
+    # cupy.argsort uses Thrust radix sort internally for integer dtypes
+    sort_perm = cupy.argsort(hashes)
+
+    # Gather into output buffers
+    if sorted_hashes_out is not None:
+        sorted_hashes_out[:n] = hashes[sort_perm]
+        sorted_hashes = sorted_hashes_out[:n]
+    else:
+        sorted_hashes = hashes[sort_perm]
+
+    if sorted_indices_out is not None:
+        sorted_indices_out[:n] = indices[sort_perm]
+        sorted_indices = sorted_indices_out[:n]
+    else:
+        sorted_indices = indices[sort_perm]
+
+    return sorted_hashes, sorted_indices

@@ -303,3 +303,26 @@
   - The fallingsand3d common.cuh already declares `__constant__ GridParams c_grid` (along with c_materials, c_interactions, c_sim, c_precalc), so hash_sort.cu does NOT redeclare it -- unlike the root-level prototype where each .cu file declared its own c_grid
   - numpy dtype with `align=False` and `(np.int32, (3,))` for int3 fields matches CUDA int3 exactly (12 bytes, no trailing pad), same pattern as float3
 ---
+
+## 2026-02-06 - US-009
+- What was implemented:
+  - `fallingsand3d/physics/kernels/fused_reorder.cu` -- K_FusedReorder kernel: single-pass gather of ALL SoA particle arrays (position, velocity, veleval, mass, packed_info, temperature, health, lifetime, color, sleep_counter, shear_rate) from unsorted to sorted order using sorted_index permutation, with `__ldg()` for read-only cache loads
+  - `fallingsand3d/fused_reorder.py` -- Python module: CuPy RawModule compilation from external .cu file with --use_fast_math, `fused_reorder()` kernel launch wrapper with block size 256
+  - `fallingsand3d/hash_sort.py` -- Added `sort_by_hash()` function: CuPy argsort (Thrust radix sort) on hash array, gathers sorted hashes and sorted original indices, supports pre-allocated output buffers to avoid per-frame allocations
+  - `fallingsand3d/world.py` -- Added sorted_* temporary buffer pre-allocation to World._allocate(): sorted_position, sorted_velocity, sorted_veleval, sorted_sph_force, sorted_color, sorted_density, sorted_mass, sorted_temperature, sorted_health, sorted_lifetime, sorted_shear_rate, sorted_packed_info, sorted_sleep_counter, plus hashes/indices/sorted_hashes/sorted_indices arrays
+  - `fallingsand3d/test_sort_reorder.py` -- Integration tests: sort produces non-decreasing hashes, sorted_index maps correctly (reconstruction test), pre-allocated buffer sort, kernel compilation, mass/temperature/health sum preservation, position gather correctness, World sorted buffer pre-allocation and resize, end-to-end World pipeline, 500K stress test, zero-particle edge case
+- Files changed:
+  - `fallingsand3d/physics/kernels/fused_reorder.cu` (new)
+  - `fallingsand3d/fused_reorder.py` (new)
+  - `fallingsand3d/hash_sort.py` (modified -- added sort_by_hash function)
+  - `fallingsand3d/world.py` (modified -- added sorted_* buffer pre-allocation)
+  - `fallingsand3d/test_sort_reorder.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - CuPy's `argsort()` uses Thrust radix sort internally for integer dtypes (uint32), making it an efficient single-call sort for grid hashes
+  - A fused CUDA reorder kernel that gathers all SoA arrays in one pass (one read of sorted_index per thread) is more bandwidth-efficient than N separate CuPy fancy-indexing calls (`arr[sorted_index]`), because sorted_index is read from global memory only once instead of N times
+  - `__ldg()` intrinsic in the reorder kernel provides read-only cache path for the scattered reads from unsorted arrays, which helps since the gather pattern has poor spatial locality
+  - Pre-allocating sorted_* buffers at World init time avoids CuPy memory pool fragmentation in the hot simulation loop; the buffers are reused every frame
+  - The `sort_by_hash()` function accepts optional pre-allocated output buffers (`sorted_hashes_out`, `sorted_indices_out`) to avoid per-frame allocations; when provided, it writes directly into the caller's buffers
+  - Zero-particle edge cases are handled gracefully: `sort_by_hash` returns empty arrays, `fused_reorder` early-returns when `num_particles == 0`
+---

@@ -3,10 +3,10 @@
   "sessionId": "0a9bb7d7-e66b-4aa5-84c0-224e7a9d1534",
   "status": "running",
   "startedAt": "2026-02-06T10:16:15.178Z",
-  "updatedAt": "2026-02-06T15:21:17.002Z",
-  "currentIteration": 7,
+  "updatedAt": "2026-02-06T15:21:18.631Z",
+  "currentIteration": 8,
   "maxIterations": 0,
-  "tasksCompleted": 14,
+  "tasksCompleted": 15,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -59,7 +59,7 @@
       {
         "id": "US-008",
         "title": "Port grid hashing kernel",
-        "status": "done",
+        "status": "completed",
         "completedInSession": true
       },
       {
@@ -266,10 +266,22 @@
       "durationMs": 322390,
       "startedAt": "2026-02-06T15:11:59.747Z",
       "endedAt": "2026-02-06T15:17:22.137Z"
+    },
+    {
+      "iteration": 8,
+      "status": "completed",
+      "taskId": "US-008",
+      "taskTitle": "Port grid hashing kernel",
+      "taskCompleted": true,
+      "durationMs": 233230,
+      "startedAt": "2026-02-06T15:17:23.761Z",
+      "endedAt": "2026-02-06T15:21:16.991Z"
     }
   ],
   "skippedTaskIds": [],
   "cwd": "/c/WORK/gpusphsim",
-  "activeTaskIds": [],
+  "activeTaskIds": [
+    "US-009"
+  ],
   "subagentPanelVisible": true
 }
