@@ -8,6 +8,7 @@
 - **Numpy structured arrays for C struct packing:** Define `np.dtype([("field", np.float32), ...], align=True)` matching the C struct layout exactly. Assert `dtype.itemsize == sizeof(CStruct)` to catch padding mismatches. Use `array.ctypes.data` for the host pointer when uploading to GPU.
 - **CuPy RawModule with external .cu files:** Read the .cu source from disk and pass to `cupy.RawModule(code=source, options=("--std=c++11", f"-I{kernel_dir}"))`. The `-I` flag lets NVRTC find `#include "common.cuh"` in the same directory. This is better than embedding CUDA source as Python strings for non-trivial kernels.
 - **CUDA float3 struct packing (no trailing pad):** CUDA `float3` is exactly 12 bytes (3 x float32) with no trailing padding. Use `np.dtype([("field", np.float32, (3,))], align=False)` to match. Do NOT use `align=True` for float3 fields -- that would add 4 bytes of padding per field.
+- **CuPy memset for 0xFFFFFFFF sentinel:** `cupy_array.data.memset(0xFF, cupy_array.nbytes)` fills each byte with 0xFF, which produces 0xFFFFFFFF for uint32 elements. This is the standard pattern for initializing cell_indexes_start to the empty-cell sentinel before each frame.
 
 ---
 
@@ -62,4 +63,21 @@
   - The C++ `calcGridCell` uses `make_int3(float3)` which truncates toward zero; porting to CUDA `(int)` cast preserves this behavior; the `np.floor` CPU reference differs for negative inputs but clamping makes them equivalent
   - Grid delta is `grid_res / grid_size` = 50/2 = 25 (not `1/cell_size` which would also be 25 for cell_size=0.04)
   - The original C++ hash kernel uses `wrapEdges=true` (modulo wrapping); the Python port uses clamping instead per acceptance criteria, which is simpler and avoids negative modulo edge cases
+---
+
+## 2026-02-06 - US-010
+- What was implemented:
+  - `physics/kernels/build_grid.cu` -- K_BuildDataStruct kernel that detects cell boundaries in the sorted hash array and writes cell_indexes_start/cell_indexes_end tables
+  - `build_grid.py` -- Python module: CuPy RawModule compilation, constant memory upload, array allocation, `build_data_struct()` kernel launch wrapper with automatic memset of cell_start to 0xFFFFFFFF
+  - `test_build_grid.py` -- Integration tests: compilation, allocation, block size, empty cell sentinel, known 8-particle/2-cell config, particle count sum consistency, boundary validation against sorted hashes, memset between frames, 500K stress test
+- Files changed:
+  - `physics/kernels/build_grid.cu` (new)
+  - `build_grid.py` (new)
+  - `test_build_grid.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The C++ reference `K_Grid_UpdateSorted` uses shared memory to cache neighboring hashes for the boundary check; the Python port uses direct global memory reads instead (`sorted_hashes[idx-1]`) since modern GPUs have L1/L2 caches that make the shared memory optimization less critical for correctness, and the simpler code is easier to verify
+  - `cupy_array.data.memset(0xFF, nbytes)` sets each byte to 0xFF, producing 0xFFFFFFFF for uint32 -- this is the correct way to initialize the empty-cell sentinel before each frame
+  - The kernel doesn't need `__constant__` GridParams for its core logic (it only reads sorted_hashes), but we include it for consistency with the hash_sort.cu pattern since downstream neighbor-search kernels will need it
+  - Each .cu file compiled via CuPy RawModule gets its own `__constant__` symbol space -- the `c_grid` in build_grid.cu is separate from the one in hash_sort.cu, so both need their own `upload_grid_params()` call
 ---
