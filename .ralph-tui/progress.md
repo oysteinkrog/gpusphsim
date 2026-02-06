@@ -378,3 +378,21 @@
   - Per-particle mass (`__ldg(&mass[index_j])`) is used throughout the neighbor loop instead of the root prototype's constant `c_fluid.particle_mass`. This supports multi-material simulations where different materials have different rest densities and therefore different particle masses.
   - The `viscosity_lap_coeff` field in PrecalcParams (= 45/(pi*h^6)) is used for GRANULAR mu(I) per-pair viscosity baking, while `viscosity_precalc` (= mu * 45/(pi*h^6)) is used for FLUID/GAS constant-mu paths. These are separate fields in common.cuh's PrecalcParams to keep the coefficients clear.
 ---
+
+## 2026-02-06 - US-013
+- What was implemented:
+  - `fallingsand3d/physics/kernels/integrate.cu` -- K_Integrate kernel: symplectic Euler velocity/position update, impulse-style SDF box boundary collisions (6 planes, restitution + Coulomb friction), GAS buoyancy (beta*(T-293)*g_y) and drag (1-c_drag*dt), velocity magnitude clamp at 50.0, particle color from material base color + temperature red tint + health fade, writeback to UNSORTED arrays via sort_indexes permutation. Skips STATIC particles.
+  - `fallingsand3d/integrate.py` -- Python module: CuPy RawModule compilation from external .cu file with --use_fast_math, constant memory upload (c_sim, c_materials), `integrate()` kernel launch wrapper with block size 256, pre-allocated output buffer support.
+  - `fallingsand3d/test_integrate.py` -- Integration tests (16 tests): compilation, block size, STATIC skip, gravity freefall, floor bounce with restitution, multi-step energy dissipation, GAS buoyancy, GAS drag, velocity clamp, color computation (base/hot/health), sort_indexes writeback, all 6 walls containment, Coulomb friction, XSPH position update (FLUID vs GRANULAR), 10K water pool no-NaN (1000 steps), 500K mixed-particle stress test.
+- Files changed:
+  - `fallingsand3d/physics/kernels/integrate.cu` (new)
+  - `fallingsand3d/integrate.py` (new)
+  - `fallingsand3d/test_integrate.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - Impulse-style SDF boundary is simpler than spring-damper penalty forces: check penetration, project out, reflect normal velocity with restitution, apply Coulomb friction to tangential. No stiffness/damping constants to tune, no boundary_distance parameter needed.
+  - XSPH position correction for FLUID: Step2 writes veleval = vel + eps*xsph_sum. The integrate kernel computes xsph_correction = veleval - vel (extracting just the eps*xsph_sum part), then uses pos_new = pos + dt * (vel_new + xsph_correction). This avoids double-counting the base velocity.
+  - Coulomb friction model: friction_impulse = mu_wall * |v_normal|; reduction = min(friction_impulse / |v_tangential|, 1.0); v_tangential *= (1 - reduction). The min clamp prevents friction from reversing tangential direction.
+  - The integrate kernel only needs c_sim and c_materials in constant memory (no c_grid, c_precalc, or c_granular), making it the simplest kernel to set up for standalone testing.
+  - GAS buoyancy and drag are applied in the integrate kernel (not Step2) because they're integration-level effects, not SPH neighbor-dependent forces. This keeps Step2 focused on neighbor-based force computation.
+---

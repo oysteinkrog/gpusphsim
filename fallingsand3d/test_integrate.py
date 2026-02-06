@@ -1,0 +1,751 @@
+"""Integration test for integrate.py -- K_Integrate kernel.
+
+Acceptance criteria:
+  - Symplectic Euler: vel_new = vel + dt * accel; pos_new uses XSPH for FLUID
+  - Impulse SDF boundary: 6 planes of box (-1,-1,-1) to (1,1,1), restitution=0.3,
+    Coulomb friction mu_wall=0.5
+  - STATIC particles skipped (position unchanged)
+  - GAS buoyancy: beta=0.01 * (T-293) * (0, 9.81, 0)
+  - GAS drag: vel *= (1 - 2.0 * dt)
+  - Velocity clamp at 50.0
+  - Color from c_materials, tinted red for T>293K, faded by health
+  - Writeback to UNSORTED arrays via sort_indexes
+  - Bounce test: particle dropped from height bounces and loses energy
+  - 10K water pool test: no NaN after 1000 steps
+  - Block size = 256, 500K stress test
+
+Requirements: cupy, numpy, an NVIDIA GPU with CUDA 12.x.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+import cupy
+import numpy as np
+
+from step1 import (
+    SIM_PARAMS_DTYPE,
+    build_sim_params,
+)
+from materials import (
+    FLUID,
+    GRANULAR,
+    GAS,
+    STATIC,
+    WATER,
+    SAND,
+    STEAM,
+    STONE,
+    build_material_array,
+)
+from integrate import (
+    BLOCK_SIZE,
+    get_module,
+    integrate,
+    upload_materials,
+    upload_sim_params,
+)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+H = 0.04
+SPACING = 0.02
+RHO0 = 1000.0
+MASS = RHO0 * SPACING**3  # 0.008 kg
+DT = 0.001
+
+# packed_info helpers
+def MAKE_PACKED(mat_id: int, behavior: int) -> int:
+    return (mat_id & 0xFF) | ((behavior & 0x3) << 8)
+
+def SET_SLEEPING(p: int) -> int:
+    return p | 0x400
+
+# ---------------------------------------------------------------------------
+# Helper: upload params for all tests
+# ---------------------------------------------------------------------------
+
+def setup_params(dt=DT, restitution=0.3, wall_friction=0.5,
+                 gravity=(0.0, -9.8, 0.0)):
+    """Upload SimParams and materials to integrate module's constant memory."""
+    sim_params = build_sim_params(
+        smoothing_length=H,
+        particle_mass=MASS,
+        particle_spacing=SPACING,
+        gravity=gravity,
+        dt=dt,
+        restitution=restitution,
+        wall_friction=wall_friction,
+        world_min=(-1.0, -1.0, -1.0),
+        world_max=(1.0, 1.0, 1.0),
+    )
+    upload_sim_params(sim_params)
+    materials = build_material_array()
+    upload_materials(materials)
+
+
+def make_simple_particles(n, mat_id, behavior, pos=None, vel=None,
+                          temp=293.0, health=1.0):
+    """Create sorted particle arrays for n particles. sort_indexes = identity."""
+    if pos is None:
+        pos = np.zeros((n, 4), dtype=np.float32)
+        pos[:, 3] = 1.0
+    else:
+        pos = np.array(pos, dtype=np.float32).reshape(n, 4)
+
+    if vel is None:
+        vel = np.zeros((n, 4), dtype=np.float32)
+    else:
+        vel = np.array(vel, dtype=np.float32).reshape(n, 4)
+
+    veleval = vel.copy()  # same as vel unless XSPH
+    sph_force = np.zeros((n, 4), dtype=np.float32)
+    mass = np.full(n, MASS, dtype=np.float32)
+    packed_info = np.full(n, MAKE_PACKED(mat_id, behavior), dtype=np.uint32)
+    temperature = np.full(n, temp, dtype=np.float32)
+    hlth = np.full(n, health, dtype=np.float32)
+    sort_idx = np.arange(n, dtype=np.uint32)
+
+    return {
+        "sorted_position": cupy.asarray(pos),
+        "sorted_velocity": cupy.asarray(vel),
+        "sorted_veleval": cupy.asarray(veleval),
+        "sorted_sph_force": cupy.asarray(sph_force),
+        "sorted_mass": cupy.asarray(mass),
+        "sorted_packed_info": cupy.asarray(packed_info),
+        "sorted_temperature": cupy.asarray(temperature),
+        "sorted_health": cupy.asarray(hlth),
+        "sort_indexes": cupy.asarray(sort_idx),
+    }
+
+
+# ===========================================================================
+# Tests
+# ===========================================================================
+
+
+def test_compilation():
+    """integrate.cu compiles without errors via CuPy RawModule."""
+    module = get_module()
+    kernel = module.get_function("K_Integrate")
+    assert kernel is not None
+    print("PASS: test_compilation")
+
+
+def test_block_size():
+    """Block size is 256 per acceptance criteria."""
+    assert BLOCK_SIZE == 256
+    print("PASS: test_block_size")
+
+
+def test_static_skip():
+    """STATIC particles are skipped -- position and velocity unchanged."""
+    setup_params()
+    n = 4
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = [0.0, 0.1, 0.2, 0.3]
+    pos[:, 1] = [0.5, 0.5, 0.5, 0.5]
+    pos[:, 3] = 1.0
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 1] = [-1.0, -1.0, -1.0, -1.0]  # downward velocity
+
+    d = make_simple_particles(n, STONE, STATIC, pos=pos, vel=vel)
+
+    pos_out, vel_out, color_out = integrate(**d)
+
+    pos_h = pos_out.get()
+    vel_h = vel_out.get()
+
+    # STATIC: position should be unchanged, velocity should be zero
+    for i in range(n):
+        assert abs(pos_h[i, 0] - pos[i, 0]) < 1e-6, f"STATIC pos.x changed for particle {i}"
+        assert abs(pos_h[i, 1] - pos[i, 1]) < 1e-6, f"STATIC pos.y changed for particle {i}"
+        assert abs(vel_h[i, 0]) < 1e-6, f"STATIC vel.x non-zero for particle {i}"
+        assert abs(vel_h[i, 1]) < 1e-6, f"STATIC vel.y non-zero for particle {i}"
+        assert abs(vel_h[i, 2]) < 1e-6, f"STATIC vel.z non-zero for particle {i}"
+
+    print("PASS: test_static_skip")
+
+
+def test_gravity_freefall():
+    """A particle in free fall (no SPH force) accelerates downward correctly."""
+    setup_params(gravity=(0.0, -9.8, 0.0))
+    n = 1
+    pos = np.array([[0.0, 0.5, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    pos_out, vel_out, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+    pos_h = pos_out.get()
+
+    # After 1 step: vel_y = 0 + dt * (-9.8) = -0.0098
+    expected_vy = -9.8 * DT
+    assert abs(vel_h[0, 1] - expected_vy) < 1e-5, (
+        f"Expected vel_y={expected_vy}, got {vel_h[0, 1]}"
+    )
+
+    # Position: pos_y = 0.5 + dt * vel_new_y = 0.5 + 0.001 * (-0.0098) = 0.4999902
+    expected_py = 0.5 + DT * expected_vy
+    assert abs(pos_h[0, 1] - expected_py) < 1e-5, (
+        f"Expected pos_y={expected_py}, got {pos_h[0, 1]}"
+    )
+
+    print("PASS: test_gravity_freefall")
+
+
+def test_bounce_floor():
+    """Particle dropped from height bounces off floor boundary and loses energy."""
+    setup_params(restitution=0.3, wall_friction=0.5, gravity=(0.0, -9.8, 0.0))
+
+    n = 1
+    # Place particle at bottom boundary with downward velocity
+    # Position just above floor, velocity pushing through it
+    pos = np.array([[0.0, -0.99, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[0.0, -5.0, 0.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    pos_out, vel_out, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+    pos_h = pos_out.get()
+
+    # After integration: vel_new_y = -5.0 + 0.001*(-9.8) = -5.0098
+    # pos_new_y = -0.99 + 0.001 * (-5.0098) = -0.9950098  -> penetrates floor at -1.0?
+    # No, -0.9950098 > -1.0 so no penetration yet.
+    # Let's use a bigger timestep or position closer to boundary.
+    # Better test: place particle so that after integration it penetrates.
+
+    # Re-test with position that definitely penetrates
+    pos2 = np.array([[0.0, -0.995, 0.0, 1.0]], dtype=np.float32)
+    vel2 = np.array([[0.0, -10.0, 0.0, 0.0]], dtype=np.float32)
+    d2 = make_simple_particles(n, WATER, FLUID, pos=pos2, vel=vel2)
+    pos_out2, vel_out2, _ = integrate(**d2)
+
+    vel_h2 = vel_out2.get()
+    pos_h2 = pos_out2.get()
+
+    # vel_new_y = -10.0 + 0.001*(-9.8) = -10.0098
+    # pos_new_y = -0.995 + 0.001*(-10.0098) = -1.0050098 -> penetrates!
+    # After boundary: pos_y = -1.0, vel_y = 0.3 * 10.0098 = ~3.003
+
+    assert pos_h2[0, 1] >= -1.0 - 1e-5, (
+        f"Particle below floor: pos_y={pos_h2[0, 1]}"
+    )
+    # Velocity should be positive (bounced up) and less than original magnitude
+    assert vel_h2[0, 1] > 0.0, (
+        f"Expected positive bounce vel_y, got {vel_h2[0, 1]}"
+    )
+    assert abs(vel_h2[0, 1]) < 10.1, (
+        f"Bounce vel_y too large (no energy loss): {vel_h2[0, 1]}"
+    )
+    # With restitution=0.3, bounced vel_y should be about 3.0
+    assert abs(vel_h2[0, 1] - 0.3 * 10.0098) < 0.1, (
+        f"Expected bounce vel_y ~{0.3*10.0098}, got {vel_h2[0, 1]}"
+    )
+
+    print("PASS: test_bounce_floor")
+
+
+def test_bounce_multi_step():
+    """Particle dropped from height loses energy over multiple bounces."""
+    setup_params(restitution=0.3, wall_friction=0.5, gravity=(0.0, -9.8, 0.0))
+
+    n = 1
+    pos_np = np.array([[0.0, 0.5, 0.0, 1.0]], dtype=np.float32)
+    vel_np = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    pos_gpu = cupy.asarray(pos_np)
+    vel_gpu = cupy.asarray(vel_np)
+
+    # Run 2000 steps
+    for step in range(2000):
+        d = {
+            "sorted_position": pos_gpu,
+            "sorted_velocity": vel_gpu,
+            "sorted_veleval": vel_gpu.copy(),
+            "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+            "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+            "sorted_packed_info": cupy.full(n, MAKE_PACKED(WATER, FLUID), dtype=cupy.uint32),
+            "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+            "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+            "position_out": pos_gpu,
+            "velocity_out": vel_gpu,
+            "color_out": cupy.zeros((n, 4), dtype=cupy.float32),
+        }
+        integrate(**d)
+
+    pos_h = pos_gpu.get()
+    vel_h = vel_gpu.get()
+
+    # After many bounces, particle should have settled near bottom
+    assert pos_h[0, 1] >= -1.0 - 1e-5, f"Below floor: {pos_h[0, 1]}"
+    # Velocity should be small (energy dissipated through bounces)
+    speed = math.sqrt(vel_h[0, 0]**2 + vel_h[0, 1]**2 + vel_h[0, 2]**2)
+    assert speed < 2.0, f"Too much residual speed after bouncing: {speed}"
+    # No NaN
+    assert not np.any(np.isnan(pos_h)), "NaN in position"
+    assert not np.any(np.isnan(vel_h)), "NaN in velocity"
+
+    print("PASS: test_bounce_multi_step")
+
+
+def test_gas_buoyancy():
+    """GAS particles with T > 293K get upward buoyancy force."""
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 1
+    temp = 500.0  # hot gas
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=temp)
+    _, vel_out, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+
+    # Expected: accel_y = -9.8 + 0.01 * (500 - 293) * 9.81 = -9.8 + 20.306 = +10.506
+    # vel_new_y = 0 + 0.001 * 10.506 = +0.010506
+    # Then drag: vel_new_y *= (1 - 2.0 * 0.001) = 0.998 -> ~0.01049
+    expected_buoyancy = 0.01 * (500.0 - 293.0) * 9.81
+    expected_accel_y = -9.8 + expected_buoyancy
+    expected_vel_y = DT * expected_accel_y * (1.0 - 2.0 * DT)
+
+    assert vel_h[0, 1] > 0, (
+        f"Expected positive vel_y for hot gas, got {vel_h[0, 1]}"
+    )
+    assert abs(vel_h[0, 1] - expected_vel_y) < 1e-4, (
+        f"Expected vel_y ~{expected_vel_y}, got {vel_h[0, 1]}"
+    )
+
+    print("PASS: test_gas_buoyancy")
+
+
+def test_gas_drag():
+    """GAS drag reduces velocity by (1 - c_drag * dt) factor."""
+    setup_params(gravity=(0.0, 0.0, 0.0))  # no gravity for clean test
+
+    n = 1
+    vel = np.array([[10.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=293.0)
+    _, vel_out, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+
+    # No SPH force, no gravity, no buoyancy (T=293K):
+    # vel_new = 10.0, then drag: vel *= (1 - 2.0*0.001) = 0.998
+    expected_vx = 10.0 * (1.0 - 2.0 * DT)
+    assert abs(vel_h[0, 0] - expected_vx) < 1e-4, (
+        f"Expected vx={expected_vx}, got {vel_h[0, 0]}"
+    )
+
+    print("PASS: test_gas_drag")
+
+
+def test_velocity_clamp():
+    """Velocity magnitude is clamped to 50.0."""
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 1
+    # Give particle huge SPH force that would produce vel > 50
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    sph_force = np.array([[0.0, 1e6, 0.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d["sorted_sph_force"] = cupy.asarray(sph_force)
+    _, vel_out, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+    speed = math.sqrt(vel_h[0, 0]**2 + vel_h[0, 1]**2 + vel_h[0, 2]**2)
+
+    assert speed <= 50.0 + 0.1, (
+        f"Velocity not clamped: speed={speed}"
+    )
+    assert speed > 49.0, (
+        f"Velocity too low after clamp: speed={speed}"
+    )
+
+    print("PASS: test_velocity_clamp")
+
+
+def test_color_computation():
+    """Color is computed from material base color, temperature, and health."""
+    setup_params()
+
+    # Test 1: room temp, full health -> base material color
+    n = 1
+    d = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
+    d["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, color_out = integrate(**d)
+    color_h = color_out.get()
+
+    # Water color: (0.2, 0.5, 0.9)
+    assert abs(color_h[0, 0] - 0.2) < 0.02, f"Water R={color_h[0, 0]}, expected 0.2"
+    assert abs(color_h[0, 1] - 0.5) < 0.02, f"Water G={color_h[0, 1]}, expected 0.5"
+    assert abs(color_h[0, 2] - 0.9) < 0.02, f"Water B={color_h[0, 2]}, expected 0.9"
+    assert abs(color_h[0, 3] - 1.0) < 0.01, f"Alpha={color_h[0, 3]}, expected 1.0"
+
+    # Test 2: hot particle -> red tint
+    d2 = make_simple_particles(n, WATER, FLUID, temp=1293.0, health=1.0)
+    d2["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, color_out2 = integrate(**d2)
+    color_h2 = color_out2.get()
+
+    # Should be more red than base water
+    assert color_h2[0, 0] > color_h[0, 0], "Hot particle not redder"
+    assert color_h2[0, 2] < color_h[0, 2], "Hot particle blue not reduced"
+
+    # Test 3: low health -> faded color
+    d3 = make_simple_particles(n, WATER, FLUID, temp=293.0, health=0.5)
+    d3["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, color_out3 = integrate(**d3)
+    color_h3 = color_out3.get()
+
+    # Should be ~half brightness
+    assert abs(color_h3[0, 0] - 0.1) < 0.02, f"Health fade R={color_h3[0, 0]}"
+    assert abs(color_h3[0, 1] - 0.25) < 0.02, f"Health fade G={color_h3[0, 1]}"
+
+    print("PASS: test_color_computation")
+
+
+def test_sort_indexes_writeback():
+    """Results are written to UNSORTED arrays using sort_indexes mapping."""
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 4
+    # Sorted order: 0,1,2,3 maps to unsorted: 3,1,0,2
+    sort_idx = np.array([3, 1, 0, 2], dtype=np.uint32)
+
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = [0.0, 0.1, 0.2, 0.3]
+    pos[:, 1] = 0.5
+    pos[:, 3] = 1.0
+    vel = np.zeros((n, 4), dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d["sort_indexes"] = cupy.asarray(sort_idx)
+
+    out_pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    out_vel = cupy.zeros((n, 4), dtype=cupy.float32)
+    out_col = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    integrate(**d, position_out=out_pos, velocity_out=out_vel, color_out=out_col)
+
+    pos_h = out_pos.get()
+
+    # Sorted particle 0 (x=0.0) -> unsorted slot 3
+    assert abs(pos_h[3, 0] - 0.0) < 1e-4, f"Sort writeback failed: slot 3 x={pos_h[3, 0]}"
+    # Sorted particle 1 (x=0.1) -> unsorted slot 1
+    assert abs(pos_h[1, 0] - 0.1) < 1e-4, f"Sort writeback failed: slot 1 x={pos_h[1, 0]}"
+    # Sorted particle 2 (x=0.2) -> unsorted slot 0
+    assert abs(pos_h[0, 0] - 0.2) < 1e-4, f"Sort writeback failed: slot 0 x={pos_h[0, 0]}"
+    # Sorted particle 3 (x=0.3) -> unsorted slot 2
+    assert abs(pos_h[2, 0] - 0.3) < 1e-4, f"Sort writeback failed: slot 2 x={pos_h[2, 0]}"
+
+    print("PASS: test_sort_indexes_writeback")
+
+
+def test_boundary_all_walls():
+    """Particles are contained by all 6 walls of the box."""
+    setup_params(gravity=(0.0, 0.0, 0.0), restitution=0.3, wall_friction=0.5)
+
+    n = 6
+    # Each particle aimed at a different wall
+    pos = np.array([
+        [-0.999, 0.0, 0.0, 1.0],  # -> -X wall
+        [ 0.999, 0.0, 0.0, 1.0],  # -> +X wall
+        [0.0, -0.999, 0.0, 1.0],  # -> -Y wall
+        [0.0,  0.999, 0.0, 1.0],  # -> +Y wall
+        [0.0, 0.0, -0.999, 1.0],  # -> -Z wall
+        [0.0, 0.0,  0.999, 1.0],  # -> +Z wall
+    ], dtype=np.float32)
+
+    vel = np.array([
+        [-20.0, 0.0, 0.0, 0.0],
+        [ 20.0, 0.0, 0.0, 0.0],
+        [0.0, -20.0, 0.0, 0.0],
+        [0.0,  20.0, 0.0, 0.0],
+        [0.0, 0.0, -20.0, 0.0],
+        [0.0, 0.0,  20.0, 0.0],
+    ], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    pos_out, vel_out, _ = integrate(**d)
+
+    pos_h = pos_out.get()
+    vel_h = vel_out.get()
+
+    for i in range(n):
+        assert pos_h[i, 0] >= -1.0 - 1e-5, f"Particle {i} escaped -X: {pos_h[i, 0]}"
+        assert pos_h[i, 0] <=  1.0 + 1e-5, f"Particle {i} escaped +X: {pos_h[i, 0]}"
+        assert pos_h[i, 1] >= -1.0 - 1e-5, f"Particle {i} escaped -Y: {pos_h[i, 1]}"
+        assert pos_h[i, 1] <=  1.0 + 1e-5, f"Particle {i} escaped +Y: {pos_h[i, 1]}"
+        assert pos_h[i, 2] >= -1.0 - 1e-5, f"Particle {i} escaped -Z: {pos_h[i, 2]}"
+        assert pos_h[i, 2] <=  1.0 + 1e-5, f"Particle {i} escaped +Z: {pos_h[i, 2]}"
+
+    # Verify velocity reflection happened (direction reversed)
+    assert vel_h[0, 0] > 0, f"Particle 0 should have bounced +X, got vx={vel_h[0, 0]}"
+    assert vel_h[1, 0] < 0, f"Particle 1 should have bounced -X, got vx={vel_h[1, 0]}"
+    assert vel_h[2, 1] > 0, f"Particle 2 should have bounced +Y, got vy={vel_h[2, 1]}"
+    assert vel_h[3, 1] < 0, f"Particle 3 should have bounced -Y, got vy={vel_h[3, 1]}"
+    assert vel_h[4, 2] > 0, f"Particle 4 should have bounced +Z, got vz={vel_h[4, 2]}"
+    assert vel_h[5, 2] < 0, f"Particle 5 should have bounced -Z, got vz={vel_h[5, 2]}"
+
+    print("PASS: test_boundary_all_walls")
+
+
+def test_coulomb_friction():
+    """Wall collision applies Coulomb friction to tangential velocity."""
+    setup_params(gravity=(0.0, 0.0, 0.0), restitution=0.3, wall_friction=0.5)
+
+    n = 1
+    # Particle hitting floor with both normal and tangential velocity
+    pos = np.array([[0.5, -0.999, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[5.0, -10.0, 0.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    _, vel_out, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+
+    # Normal: vy reflected with restitution -> ~0.3 * 10.0 = 3.0 upward
+    assert vel_h[0, 1] > 0, f"Expected upward bounce, got vy={vel_h[0, 1]}"
+
+    # Tangential: vx should be reduced by friction
+    # friction_impulse = mu_wall * |vn| = 0.5 * 10.0 = 5.0
+    # reduction = min(5.0 / |vt|, 1.0) = min(5.0/5.0, 1.0) = 1.0
+    # vx = 5.0 * (1 - 1.0) = 0.0
+    assert abs(vel_h[0, 0]) < 0.5, (
+        f"Expected vx ~0 after friction, got {vel_h[0, 0]}"
+    )
+
+    print("PASS: test_coulomb_friction")
+
+
+def test_xsph_position_update():
+    """FLUID particles use XSPH-corrected velocity for position advection."""
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 1
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    # veleval has XSPH correction: vel + eps*xsph_sum
+    veleval = np.array([[1.5, 0.0, 0.0, 0.0]], dtype=np.float32)  # xsph added 0.5
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d["sorted_veleval"] = cupy.asarray(veleval)
+    pos_out, vel_out, _ = integrate(**d)
+
+    pos_h = pos_out.get()
+    vel_h = vel_out.get()
+
+    # vel_new = 1.0 (no force)
+    # xsph_correction = veleval - vel = 0.5
+    # pos_new = 0 + dt * (vel_new + xsph_correction) = 0 + 0.001 * 1.5 = 0.0015
+    expected_px = DT * (1.0 + 0.5)
+    assert abs(pos_h[0, 0] - expected_px) < 1e-5, (
+        f"Expected pos_x={expected_px}, got {pos_h[0, 0]}"
+    )
+
+    # Non-FLUID should NOT use XSPH
+    d2 = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
+    d2["sorted_veleval"] = cupy.asarray(veleval)
+    pos_out2, _, _ = integrate(**d2)
+    pos_h2 = pos_out2.get()
+
+    expected_px2 = DT * 1.0  # no XSPH
+    assert abs(pos_h2[0, 0] - expected_px2) < 1e-5, (
+        f"GRANULAR should not use XSPH: expected {expected_px2}, got {pos_h2[0, 0]}"
+    )
+
+    print("PASS: test_xsph_position_update")
+
+
+def test_water_pool_no_nan():
+    """10K water particles in box settle without NaN after 1000 steps.
+
+    This is a simplified test without the full neighbor pipeline --
+    we just check that integration alone doesn't produce NaN with
+    typical SPH-like forces.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 10000
+    rng = np.random.RandomState(42)
+
+    # Particles in a cube near the top, falling
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = rng.uniform(-0.5, 0.5, n)
+    pos[:, 1] = rng.uniform(0.0, 0.8, n)
+    pos[:, 2] = rng.uniform(-0.5, 0.5, n)
+    pos[:, 3] = 1.0
+
+    vel = np.zeros((n, 4), dtype=np.float32)
+
+    pos_gpu = cupy.asarray(pos)
+    vel_gpu = cupy.asarray(vel)
+    veleval_gpu = vel_gpu.copy()
+    force_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+    mass_gpu = cupy.full(n, MASS, dtype=cupy.float32)
+    pi_gpu = cupy.full(n, MAKE_PACKED(WATER, FLUID), dtype=cupy.uint32)
+    temp_gpu = cupy.full(n, 293.0, dtype=cupy.float32)
+    health_gpu = cupy.full(n, 1.0, dtype=cupy.float32)
+    sort_idx = cupy.arange(n, dtype=cupy.uint32)
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    for step in range(1000):
+        # Apply small random SPH-like forces for realism
+        if step % 10 == 0:
+            force_gpu[:, :3] = cupy.random.uniform(-0.1, 0.1, (n, 3), dtype=cupy.float32)
+
+        integrate(
+            sorted_position=pos_gpu,
+            sorted_velocity=vel_gpu,
+            sorted_veleval=veleval_gpu,
+            sorted_sph_force=force_gpu,
+            sorted_mass=mass_gpu,
+            sorted_packed_info=pi_gpu,
+            sorted_temperature=temp_gpu,
+            sorted_health=health_gpu,
+            sort_indexes=sort_idx,
+            position_out=pos_gpu,
+            velocity_out=vel_gpu,
+            color_out=color_gpu,
+        )
+        veleval_gpu[:] = vel_gpu
+
+    pos_h = pos_gpu.get()
+    vel_h = vel_gpu.get()
+
+    assert not np.any(np.isnan(pos_h)), "NaN found in positions after 1000 steps"
+    assert not np.any(np.isnan(vel_h)), "NaN found in velocities after 1000 steps"
+
+    # All particles should be within boundaries
+    assert np.all(pos_h[:, 0] >= -1.0 - 1e-4), "Particles escaped -X"
+    assert np.all(pos_h[:, 0] <=  1.0 + 1e-4), "Particles escaped +X"
+    assert np.all(pos_h[:, 1] >= -1.0 - 1e-4), "Particles escaped -Y"
+    assert np.all(pos_h[:, 1] <=  1.0 + 1e-4), "Particles escaped +Y"
+    assert np.all(pos_h[:, 2] >= -1.0 - 1e-4), "Particles escaped -Z"
+    assert np.all(pos_h[:, 2] <=  1.0 + 1e-4), "Particles escaped +Z"
+
+    # Most particles should have settled near the bottom
+    mean_y = np.mean(pos_h[:, 1])
+    assert mean_y < 0.0, f"Mean Y should be negative (settled), got {mean_y}"
+
+    print("PASS: test_water_pool_no_nan")
+
+
+def test_500k_stress():
+    """500K particles run through integrate without errors."""
+    setup_params()
+
+    n = 500_000
+    rng = np.random.RandomState(123)
+
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, :3] = rng.uniform(-0.9, 0.9, (n, 3))
+    pos[:, 3] = 1.0
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, :3] = rng.uniform(-1.0, 1.0, (n, 3))
+
+    # Mix of behaviors
+    packed = np.zeros(n, dtype=np.uint32)
+    packed[:200000] = MAKE_PACKED(WATER, FLUID)
+    packed[200000:400000] = MAKE_PACKED(SAND, GRANULAR)
+    packed[400000:480000] = MAKE_PACKED(STEAM, GAS)
+    packed[480000:] = MAKE_PACKED(STONE, STATIC)
+
+    d = {
+        "sorted_position": cupy.asarray(pos),
+        "sorted_velocity": cupy.asarray(vel),
+        "sorted_veleval": cupy.asarray(vel),
+        "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+        "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+        "sorted_packed_info": cupy.asarray(packed),
+        "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+        "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+    }
+
+    pos_out, vel_out, color_out = integrate(**d)
+
+    # Synchronize to catch any CUDA errors
+    cupy.cuda.Device().synchronize()
+
+    pos_h = pos_out.get()
+    vel_h = vel_out.get()
+    color_h = color_out.get()
+
+    assert not np.any(np.isnan(pos_h)), "NaN in positions (500K)"
+    assert not np.any(np.isnan(vel_h)), "NaN in velocities (500K)"
+    assert not np.any(np.isnan(color_h)), "NaN in colors (500K)"
+
+    # All particles should be within boundaries
+    assert np.all(pos_h[:, 0] >= -1.0 - 1e-4), "500K: particles escaped -X"
+    assert np.all(pos_h[:, 0] <=  1.0 + 1e-4), "500K: particles escaped +X"
+    assert np.all(pos_h[:, 1] >= -1.0 - 1e-4), "500K: particles escaped -Y"
+    assert np.all(pos_h[:, 1] <=  1.0 + 1e-4), "500K: particles escaped +Y"
+
+    # STATIC particles should keep their original positions
+    static_pos_orig = pos[480000:, :3]
+    static_pos_new = pos_h[480000:, :3]
+    assert np.allclose(static_pos_orig, static_pos_new, atol=1e-5), (
+        "STATIC particle positions changed!"
+    )
+
+    print("PASS: test_500k_stress")
+
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+if __name__ == "__main__":
+    tests = [
+        test_compilation,
+        test_block_size,
+        test_static_skip,
+        test_gravity_freefall,
+        test_bounce_floor,
+        test_bounce_multi_step,
+        test_gas_buoyancy,
+        test_gas_drag,
+        test_velocity_clamp,
+        test_color_computation,
+        test_sort_indexes_writeback,
+        test_boundary_all_walls,
+        test_coulomb_friction,
+        test_xsph_position_update,
+        test_water_pool_no_nan,
+        test_500k_stress,
+    ]
+
+    passed = 0
+    failed = 0
+    for test in tests:
+        try:
+            test()
+            passed += 1
+        except Exception as e:
+            print(f"FAIL: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+
+    print(f"\n{'='*60}")
+    print(f"Results: {passed} passed, {failed} failed out of {len(tests)}")
+    if failed > 0:
+        sys.exit(1)
+    print("All tests passed!")
