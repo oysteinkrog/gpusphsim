@@ -479,8 +479,9 @@
         "No NaN or explosions with mixed gas + fluid + granular simulation over 5000 steps"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": "This is mainly a verification/tuning story. The physics code is already in Step2 (EOS branching by behavior_class), Integrate (buoyancy/drag for GAS), and Reactions (lifetime). Tune k_gas, beta, c_drag if behavior looks wrong."
+      "passes": true,
+      "notes": "This is mainly a verification/tuning story. The physics code is already in Step2 (EOS branching by behavior_class), Integrate (buoyancy/drag for GAS), and Reactions (lifetime). Tune k_gas, beta, c_drag if behavior looks wrong.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-025",
@@ -602,6 +603,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T17:13:28.123Z"
+    "updatedAt": "2026-02-06T17:13:30.142Z"
   }
 }
