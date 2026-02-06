@@ -12,6 +12,8 @@
 - **Grid neighbor iteration pattern (inline 27-cell loop):** For force kernels, iterate 27 neighbor cells with 3 nested loops (dx,dy,dz in [-1,1]), boundary-check each cell, look up cell_start/cell_end, skip self-interaction (j==i), and check distance within h^2. Use 0xFFFFFFFF sentinel for empty cells. This replaces the C++ template-based IterateParticlesInNearbyCells approach.
 - **Tait EOS pressure with behavior classes:** Compute `p_raw = k * (pow(rho/rho0, 7) - 1)` then clamp per behavior: FLUID allows small tensile `max(p_raw, -0.5*k)`, GRANULAR clamps `max(p_raw, 0)`, GAS uses linear `k_gas * max(rho - rho0, 0)`. The different clamping prevents tensile instability in granular materials.
 - **SPH precalc sign convention:** `pressure_precalc = +45/(pi*h^6)` is POSITIVE because it absorbs the double negative from the SPH momentum equation (negative gradient) and the spiky gradient constant (-45/(pi*h^6)). The force formula `f += pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable(r)` produces correct repulsive forces for positive pressure.
+- **Sim/render decoupling pattern:** Each render frame computes `sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps)`, runs that many simulation steps, then renders ONCE. The `speed` parameter controls how many sim-seconds elapse per wall-second. `max_substeps` (default 20) prevents spiral-of-death when sim_dt is very small relative to wall_dt.
+- **Sorted vs unsorted array lifecycle:** Unsorted arrays (indexed by original particle ID) persist across frames. Sorted arrays (indexed by grid-sorted slot) are ephemeral within a single step. The reorder kernel gathers unsorted->sorted, and the integrate kernel scatters sorted->unsorted using `sort_indexes[sorted_slot] = original_id`.
 
 ---
 
@@ -102,4 +104,38 @@
   - Grid cell functions had to be renamed (`calcGridCell_step2`) to avoid symbol conflicts since each .cu file is compiled as a separate NVRTC module -- unlike C++ where they share translation units via #include
   - The `__ldg()` intrinsic for read-only cache loads works with `const*` pointers in the kernel signature. CuPy passes device pointers directly from `cupy.ndarray` objects
   - For 2-particle test setups, particles must be sorted by grid hash and placed into cell_start/cell_end arrays matching the sorted order, otherwise the kernel won't find neighbors
+---
+
+## 2026-02-06 - US-014
+- What was implemented:
+  - `physics/kernels/step1.cu` -- K_Step1 density summation kernel (Poly6): inline 27-cell neighbor iteration, self-interaction included, density clamped to >= 1.0
+  - `step1.py` -- Python module: CuPy RawModule compilation from external .cu file, constant memory upload (c_grid, c_fluid, c_precalc), `compute_step1()` kernel launch wrapper
+  - `physics/kernels/integrate.cu` -- K_Integrate kernel: leapfrog velocity/position update, wall boundary penalty forces (6 walls), velocity limit clamping, velocity-based HSV coloring, writeback to unsorted arrays via sort_indexes permutation, position clamping to grid bounds
+  - `integrate.py` -- Python module: IntegrateParams dtype and builder, CuPy RawModule compilation, constant memory upload (c_grid, c_integrate), `integrate()` kernel launch wrapper
+  - `physics/kernels/fused_reorder.cu` -- K_FusedReorder kernel: gathers position, velocity, veleval, behavior_class, flags from unsorted to sorted order using sort_indexes permutation
+  - `fused_reorder.py` -- Python module: CuPy RawModule compilation, `fused_reorder()` kernel launch wrapper
+  - `simulation.py` -- SPHSimulation orchestrator: full pipeline per step (hash -> argsort -> fused_reorder -> build -> step1 -> step2 -> integrate), sim/render decoupling with speed parameter, max_substeps=20, pause/reset controls, constant memory upload to all 6 kernel modules at init (including materials)
+  - `main.py` -- OpenGL renderer: GLFW window with perspective camera, CUDA-GL interop VBOs for position and color, keyboard controls (Space=pause, R=reset, +/-=speed, Esc=quit), FPS/substeps/speed display in title bar
+  - Updated `hash_sort.py`, `build_grid.py`, `step2.py` to include `--use_fast_math` in CuPy RawModule compilation options
+- Files changed:
+  - `physics/kernels/step1.cu` (new)
+  - `physics/kernels/integrate.cu` (new)
+  - `physics/kernels/fused_reorder.cu` (new)
+  - `step1.py` (new)
+  - `integrate.py` (new)
+  - `fused_reorder.py` (new)
+  - `simulation.py` (new)
+  - `main.py` (new)
+  - `hash_sort.py` (modified -- added --use_fast_math)
+  - `build_grid.py` (modified -- added --use_fast_math)
+  - `step2.py` (modified -- added --use_fast_math)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The C++ code uses scale_to_simulation to convert between world and sim space during reorder (pre-scaling positions for cheaper neighbor distance checks). The Python port eliminates this complexity by keeping everything in world space, since the grid params already define the correct cell sizes for neighbor iteration
+  - Step1 density summation INCLUDES self-interaction (particle i contributes to its own density with rlen_sq=0 -> (h^2)^3), unlike Step2 which skips self. This is because a particle should contribute to its own density
+  - The C++ code stores velocity in two arrays: vel (half-step leapfrog velocity) and veleval (full-step average for evaluation/display). Leapfrog: vnext = vel + force*dt, vel_eval = (vel+vnext)/2, pos += vnext*dt
+  - The integrate kernel writes back to UNSORTED arrays using sort_indexes[sorted_slot] = original_id. This scatter-write pattern means sorted arrays are ephemeral within a single step; unsorted arrays persist across frames
+  - The fused_reorder is a separate kernel from build_data_struct (unlike the C++ K_Grid_UpdateSorted which fuses both). This simplifies the code at the cost of one extra kernel launch per step
+  - Wall boundary forces use a spring-damper model: force = stiffness * penetration_depth - dampening * velocity_component. The boundary_distance parameter controls how far from the wall the force activates
+  - Each CuPy RawModule compilation creates its own __constant__ symbol space, so constant memory must be uploaded separately to each module (hash, build, step1, step2, integrate, materials = 6 modules total)
 ---

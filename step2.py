@@ -166,7 +166,7 @@ def _get_module() -> "object":
 
     _module = cupy.RawModule(
         code=source,
-        options=("--std=c++11", f"-I{kernel_dir}"),
+        options=("--std=c++11", "--use_fast_math", f"-I{kernel_dir}"),
     )
     return _module
 
