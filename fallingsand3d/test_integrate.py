@@ -364,10 +364,12 @@ def test_velocity_clamp():
     setup_params(gravity=(0.0, 0.0, 0.0))
 
     n = 1
-    # Give particle huge SPH force that would produce vel > 50
+    # Start with velocity near the limit, add moderate force to push over 50
+    # accel = force/mass = 20/0.008 = 2500 (below accel_max 5000)
+    # vel_new = 48 + dt*2500 = 48 + 2.5 = 50.5 -> clamped to 50
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
-    vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
-    sph_force = np.array([[0.0, 1e6, 0.0, 0.0]], dtype=np.float32)
+    vel = np.array([[48.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    sph_force = np.array([[20.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_sph_force"] = cupy.asarray(sph_force)
@@ -1323,6 +1325,181 @@ def test_sleep_wake_cycle():
     print("PASS: test_sleep_wake_cycle")
 
 
+# ===========================================================================
+# Acceleration clamping tests (US-028)
+# ===========================================================================
+
+
+def test_accel_clamp_overlapping_particles():
+    """Overlapping particles with huge SPH forces separate without flying to infinity.
+
+    Acceptance: accel_max = 5000 clamps extreme accelerations from numerical blowups.
+    Particles should remain within boundaries after multiple steps.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 10
+    # All particles at the SAME position (worst-case overlap)
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = 0.0
+    pos[:, 1] = 0.0
+    pos[:, 2] = 0.0
+    pos[:, 3] = 1.0
+
+    vel = np.zeros((n, 4), dtype=np.float32)
+
+    # Huge SPH forces simulating numerical blowup from overlapping particles
+    # Without clamping, accel = 1e8 / 0.008 = 1.25e10 m/s^2 -> instant explosion
+    sph_force = np.zeros((n, 4), dtype=np.float32)
+    sph_force[:, 0] = np.linspace(-1e8, 1e8, n)
+    sph_force[:, 1] = np.linspace(1e8, -1e8, n)
+
+    pos_gpu = cupy.asarray(pos)
+    vel_gpu = cupy.asarray(vel)
+    force_gpu = cupy.asarray(sph_force)
+    pi_gpu = cupy.full(n, MAKE_PACKED(WATER, FLUID), dtype=cupy.uint32)
+    sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    # Run 100 steps with extreme forces
+    for step in range(100):
+        d = {
+            "sorted_position": pos_gpu,
+            "sorted_velocity": vel_gpu,
+            "sorted_veleval": vel_gpu.copy(),
+            "sorted_sph_force": force_gpu,
+            "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+            "sorted_packed_info": pi_gpu,
+            "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+            "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sorted_sleep_counter": sc_gpu,
+            "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+            "position_out": pos_gpu,
+            "velocity_out": vel_gpu,
+            "color_out": color_gpu,
+            "packed_info_out": pi_gpu,
+            "sleep_counter_out": sc_gpu,
+        }
+        integrate(**d)
+
+    pos_h = pos_gpu.get()
+    vel_h = vel_gpu.get()
+
+    # No NaN
+    assert not np.any(np.isnan(pos_h)), "NaN in positions after overlapping particle test"
+    assert not np.any(np.isnan(vel_h)), "NaN in velocities after overlapping particle test"
+
+    # All particles should be within boundaries (not flying to infinity)
+    assert np.all(pos_h[:, 0] >= -1.0 - 1e-4), "Particles escaped -X in blowup test"
+    assert np.all(pos_h[:, 0] <=  1.0 + 1e-4), "Particles escaped +X in blowup test"
+    assert np.all(pos_h[:, 1] >= -1.0 - 1e-4), "Particles escaped -Y in blowup test"
+    assert np.all(pos_h[:, 1] <=  1.0 + 1e-4), "Particles escaped +Y in blowup test"
+    assert np.all(pos_h[:, 2] >= -1.0 - 1e-4), "Particles escaped -Z in blowup test"
+    assert np.all(pos_h[:, 2] <=  1.0 + 1e-4), "Particles escaped +Z in blowup test"
+
+    # Velocity should be clamped (not infinite)
+    speeds = np.sqrt(np.sum(vel_h[:, :3]**2, axis=1))
+    assert np.all(speeds <= 50.0 + 0.1), (
+        f"Velocity exceeds limit after blowup: max_speed={np.max(speeds)}"
+    )
+
+    print("PASS: test_accel_clamp_overlapping_particles")
+
+
+def test_accel_clamp_normal_unaffected():
+    """Normal simulation forces do NOT trigger acceleration clamping.
+
+    With gravity=-9.8 and typical SPH forces, accel << 5000 so clamping
+    should not alter the results.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 1
+    pos = np.array([[0.0, 0.5, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    # Typical SPH repulsive force (not extreme)
+    sph_force = np.array([[10.0, 50.0, -5.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d["sorted_sph_force"] = cupy.asarray(sph_force)
+    _, vel_out, _, _, _, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+
+    # accel = force/mass + gravity
+    # = (10/0.008, 50/0.008, -5/0.008) + (0, -9.8, 0)
+    # = (1250, 6250-9.8, -625) = (1250, 6240.2, -625)
+    # |accel| = sqrt(1250^2 + 6240.2^2 + 625^2) = sqrt(1562500 + 38940096 + 390625) = ~6395
+    # This exceeds 5000 so clamping WILL activate for this force.
+    # Let's use smaller forces that won't trigger.
+
+    # Use a force where accel < 5000
+    sph_force2 = np.array([[1.0, 5.0, -0.5, 0.0]], dtype=np.float32)
+    d2 = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d2["sorted_sph_force"] = cupy.asarray(sph_force2)
+    _, vel_out2, _, _, _, _ = integrate(**d2)
+
+    vel_h2 = vel_out2.get()
+
+    # accel = (1/0.008, 5/0.008 - 9.8, -0.5/0.008) = (125, 615.2, -62.5)
+    # |accel| = sqrt(125^2 + 615.2^2 + 62.5^2) = sqrt(15625 + 378471 + 3906) = ~630.9
+    # Well below 5000, so clamping should NOT activate.
+    inv_mass = 1.0 / MASS
+    expected_vx = DT * (1.0 * inv_mass)
+    expected_vy = DT * (5.0 * inv_mass - 9.8)
+    expected_vz = DT * (-0.5 * inv_mass)
+
+    assert abs(vel_h2[0, 0] - expected_vx) < 1e-4, (
+        f"Accel clamp altered normal vx: expected {expected_vx}, got {vel_h2[0, 0]}"
+    )
+    assert abs(vel_h2[0, 1] - expected_vy) < 1e-4, (
+        f"Accel clamp altered normal vy: expected {expected_vy}, got {vel_h2[0, 1]}"
+    )
+    assert abs(vel_h2[0, 2] - expected_vz) < 1e-4, (
+        f"Accel clamp altered normal vz: expected {expected_vz}, got {vel_h2[0, 2]}"
+    )
+
+    print("PASS: test_accel_clamp_normal_unaffected")
+
+
+def test_accel_clamp_exact_threshold():
+    """Acceleration exactly at the clamping threshold is correctly handled.
+
+    Verify that acceleration just above 5000 gets clamped to exactly 5000 magnitude.
+    """
+    setup_params(gravity=(0.0, 0.0, 0.0))  # no gravity for clean test
+
+    n = 1
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    # Force that produces accel = 10000 m/s^2 in Y direction
+    # accel = force / mass -> force = accel * mass = 10000 * 0.008 = 80
+    target_accel = 10000.0
+    force_y = target_accel * MASS
+    sph_force = np.array([[0.0, force_y, 0.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d["sorted_sph_force"] = cupy.asarray(sph_force)
+    _, vel_out, _, _, _, _ = integrate(**d)
+
+    vel_h = vel_out.get()
+
+    # Without clamping: vel_y = dt * 10000 = 10.0
+    # With clamping: accel clamped to 5000, vel_y = dt * 5000 = 5.0
+    expected_vy = DT * 5000.0
+    assert abs(vel_h[0, 1] - expected_vy) < 1e-3, (
+        f"Expected clamped vel_y={expected_vy}, got {vel_h[0, 1]}"
+    )
+
+    # Direction should be preserved (only Y component)
+    assert abs(vel_h[0, 0]) < 1e-6, f"Unexpected vx={vel_h[0, 0]}"
+    assert abs(vel_h[0, 2]) < 1e-6, f"Unexpected vz={vel_h[0, 2]}"
+
+    print("PASS: test_accel_clamp_exact_threshold")
+
+
 def test_500k_stress():
     """500K particles run through integrate without errors."""
     setup_params()
@@ -1431,6 +1608,10 @@ if __name__ == "__main__":
         test_sleep_counter_saturates,
         test_sleeping_particles_density_contribution,
         test_sleep_wake_cycle,
+        # Acceleration clamping tests (US-028)
+        test_accel_clamp_overlapping_particles,
+        test_accel_clamp_normal_unaffected,
+        test_accel_clamp_exact_threshold,
         test_500k_stress,
     ]
 

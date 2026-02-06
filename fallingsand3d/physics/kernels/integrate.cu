@@ -35,6 +35,8 @@
 #define GAS_DRAG_COEFF     2.0f
 #define VELOCITY_LIMIT     50.0f
 #define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
+#define ACCEL_MAX          5000.0f
+#define ACCEL_MAX_SQ       (ACCEL_MAX * ACCEL_MAX)
 
 /* Temperature integration constants */
 #define T_AMBIENT          293.0f
@@ -322,6 +324,15 @@ void K_Integrate(
     if (behavior == GAS) {
         float buoyancy = GAS_BUOYANCY_BETA * (temp - GAS_AMBIENT_TEMP) * GAS_BUOYANCY_G;
         accel.y += buoyancy;
+    }
+
+    // --- Acceleration clamp (safety net against numerical blowups) ---
+    float accel_sq = accel.x * accel.x + accel.y * accel.y + accel.z * accel.z;
+    if (accel_sq > ACCEL_MAX_SQ) {
+        float scale = ACCEL_MAX / sqrtf(accel_sq);
+        accel.x *= scale;
+        accel.y *= scale;
+        accel.z *= scale;
     }
 
     // --- Symplectic Euler: velocity update ---

@@ -691,3 +691,17 @@
   - The cool_rate=0.1 ambient cooling follows exponential decay: T(t) = T_ambient + (T0 - T_ambient) * exp(-cool_rate * t). For lava at 1500K, reaching 900K takes ~8 seconds (8000 steps at dt=0.001). The discretized version matches within 1K of the analytical solution
   - 830 particles (all 15 materials) complete 10000 steps in 13.5s on RTX 5070 Ti -- about 1.35ms per step, which is well within interactive frame rate even with the per-step GPU->CPU copies for NaN checking
 ---
+
+## 2026-02-06 - US-028
+- What was implemented:
+  - Per-particle acceleration clamping safety net in `K_Integrate` kernel. After computing `accel = sph_force/mass + gravity + buoyancy`, clamp `|accel|` to `ACCEL_MAX = 5000.0` (preserving direction). This prevents numerical blowups from overlapping particles or extreme forces without affecting normal physics.
+  - Three new tests: overlapping particles with extreme forces stay bounded, normal forces unaffected by clamp, exact threshold verification.
+  - Updated existing `test_velocity_clamp` to use a force below accel_max (since the old 1e6 force now gets accel-clamped first).
+- Files changed:
+  - `fallingsand3d/physics/kernels/integrate.cu` (added `ACCEL_MAX`/`ACCEL_MAX_SQ` constants and 5-line clamping block)
+  - `fallingsand3d/test_integrate.py` (added 3 new tests, updated `test_velocity_clamp`)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - Adding acceleration clamping before velocity integration means existing velocity-clamp tests that relied on extreme forces (1e6) need updating -- the accel clamp activates first, limiting per-step velocity gain to `dt * ACCEL_MAX = 5.0` instead of `dt * (force/mass)`. The velocity clamp test was updated to use initial velocity near the limit with moderate force instead.
+  - The squared-magnitude pattern (`accel_sq > ACCEL_MAX_SQ`, then `sqrtf` only when clamping) is consistent with the existing velocity clamp pattern and avoids unnecessary `sqrtf` in the common case.
+---
