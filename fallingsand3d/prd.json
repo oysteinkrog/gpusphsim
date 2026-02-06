@@ -134,8 +134,9 @@
         "All arrays are contiguous CuPy float32/uint32/uint8 arrays on GPU (no Python objects)"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "Default spacing=0.02 for h=0.04. V_particle = spacing^3 = 8e-6. Water mass = 1000 * 8e-6 = 0.008 kg. DEAD particles have packed_info=0. World bounds = (-1,-1,-1) to (1,1,1). max_particles configurable at startup to fit different GPU VRAM sizes. resize() is destructive (clears everything) — only called from UI settings, not during simulation."
+      "passes": true,
+      "notes": "Default spacing=0.02 for h=0.04. V_particle = spacing^3 = 8e-6. Water mass = 1000 * 8e-6 = 0.008 kg. DEAD particles have packed_info=0. World bounds = (-1,-1,-1) to (1,1,1). max_particles configurable at startup to fit different GPU VRAM sizes. resize() is destructive (clears everything) — only called from UI settings, not during simulation.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-008",
@@ -585,6 +586,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:11:59.755Z"
+    "updatedAt": "2026-02-06T15:17:22.140Z"
   }
 }
