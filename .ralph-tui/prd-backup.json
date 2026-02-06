@@ -72,9 +72,8 @@
         "glEnable(GL_PROGRAM_POINT_SIZE) is set"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "This completes Phase 0 (render pipeline). Position VBO = float4 (x,y,z,w=1). Color VBO = float4 (r,g,b,a). VAO binds both VBOs as vertex attributes. Draw with glDrawArrays(GL_POINTS, 0, num_active).",
-      "completionNotes": "Completed by agent"
+      "passes": false,
+      "notes": "This completes Phase 0 (render pipeline). Position VBO = float4 (x,y,z,w=1). Color VBO = float4 (r,g,b,a). VAO binds both VBOs as vertex attributes. Draw with glDrawArrays(GL_POINTS, 0, num_active)."
     },
     {
       "id": "US-005",
@@ -583,6 +582,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:03:41.063Z"
+    "updatedAt": "2026-02-06T14:58:50.863Z"
   }
 }
