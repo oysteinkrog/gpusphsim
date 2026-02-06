@@ -566,8 +566,9 @@
         "If clamping activates, it's silent (no error, just clamped)"
       ],
       "priority": 26,
-      "passes": false,
-      "notes": "Safety net only. If this activates frequently, it indicates a physics bug that should be fixed properly. accel_max = 5000 means max ~500g — way beyond normal SPH forces."
+      "passes": true,
+      "notes": "Safety net only. If this activates frequently, it indicates a physics bug that should be fixed properly. accel_max = 5000 means max ~500g — way beyond normal SPH forces.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-029",
@@ -606,6 +607,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T17:49:49.648Z"
+    "updatedAt": "2026-02-06T17:53:28.404Z"
   }
 }
