@@ -326,3 +326,19 @@
   - The `sort_by_hash()` function accepts optional pre-allocated output buffers (`sorted_hashes_out`, `sorted_indices_out`) to avoid per-frame allocations; when provided, it writes directly into the caller's buffers
   - Zero-particle edge cases are handled gracefully: `sort_by_hash` returns empty arrays, `fused_reorder` early-returns when `num_particles == 0`
 ---
+
+## 2026-02-06 - US-010 (fallingsand3d/)
+- What was implemented:
+  - `fallingsand3d/physics/kernels/build_grid.cu` -- K_BuildDataStruct kernel: detects cell boundaries in sorted hash array and writes cell_indexes_start/cell_indexes_end tables. Uses common.cuh's `__constant__ GridParams c_grid` (does NOT redeclare it like the root-level prototype)
+  - `fallingsand3d/build_grid.py` -- Python module: CuPy RawModule compilation from external .cu file with --use_fast_math, constant memory upload, array allocation, `build_data_struct()` kernel launch wrapper with automatic memset of cell_start to 0xFFFFFFFF
+  - `fallingsand3d/test_build_grid.py` -- Integration tests: compilation, allocation, block size, empty cell sentinel, known 8-particle/2-cell config, particle count sum consistency, boundary validation against sorted hashes, memset between frames, 500K stress test
+- Files changed:
+  - `fallingsand3d/physics/kernels/build_grid.cu` (new)
+  - `fallingsand3d/build_grid.py` (new)
+  - `fallingsand3d/test_build_grid.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The fallingsand3d common.cuh already declares `__constant__ GridParams c_grid`, so build_grid.cu must NOT redeclare it (unlike the root-level prototype which had its own `__constant__` declaration per .cu file). This is a key architectural difference -- all fallingsand3d kernels share the same constant memory symbol space through common.cuh
+  - The kernel is straightforward global-memory-only (no shared memory optimization) since modern GPUs' L1/L2 caches handle the `sorted_hashes[idx-1]` reads efficiently
+  - `cell_end` is zeroed (memset 0x00) for safety even though only written cells matter -- prevents stale data from previous frames if code ever reads cell_end without checking cell_start sentinel first
+---
