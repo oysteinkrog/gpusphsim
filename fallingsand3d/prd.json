@@ -603,11 +603,12 @@
         "Presets can be loaded at any time during simulation"
       ],
       "priority": 30,
-      "passes": false,
-      "notes": "Preset spawn functions go in world.py or a new presets.py. Acid Rain needs periodic spawning (spawn N acid particles per frame at top of world) — add a spawner system or just do it in the Python frame loop."
+      "passes": true,
+      "notes": "Preset spawn functions go in world.py or a new presets.py. Acid Rain needs periodic spawning (spawn N acid particles per frame at top of world) — add a spawner system or just do it in the Python frame loop.",
+      "completionNotes": "Completed by agent"
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T17:59:55.805Z"
+    "updatedAt": "2026-02-06T18:07:43.231Z"
   }
 }
