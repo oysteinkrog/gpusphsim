@@ -376,21 +376,13 @@ void K_Integrate(
     }
 
     // --- Position update ---
-    float3 pos_new;
-    if (behavior == FLUID) {
-        // FLUID: use XSPH-corrected velocity for position update
-        pos_new = make_float3(
-            pos.x + dt * (vel_new.x + veleval_xsph.x - vel.x),
-            pos.y + dt * (vel_new.y + veleval_xsph.y - vel.y),
-            pos.z + dt * (vel_new.z + veleval_xsph.z - vel.z)
-        );
-    } else {
-        pos_new = make_float3(
-            pos.x + dt * vel_new.x,
-            pos.y + dt * vel_new.y,
-            pos.z + dt * vel_new.z
-        );
-    }
+    // Use actual velocity (not XSPH-corrected), matching parent project convention.
+    // XSPH veleval is stored for evaluation purposes but not used for advection.
+    float3 pos_new = make_float3(
+        pos.x + dt * vel_new.x,
+        pos.y + dt * vel_new.y,
+        pos.z + dt * vel_new.z
+    );
 
     // --- Impulse-style SDF boundary ---
     sdf_box_boundary(

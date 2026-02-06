@@ -23,6 +23,12 @@ _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
 # Default particle spacing (h=0.04 -> spacing=h/2=0.02)
 DEFAULT_SPACING = 0.02
 
+# Global particle mass -- matches parent project convention.
+# Using mass = 0.02 (instead of rho0*dx^3 = 0.008) produces SPH densities
+# ~2.5x rest_density, which keeps the Tait EOS in a stable high-pressure
+# regime where k=3.0 and viscosity=3.5 are properly tuned.
+PARTICLE_MASS = 0.02
+
 # Default temperatures for hot materials (Kelvin)
 _DEFAULT_TEMPS = {
     7: 1500.0,   # LAVA
@@ -245,9 +251,7 @@ class World:
         self.veleval[sl] = 0.0
         self.sph_force[sl] = 0.0
 
-        # mass = rho0 * spacing^3
-        particle_mass = mat.rest_density * (DEFAULT_SPACING ** 3)
-        self.mass[sl] = particle_mass
+        self.mass[sl] = PARTICLE_MASS
 
         packed = _MAKE_PACKED(material_id, mat.behavior_class)
         self.packed_info[sl] = cp.uint32(packed)
@@ -327,8 +331,7 @@ class World:
         self.veleval[sl] = 0.0
         self.sph_force[sl] = 0.0
 
-        particle_mass = mat.rest_density * (spacing ** 3)
-        self.mass[sl] = particle_mass
+        self.mass[sl] = PARTICLE_MASS
 
         packed = _MAKE_PACKED(material_id, mat.behavior_class)
         self.packed_info[sl] = cp.uint32(packed)

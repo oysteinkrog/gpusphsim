@@ -131,26 +131,20 @@ class Simulation:
     def _compute_viscosity_bounds(self) -> tuple:
         """Compute max viscosity and min density for viscous CFL.
 
-        For GRANULAR materials, uses mu_max (10000) as worst-case eta.
-        For FLUID/GAS, uses base_viscosity from the material table.
+        Uses base_viscosity from the material table (not mu_max, which is
+        a theoretical clamp rarely reached and would cripple the timestep).
         rho_min excludes GAS materials (they use low constant viscosity,
         not mu(I), so their low density doesn't tighten the viscous CFL).
         """
         max_eta = 0.0
         rho_min = 1e30
-        has_granular = False
         for mat in MATERIALS.values():
             if mat.behavior_class == STATIC or mat.rest_density <= 0.0:
                 continue
-            # rho_min for viscous CFL: exclude GAS (never runs mu(I))
             if mat.behavior_class != GAS and mat.rest_density < rho_min:
                 rho_min = mat.rest_density
-            if mat.behavior_class == GRANULAR:
-                has_granular = True
             if mat.base_viscosity > max_eta:
                 max_eta = mat.base_viscosity
-        if has_granular:
-            max_eta = max(max_eta, float(step2.DEFAULT_MU_MAX))
         rho_min = max(rho_min, 0.1)  # floor
         return max_eta, rho_min
 
@@ -201,7 +195,7 @@ class Simulation:
         grid_params = hash_sort.build_grid_params()
         sim_params = step1.build_sim_params(
             smoothing_length=self._h,
-            particle_mass=0.008,
+            particle_mass=0.02,
             particle_spacing=0.02,
             gravity=(0.0, -9.8, 0.0),
             dt=self.dt,

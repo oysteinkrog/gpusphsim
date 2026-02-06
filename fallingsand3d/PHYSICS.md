@@ -323,17 +323,19 @@ f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
 | Parameter | fallingsand3d | Parent | Notes |
 |-----------|--------------|--------|-------|
 | h (smoothing length) | 0.04 | 0.04 | Same |
-| m (particle mass) | 0.008 | 0.02 | fs3d: m=rho0*dx^3 (correct), parent: tuned |
+| m (particle mass) | 0.02 | 0.02 | Matched to parent (was 0.008 = rho0*dx^3) |
 | dx (particle spacing) | 0.02 | ~0.02 | Same |
-| rho_0 (rest density) | 1000 | 1000 | Same |
-| k (EOS stiffness) | 3.0 | 3.0 | Same value but 20x different effective |
+| rho_0 (rest density) | 1000 | 1000 | Same; SPH density ≈ 2500 at rest (see §7) |
+| k (EOS stiffness) | 3.0 | 3.0 | Same |
 | gamma (EOS exponent) | 7 | 7 | Same |
-| mu_0 (viscosity) | 3.5 | 3.5 | Same value but 20x different effective |
-| epsilon (XSPH) | 0.5 | 0.5 | Same |
+| mu_0 (viscosity) | 3.5 | 3.5 | Same |
+| epsilon (XSPH) | 0.5 | 0.5 | Same (computed but not used in position update) |
 | gravity | -9.8 | -9.8 | Same |
-| dt | 0.001 | 0.001 | Same |
-| step2 output | acceleration | m * acceleration | **20x difference** |
-| integrate | accel = sph + g | v += (sph + g) * dt | parent: dimensionally inconsistent |
+| dt | adaptive | 0.001 (fixed) | CFL: min(advection, acoustic, viscous) ∈ [1e-5, 0.005] |
+| force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention |
+| step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
+| integrate | accel = sph + g | accel = sph + g | Both treat step2 output as acceleration |
+| position update | pos += vel_new * dt | pos += vel_new * dt | Same (no XSPH in position) |
 | boundaries | impulse SDF | penalty springs | Fundamentally different |
 | velocity_limit | 50 | 200 | Different |
 | accel_max | 5000 | N/A | Only in fallingsand3d |
@@ -358,48 +360,38 @@ The `m_j` inside the sum is part of the standard SPH formula. With uniform mass:
 a_i = m * pressure_precalc * SUM_j [ (p_i/rho_i^2 + p_j/rho_j^2) * grad_var ]
 ```
 
-### 7.2 fallingsand3d chain
+### 7.2 Convention matching (RESOLVED)
+
+Both projects now use equivalent force pipelines:
 
 ```
-step2 output = a_i = m * precalc * SUM(...)
-integrate:     accel_total = a_i + gravity
-               v += accel_total * dt
+step2 inner:     f_pressure += m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_W
+                 f_viscosity += m_j * (v_j - v_i) / rho_j * lap_W
+step2 output:    sph_force = (pp * f_pressure + vp * f_viscosity) * force_scale
+integrate:       accel = sph_force + gravity
+                 v += accel * dt
+                 pos += v * dt
 ```
 
-SPH acceleration scales with m = 0.008.
-
-### 7.3 Parent chain
-
+With m_j = 0.02 (matching parent) and force_scale = 0.02 (matching parent's `output * m_j`):
 ```
-step2 output = m * a_i = m^2 * precalc * SUM(...)
-integrate:     "force" = m*a_i + gravity
-               v += "force" * dt
+Effective SPH scaling = m_j * force_scale = 0.02 * 0.02 = 0.0004
+Parent SPH scaling    = m_j * m_j         = 0.02 * 0.02 = 0.0004  (identical)
 ```
 
-SPH contribution to velocity change scales with m^2 = 0.0004.
-Gravity contribution: gravity * dt (no mass factor).
+### 7.3 Why mass = 0.02 (not rho0 * dx^3 = 0.008)
 
-### 7.4 Effective ratio
+With m = rho0 * dx^3 = 0.008, the SPH density at rest ≈ 1000 (physical).
+With m = 0.02, the SPH density at rest ≈ 2500 (inflated, ~2.5x rho0).
 
-```
-fallingsand3d SPH / parent SPH = m / m^2 = 1/m_parent = 1/0.02 = 50x
+The Tait EOS pressure depends on rho/rho0:
+- m=0.008: rho/rho0 ≈ 1.0 → p ≈ 0 (near zero pressure at rest)
+- m=0.02:  rho/rho0 ≈ 2.5 → p = k * (2.5^7 - 1) = 3 * 609 = 1828
 
-Wait -- different masses:
-fallingsand3d:  m_child = 0.008,  SPH ~ m_child * precalc = 0.008 * precalc
-Parent:         m_parent = 0.02,  SPH ~ m_parent^2 * precalc = 0.0004 * precalc
-
-Ratio = 0.008 / 0.0004 = 20x
-```
-
-To match the parent's effective SPH-to-gravity balance:
-```
-k_effective_match = k_parent * (m_parent^2 / m_child)
-                  = 3.0 * (0.0004 / 0.008)
-                  = 3.0 * 0.05
-                  = 0.15
-
-viscosity_match   = 3.5 * 0.05 = 0.175
-```
+The inflated density keeps the EOS in a stable high-pressure regime where
+small density changes produce large pressure gradients (strong restoring force).
+With the "correct" mass (0.008), k would need to be ~128,000 to achieve the
+same stiffness, requiring a much smaller timestep for stability.
 
 ---
 
@@ -449,17 +441,30 @@ STATIC particles still conduct heat (but don't move).
 Step2 outputs acceleration. Previous code divided by mass again (125x amplification).
 **Fixed**: removed `inv_mass` multiplication.
 
-### 10.2 FIXED: 20x SPH-to-gravity ratio vs parent
-Due to parent's extra mass multiplication at step2 output, the parent's SPH forces
-are effectively 20x weaker relative to gravity. **Fixed**: added `force_scale = 0.05`
-constant in GranularParams, applied as a multiplier to step2 output. This matches
-the parent's effective SPH-to-gravity ratio:
-```
-force_scale = parent_m^2 / child_m = 0.02^2 / 0.008 = 0.05
-```
-**Source**: `step2.cu:48,393`, `step2.py:49,101`
+### 10.2 FIXED: SPH force scaling and particle mass
+The parent multiplies step2 output by `m_j = 0.02` and uses mass=0.02 for density.
+**Fixed** in two parts:
+1. Particle mass changed from 0.008 (rho0*dx^3) to 0.02 (matching parent).
+   This puts the Tait EOS in the same inflated-density regime (rho≈2500, p≈1828).
+2. Added `force_scale = 0.02` in GranularParams, applied at step2 output.
+   This matches the parent's `output * m_j` convention.
+**Source**: `world.py:27`, `step2.cu:48,393`, `step2.py:49,101`
 
-### 10.3 OPEN: Boundary handling differences
+### 10.3 FIXED: XSPH used in position update (parent does not)
+The child was using XSPH-corrected velocity for FLUID position advection
+(`pos += dt * (vel_new + eps*xsph)`), causing water to behave as a sticky blob.
+The parent uses `pos += vel_new * dt` (no XSPH in position).
+**Fixed**: removed XSPH from position update; all particles use `pos += vel_new * dt`.
+**Source**: `integrate.cu:378-385`
+
+### 10.4 FIXED: Viscous CFL using mu_max from inactive materials
+The adaptive timestep computed viscous CFL from ALL materials in the table,
+including GRANULAR mu_max=10000, even when no GRANULAR particles existed.
+This gave dt ≈ 6.4e-4 instead of dt ≈ 0.005 (DT_MAX), an 8x penalty.
+**Fixed**: viscous CFL now uses base_viscosity only, not mu_max.
+**Source**: `simulation.py:131-155`
+
+### 10.5 OPEN: Boundary handling differences
 Parent uses penalty-force walls (smooth, damped).
 fallingsand3d uses impulse SDF (sharp reflection + friction).
 May cause different settling behavior.

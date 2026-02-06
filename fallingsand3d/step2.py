@@ -46,7 +46,7 @@ DEFAULT_MU_MAX = np.float32(10000.0)
 DEFAULT_PARTICLE_SPACING = np.float32(0.02)
 DEFAULT_MU0 = np.float32(3.5)
 DEFAULT_XSPH_EPSILON = np.float32(0.5)
-DEFAULT_FORCE_SCALE = np.float32(0.05)
+DEFAULT_FORCE_SCALE = np.float32(0.02)
 
 # ---------------------------------------------------------------------------
 # Numpy dtype matching GranularParams struct in step2.cu
