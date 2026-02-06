@@ -635,3 +635,25 @@
   - Gas buoyancy test with 100 fire particles at T=1200K: only 55% rose upward (not 80%+) because SPH repulsion pushes some particles sideways or downward. A 50% threshold is sufficient for the buoyancy check since the key assertion is that the mean rise is positive and significant.
   - The full-pipeline harness (`run_full_pipeline_step`) requires all constant memory to be uploaded to all 4 kernel modules (step1, step2, integrate, reactions) before running. Each module has its own `__constant__` symbol space, so `setup_all_modules()` must call upload functions on each module separately.
 ---
+
+## 2026-02-06 - US-025
+- What was implemented:
+  - Adaptive timestep with CFL condition in `simulation.py`: three CFL constraints (advection, acoustic, viscous) computed per render frame, dt updated in constant memory across all kernel modules
+  - Three user-facing controls: `speed` (0.1-10.0, default 1.0), `accuracy` (0.1-1.0, default 0.4 = CFL number), `fixed_dt` toggle (default OFF, value 0.001 when ON)
+  - `_compute_adaptive_dt()`: max velocity via CuPy reduction (`cp.sqrt(cp.max(vel_sq))`), dt_advection/dt_acoustic/dt_viscous, clamped to [1e-5, 0.005]
+  - `_compute_c_sound()`: max over active materials of sqrt(k * gamma / rho0) — precomputed at init
+  - `_compute_viscosity_bounds()`: max_eta from mu_max=10000 (GRANULAR) or base_viscosity, rho_min from non-GAS/non-STATIC materials
+  - `_upload_dt()`: re-uploads c_sim with new dt to 5 modules (step1, step2, integrate, reactions, spawn)
+  - `adjust_accuracy()` and `toggle_fixed_dt()` control methods
+  - `main.py`: keyboard controls `[`/`]` for accuracy, `F` for fixed_dt toggle; window title shows dt and accuracy
+- Files changed:
+  - `fallingsand3d/simulation.py` (modified -- adaptive timestep, CFL constraints, accuracy/fixed_dt controls, _upload_dt)
+  - `fallingsand3d/main.py` (modified -- accuracy/fixed_dt keyboard controls, dt display in title)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - No CUDA kernel changes needed for adaptive dt: all kernels read `c_sim.dt` from constant memory, so updating the SimParams struct and re-uploading to each module's `__constant__` space is sufficient. The `_upload_dt()` method touches 5 modules (step1, step2, integrate, reactions, spawn).
+  - The viscous CFL with mu_max=10000 (GRANULAR mu(I) worst-case) dominates when granular particles are defined in the materials table: dt_visc ~ 0.05ms at accuracy=0.4 with rho_min=800 (OIL). This makes the simulation run ~20x slower than the original fixed dt=0.001s. This is correct behavior — mu(I) rheology requires small timesteps for stability.
+  - rho_min for viscous CFL should exclude GAS materials (rest_density 0.2-0.6) because GAS never uses mu(I) rheology. Including gas densities would make dt_visc 1000x tighter than necessary (0.2 vs 800 for rho_min). The acoustic speed c_sound is dominated by fire/steam (sqrt(4/0.2) = 4.47 m/s) due to their low rest_density and non-zero stiffness.
+  - Adaptive dt is computed once per render frame (before the substep loop), not once per substep. This avoids the overhead of CuPy reductions inside the tight substep loop while still adapting between frames based on the latest velocity field.
+  - The `accuracy` parameter IS the CFL number — accuracy=0.4 means CFL=0.4 (standard). accuracy=0.2 halves dt for stability, accuracy=0.8 doubles it for speed. The acoustic CFL uses a fixed 0.25 coefficient (not scaled by accuracy) because the acoustic speed is a material property, not a numerical parameter.
+---

@@ -106,8 +106,8 @@ def main():
     renderer = Renderer(MAX_PARTICLES, point_scale=20.0)
     renderer.num_active = num_active
 
-    # Create simulation orchestrator
-    sim = Simulation(world, dt=0.001, speed=1.0, max_substeps=20)
+    # Create simulation orchestrator (adaptive timestep, accuracy=0.4 CFL)
+    sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
     print("Simulation initialized -- kernels compiled and constants uploaded")
 
     # Copy initial state to VBOs
@@ -141,6 +141,12 @@ def main():
             sim.adjust_speed(0.2)
         elif key == glfw.KEY_MINUS or key == glfw.KEY_KP_SUBTRACT:
             sim.adjust_speed(-0.2)
+        elif key == glfw.KEY_LEFT_BRACKET:
+            sim.adjust_accuracy(-0.1)
+        elif key == glfw.KEY_RIGHT_BRACKET:
+            sim.adjust_accuracy(0.1)
+        elif key == glfw.KEY_F:
+            sim.toggle_fixed_dt()
 
     def mouse_button_callback(_win, button, action, _mods):
         nonlocal right_pressed, middle_pressed, last_mx, last_my
@@ -214,11 +220,15 @@ def main():
             frame_count = 0
             fps_time = now
             pause_str = " [PAUSED]" if sim.paused else ""
+            dt_str = f"dt:{sim.dt*1000:.2f}ms"
+            if sim.fixed_dt:
+                dt_str += " [FIXED]"
             glfw.set_window_title(
                 window,
                 f"{WINDOW_TITLE} | {world._high_water // 1000}K | "
                 f"FPS: {fps:.0f} | steps: {substeps} | "
-                f"speed: {sim.speed:.1f}x{pause_str}",
+                f"speed: {sim.speed:.1f}x | acc: {sim.accuracy:.1f} | "
+                f"{dt_str}{pause_str}",
             )
 
         # Check GL errors
