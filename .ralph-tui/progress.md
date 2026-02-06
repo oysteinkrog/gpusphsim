@@ -396,3 +396,19 @@
   - The integrate kernel only needs c_sim and c_materials in constant memory (no c_grid, c_precalc, or c_granular), making it the simplest kernel to set up for standalone testing.
   - GAS buoyancy and drag are applied in the integrate kernel (not Step2) because they're integration-level effects, not SPH neighbor-dependent forces. This keeps Step2 focused on neighbor-based force computation.
 ---
+
+## 2026-02-06 - US-014 (fallingsand3d/ orchestrator)
+- What was implemented:
+  - `fallingsand3d/simulation.py` -- SPH simulation orchestrator: full pipeline per step (hash -> argsort -> fused_reorder -> build -> step1 -> step2 -> integrate), sim/render decoupling with speed parameter, max_substeps=20, pause/toggle_pause, adjust_speed (+/- with clamp [0.1, 10.0]), constant memory upload to all 6 kernel modules at init (grid, sim, precalc, materials, granular), pre-allocated cell tables
+  - `fallingsand3d/main.py` -- Updated: integrates Simulation orchestrator, spawns initial scene (8K water cube at y=0.3-0.7 + 8K sand bed at y=-0.5 to -0.3), CUDA-GL interop VBO copy once per frame, keyboard controls (Space=pause, R=reset, +/-=speed, Esc=quit), FPS/substeps/speed display in title bar
+- Files changed:
+  - `fallingsand3d/simulation.py` (new -- orchestrator)
+  - `fallingsand3d/main.py` (rewritten -- simulation integration)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The simulation orchestrator touches 6 separate CuPy RawModule compilations, each with its own `__constant__` symbol space. Constant memory must be uploaded separately to each module: hash_sort (c_grid), build_grid (c_grid), step1 (c_grid, c_sim, c_precalc), step2 (c_grid, c_sim, c_precalc, c_materials, c_granular), integrate (c_sim, c_materials), materials (c_materials, c_interactions)
+  - The sim/render decoupling pattern uses wall clock delta for substep calculation: `sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps)`. At speed=1.0, dt=0.001, 60fps: ~16 substeps/frame. First frame returns 0 substeps (no valid wall_dt yet)
+  - The fused_reorder gathers veleval from unsorted to sorted, but Step2 overwrites sorted_veleval entirely each step (XSPH correction). So veleval doesn't need to persist across steps -- it's ephemeral within a single step
+  - VBO copy uses CuPy slice assignment (`pos_arr[:n] = world.position[:n]`) which is a device-to-device memcpy (both sides are CuPy arrays on the same GPU). No host round-trip needed
+  - For the initial scene, sand particles use spacing=0.04 (larger than water's 0.02) to get a coarser bed that still looks reasonable and keeps particle count manageable
+---

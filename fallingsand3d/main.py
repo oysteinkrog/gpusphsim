@@ -14,7 +14,7 @@ from renderer import Renderer
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 WINDOW_TITLE = "Falling Sand 3D"
-NUM_PARTICLES = 500_000
+MAX_PARTICLES = 30_000  # budget for initial scene (~20K used)
 
 
 def _apply_ptx_workaround():
@@ -32,31 +32,31 @@ def _apply_ptx_workaround():
         pass
 
 
-def _fill_particles_dummy(renderer: Renderer):
-    """Fill VBOs with 500K particles in a cube with random colors via CuPy."""
-    import cupy
+def _spawn_initial_scene(world):
+    """Spawn the initial scene: water cube + sand bed."""
+    from materials import WATER, SAND
 
-    _apply_ptx_workaround()
+    # 10K water particles in cube at (0, 0.5, 0) size 0.4
+    n_water = world.spawn_cube(
+        min_corner=(-0.2, 0.3, -0.2),
+        max_corner=(0.2, 0.7, 0.2),
+        material_id=WATER,
+        spacing=0.02,
+    )
+    print(f"  Water: {n_water:,} particles")
 
-    n = renderer.num_particles
+    # 10K sand particles in flat bed y=-0.5 to y=-0.3, x/z spanning -0.8 to 0.8
+    n_sand = world.spawn_cube(
+        min_corner=(-0.8, -0.5, -0.8),
+        max_corner=(0.8, -0.3, 0.8),
+        material_id=SAND,
+        spacing=0.04,
+    )
+    print(f"  Sand:  {n_sand:,} particles")
 
-    # Fill position VBO: random positions in [-0.5, 0.5]^3 cube
-    with renderer.cuda_pos as buf:
-        pos_arr = buf.device_pointer_as_cupy_array((n, 4), np.float32)
-        pos_arr[:, 0] = cupy.random.uniform(-0.5, 0.5, n, dtype=cupy.float32)
-        pos_arr[:, 1] = cupy.random.uniform(-0.5, 0.5, n, dtype=cupy.float32)
-        pos_arr[:, 2] = cupy.random.uniform(-0.5, 0.5, n, dtype=cupy.float32)
-        pos_arr[:, 3] = 1.0
-        cupy.cuda.Device().synchronize()
-
-    # Fill color VBO: random bright colors
-    with renderer.cuda_col as buf:
-        col_arr = buf.device_pointer_as_cupy_array((n, 4), np.float32)
-        col_arr[:, 0] = cupy.random.uniform(0.2, 1.0, n, dtype=cupy.float32)
-        col_arr[:, 1] = cupy.random.uniform(0.2, 1.0, n, dtype=cupy.float32)
-        col_arr[:, 2] = cupy.random.uniform(0.2, 1.0, n, dtype=cupy.float32)
-        col_arr[:, 3] = 1.0
-        cupy.cuda.Device().synchronize()
+    total = n_water + n_sand
+    print(f"  Total: {total:,} particles")
+    return total
 
 
 def main():
@@ -91,10 +91,30 @@ def main():
     camera = OrbitCamera(distance=2.0, elevation=20.0)
     camera.set_aspect(WINDOW_WIDTH, WINDOW_HEIGHT)
 
-    # Create renderer and fill with dummy particles
-    renderer = Renderer(NUM_PARTICLES, point_scale=20.0)
-    _fill_particles_dummy(renderer)
-    print(f"Initialized {NUM_PARTICLES:,} particles")
+    # Apply PTX workaround before any CuPy compilation
+    _apply_ptx_workaround()
+
+    # Create world and spawn initial scene
+    from world import World
+    from simulation import Simulation
+
+    world = World(max_particles=MAX_PARTICLES)
+    print("Spawning initial scene...")
+    num_active = _spawn_initial_scene(world)
+
+    # Create renderer sized to max_particles
+    renderer = Renderer(MAX_PARTICLES, point_scale=20.0)
+    renderer.num_active = num_active
+
+    # Create simulation orchestrator
+    sim = Simulation(world, dt=0.001, speed=1.0, max_substeps=20)
+    print("Simulation initialized -- kernels compiled and constants uploaded")
+
+    # Copy initial state to VBOs
+    with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
+        sim.copy_to_vbos(pos_buf, col_buf)
+    import cupy
+    cupy.cuda.Device().synchronize()
 
     # Input state
     right_pressed = False
@@ -102,8 +122,25 @@ def main():
     last_mx, last_my = 0.0, 0.0
 
     def key_callback(_win, key, _scancode, action, _mods):
-        if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
+        nonlocal num_active
+        if action != glfw.PRESS:
+            return
+        if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(_win, True)
+        elif key == glfw.KEY_SPACE:
+            sim.toggle_pause()
+        elif key == glfw.KEY_R:
+            # Reset to initial configuration
+            world.packed_info[:] = 0
+            world._high_water = 0
+            num_active = _spawn_initial_scene(world)
+            renderer.num_active = num_active
+            sim.sim_time = 0.0
+            sim._last_frame_time = None
+        elif key == glfw.KEY_EQUAL or key == glfw.KEY_KP_ADD:
+            sim.adjust_speed(0.2)
+        elif key == glfw.KEY_MINUS or key == glfw.KEY_KP_SUBTRACT:
+            sim.adjust_speed(-0.2)
 
     def mouse_button_callback(_win, button, action, _mods):
         nonlocal right_pressed, middle_pressed, last_mx, last_my
@@ -149,6 +186,17 @@ def main():
     while not glfw.window_should_close(window):
         glfw.poll_events()
 
+        # --- Simulation substeps ---
+        substeps = sim.step_frame()
+
+        # --- Copy to VBOs (once per frame) ---
+        with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
+            sim.copy_to_vbos(pos_buf, col_buf)
+
+        # Update active count for renderer
+        renderer.num_active = world._high_water
+
+        # --- Render ---
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         view = camera.view_matrix()
@@ -165,9 +213,12 @@ def main():
             fps = frame_count / elapsed
             frame_count = 0
             fps_time = now
+            pause_str = " [PAUSED]" if sim.paused else ""
             glfw.set_window_title(
                 window,
-                f"{WINDOW_TITLE} | {NUM_PARTICLES // 1000}K particles | FPS: {fps:.0f}",
+                f"{WINDOW_TITLE} | {world._high_water // 1000}K | "
+                f"FPS: {fps:.0f} | steps: {substeps} | "
+                f"speed: {sim.speed:.1f}x{pause_str}",
             )
 
         # Check GL errors
