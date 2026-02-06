@@ -726,3 +726,25 @@
   - Compaction must zero out the dead tail (`packed_info[num_alive:n] = 0`) after moving alive particles to prevent stale data from confusing future `num_active` counts or other code that might scan the full array.
   - The compaction threshold (100 dead particles) prevents wasting GPU time on compaction when there are only a few dead particles scattered in the array. The interval (60 frames) amortizes the cost across frames.
 ---
+
+## 2026-02-06 - US-030
+- What was implemented:
+  - `fallingsand3d/presets.py` (new) -- 4 preset scene functions with a PRESETS registry dict
+    - Sand Castle: ~115K sand (3 stacked cubes narrowing upward) + ~33K water (4 slabs around base)
+    - Volcano: ~20K stone crater walls (4 walls forming ring) + ~55K lava pool + ~1.5K fire above
+    - Dam Break: ~14K ice wall + ~122K water behind it + ~4K lava heat source on opposite side
+    - Acid Rain: ~7.5K metal pillars (5 STATIC pillars) + ~3.2K stone floor + ~2.7K initial acid + periodic spawner config
+  - `fallingsand3d/ui.py` (modified) -- Added "Scenes" panel with 4 preset buttons (2x2 layout), `_pending_preset` state, `pending_preset` property for consumption by main loop
+  - `fallingsand3d/main.py` (modified) -- Preset loading integration, periodic spawner system for Acid Rain, spawner state cleared on Reset (R key) and max_particles change. Increased MAX_PARTICLES from 30K to 500K to support preset scenes.
+- Files changed:
+  - `fallingsand3d/presets.py` (new)
+  - `fallingsand3d/ui.py` (modified)
+  - `fallingsand3d/main.py` (modified)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - Preset loading follows the same pattern as Reset (R key): clear packed_info, reset _high_water, spawn new particles, update renderer.num_active, reset sim.sim_time and sim._last_frame_time. The key addition is returning an optional spawner config dict for presets that need periodic spawning.
+  - The periodic spawner pattern is lightweight: a dict with min_corner/max_corner/spacing/material_id/interval_frames, checked each frame in the main loop. The spawner calls world.spawn_cube() every N frames. This avoids needing a separate spawner system or kernel.
+  - ImGui panel with `pending_preset` as a consume-once property (returns and clears) is clean integration -- the main loop polls it after ui.draw() and the preset gets loaded in the same frame. No need for callback plumbing.
+  - Particle count tuning requires computing spawn_cube output counts: `len(arange(x0+spacing*0.5, x1, spacing))` per axis, multiplied together. Small spacing changes (0.025 vs 0.02) cause large count changes since it's cubic.
+  - MAX_PARTICLES needed to increase from 30K to 500K to accommodate the largest preset (Dam Break at ~140K). The world pre-allocates all SoA arrays at this size.
+---

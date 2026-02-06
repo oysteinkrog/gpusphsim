@@ -14,7 +14,7 @@ from renderer import Renderer
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 WINDOW_TITLE = "Falling Sand 3D"
-MAX_PARTICLES = 30_000  # budget for initial scene (~20K used)
+MAX_PARTICLES = 500_000  # budget for preset scenes (up to ~200K used)
 
 
 def _apply_ptx_workaround():
@@ -126,7 +126,7 @@ def main():
     last_mx, last_my = 0.0, 0.0
 
     def key_callback(_win, key, _scancode, action, _mods):
-        nonlocal num_active
+        nonlocal num_active, active_spawner, spawner_frame_counter
         # Let UI handle material shortcuts first
         if ui.handle_key_shortcuts(key, action, sim):
             return
@@ -144,6 +144,8 @@ def main():
             renderer.num_active = num_active
             sim.sim_time = 0.0
             sim._last_frame_time = None
+            active_spawner = None
+            spawner_frame_counter = 0
         elif key == glfw.KEY_EQUAL or key == glfw.KEY_KP_ADD:
             sim.adjust_speed(0.2)
         elif key == glfw.KEY_MINUS or key == glfw.KEY_KP_SUBTRACT:
@@ -199,6 +201,10 @@ def main():
     fps_time = time.perf_counter()
     fps = 0.0
 
+    # Periodic spawner state (used by Acid Rain preset)
+    active_spawner = None
+    spawner_frame_counter = 0
+
     while not glfw.window_should_close(window):
         glfw.poll_events()
 
@@ -209,6 +215,19 @@ def main():
         brush_delta = ui.process_brush_actions(world, camera)
         if brush_delta != 0:
             renderer.num_active = world._high_water
+
+        # --- Periodic spawner (Acid Rain) ---
+        if active_spawner is not None:
+            spawner_frame_counter += 1
+            if spawner_frame_counter >= active_spawner["interval_frames"]:
+                spawner_frame_counter = 0
+                world.spawn_cube(
+                    min_corner=tuple(active_spawner["min_corner"]),
+                    max_corner=tuple(active_spawner["max_corner"]),
+                    material_id=active_spawner["material_id"],
+                    spacing=active_spawner["spacing"],
+                )
+                renderer.num_active = world._high_water
 
         # --- Simulation substeps ---
         substeps = sim.step_frame()
@@ -230,6 +249,21 @@ def main():
         # --- Draw ImGui UI ---
         new_max = ui.draw(sim, world, fps)
 
+        # --- Handle preset loading ---
+        preset_name = ui.pending_preset
+        if preset_name is not None:
+            from presets import PRESETS
+            load_fn = PRESETS[preset_name]
+            print(f"Loading preset: {preset_name}")
+            n_spawned, spawner_cfg = load_fn(world)
+            active_spawner = spawner_cfg
+            spawner_frame_counter = 0
+            renderer.num_active = world._high_water
+            sim.sim_time = 0.0
+            sim._last_frame_time = None
+            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
+                sim.copy_to_vbos(pos_buf, col_buf)
+
         # Handle max_particles change
         if new_max is not None:
             world.resize(new_max)
@@ -239,6 +273,8 @@ def main():
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
+            active_spawner = None
+            spawner_frame_counter = 0
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
                 sim.copy_to_vbos(pos_buf, col_buf)
 

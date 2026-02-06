@@ -26,6 +26,7 @@ from materials import (
     MATERIALS, DEAD, STONE, SAND, DIRT, GRAVEL, WATER, OIL, LAVA, ACID,
     WOOD, METAL, ICE, STEAM, SMOKE, FIRE, GUNPOWDER,
 )
+from presets import PRESETS
 
 # Material IDs for the picker (exclude DEAD=0)
 _PICKER_MATERIALS = [
@@ -140,6 +141,9 @@ class UI:
         self._pending_spawn: Optional[Tuple[float, float]] = None
         self._pending_kill: Optional[Tuple[float, float]] = None
 
+        # Preset loading state (set by Scenes panel, consumed by main loop)
+        self._pending_preset: Optional[str] = None
+
         # Cached viewport size
         w, h = glfw.get_framebuffer_size(window)
         self._viewport_w = w
@@ -228,6 +232,13 @@ class UI:
     @property
     def brush_radius(self) -> float:
         return self._brush_radius
+
+    @property
+    def pending_preset(self) -> Optional[str]:
+        """Return and clear the pending preset name, if any."""
+        name = self._pending_preset
+        self._pending_preset = None
+        return name
 
     @property
     def want_capture_mouse(self) -> bool:
@@ -360,8 +371,21 @@ class UI:
 
         imgui.end()
 
+        # --- Scenes Panel ---
+        imgui.set_next_window_pos(imgui.ImVec2(10, 340), imgui.Cond_.first_use_ever)
+        imgui.set_next_window_size(imgui.ImVec2(220, 0), imgui.Cond_.first_use_ever)
+
+        if imgui.begin("Scenes", None, imgui.WindowFlags_.always_auto_resize)[0]:
+            btn_size = imgui.ImVec2(100, 28)
+            for i, name in enumerate(PRESETS):
+                if imgui.button(f"{name}##{i}", btn_size):
+                    self._pending_preset = name
+                if i % 2 == 0 and i < len(PRESETS) - 1:
+                    imgui.same_line()
+        imgui.end()
+
         # --- Simulation Controls Panel ---
-        imgui.set_next_window_pos(imgui.ImVec2(10, 400), imgui.Cond_.first_use_ever)
+        imgui.set_next_window_pos(imgui.ImVec2(10, 440), imgui.Cond_.first_use_ever)
         imgui.set_next_window_size(imgui.ImVec2(220, 0), imgui.Cond_.first_use_ever)
 
         if imgui.begin("Simulation", None, imgui.WindowFlags_.always_auto_resize)[0]:
