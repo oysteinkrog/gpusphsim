@@ -394,8 +394,9 @@
         "Temperature affects particle color in Integrate (already implemented in US-013 color computation)"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": "Heat is PARTICLE-BASED (SPH Laplacian in Step1 neighbor loop), not grid-based. Heat moves with the particles (lava flowing carries its heat). No separate grid diffusion solver needed. thermal_conductivity read from c_materials[mat_id]. Metal has high conductivity (~50), stone low (~1), water medium (~5). If adding dTdt accumulation to Step1 causes register pressure issues, split into a separate kernel pass."
+      "passes": true,
+      "notes": "Heat is PARTICLE-BASED (SPH Laplacian in Step1 neighbor loop), not grid-based. Heat moves with the particles (lava flowing carries its heat). No separate grid diffusion solver needed. thermal_conductivity read from c_materials[mat_id]. Metal has high conductivity (~50), stone low (~1), water medium (~5). If adding dTdt accumulation to Step1 causes register pressure issues, split into a separate kernel pass.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-021",
@@ -598,6 +599,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T16:30:42.008Z"
+    "updatedAt": "2026-02-06T16:43:29.683Z"
   }
 }
