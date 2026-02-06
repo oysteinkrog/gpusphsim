@@ -1,4 +1,4 @@
-"""Falling Sand 3D - Main entry point with GLFW window and orbit camera."""
+"""Falling Sand 3D - Main entry point with GLFW window, orbit camera, and ImGui UI."""
 
 import time
 import glfw
@@ -97,6 +97,7 @@ def main():
     # Create world and spawn initial scene
     from world import World
     from simulation import Simulation
+    from ui import UI
 
     world = World(max_particles=MAX_PARTICLES)
     print("Spawning initial scene...")
@@ -110,19 +111,25 @@ def main():
     sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
     print("Simulation initialized -- kernels compiled and constants uploaded")
 
+    # Create ImGui UI
+    ui = UI(window)
+
     # Copy initial state to VBOs
     with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
         sim.copy_to_vbos(pos_buf, col_buf)
     import cupy
     cupy.cuda.Device().synchronize()
 
-    # Input state
+    # Input state for camera
     right_pressed = False
     middle_pressed = False
     last_mx, last_my = 0.0, 0.0
 
     def key_callback(_win, key, _scancode, action, _mods):
         nonlocal num_active
+        # Let UI handle material shortcuts first
+        if ui.handle_key_shortcuts(key, action, sim):
+            return
         if action != glfw.PRESS:
             return
         if key == glfw.KEY_ESCAPE:
@@ -178,11 +185,14 @@ def main():
             glViewport(0, 0, width, height)
             camera.set_aspect(width, height)
 
-    glfw.set_key_callback(window, key_callback)
-    glfw.set_mouse_button_callback(window, mouse_button_callback)
-    glfw.set_cursor_pos_callback(window, cursor_pos_callback)
-    glfw.set_scroll_callback(window, scroll_callback)
-    glfw.set_framebuffer_size_callback(window, framebuffer_size_callback)
+    # Install callbacks through UI (chains imgui + user callbacks)
+    ui.set_callbacks(
+        key_cb=key_callback,
+        mouse_button_cb=mouse_button_callback,
+        cursor_pos_cb=cursor_pos_callback,
+        scroll_cb=scroll_callback,
+        framebuffer_cb=framebuffer_size_callback,
+    )
 
     # FPS tracking
     frame_count = 0
@@ -191,6 +201,14 @@ def main():
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
+
+        # --- ImGui frame start ---
+        ui.begin_frame()
+
+        # --- Process brush spawn/kill ---
+        brush_delta = ui.process_brush_actions(world, camera)
+        if brush_delta != 0:
+            renderer.num_active = world._high_water
 
         # --- Simulation substeps ---
         substeps = sim.step_frame()
@@ -202,12 +220,30 @@ def main():
         # Update active count for renderer
         renderer.num_active = world._high_water
 
-        # --- Render ---
+        # --- Render 3D scene ---
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         view = camera.view_matrix()
         proj = camera.projection_matrix()
         renderer.draw(view, proj)
+
+        # --- Draw ImGui UI ---
+        new_max = ui.draw(sim, world, fps)
+
+        # Handle max_particles change
+        if new_max is not None:
+            world.resize(new_max)
+            renderer.close()
+            renderer = Renderer(new_max, point_scale=20.0)
+            renderer.num_active = 0
+            num_active = _spawn_initial_scene(world)
+            renderer.num_active = num_active
+            sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
+            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
+                sim.copy_to_vbos(pos_buf, col_buf)
+
+        # --- ImGui frame end (render ImGui draw data) ---
+        ui.end_frame()
 
         glfw.swap_buffers(window)
 
@@ -219,23 +255,14 @@ def main():
             fps = frame_count / elapsed
             frame_count = 0
             fps_time = now
-            pause_str = " [PAUSED]" if sim.paused else ""
-            dt_str = f"dt:{sim.dt*1000:.2f}ms"
-            if sim.fixed_dt:
-                dt_str += " [FIXED]"
-            glfw.set_window_title(
-                window,
-                f"{WINDOW_TITLE} | {world._high_water // 1000}K | "
-                f"FPS: {fps:.0f} | steps: {substeps} | "
-                f"speed: {sim.speed:.1f}x | acc: {sim.accuracy:.1f} | "
-                f"{dt_str}{pause_str}",
-            )
+            glfw.set_window_title(window, WINDOW_TITLE)
 
         # Check GL errors
         err = glGetError()
         if err != GL_NO_ERROR:
             print(f"GL error: {err}")
 
+    ui.shutdown()
     renderer.close()
     glfw.destroy_window(window)
     glfw.terminate()

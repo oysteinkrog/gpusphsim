@@ -657,3 +657,21 @@
   - Adaptive dt is computed once per render frame (before the substep loop), not once per substep. This avoids the overhead of CuPy reductions inside the tight substep loop while still adapting between frames based on the latest velocity field.
   - The `accuracy` parameter IS the CFL number — accuracy=0.4 means CFL=0.4 (standard). accuracy=0.2 halves dt for stability, accuracy=0.8 doubles it for speed. The acoustic CFL uses a fixed 0.25 coefficient (not scaled by accuracy) because the acoustic speed is a material property, not a numerical parameter.
 ---
+
+## 2026-02-06 - US-026
+- What was implemented:
+  - `fallingsand3d/ui.py` -- Complete ImGui-based UI with imgui-bundle integration: material picker panel (15 colored buttons in 3x5 grid), brush size slider (0.02-0.3), simulation controls (speed log-scale slider, accuracy slider, fixed_dt checkbox + input, max_particles dropdown), status bar (particles/max, FPS, dt, substeps, speed, paused), mouse ray unprojection for 3D brush placement, left-click spawn / shift+click kill, keyboard shortcuts 1-9 for material selection
+  - `fallingsand3d/main.py` -- Updated: integrated UI with callback chaining (ImGui gets events first, forwards to camera/sim only when not consumed), ImGui frame lifecycle in render loop (begin_frame/draw/end_frame), brush action processing, max_particles change handling with full world/renderer/sim recreation
+- Files changed:
+  - `fallingsand3d/ui.py` (implemented from placeholder)
+  - `fallingsand3d/main.py` (modified -- ImGui integration, callback chaining, brush actions)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - imgui-bundle's `GlfwRenderer(window, attach_callbacks=False)` allows manual callback installation. This is essential when the app already has its own GLFW callbacks -- the UI module installs combined callbacks that forward to imgui_renderer first, then check `want_capture_mouse`/`want_capture_keyboard` before forwarding to user callbacks
+  - imgui-bundle uses trailing-underscore enum naming: `imgui.Cond_.first_use_ever`, `imgui.WindowFlags_.always_auto_resize`, `imgui.Col_.button`. These are nanobind-wrapped C++ enums
+  - `imgui.begin()` returns `tuple[bool, bool | None]` (visible, p_open), `imgui.begin_combo()` returns plain `bool`, `imgui.slider_float()` returns `tuple[bool, float]`. The return type inconsistency requires checking docstrings
+  - Mouse ray unprojection: unproject NDC to world via inverse(proj @ view), then intersect with y=0 plane. Camera looking at origin from elevation=30 degrees hits (0,0,0) when clicking screen center -- confirms the math is correct
+  - The `push_style_color`/`pop_style_color` pattern with 3 colors (button, button_hovered, button_active) per material button creates a visually distinctive picker where selected material is bright and unselected are dimmed (60% RGB)
+  - Speed slider uses log scale: `log_speed = log10(speed)`, slider range [-1, 1], display format `f"{speed:.2f}x"`. This gives equal visual range to slow-mo (0.1-1.0) and fast-forward (1.0-10.0)
+  - Changing max_particles requires destroying and recreating the Renderer (new VBOs of different size) and Simulation (re-upload constants). The world.resize() kills all particles, so the initial scene is re-spawned after resize
+---
