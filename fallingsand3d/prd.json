@@ -35,8 +35,9 @@
         "FPS counter displayed in window title"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "camera.py handles orbit camera math (spherical coordinates, view/projection matrices). main.py has the GLFW event loop. Camera default: look at origin from distance=3, elevation=30deg."
+      "passes": true,
+      "notes": "camera.py handles orbit camera math (spherical coordinates, view/projection matrices). main.py has the GLFW event loop. Camera default: look at origin from distance=3, elevation=30deg.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-003",
@@ -580,6 +581,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T14:52:13.036Z"
+    "updatedAt": "2026-02-06T14:54:45.289Z"
   }
 }
