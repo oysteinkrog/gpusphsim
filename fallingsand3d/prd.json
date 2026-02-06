@@ -211,8 +211,9 @@
         "Block size = 128, kernel runs without errors for 500K particles"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": "Port neighbor iteration from SPHSimLib/K_UniformGrid_Utils.inl:IterateParticlesInNearbyCells (flatten the template callback into explicit loops). Port poly6 from SPHSimLib/K_SPH_Kernels_poly6.inl. NOTE: self-contribution IS included for density (unlike force kernels). See PHYSICS.md for poly6 formula."
+      "passes": true,
+      "notes": "Port neighbor iteration from SPHSimLib/K_UniformGrid_Utils.inl:IterateParticlesInNearbyCells (flatten the template callback into explicit loops). Port poly6 from SPHSimLib/K_SPH_Kernels_poly6.inl. NOTE: self-contribution IS included for density (unlike force kernels). See PHYSICS.md for poly6 formula.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-012",
@@ -589,6 +590,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:31:17.959Z"
+    "updatedAt": "2026-02-06T15:37:50.152Z"
   }
 }
