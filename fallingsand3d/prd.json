@@ -525,8 +525,9 @@
         "ImGui consumes mouse events when cursor is over UI panels (camera doesn't orbit when clicking UI)"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": "Mouse ray: unproject screen coords through inverse(projection * view) to get world-space ray. Intersect with y=0 plane for spawn point. imgui-bundle provides the GLFW+OpenGL3 backend integration. Call imgui.get_io().want_capture_mouse to check if ImGui wants the mouse. Changing max_particles calls world.resize() which kills all particles and reallocates arrays."
+      "passes": true,
+      "notes": "Mouse ray: unproject screen coords through inverse(projection * view) to get world-space ray. Intersect with y=0 plane for spawn point. imgui-bundle provides the GLFW+OpenGL3 backend integration. Call imgui.get_io().want_capture_mouse to check if ImGui wants the mouse. Changing max_particles calls world.resize() which kills all particles and reallocates arrays.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-027",
@@ -604,6 +605,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T17:32:26.675Z"
+    "updatedAt": "2026-02-06T17:41:14.783Z"
   }
 }
