@@ -3,10 +3,10 @@
   "sessionId": "0a9bb7d7-e66b-4aa5-84c0-224e7a9d1534",
   "status": "running",
   "startedAt": "2026-02-06T10:16:15.178Z",
-  "updatedAt": "2026-02-06T16:52:10.822Z",
-  "currentIteration": 20,
+  "updatedAt": "2026-02-06T16:58:38.245Z",
+  "currentIteration": 21,
   "maxIterations": 0,
-  "tasksCompleted": 27,
+  "tasksCompleted": 28,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -137,8 +137,8 @@
       {
         "id": "US-021",
         "title": "Exposure accumulation and interaction matrix",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "US-022",
@@ -396,6 +396,16 @@
       "durationMs": 765941,
       "startedAt": "2026-02-06T16:30:43.735Z",
       "endedAt": "2026-02-06T16:43:29.676Z"
+    },
+    {
+      "iteration": 21,
+      "status": "completed",
+      "taskId": "US-021",
+      "taskTitle": "Exposure accumulation and interaction matrix",
+      "taskCompleted": true,
+      "durationMs": 519033,
+      "startedAt": "2026-02-06T16:43:31.777Z",
+      "endedAt": "2026-02-06T16:52:10.810Z"
     }
   ],
   "skippedTaskIds": [],
