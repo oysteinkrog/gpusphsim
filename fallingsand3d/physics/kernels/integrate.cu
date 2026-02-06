@@ -35,6 +35,12 @@
 #define VELOCITY_LIMIT     50.0f
 #define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
 
+/* Anti-creep thresholds for GRANULAR particles */
+#define GRANULAR_V_THRESHOLD     0.01f
+#define GRANULAR_V_THRESHOLD_SQ  (GRANULAR_V_THRESHOLD * GRANULAR_V_THRESHOLD)
+#define GRANULAR_GAMMA_MIN       0.05f
+#define GRANULAR_RHO_FACTOR      0.95f
+
 /* ======================================================================
  * Impulse-style SDF boundary collision for axis-aligned box.
  *
@@ -196,6 +202,8 @@ void K_Integrate(
     const uint*     __restrict__ sorted_packed_info,    // sorted packed_info
     const float*    __restrict__ sorted_temperature,    // sorted temperature
     const float*    __restrict__ sorted_health,         // sorted health
+    const float*    __restrict__ sorted_density,        // sorted density (from Step1)
+    const float*    __restrict__ sorted_shear_rate,     // sorted shear rate (from Step1)
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
     // --- Unsorted outputs (write via sort_indexes) ---
     float4*         __restrict__ position_out,          // unsorted position
@@ -281,6 +289,21 @@ void K_Integrate(
         vel_new.x *= scale;
         vel_new.y *= scale;
         vel_new.z *= scale;
+    }
+
+    // --- GRANULAR anti-creep: zero velocity if nearly at rest ---
+    if (behavior == GRANULAR) {
+        float vel_sq_ac = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
+        if (vel_sq_ac < GRANULAR_V_THRESHOLD_SQ) {
+            float rho_i = sorted_density[i];
+            float rho0_i = c_materials[mat_id].rest_density;
+            float sr_i = sorted_shear_rate[i];
+            if (rho_i > GRANULAR_RHO_FACTOR * rho0_i && sr_i < GRANULAR_GAMMA_MIN) {
+                vel_new.x = 0.0f;
+                vel_new.y = 0.0f;
+                vel_new.z = 0.0f;
+            }
+        }
     }
 
     // --- Position update ---

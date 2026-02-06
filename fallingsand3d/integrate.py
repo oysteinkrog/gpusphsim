@@ -108,7 +108,9 @@ def integrate(
     sorted_packed_info: cupy.ndarray,
     sorted_temperature: cupy.ndarray,
     sorted_health: cupy.ndarray,
-    sort_indexes: cupy.ndarray,
+    sorted_density: "Optional[cupy.ndarray]" = None,
+    sorted_shear_rate: "Optional[cupy.ndarray]" = None,
+    sort_indexes: "Optional[cupy.ndarray]" = None,
     position_out: "Optional[cupy.ndarray]" = None,
     velocity_out: "Optional[cupy.ndarray]" = None,
     color_out: "Optional[cupy.ndarray]" = None,
@@ -129,6 +131,12 @@ def integrate(
     sorted_packed_info : cupy.ndarray, (N,) uint32
     sorted_temperature : cupy.ndarray, (N,) float32
     sorted_health : cupy.ndarray, (N,) float32
+    sorted_density : cupy.ndarray, optional, (N,) float32
+        Density from Step1. Used for GRANULAR anti-creep check.
+        If None, a zeros array is used (anti-creep won't trigger).
+    sorted_shear_rate : cupy.ndarray, optional, (N,) float32
+        Shear rate from Step1. Used for GRANULAR anti-creep check.
+        If None, a zeros array is used (anti-creep won't trigger).
     sort_indexes : cupy.ndarray, (N,) uint32
         sort_indexes[sorted_i] = original unsorted index.
     position_out : cupy.ndarray, optional
@@ -145,6 +153,12 @@ def integrate(
     n = sorted_position.shape[0]
     if n == 0:
         return position_out, velocity_out, color_out
+
+    # Default density/shear_rate to zeros if not provided (anti-creep won't trigger)
+    if sorted_density is None:
+        sorted_density = cupy.zeros(n, dtype=cupy.float32)
+    if sorted_shear_rate is None:
+        sorted_shear_rate = cupy.zeros(n, dtype=cupy.float32)
 
     # Allocate outputs if not provided
     if position_out is None:
@@ -176,6 +190,8 @@ def integrate(
             sorted_packed_info,
             sorted_temperature,
             sorted_health,
+            sorted_density,
+            sorted_shear_rate,
             sort_indexes,
             position_out,
             velocity_out,

@@ -647,6 +647,242 @@ def test_water_pool_no_nan():
     print("PASS: test_water_pool_no_nan")
 
 
+def test_granular_anti_creep_settled():
+    """GRANULAR particles at rest with high density and low shear rate get zeroed velocity.
+
+    Acceptance: sand pile that has settled shows zero velocity for interior particles.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 100
+    # Particles sitting at the bottom with tiny residual velocity
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = np.linspace(-0.5, 0.5, n)
+    pos[:, 1] = -0.9  # near bottom
+    pos[:, 3] = 1.0
+
+    # Small residual velocity (below threshold 0.01)
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = 0.005  # magnitude < 0.01 threshold
+    vel[:, 1] = 0.003
+
+    d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
+
+    # Density well above 0.95 * rho0 (sand rho0 = 1600)
+    d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
+    # Shear rate below gamma_min (0.05)
+    d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
+
+    _, vel_out, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    # All velocities should be exactly zero (anti-creep triggered)
+    for i in range(n):
+        speed = math.sqrt(vel_h[i, 0]**2 + vel_h[i, 1]**2 + vel_h[i, 2]**2)
+        assert speed < 1e-6, (
+            f"Particle {i} should be zeroed by anti-creep, got speed={speed}"
+        )
+
+    print("PASS: test_granular_anti_creep_settled")
+
+
+def test_granular_anti_creep_flowing():
+    """GRANULAR particles with velocity above threshold still flow correctly.
+
+    Acceptance: pouring new sand on top of settled pile still flows correctly.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 10
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 1] = 0.5  # above ground
+    pos[:, 3] = 1.0
+
+    # Velocity well above threshold (0.01)
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 1] = -2.0  # falling fast
+
+    d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
+    d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
+    d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
+
+    _, vel_out, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    # Velocity should NOT be zeroed (above threshold)
+    for i in range(n):
+        speed = math.sqrt(vel_h[i, 0]**2 + vel_h[i, 1]**2 + vel_h[i, 2]**2)
+        assert speed > 0.5, (
+            f"Particle {i} should still be flowing, got speed={speed}"
+        )
+
+    print("PASS: test_granular_anti_creep_flowing")
+
+
+def test_granular_anti_creep_low_density():
+    """GRANULAR particles with density below 0.95*rho0 are NOT clamped.
+
+    If density is low (particle expanding / not under compression),
+    the anti-creep should not trigger even with slow velocity.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 10
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 1] = 0.0
+    pos[:, 3] = 1.0
+
+    # Small velocity (below threshold)
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = 0.005
+
+    d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
+    # Density BELOW 0.95 * 1600 = 1520
+    d["sorted_density"] = cupy.full(n, 1000.0, dtype=cupy.float32)
+    d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
+
+    _, vel_out, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    # Velocity should NOT be zeroed (density too low for anti-creep)
+    for i in range(n):
+        # After integration with gravity: vel_y = 0.005_y_component + dt * (-9.8) != 0
+        speed = math.sqrt(vel_h[i, 0]**2 + vel_h[i, 1]**2 + vel_h[i, 2]**2)
+        assert speed > 1e-6, (
+            f"Particle {i} should not be zeroed (low density), got speed={speed}"
+        )
+
+    print("PASS: test_granular_anti_creep_low_density")
+
+
+def test_granular_anti_creep_high_shear():
+    """GRANULAR particles with high shear rate are NOT clamped.
+
+    If shear rate is above gamma_min, anti-creep should not trigger.
+    """
+    setup_params(gravity=(0.0, 0.0, 0.0))  # no gravity for clean test
+
+    n = 10
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 3] = 1.0
+
+    # Small velocity (below threshold)
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = 0.005
+
+    d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
+    d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
+    # Shear rate ABOVE gamma_min (0.05)
+    d["sorted_shear_rate"] = cupy.full(n, 1.0, dtype=cupy.float32)
+
+    _, vel_out, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    # Velocity should NOT be zeroed (shear rate too high)
+    for i in range(n):
+        assert abs(vel_h[i, 0] - 0.005) < 1e-4, (
+            f"Particle {i} vel.x changed unexpectedly: {vel_h[i, 0]}"
+        )
+
+    print("PASS: test_granular_anti_creep_high_shear")
+
+
+def test_granular_no_jitter_5000_steps():
+    """Settled sand pile shows no jitter over 5000 steps.
+
+    Acceptance: no visible vibration or jitter in settled sand pile over 5000 steps.
+    """
+    setup_params(gravity=(0.0, -9.8, 0.0))
+
+    n = 100
+    pos_np = np.zeros((n, 4), dtype=np.float32)
+    pos_np[:, 0] = np.linspace(-0.5, 0.5, n)
+    pos_np[:, 1] = -0.95  # near floor
+    pos_np[:, 3] = 1.0
+
+    vel_np = np.zeros((n, 4), dtype=np.float32)
+    vel_np[:, 1] = 0.002  # tiny residual
+
+    pos_gpu = cupy.asarray(pos_np)
+    vel_gpu = cupy.asarray(vel_np)
+    # High density (settled/compressed)
+    density_gpu = cupy.full(n, 1700.0, dtype=cupy.float32)
+    # Low shear rate (at rest)
+    shear_rate_gpu = cupy.full(n, 0.01, dtype=cupy.float32)
+
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    # Record initial position after first step
+    for step in range(5000):
+        d = {
+            "sorted_position": pos_gpu,
+            "sorted_velocity": vel_gpu,
+            "sorted_veleval": vel_gpu.copy(),
+            "sorted_sph_force": cupy.zeros((n, 4), dtype=cupy.float32),
+            "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+            "sorted_packed_info": cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32),
+            "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+            "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+            "sorted_density": density_gpu,
+            "sorted_shear_rate": shear_rate_gpu,
+            "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+            "position_out": pos_gpu,
+            "velocity_out": vel_gpu,
+            "color_out": color_gpu,
+        }
+        integrate(**d)
+
+    vel_h = vel_gpu.get()
+    pos_h = pos_gpu.get()
+
+    # All velocities should be zero after settling
+    max_speed = 0.0
+    for i in range(n):
+        speed = math.sqrt(vel_h[i, 0]**2 + vel_h[i, 1]**2 + vel_h[i, 2]**2)
+        max_speed = max(max_speed, speed)
+
+    assert max_speed < 1e-6, (
+        f"Jitter detected after 5000 steps: max_speed={max_speed}"
+    )
+
+    # No NaN
+    assert not np.any(np.isnan(pos_h)), "NaN in positions after 5000 steps"
+    assert not np.any(np.isnan(vel_h)), "NaN in velocities after 5000 steps"
+
+    # All particles should be within boundaries
+    assert np.all(pos_h[:, 1] >= -1.0 - 1e-4), "Particles escaped floor"
+
+    print("PASS: test_granular_no_jitter_5000_steps")
+
+
+def test_fluid_unaffected_by_anti_creep():
+    """FLUID particles with low velocity are NOT affected by anti-creep."""
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    n = 5
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 3] = 1.0
+
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = 0.005  # below granular threshold
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    # Even with high density and low shear rate, FLUID should not be affected
+    d["sorted_density"] = cupy.full(n, 1200.0, dtype=cupy.float32)
+    d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
+
+    _, vel_out, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    # FLUID velocity should be preserved (not zeroed)
+    for i in range(n):
+        assert abs(vel_h[i, 0] - 0.005) < 1e-4, (
+            f"FLUID particle {i} vel.x incorrectly zeroed: {vel_h[i, 0]}"
+        )
+
+    print("PASS: test_fluid_unaffected_by_anti_creep")
+
+
 def test_500k_stress():
     """500K particles run through integrate without errors."""
     setup_params()
@@ -667,6 +903,16 @@ def test_500k_stress():
     packed[400000:480000] = MAKE_PACKED(STEAM, GAS)
     packed[480000:] = MAKE_PACKED(STONE, STATIC)
 
+    # Provide density and shear_rate for the mixed test
+    density = np.zeros(n, dtype=np.float32)
+    density[:200000] = 1000.0  # water rho0
+    density[200000:400000] = 1600.0  # sand rho0
+    density[400000:480000] = 0.6  # steam rho0
+    density[480000:] = 2500.0  # stone rho0
+
+    shear_rate = np.zeros(n, dtype=np.float32)
+    shear_rate[:] = 0.0  # all at rest
+
     d = {
         "sorted_position": cupy.asarray(pos),
         "sorted_velocity": cupy.asarray(vel),
@@ -676,6 +922,8 @@ def test_500k_stress():
         "sorted_packed_info": cupy.asarray(packed),
         "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
         "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "sorted_density": cupy.asarray(density),
+        "sorted_shear_rate": cupy.asarray(shear_rate),
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
@@ -729,6 +977,12 @@ if __name__ == "__main__":
         test_coulomb_friction,
         test_xsph_position_update,
         test_water_pool_no_nan,
+        test_granular_anti_creep_settled,
+        test_granular_anti_creep_flowing,
+        test_granular_anti_creep_low_density,
+        test_granular_anti_creep_high_shear,
+        test_granular_no_jitter_5000_steps,
+        test_fluid_unaffected_by_anti_creep,
         test_500k_stress,
     ]
 

@@ -434,3 +434,26 @@
   - SPH strain-rate approximation with spiky gradient is quite accurate: for a linear shear flow with applied_SR=10.0, interior particles produce gamma_dot=9.56 (4.4% error), well within expected SPH discretization error
   - The spiky gradient coefficient (`c_precalc.spiky_grad_coeff = -45/(pi*h^6)`) is NEGATIVE, so the gradient vector `gradW = spiky_grad_coeff * (h-r)^2/r * r_vec` points from i toward j (opposite to r = pos_i - pos_j). This is correct for the strain-rate computation since D_ab = sum (m_j/rho_j) * dv_a * gradW_b where dv = v_i - v_j
 ---
+
+## 2026-02-06 - US-017
+- What was implemented:
+  - Velocity clamp and anti-creep for GRANULAR particles in the K_Integrate kernel
+  - After velocity magnitude clamp and before position update: if behavior==GRANULAR AND |vel| < 0.01 AND rho_i > 0.95*rho0 AND shear_rate < 0.05, velocity is zeroed to (0,0,0)
+  - Uses per-material rest_density from `c_materials[mat_id]` so different granular materials (sand=1600, dirt=1500, gravel=1800) each use their own rho0 threshold
+  - Two new kernel inputs: `sorted_density` and `sorted_shear_rate` (from Step1)
+  - Python wrapper accepts optional `sorted_density`/`sorted_shear_rate` params; defaults to zeros (anti-creep disabled) for backward compatibility
+  - simulation.py passes sorted_density and sorted_shear_rate through to integrate
+  - 6 new tests: settled pile zero velocity, flowing sand preserved, low density bypass, high shear rate bypass, 5000-step no-jitter, FLUID unaffected
+- Files changed:
+  - `fallingsand3d/physics/kernels/integrate.cu` (modified -- added anti-creep constants and GRANULAR velocity zeroing logic, added sorted_density/sorted_shear_rate kernel params)
+  - `fallingsand3d/integrate.py` (modified -- added sorted_density/sorted_shear_rate optional params, passed to kernel)
+  - `fallingsand3d/simulation.py` (modified -- passes sorted_density/sorted_shear_rate to integrate call)
+  - `fallingsand3d/test_integrate.py` (modified -- added 6 anti-creep tests, updated 500K stress test with density/shear_rate data)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The anti-creep check is placed AFTER the velocity magnitude clamp and BEFORE the position update. This ordering ensures: (1) huge forces are clamped first, (2) then small residual velocities are checked for zeroing, (3) position update sees the final velocity
+  - Making sorted_density/sorted_shear_rate optional with None defaults (mapped to zero arrays) preserves backward compatibility -- all 16 existing tests pass without modification since anti-creep won't trigger when density=0 (below 0.95*rho0)
+  - Using per-material `c_materials[mat_id].rest_density` rather than a single global rho0 constant means each granular material type has its own appropriate anti-creep density threshold
+  - The velocity check uses squared magnitude (`vel_sq < threshold_sq`) to avoid a sqrt, consistent with the existing velocity clamp pattern in the kernel
+  - The 5000-step no-jitter test confirms that once anti-creep kicks in (first step: tiny velocity + high density + low shear), the particle stays at rest permanently -- no oscillation between clamped/unclamped states
+---
