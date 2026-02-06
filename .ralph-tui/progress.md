@@ -287,3 +287,19 @@
   - spawn_cube builds the meshgrid on CPU (numpy) then transfers to GPU (cupy.asarray) -- this is fine because grid generation is cheap and the transfer is a single bulk H2D copy
   - DEAD particles have packed_info=0, which means material_id=0 (DEAD) and behavior_class=0 (FLUID). The DEAD material in the table has all-zero properties, so even if a dead particle is accidentally processed, it produces zero forces
 ---
+
+## 2026-02-06 - US-008 (fallingsand3d/)
+- What was implemented:
+  - `fallingsand3d/physics/kernels/hash_sort.cu` -- K_CalcHash kernel ported from SPHSimLib/K_UniformGrid_Utils.inl (calcGridCell + calcGridHash non-Morton) with boundary clamping, using the fallingsand3d common.cuh GridParams struct (int3 grid_res, int num_cells)
+  - `fallingsand3d/hash_sort.py` -- Python module: GridParams numpy dtype (52 bytes matching common.cuh), constant memory upload, CuPy RawModule compilation from external .cu file with --use_fast_math, `calc_hash()` kernel launch wrapper
+  - `fallingsand3d/test_hash_sort.py` -- Integration tests: grid constants, struct layout (52 bytes), compilation, known-position hash, 100K uniform particles, boundary clamping, 500K stress test, CPU reference cross-validation
+- Files changed:
+  - `fallingsand3d/physics/kernels/hash_sort.cu` (new)
+  - `fallingsand3d/hash_sort.py` (new)
+  - `fallingsand3d/test_hash_sort.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The fallingsand3d GridParams uses `int3 grid_res` (not `float3` like the root-level prototype) and has a `num_cells` field -- total 52 bytes vs 60 bytes in the prototype. This means the hash kernel can use integer arithmetic directly for grid_res without casting
+  - The fallingsand3d common.cuh already declares `__constant__ GridParams c_grid` (along with c_materials, c_interactions, c_sim, c_precalc), so hash_sort.cu does NOT redeclare it -- unlike the root-level prototype where each .cu file declared its own c_grid
+  - numpy dtype with `align=False` and `(np.int32, (3,))` for int3 fields matches CUDA int3 exactly (12 bytes, no trailing pad), same pattern as float3
+---
