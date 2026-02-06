@@ -1,12 +1,15 @@
-"""Step1 kernel: SPH density summation + strain-rate tensor computation.
+"""Step1 kernel: SPH density summation + strain-rate tensor + heat diffusion.
 
 Compiles physics/kernels/step1.cu via CuPy RawModule and provides
 a function to launch K_Step1 which computes per-particle density
 from the sorted particle positions and masses using neighbor iteration.
 
-Additionally, for GRANULAR particles, computes the symmetric strain-rate
-tensor D from SPH velocity gradient (spiky kernel) and writes the second
-invariant gamma_dot = sqrt(2 * D:D) to the shear_rate output array.
+Additionally computes heat diffusion dTdt via SPH Laplacian of temperature:
+  dTdt = kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r|)
+
+For GRANULAR particles, computes the symmetric strain-rate tensor D from
+SPH velocity gradient (spiky kernel) and writes the second invariant
+gamma_dot = sqrt(2 * D:D) to the shear_rate output array.
 Non-GRANULAR particles get shear_rate = 0.
 
 Density formula
@@ -212,6 +215,15 @@ def upload_precalc_params(params: Optional[np.ndarray] = None) -> None:
     )
 
 
+def upload_materials(materials_data: np.ndarray) -> None:
+    """Upload MaterialProps[32] to ``__constant__ MaterialProps c_materials[32]``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_materials")  # type: ignore[union-attr]
+    cupy.cuda.runtime.memcpy(
+        int(d_ptr), materials_data.ctypes.data, materials_data.nbytes, 1
+    )
+
+
 # ---------------------------------------------------------------------------
 # Kernel launch
 # ---------------------------------------------------------------------------
@@ -225,12 +237,14 @@ def compute_step1(
     mass: cupy.ndarray,
     density_in: Optional[cupy.ndarray],
     packed_info: cupy.ndarray,
+    temperature_in: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     density_out: Optional[cupy.ndarray] = None,
     shear_rate_out: Optional[cupy.ndarray] = None,
+    dTdt_out: Optional[cupy.ndarray] = None,
 ) -> tuple:
-    """Launch K_Step1 and return (density, shear_rate) arrays.
+    """Launch K_Step1 and return (density, shear_rate, dTdt) arrays.
 
     Parameters
     ----------
@@ -241,10 +255,12 @@ def compute_step1(
     mass : cupy.ndarray, (N,) float32
         Sorted per-particle masses.
     density_in : cupy.ndarray or None, (N,) float32
-        Density from previous step for m_j/rho_j weighting in strain-rate.
-        Pass None on first frame (kernel uses rho0=1000 fallback).
+        Density from previous step for m_j/rho_j weighting in strain-rate
+        and heat diffusion. Pass None on first frame (kernel uses rho0=1000 fallback).
     packed_info : cupy.ndarray, (N,) uint32
-        Sorted packed_info for behavior class check.
+        Sorted packed_info for behavior class and material ID.
+    temperature_in : cupy.ndarray, (N,) float32
+        Sorted temperature per particle (for heat diffusion).
     cell_start : cupy.ndarray, (num_cells,) uint32
         Grid cell start indices (0xFFFFFFFF for empty).
     cell_end : cupy.ndarray, (num_cells,) uint32
@@ -253,18 +269,23 @@ def compute_step1(
         Pre-allocated (N,) float32 output buffer. If None, allocates new.
     shear_rate_out : cupy.ndarray, optional
         Pre-allocated (N,) float32 output buffer. If None, allocates new.
+    dTdt_out : cupy.ndarray, optional
+        Pre-allocated (N,) float32 output buffer. If None, allocates new.
 
     Returns
     -------
-    (density, shear_rate) : tuple of cupy.ndarray, each (N,) float32
+    (density, shear_rate, dTdt) : tuple of cupy.ndarray, each (N,) float32
         density: Per-particle density (clamped >= 1.0).
         shear_rate: Per-particle gamma_dot (0 for non-GRANULAR).
+        dTdt: Per-particle temperature rate of change from heat diffusion.
     """
     n = position.shape[0]
     if density_out is None:
         density_out = cupy.empty(n, dtype=cupy.float32)
     if shear_rate_out is None:
         shear_rate_out = cupy.empty(n, dtype=cupy.float32)
+    if dTdt_out is None:
+        dTdt_out = cupy.empty(n, dtype=cupy.float32)
 
     # density_in can be None (first frame) -- pass null pointer
     density_in_ptr = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
@@ -285,11 +306,13 @@ def compute_step1(
             mass,
             density_in_ptr,
             packed_info,
+            temperature_in,
             cell_start,
             cell_end,
             density_out,
             shear_rate_out,
+            dTdt_out,
         ),
     )
 
-    return density_out, shear_rate_out
+    return density_out, shear_rate_out, dTdt_out

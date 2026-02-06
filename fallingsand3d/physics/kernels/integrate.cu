@@ -12,8 +12,9 @@
  *      pos_new = pos + dt * vel_new for others
  *   6. Impulse SDF boundary: 6 planes of box, project out, reflect normal vel
  *      with restitution, apply Coulomb friction to tangential vel
- *   7. Compute color from material base color, temperature tint, health fade
- *   8. Write pos, vel, color to UNSORTED arrays via sort_indexes[i]
+ *   7. Temperature integration: T += dTdt*dt - cool_rate*(T-T_ambient)*dt, clamp [0,5000]
+ *   8. Compute color from material base color, temperature tint, health fade
+ *   9. Write pos, vel, color, temperature to UNSORTED arrays via sort_indexes[i]
  *
  * Skips STATIC particles (behavior_class == 3): early return, position unchanged.
  *
@@ -34,6 +35,12 @@
 #define GAS_DRAG_COEFF     2.0f
 #define VELOCITY_LIMIT     50.0f
 #define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
+
+/* Temperature integration constants */
+#define T_AMBIENT          293.0f
+#define COOL_RATE          0.1f
+#define T_MIN              0.0f
+#define T_MAX              5000.0f
 
 /* Anti-creep thresholds for GRANULAR particles */
 #define GRANULAR_V_THRESHOLD     0.01f
@@ -212,6 +219,7 @@ void K_Integrate(
     const float*    __restrict__ sorted_health,         // sorted health
     const float*    __restrict__ sorted_density,        // sorted density (from Step1)
     const float*    __restrict__ sorted_shear_rate,     // sorted shear rate (from Step1)
+    const float*    __restrict__ sorted_dTdt,           // sorted dTdt (heat diffusion from Step1)
     const unsigned char* __restrict__ sorted_sleep_counter, // sorted sleep counter (uint8)
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
     // --- Unsorted outputs (write via sort_indexes) ---
@@ -219,7 +227,8 @@ void K_Integrate(
     float4*         __restrict__ velocity_out,          // unsorted velocity
     float4*         __restrict__ color_out,             // unsorted color
     uint*           __restrict__ packed_info_out,       // unsorted packed_info (sleep flag updates)
-    unsigned char*  __restrict__ sleep_counter_out      // unsorted sleep counter
+    unsigned char*  __restrict__ sleep_counter_out,     // unsorted sleep counter
+    float*          __restrict__ temperature_out        // unsorted temperature (updated)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -239,10 +248,16 @@ void K_Integrate(
         position_out[orig_idx] = pos4;
         velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         float temp = sorted_temperature[i];
+        // STATIC particles still conduct heat
+        float dTdt = sorted_dTdt[i];
+        temp += dTdt * c_sim.dt;
+        temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
+        temp = fmaxf(T_MIN, fminf(temp, T_MAX));
         float hlth = sorted_health[i];
         color_out[orig_idx] = compute_color(mat_id, temp, hlth);
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
+        temperature_out[orig_idx] = temp;
         return;
     }
 
@@ -265,11 +280,17 @@ void K_Integrate(
         float vel_sq_wake = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
         if (vel_sq_wake <= V_WAKE_SQ) {
             // Still sleeping: write position/velocity unchanged, keep flag and saturate counter
+            // Sleeping particles still conduct heat
+            float dTdt_sleep = sorted_dTdt[i];
+            temp += dTdt_sleep * c_sim.dt;
+            temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
+            temp = fmaxf(T_MIN, fminf(temp, T_MAX));
             position_out[orig_idx] = pos4;
             velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             color_out[orig_idx] = compute_color(mat_id, temp, hlth);
             packed_info_out[orig_idx] = pi;  // keep SLEEPING flag set
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
+            temperature_out[orig_idx] = temp;
             return;
         }
         // Wake up: clear sleeping flag, set just_woke flag, reset counter
@@ -385,6 +406,12 @@ void K_Integrate(
         pi = SET_SLEEPING(pi);
     }
 
+    // --- Temperature integration ---
+    float dTdt = sorted_dTdt[i];
+    temp += dTdt * dt;
+    temp -= COOL_RATE * (temp - T_AMBIENT) * dt;
+    temp = fmaxf(T_MIN, fminf(temp, T_MAX));
+
     // --- Compute color ---
     float4 color = compute_color(mat_id, temp, hlth);
 
@@ -394,4 +421,5 @@ void K_Integrate(
     color_out[orig_idx] = color;
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
+    temperature_out[orig_idx] = temp;
 }

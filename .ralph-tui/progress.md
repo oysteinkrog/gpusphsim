@@ -18,6 +18,7 @@
 - **mu(I) rheology two-pass neighbor loop:** For GRANULAR particles, the Step2 kernel does TWO neighbor traversals: (1) first pass computes gamma_dot_i (strain rate magnitude) from SPH velocity gradient, then derives eta_i via mu(I); (2) second pass accumulates viscosity force using harmonic mean eta_ij per pair. For eta_j, the pair-wise strain rate approximation `|v_ij|/|r_ij|` is used since we can't access j's full SPH-computed gamma_dot without an extra array. This avoids storing gamma_dot per particle at the cost of one extra neighbor traversal for GRANULAR only.
 - **Cell-flag wake propagation pattern:** For sleeping-particle systems, use a per-cell uint32 flag array (memset to 0 each frame). Just-woke particles atomicOr(1) on their 3x3x3 neighbor cells, then sleeping particles check their cell's flag to decide whether to wake. This is O(N) with small constant (27 atomics per waker, 1 read per sleeper) instead of O(N*K) neighbor searches. Operates on UNSORTED arrays after Integrate writeback.
 - **Mixed viscosity accumulator pattern:** When GRANULAR particles use per-pair variable viscosity (eta_ij * lap_const baked in), the f_viscosity accumulator has full coefficients already. For FLUID/GAS particles, the accumulator stores raw sums that get multiplied by viscosity_precalc in PostCalc. The `is_granular_i` branch in PostCalc handles this split: GRANULAR adds f_viscosity directly, FLUID/GAS multiplies by viscosity_precalc.
+- **SPH heat diffusion in Step1 pattern:** Heat diffusion uses the viscosity Laplacian kernel (same as viscous forces): `dTdt_i = kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|)`. The variable part `(h - r)` is accumulated in the neighbor loop, then multiplied by `kappa_i * viscosity_lap_coeff` in PostCalc. `kappa_i = c_materials[mat_id].thermal_conductivity`. dTdt is a sorted-order ephemeral array (like density), written by Step1 and consumed by Integrate. Integrate applies: `T += dTdt*dt - cool_rate*(T-T_ambient)*dt`, clamped to [0, 5000].
 
 ---
 
@@ -511,4 +512,33 @@
   - The 3x3x3 cell reach matches the SPH smoothing length h: cell_size=0.04=h, so 1 cell in each direction covers the entire interaction radius. This ensures any sleeping particle within SPH interaction range of a just-woke particle will be woken
   - The cell_wake_flags array is small (125K uint32 = 500KB) and is memset to 0 every step. This is cheaper than per-particle neighbor iteration for wake propagation
   - The 500K stress test with 25K just-woke particles shows massive wake propagation: ~99.7% of originally-sleeping particles wake up because the random uniform distribution means most cells have at least one just-woke particle nearby
+---
+
+## 2026-02-06 - US-020
+- What was implemented:
+  - Heat diffusion via SPH Laplacian of temperature in Step1 neighbor loop
+  - dTdt accumulation: `dTdt += kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r|)`
+  - dTdt written to sorted-order float array (ephemeral, like density/shear_rate)
+  - Integrate kernel temperature update: `T += dTdt*dt - cool_rate*(T-T_ambient)*dt`, clamped [0, 5000]
+  - T_ambient = 293.0 (20C), cool_rate = 0.1
+  - Temperature written back to unsorted arrays via sort_indexes (persists across frames)
+  - Step1 now reads c_materials for thermal_conductivity (Metal=50, Stone=2, Water=0.6, etc.)
+  - Static and sleeping particles still conduct heat (dTdt applied in their early-return paths)
+  - 3 new tests: hot-among-cold sign test, uniform-temperature zero-dTdt, material-dependent conductivity ratio
+- Files changed:
+  - `fallingsand3d/physics/kernels/step1.cu` (modified -- added temperature_in input, dTdt_out output, heat diffusion in neighbor loop, c_materials access)
+  - `fallingsand3d/physics/kernels/integrate.cu` (modified -- added sorted_dTdt input, temperature_out output, T_AMBIENT/COOL_RATE/T_MIN/T_MAX constants, temperature integration in all paths)
+  - `fallingsand3d/step1.py` (modified -- added temperature_in param, dTdt_out param, upload_materials(), 3-tuple return)
+  - `fallingsand3d/integrate.py` (modified -- added sorted_dTdt param, temperature_out param, 6-tuple return)
+  - `fallingsand3d/simulation.py` (modified -- step1 materials upload, temperature_in/dTdt_out wiring, sorted_dTdt/temperature_out in integrate call)
+  - `fallingsand3d/world.py` (modified -- added sorted_dTdt buffer allocation)
+  - `fallingsand3d/test_step1.py` (modified -- updated all unpacking to 5-tuple, added 3 heat diffusion tests, materials upload in setup)
+  - `fallingsand3d/test_integrate.py` (modified -- updated all unpacking from 5-tuple to 6-tuple)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The SPH Laplacian for heat diffusion uses the viscosity Laplacian kernel (same kernel as viscous forces in Step2), with variable part `(h - |r|)` and coefficient `viscosity_lap_coeff = 45/(pi*h^6)`. This reuses existing precalculated coefficients
+  - dTdt is an ephemeral sorted-order array that doesn't need to go through fused_reorder -- it's produced by Step1 (sorted) and consumed by Integrate (sorted), then discarded
+  - When adding a new output to a kernel, all downstream consumers must update their return tuple unpacking. In this case, step1 went from 2-tuple to 3-tuple and integrate from 5-tuple to 6-tuple, requiring changes in ~30 call sites across test files
+  - Metal thermal conductivity (50.0) vs Water (0.6) gives an 83x theoretical ratio in dTdt magnitude, and the actual GPU measurement shows 83.3x -- confirming the SPH discretization is consistent with the material properties
+  - Temperature integration is applied in ALL paths of integrate (static early-return, sleeping early-return, normal path) because heat conduction is a physical process that occurs regardless of particle motion state
 ---

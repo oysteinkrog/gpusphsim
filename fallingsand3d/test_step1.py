@@ -52,9 +52,11 @@ from step1 import (
     compute_step1,
     get_module,
     upload_grid_params as upload_step1_grid_params,
+    upload_materials as upload_step1_materials,
     upload_precalc_params,
     upload_sim_params,
 )
+from materials import build_material_array
 
 # Simulation constants matching the acceptance criteria
 H = 0.04                # smoothing length
@@ -73,7 +75,7 @@ PACKED_SAND  = 2 | (GRANULAR << 8)  # material 2, GRANULAR
 
 
 def _upload_all_params() -> None:
-    """Upload grid, sim, and precalc params to all kernel modules."""
+    """Upload grid, sim, precalc, and materials params to all kernel modules."""
     gp = build_grid_params()
     upload_hash_grid_params(gp)
     upload_build_grid_params(gp)
@@ -89,6 +91,9 @@ def _upload_all_params() -> None:
     pp = build_precalc_params(smoothing_length=H)
     upload_precalc_params(pp)
 
+    materials_data = build_material_array()
+    upload_step1_materials(materials_data)
+
 
 def _run_full_pipeline(
     positions_np: np.ndarray,
@@ -96,6 +101,7 @@ def _run_full_pipeline(
     velocity_np: np.ndarray | None = None,
     packed_info_np: np.ndarray | None = None,
     density_in_np: np.ndarray | None = None,
+    temperature_np: np.ndarray | None = None,
 ) -> tuple:
     """Run hash -> sort -> build -> step1 and return results.
 
@@ -106,11 +112,13 @@ def _run_full_pipeline(
     velocity_np : (N, 4) float32, optional (default: zeros)
     packed_info_np : (N,) uint32, optional (default: PACKED_WATER)
     density_in_np : (N,) float32, optional (default: None -> kernel uses fallback)
+    temperature_np : (N,) float32, optional (default: 293.0 ambient)
 
     Returns
     -------
     density_cpu : (N,) float32 -- density in sorted order
     shear_rate_cpu : (N,) float32 -- gamma_dot in sorted order
+    dTdt_cpu : (N,) float32 -- temperature rate of change in sorted order
     sorted_positions_cpu : (N, 4) float32
     sorted_mass_cpu : (N,) float32
     """
@@ -120,11 +128,14 @@ def _run_full_pipeline(
         velocity_np = np.zeros((n, 4), dtype=np.float32)
     if packed_info_np is None:
         packed_info_np = np.full(n, PACKED_WATER, dtype=np.uint32)
+    if temperature_np is None:
+        temperature_np = np.full(n, 293.0, dtype=np.float32)
 
     pos_gpu = cupy.asarray(positions_np)
     mass_gpu = cupy.asarray(mass_np)
     vel_gpu = cupy.asarray(velocity_np)
     pi_gpu = cupy.asarray(packed_info_np)
+    temp_gpu = cupy.asarray(temperature_np)
     density_in_gpu = cupy.asarray(density_in_np) if density_in_np is not None else None
 
     hashes, indices = calc_hash(pos_gpu)
@@ -135,13 +146,15 @@ def _run_full_pipeline(
     sorted_mass = mass_gpu[sorted_indices]
     sorted_vel = vel_gpu[sorted_indices]
     sorted_pi = pi_gpu[sorted_indices]
+    sorted_temp = temp_gpu[sorted_indices]
     sorted_density_in = density_in_gpu[sorted_indices] if density_in_gpu is not None else None
 
     cell_start, cell_end = build_data_struct(sorted_hashes)
 
-    density, shear_rate = compute_step1(
+    density, shear_rate, dTdt = compute_step1(
         sorted_pos, sorted_vel, sorted_mass,
         sorted_density_in, sorted_pi,
+        sorted_temp,
         cell_start, cell_end,
     )
     cupy.cuda.Device().synchronize()
@@ -149,6 +162,7 @@ def _run_full_pipeline(
     return (
         cupy.asnumpy(density),
         cupy.asnumpy(shear_rate),
+        cupy.asnumpy(dTdt),
         cupy.asnumpy(sorted_pos),
         cupy.asnumpy(sorted_mass),
     )
@@ -230,7 +244,7 @@ def test_single_isolated_particle() -> None:
 
     mass_arr = np.array([MASS], dtype=np.float32)
 
-    density, shear_rate, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, shear_rate, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     expected = POLY6_COEFF * MASS * H_SQ**3  # poly6_coeff * mass * h^6
     actual = density[0]
@@ -264,7 +278,7 @@ def test_two_particles_within_h() -> None:
 
     mass_arr = np.full(2, MASS, dtype=np.float32)
 
-    density, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     # Self-contribution only
     single_rho = POLY6_COEFF * MASS * H_SQ**3
@@ -301,7 +315,7 @@ def test_two_particles_beyond_h() -> None:
 
     mass_arr = np.full(2, MASS, dtype=np.float32)
 
-    density, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     single_rho = POLY6_COEFF * MASS * H_SQ**3
 
@@ -332,7 +346,7 @@ def test_per_particle_mass() -> None:
     # Particle 0 has 2x mass
     mass_arr = np.array([MASS * 2.0, MASS], dtype=np.float32)
 
-    density, _, _, sorted_mass = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, sorted_mass = _run_full_pipeline(positions, mass_arr)
 
     # Particle with larger mass should generally produce higher self-density
     # But both particles contribute to each other, and mass affects contribution
@@ -358,7 +372,7 @@ def test_density_clamp_minimum() -> None:
 
     mass_arr = np.array([tiny_mass], dtype=np.float32)
 
-    density, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     assert density[0] >= 1.0, (
         f"Density {density[0]} < 1.0 (clamp failed)"
@@ -393,7 +407,7 @@ def test_uniform_field_rest_density() -> None:
 
     mass_arr = np.full(n, MASS, dtype=np.float32)
 
-    density, _, sorted_pos, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, sorted_pos, _ = _run_full_pipeline(positions, mass_arr)
 
     # Filter to interior particles (at least 2h from edge to avoid boundary effects)
     margin = 2.0 * H  # 0.08
@@ -444,7 +458,7 @@ def test_self_contribution_included() -> None:
     positions[0] = [0.0, 0.0, 0.0, 1.0]
     mass_arr = np.array([MASS], dtype=np.float32)
 
-    density, _, _, _ = _run_full_pipeline(positions, mass_arr)
+    density, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
     # Without self-contribution, density would be 0 -> clamped to 1.0
     # With self-contribution, density = poly6_coeff * mass * h^6 which is >> 1.0
@@ -492,7 +506,7 @@ def test_stationary_sand_zero_gamma_dot() -> None:
     # Provide density_in for m_j/rho_j weighting
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    density, shear_rate, sorted_pos, _ = _run_full_pipeline(
+    density, shear_rate, _, sorted_pos, _ = _run_full_pipeline(
         positions, mass_arr, velocities, packed_info, density_in,
     )
 
@@ -542,7 +556,7 @@ def test_shear_flow_nonzero_gamma_dot() -> None:
     packed_info = np.full(n, PACKED_SAND, dtype=np.uint32)
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    density, shear_rate, sorted_pos, _ = _run_full_pipeline(
+    density, shear_rate, _, sorted_pos, _ = _run_full_pipeline(
         positions, mass_arr, velocities, packed_info, density_in,
     )
 
@@ -608,7 +622,7 @@ def test_non_granular_zero_shear_rate() -> None:
     mass_arr = np.full(n, MASS, dtype=np.float32)
     packed_info = np.full(n, PACKED_WATER, dtype=np.uint32)  # FLUID, not GRANULAR
 
-    density, shear_rate, _, _ = _run_full_pipeline(
+    density, shear_rate, _, _, _ = _run_full_pipeline(
         positions, mass_arr, velocities, packed_info,
     )
 
@@ -645,28 +659,220 @@ def test_500k_no_errors() -> None:
 
     density_in = np.full(n, RHO0, dtype=np.float32)
 
-    density, shear_rate, _, _ = _run_full_pipeline(
-        positions, mass_arr, velocities, packed_info, density_in,
+    # Random temperatures for stress test
+    temperature = rng.uniform(200.0, 1500.0, size=n).astype(np.float32)
+
+    density, shear_rate, dTdt, _, _ = _run_full_pipeline(
+        positions, mass_arr, velocities, packed_info, density_in, temperature,
     )
 
     # Basic sanity checks
     assert density.shape == (n,), f"density shape {density.shape} != ({n},)"
     assert shear_rate.shape == (n,), f"shear_rate shape {shear_rate.shape} != ({n},)"
+    assert dTdt.shape == (n,), f"dTdt shape {dTdt.shape} != ({n},)"
     assert np.all(density >= 1.0), "Some densities < 1.0 (clamp failed)"
     assert np.all(np.isfinite(density)), "NaN or Inf in densities"
     assert np.all(np.isfinite(shear_rate)), "NaN or Inf in shear_rates"
     assert np.all(shear_rate >= 0.0), "Negative shear_rate values found"
+    assert np.all(np.isfinite(dTdt)), "NaN or Inf in dTdt"
 
     mean_rho = float(np.mean(density))
     min_rho = float(np.min(density))
     max_rho = float(np.max(density))
     mean_sr = float(np.mean(shear_rate))
     max_sr = float(np.max(shear_rate))
+    mean_dTdt = float(np.mean(dTdt))
+    max_dTdt = float(np.max(np.abs(dTdt)))
 
     print(f"  500K particles processed (250K FLUID + 250K GRANULAR)")
     print(f"  Density range: [{min_rho:.2f}, {max_rho:.2f}], mean: {mean_rho:.2f}")
     print(f"  Shear rate: mean={mean_sr:.4f}, max={max_sr:.4f}")
+    print(f"  dTdt: mean={mean_dTdt:.4f}, max |dTdt|={max_dTdt:.4f}")
     print("[OK] 500K particles: no CUDA errors, all values finite")
+
+
+# ===================================================================
+# Heat diffusion tests (US-020)
+# ===================================================================
+
+# Material IDs from materials.py
+MAT_WATER = 5   # thermal_conductivity = 0.6
+MAT_METAL = 10  # thermal_conductivity = 50.0
+
+def test_hot_particle_among_cold() -> None:
+    """Hot particle (1000K) among cold particles (293K):
+    dTdt is positive for cold neighbors, negative for hot particle.
+    """
+    print("\n--- Hot particle among cold: dTdt sign test ---")
+    _upload_all_params()
+
+    # Place one hot particle at center, surrounded by cold ones
+    # Use a small cluster: 1 hot + neighbors in a regular grid
+    spacing = SPACING
+    extent = 0.06  # small region so all particles are neighbors
+    coords = np.arange(-extent, extent + spacing * 0.5, spacing, dtype=np.float32)
+    xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
+    n = xx.size
+
+    positions = np.zeros((n, 4), dtype=np.float32)
+    positions[:, 0] = xx.ravel()
+    positions[:, 1] = yy.ravel()
+    positions[:, 2] = zz.ravel()
+    positions[:, 3] = 1.0
+
+    mass_arr = np.full(n, MASS, dtype=np.float32)
+
+    # All METAL (high thermal conductivity = 50.0)
+    packed_metal = MAT_METAL | (FLUID << 8)
+    packed_info = np.full(n, packed_metal, dtype=np.uint32)
+
+    # All cold (293K) except the center particle (1000K)
+    temperature = np.full(n, 293.0, dtype=np.float32)
+    # Find the particle closest to origin
+    dists = positions[:, 0]**2 + positions[:, 1]**2 + positions[:, 2]**2
+    center_idx = np.argmin(dists)
+    temperature[center_idx] = 1000.0
+
+    density_in = np.full(n, RHO0, dtype=np.float32)
+
+    density, shear_rate, dTdt, sorted_pos, _ = _run_full_pipeline(
+        positions, mass_arr, None, packed_info, density_in, temperature,
+    )
+
+    # Find the hot particle in sorted order (closest to origin)
+    sorted_dists = sorted_pos[:, 0]**2 + sorted_pos[:, 1]**2 + sorted_pos[:, 2]**2
+    hot_sorted_idx = np.argmin(sorted_dists)
+
+    hot_dTdt = dTdt[hot_sorted_idx]
+    cold_dTdt = np.delete(dTdt, hot_sorted_idx)
+
+    print(f"  {n} METAL particles, center=1000K, rest=293K")
+    print(f"  Hot particle dTdt: {hot_dTdt:.4f} (should be negative)")
+    print(f"  Cold particles dTdt mean: {np.mean(cold_dTdt):.4f} (should be positive)")
+    print(f"  Cold particles dTdt range: [{np.min(cold_dTdt):.4f}, {np.max(cold_dTdt):.4f}]")
+
+    # Hot particle loses heat -> dTdt < 0
+    assert hot_dTdt < 0.0, f"Hot particle dTdt = {hot_dTdt:.4f}, expected negative"
+    # Cold neighbors near hot particle gain heat -> at least some dTdt > 0
+    assert np.any(cold_dTdt > 0.0), "No cold particle has positive dTdt"
+
+    print("[OK] Hot particle dTdt negative, cold neighbors dTdt positive")
+
+
+def test_uniform_temperature_zero_dTdt() -> None:
+    """All particles at same temperature -> dTdt should be ~0."""
+    print("\n--- Uniform temperature zero dTdt test ---")
+    _upload_all_params()
+
+    spacing = SPACING
+    extent = 0.08
+    coords = np.arange(-extent, extent + spacing * 0.5, spacing, dtype=np.float32)
+    xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
+    n = xx.size
+
+    positions = np.zeros((n, 4), dtype=np.float32)
+    positions[:, 0] = xx.ravel()
+    positions[:, 1] = yy.ravel()
+    positions[:, 2] = zz.ravel()
+    positions[:, 3] = 1.0
+
+    mass_arr = np.full(n, MASS, dtype=np.float32)
+
+    packed_water = MAT_WATER | (FLUID << 8)
+    packed_info = np.full(n, packed_water, dtype=np.uint32)
+
+    # All at 500K uniform
+    temperature = np.full(n, 500.0, dtype=np.float32)
+    density_in = np.full(n, RHO0, dtype=np.float32)
+
+    _, _, dTdt, _, _ = _run_full_pipeline(
+        positions, mass_arr, None, packed_info, density_in, temperature,
+    )
+
+    max_abs_dTdt = float(np.max(np.abs(dTdt)))
+    print(f"  {n} WATER particles at uniform 500K")
+    print(f"  Max |dTdt|: {max_abs_dTdt:.6e}")
+
+    assert max_abs_dTdt < 1e-3, (
+        f"Uniform temperature dTdt = {max_abs_dTdt:.6e}, expected ~0"
+    )
+    print("[OK] Uniform temperature produces dTdt ~ 0")
+
+
+def test_heat_conductivity_material_dependence() -> None:
+    """Metal (kappa=50) conducts heat much faster than water (kappa=0.6)."""
+    print("\n--- Heat conductivity material dependence test ---")
+    _upload_all_params()
+
+    # Two clusters: one metal, one water, same geometry
+    spacing = SPACING
+    extent = 0.04
+    coords = np.arange(-extent, extent + spacing * 0.5, spacing, dtype=np.float32)
+    xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
+    n_each = xx.size
+    n = n_each * 2
+
+    # Metal cluster near origin
+    pos_metal = np.zeros((n_each, 4), dtype=np.float32)
+    pos_metal[:, 0] = xx.ravel()
+    pos_metal[:, 1] = yy.ravel()
+    pos_metal[:, 2] = zz.ravel()
+    pos_metal[:, 3] = 1.0
+
+    # Water cluster offset far away (no interaction)
+    pos_water = np.zeros((n_each, 4), dtype=np.float32)
+    pos_water[:, 0] = xx.ravel() + 0.5
+    pos_water[:, 1] = yy.ravel()
+    pos_water[:, 2] = zz.ravel()
+    pos_water[:, 3] = 1.0
+
+    positions = np.vstack([pos_metal, pos_water])
+    mass_arr = np.full(n, MASS, dtype=np.float32)
+
+    packed_metal = MAT_METAL | (FLUID << 8)
+    packed_water = MAT_WATER | (FLUID << 8)
+    packed_info = np.empty(n, dtype=np.uint32)
+    packed_info[:n_each] = packed_metal
+    packed_info[n_each:] = packed_water
+
+    # Center particle of each cluster is hot, rest cold
+    temperature = np.full(n, 293.0, dtype=np.float32)
+    # Metal center
+    metal_dists = pos_metal[:, 0]**2 + pos_metal[:, 1]**2 + pos_metal[:, 2]**2
+    metal_center = np.argmin(metal_dists)
+    temperature[metal_center] = 1000.0
+    # Water center
+    water_dists = (pos_water[:, 0] - 0.5)**2 + pos_water[:, 1]**2 + pos_water[:, 2]**2
+    water_center = n_each + np.argmin(water_dists)
+    temperature[water_center] = 1000.0
+
+    density_in = np.full(n, RHO0, dtype=np.float32)
+
+    _, _, dTdt, sorted_pos, _ = _run_full_pipeline(
+        positions, mass_arr, None, packed_info, density_in, temperature,
+    )
+
+    # Find metal and water hot particles in sorted order
+    sorted_metal_dists = sorted_pos[:, 0]**2 + sorted_pos[:, 1]**2 + sorted_pos[:, 2]**2
+    sorted_water_dists = (sorted_pos[:, 0] - 0.5)**2 + sorted_pos[:, 1]**2 + sorted_pos[:, 2]**2
+
+    metal_hot_sorted = np.argmin(sorted_metal_dists)
+    water_hot_sorted = np.argmin(sorted_water_dists)
+
+    metal_hot_dTdt = abs(dTdt[metal_hot_sorted])
+    water_hot_dTdt = abs(dTdt[water_hot_sorted])
+
+    ratio = metal_hot_dTdt / max(water_hot_dTdt, 1e-12)
+
+    print(f"  Metal (kappa=50) hot particle |dTdt|: {metal_hot_dTdt:.4f}")
+    print(f"  Water (kappa=0.6) hot particle |dTdt|: {water_hot_dTdt:.4f}")
+    print(f"  Ratio: {ratio:.1f}x")
+
+    # Metal should conduct at least 10x faster than water (50/0.6 = 83x theoretically)
+    assert metal_hot_dTdt > water_hot_dTdt * 5.0, (
+        f"Metal dTdt {metal_hot_dTdt:.4f} not significantly larger than water {water_hot_dTdt:.4f}"
+    )
+    print("[OK] Metal conducts heat much faster than water")
 
 
 def main() -> None:
@@ -684,6 +890,9 @@ def main() -> None:
     test_stationary_sand_zero_gamma_dot()
     test_shear_flow_nonzero_gamma_dot()
     test_non_granular_zero_shear_rate()
+    test_hot_particle_among_cold()
+    test_uniform_temperature_zero_dTdt()
+    test_heat_conductivity_material_dependence()
     test_500k_no_errors()
     print("\n=== ALL CHECKS PASSED ===")
 

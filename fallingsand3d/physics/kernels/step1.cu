@@ -1,9 +1,13 @@
 /*
- * step1.cu -- K_Step1 SPH density summation + strain-rate tensor kernel.
+ * step1.cu -- K_Step1 SPH density summation + strain-rate tensor + heat diffusion kernel.
  *
  * Per-particle computation:
  *   density_sum += m_j * (h^2 - |r_ij|^2)^3   for all neighbors j within h
  *   density_i = max(1.0, poly6_coeff * density_sum)
+ *
+ * Heat diffusion (all particles):
+ *   dTdt += kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|)
+ *   where kappa_i = c_materials[mat_id].thermal_conductivity
  *
  * For GRANULAR particles only, also computes the symmetric strain-rate tensor D
  * using the SPH velocity gradient with spiky gradient weighting:
@@ -13,13 +17,13 @@
  * Operates on SORTED particle arrays (after hash + sort + reorder).
  * Uses 27-cell neighbor iteration with grid cell_start/cell_end tables.
  * Self-interaction IS included for density (j==i NOT skipped).
- * Self-interaction is skipped for strain-rate (j==i skipped).
+ * Self-interaction is skipped for strain-rate and heat diffusion (j==i skipped).
  * Per-particle mass m_j supports multi-material and mass splitting.
  *
  * Ported from SPHSimLib/K_SimpleSPH_Step1.inl + K_SPH_Kernels_poly6.inl.
  * Neighbor iteration ported from SPHSimLib/K_UniformGrid_Utils.inl.
  *
- * Constant memory (c_grid, c_sim, c_precalc) declared in common.cuh.
+ * Constant memory (c_grid, c_sim, c_precalc, c_materials) declared in common.cuh.
  */
 
 #include "common.cuh"
@@ -32,10 +36,12 @@ void K_Step1(
     const float*    __restrict__ mass,           // sorted per-particle mass
     const float*    __restrict__ density_in,     // sorted density from previous step (for strain-rate m_j/rho_j weighting; NULL on first frame)
     const uint*     __restrict__ packed_info,    // sorted packed_info (for behavior class check)
+    const float*    __restrict__ temperature_in, // sorted temperature (for heat diffusion)
     const uint*     __restrict__ cell_start,     // grid cell start indices
     const uint*     __restrict__ cell_end,       // grid cell end indices
     float*          __restrict__ density_out,    // output: density per particle
-    float*          __restrict__ shear_rate_out  // output: gamma_dot per particle (0 for non-GRANULAR)
+    float*          __restrict__ shear_rate_out, // output: gamma_dot per particle (0 for non-GRANULAR)
+    float*          __restrict__ dTdt_out        // output: temperature rate of change (heat diffusion)
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -50,6 +56,7 @@ void K_Step1(
     // Check if this particle is GRANULAR
     uint pi_i = __ldg(&packed_info[index_i]);
     int behavior_i = GET_BEHAVIOR(pi_i);
+    uint mat_id_i = GET_MATERIAL_ID(pi_i);
     bool is_granular = (behavior_i == GRANULAR);
 
     // Read velocity for strain-rate (only used if GRANULAR, but cheap to read)
@@ -59,8 +66,15 @@ void K_Step1(
         vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
     }
 
+    // Read temperature for heat diffusion
+    float T_i = __ldg(&temperature_in[index_i]);
+    float kappa_i = c_materials[mat_id_i].thermal_conductivity;
+
     // Density accumulator (variable part of Poly6 kernel)
     float sum_density = 0.0f;
+
+    // Heat diffusion accumulator: dTdt
+    float sum_dTdt = 0.0f;
 
     // Strain-rate tensor accumulators (6 symmetric components)
     // D_xx, D_yy, D_zz, D_xy, D_xz, D_yz
@@ -115,6 +129,18 @@ void K_Step1(
                         float m_j = __ldg(&mass[index_j]);
                         sum_density += m_j * diff * diff * diff;
 
+                        // --- Heat diffusion: skip self ---
+                        if (index_j != index_i) {
+                            float rlen = sqrtf(r_sq);
+                            float T_j = __ldg(&temperature_in[index_j]);
+                            float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
+                            // SPH Laplacian of temperature using viscosity Laplacian kernel:
+                            // lap_W_visc(r) = (h - |r|)  (variable part, coeff is viscosity_lap_coeff)
+                            // dTdt += kappa * (m_j / rho_j) * (T_j - T_i) * viscosity_lap_coeff * (h - |r|)
+                            float lap_var = h - rlen;
+                            sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var;
+                        }
+
                         // --- Strain-rate: skip self, GRANULAR only ---
                         if (is_granular && index_j != index_i && r_sq > 1e-12f) {
                             float rlen = sqrtf(r_sq);
@@ -166,6 +192,10 @@ void K_Step1(
     // --- PostCalc: density ---
     float density = c_precalc.poly6_coeff * sum_density;
     density_out[index_i] = fmaxf(density, 1.0f);
+
+    // --- PostCalc: heat diffusion dTdt ---
+    // dTdt = kappa_i * viscosity_lap_coeff * sum_dTdt
+    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt;
 
     // --- PostCalc: strain-rate magnitude (gamma_dot) ---
     if (is_granular) {

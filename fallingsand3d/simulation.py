@@ -105,10 +105,11 @@ class Simulation:
         # --- build_grid module: c_grid ---
         build_grid.upload_grid_params(grid_params)
 
-        # --- step1 module: c_grid, c_sim, c_precalc ---
+        # --- step1 module: c_grid, c_sim, c_precalc, c_materials ---
         step1.upload_grid_params(grid_params)
         step1.upload_sim_params(sim_params)
         step1.upload_precalc_params(precalc_params)
+        step1.upload_materials(materials_data)
 
         # --- step2 module: c_grid, c_sim, c_precalc, c_materials, c_granular ---
         step2.upload_grid_params(grid_params)
@@ -159,17 +160,19 @@ class Simulation:
             sorted_hashes[:n], self._cell_start, self._cell_end
         )
 
-        # 5. Step1: density summation + strain-rate tensor
+        # 5. Step1: density summation + strain-rate tensor + heat diffusion
         step1.compute_step1(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
             w.sorted_mass[:n],
             w.sorted_density if hasattr(w, '_density_initialized') else None,
             w.sorted_packed_info[:n],
+            w.sorted_temperature[:n],
             self._cell_start,
             self._cell_end,
             density_out=w.sorted_density,
             shear_rate_out=w.sorted_shear_rate,
+            dTdt_out=w.sorted_dTdt,
         )
         w._density_initialized = True
 
@@ -186,9 +189,9 @@ class Simulation:
             veleval_out=w.sorted_veleval,
         )
 
-        # 7. Integrate: symplectic Euler + SDF boundaries + color update
+        # 7. Integrate: symplectic Euler + SDF boundaries + color + temperature update
         #    Writes back to UNSORTED arrays via sort_indexes
-        #    Also updates packed_info (sleep flag) and sleep_counter
+        #    Also updates packed_info (sleep flag), sleep_counter, and temperature
         integrate.integrate(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -200,6 +203,7 @@ class Simulation:
             w.sorted_health[:n],
             sorted_density=w.sorted_density[:n],
             sorted_shear_rate=w.sorted_shear_rate[:n],
+            sorted_dTdt=w.sorted_dTdt[:n],
             sorted_sleep_counter=w.sorted_sleep_counter[:n],
             sort_indexes=sorted_indices[:n],
             position_out=w.position,
@@ -207,6 +211,7 @@ class Simulation:
             color_out=w.color,
             packed_info_out=w.packed_info,
             sleep_counter_out=w.sleep_counter,
+            temperature_out=w.temperature,
         )
 
         # 8. Wake propagation: mark cells near just-woke particles,

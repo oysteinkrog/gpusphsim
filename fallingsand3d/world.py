@@ -87,6 +87,7 @@ class World:
         self.sorted_health = cp.zeros(n, dtype=cp.float32)
         self.sorted_lifetime = cp.zeros(n, dtype=cp.float32)
         self.sorted_shear_rate = cp.zeros(n, dtype=cp.float32)
+        self.sorted_dTdt = cp.zeros(n, dtype=cp.float32)
         self.sorted_packed_info = cp.zeros(n, dtype=cp.uint32)
         self.sorted_sleep_counter = cp.zeros(n, dtype=cp.uint8)
         # Sort index arrays (hash + original index, plus sorted versions)
