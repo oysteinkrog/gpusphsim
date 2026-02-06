@@ -705,3 +705,24 @@
   - Adding acceleration clamping before velocity integration means existing velocity-clamp tests that relied on extreme forces (1e6) need updating -- the accel clamp activates first, limiting per-step velocity gain to `dt * ACCEL_MAX = 5.0` instead of `dt * (force/mass)`. The velocity clamp test was updated to use initial velocity near the limit with moderate force instead.
   - The squared-magnitude pattern (`accel_sq > ACCEL_MAX_SQ`, then `sqrtf` only when clamping) is consistent with the existing velocity clamp pattern and avoids unnecessary `sqrtf` in the common case.
 ---
+
+## 2026-02-06 - US-029
+- What was implemented:
+  - `World.compact()` method: CuPy stream compaction that gathers alive particles (material_id != 0) to the front of all SoA arrays, updates `_high_water` to count of alive only
+  - Uses sorted_* buffers as scratch space (they're ephemeral between frames) to avoid temporary allocations
+  - Fixed `World.num_active` property to use `(packed_info & 0xFF) != 0` check instead of `packed_info != 0` (correctly handles DEAD particles with behavior=STATIC that have packed_info=0x300)
+  - `Simulation._maybe_compact()`: periodic compaction every `compact_interval` frames (default 60) when `dead_count >= compact_threshold` (default 100)
+  - `compact_interval` and `compact_threshold` configurable via Simulation constructor
+  - 19 tests: no-dead no-op, all-dead, empty, removes dead, preserves positions/velocities/materials/temperature/mass/health/sleep_counter/color, handles 0x300 dead, 10K kill+render, spawn after compact, contiguous arrays, repeated compaction, 500K stress test, num_active fix
+- Files changed:
+  - `fallingsand3d/world.py` (modified -- added `compact()` method, fixed `num_active` property to check material_id bits)
+  - `fallingsand3d/simulation.py` (modified -- added `compact_interval`/`compact_threshold` params, `_maybe_compact()` method, periodic compaction in `step_frame()`)
+  - `fallingsand3d/test_compact.py` (new -- 19 tests)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - DEAD particles have TWO encodings: `packed_info=0` (from `World.kill_in_sphere`) and `packed_info=0x300` (MAKE_PACKED(0, STATIC) from Reactions kernel). The alive check must use `(packed_info & 0xFF) != 0` (material_id != 0), NOT `packed_info != 0`. The existing `num_active` property was buggy -- it used `count_nonzero(packed_info)` which counted 0x300 dead particles as alive.
+  - CuPy `flatnonzero()` + fancy indexing is the natural stream compaction pattern: `alive_idx = cp.flatnonzero(alive_mask)` then `dst[:num_alive] = src[:n][alive_idx]`. This runs entirely on GPU with no host-device copies.
+  - The sorted_* buffers (normally used as double-buffer targets during sort+reorder) are available as scratch space between frames since they're ephemeral within a single simulation step. Using them avoids allocating temporary arrays for the gather-then-copy-back pattern.
+  - Compaction must zero out the dead tail (`packed_info[num_alive:n] = 0`) after moving alive particles to prevent stale data from confusing future `num_active` counts or other code that might scan the full array.
+  - The compaction threshold (100 dead particles) prevents wasting GPU time on compaction when there are only a few dead particles scattered in the array. The interval (60 frames) amortizes the cost across frames.
+---

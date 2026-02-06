@@ -70,6 +70,8 @@ class Simulation:
         accuracy: float = 0.4,
         fixed_dt: bool = False,
         max_substeps: int = 20,
+        compact_interval: int = 60,
+        compact_threshold: int = 100,
     ) -> None:
         self.world = world
         self.dt = dt
@@ -84,6 +86,8 @@ class Simulation:
         self._last_substeps = 0
         self.sim_time = 0.0
         self._frame_counter = 0
+        self.compact_interval = compact_interval
+        self.compact_threshold = compact_threshold
 
         # Precompute acoustic speed from materials table
         self._c_sound = self._compute_c_sound()
@@ -429,8 +433,33 @@ class Simulation:
         for _ in range(sim_steps):
             self._sim_step(n)
 
+        # Periodic compaction: remove dead particles from the active range
+        if sim_steps > 0:
+            n = self._maybe_compact()
+
         self._last_substeps = sim_steps
         return sim_steps
+
+    def _maybe_compact(self) -> int:
+        """Run compaction if due and enough dead particles exist.
+
+        Returns the current _high_water (possibly reduced by compaction).
+        """
+        n = self.world._high_water
+        if n == 0 or self.compact_interval <= 0:
+            return n
+
+        if self._frame_counter % self.compact_interval != 0:
+            return n
+
+        # Count dead particles = _high_water - num_active
+        num_alive = self.world.num_active
+        num_dead = n - num_alive
+        if num_dead < self.compact_threshold:
+            return n
+
+        self.world.compact()
+        return self.world._high_water
 
     def copy_to_vbos(self, cuda_pos, cuda_col) -> None:
         """Copy UNSORTED pos/color arrays into mapped GL VBOs.

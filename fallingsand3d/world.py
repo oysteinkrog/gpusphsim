@@ -106,10 +106,89 @@ class World:
 
     @property
     def num_active(self) -> int:
-        """Count of non-DEAD particles (packed_info != 0)."""
+        """Count of non-DEAD particles (material_id != 0)."""
         if self._high_water == 0:
             return 0
-        return int(cp.count_nonzero(self.packed_info[:self._high_water]))
+        return int(cp.count_nonzero(self.packed_info[:self._high_water] & cp.uint32(0xFF)))
+
+    def compact(self) -> int:
+        """Compact particle arrays by moving alive particles to the front.
+
+        Uses CuPy stream compaction (fancy indexing gather) to move all
+        non-DEAD particles to contiguous slots [0, num_alive). Dead
+        particles are effectively discarded (their slots become available
+        for future spawning).
+
+        Returns
+        -------
+        int
+            Number of alive particles after compaction (_high_water).
+        """
+        n = self._high_water
+        if n == 0:
+            return 0
+
+        # Find alive particle indices: material_id != 0
+        alive_mask = (self.packed_info[:n] & cp.uint32(0xFF)) != cp.uint32(0)
+        alive_idx = cp.flatnonzero(alive_mask)
+        num_alive = len(alive_idx)
+
+        if num_alive == n:
+            # No dead particles, nothing to do
+            return n
+
+        if num_alive == 0:
+            # All dead
+            self._high_water = 0
+            return 0
+
+        # Gather alive particles into temporary buffers, then copy back.
+        # We use the sorted_* buffers as scratch space since they're
+        # ephemeral and not needed between frames.
+
+        # float4 arrays
+        self.sorted_position[:num_alive] = self.position[:n][alive_idx]
+        self.sorted_velocity[:num_alive] = self.velocity[:n][alive_idx]
+        self.sorted_veleval[:num_alive] = self.veleval[:n][alive_idx]
+        self.sorted_sph_force[:num_alive] = self.sph_force[:n][alive_idx]
+        self.sorted_color[:num_alive] = self.color[:n][alive_idx]
+        # float arrays
+        self.sorted_density[:num_alive] = self.density[:n][alive_idx]
+        self.sorted_mass[:num_alive] = self.mass[:n][alive_idx]
+        self.sorted_temperature[:num_alive] = self.temperature[:n][alive_idx]
+        self.sorted_health[:num_alive] = self.health[:n][alive_idx]
+        self.sorted_lifetime[:num_alive] = self.lifetime[:n][alive_idx]
+        self.sorted_shear_rate[:num_alive] = self.shear_rate[:n][alive_idx]
+        self.sorted_exposure_heat[:num_alive] = self.exposure_heat[:n][alive_idx]
+        self.sorted_exposure_corrode[:num_alive] = self.exposure_corrode[:n][alive_idx]
+        # uint32 arrays
+        self.sorted_packed_info[:num_alive] = self.packed_info[:n][alive_idx]
+        # uint8 arrays
+        self.sorted_sleep_counter[:num_alive] = self.sleep_counter[:n][alive_idx]
+
+        # Copy back from scratch to primary arrays
+        self.position[:num_alive] = self.sorted_position[:num_alive]
+        self.velocity[:num_alive] = self.sorted_velocity[:num_alive]
+        self.veleval[:num_alive] = self.sorted_veleval[:num_alive]
+        self.sph_force[:num_alive] = self.sorted_sph_force[:num_alive]
+        self.color[:num_alive] = self.sorted_color[:num_alive]
+        self.density[:num_alive] = self.sorted_density[:num_alive]
+        self.mass[:num_alive] = self.sorted_mass[:num_alive]
+        self.temperature[:num_alive] = self.sorted_temperature[:num_alive]
+        self.health[:num_alive] = self.sorted_health[:num_alive]
+        self.lifetime[:num_alive] = self.sorted_lifetime[:num_alive]
+        self.shear_rate[:num_alive] = self.sorted_shear_rate[:num_alive]
+        self.exposure_heat[:num_alive] = self.sorted_exposure_heat[:num_alive]
+        self.exposure_corrode[:num_alive] = self.sorted_exposure_corrode[:num_alive]
+        self.packed_info[:num_alive] = self.sorted_packed_info[:num_alive]
+        self.sleep_counter[:num_alive] = self.sorted_sleep_counter[:num_alive]
+
+        # Zero out the dead tail to prevent stale data
+        if num_alive < n:
+            self.packed_info[num_alive:n] = cp.uint32(0)
+
+        self._high_water = num_alive
+        return num_alive
 
     def spawn_sphere(
         self,
