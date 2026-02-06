@@ -38,7 +38,7 @@ import wake
 
 # Adaptive timestep limits
 DT_MIN = 1e-5
-DT_MAX = 0.005
+DT_MAX = 0.001
 
 
 class Simulation:
@@ -207,7 +207,7 @@ class Simulation:
         self._sim_params = sim_params
         precalc_params = step1.build_precalc_params(
             smoothing_length=0.04,
-            viscosity=3.5,
+            viscosity=0.1,
         )
         granular_params = step2.build_granular_params()
         materials_data = build_material_array()

@@ -183,7 +183,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     SAND: MaterialDef(
         id=SAND, name="SAND",
-        rest_density=1600.0, eos_stiffness=20.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=20.0, eos_gamma=7.0,
         base_viscosity=0.5, friction_coeff=0.6, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.3, heat_capacity=830.0,
         temp_melt=1700.0, temp_boil=2500.0, temp_ignite=0.0,
@@ -192,7 +192,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     DIRT: MaterialDef(
         id=DIRT, name="DIRT",
-        rest_density=1500.0, eos_stiffness=18.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=18.0, eos_gamma=7.0,
         base_viscosity=0.8, friction_coeff=0.5, cohesion=0.1,
         buoyancy_extra=0.0, thermal_conductivity=0.25, heat_capacity=900.0,
         temp_melt=1400.0, temp_boil=2200.0, temp_ignite=0.0,
@@ -201,7 +201,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     GRAVEL: MaterialDef(
         id=GRAVEL, name="GRAVEL",
-        rest_density=1800.0, eos_stiffness=25.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=25.0, eos_gamma=7.0,
         base_viscosity=0.3, friction_coeff=0.65, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=840.0,
         temp_melt=1500.0, temp_boil=2800.0, temp_ignite=0.0,
@@ -210,7 +210,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     WATER: MaterialDef(
         id=WATER, name="WATER",
-        rest_density=1000.0, eos_stiffness=3.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=3.0, eos_gamma=7.0,
         base_viscosity=3.5, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.6, heat_capacity=4186.0,
         temp_melt=273.0, temp_boil=373.0, temp_ignite=0.0,
@@ -219,7 +219,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     OIL: MaterialDef(
         id=OIL, name="OIL",
-        rest_density=800.0, eos_stiffness=8.0, eos_gamma=7.0,
+        rest_density=2000.0, eos_stiffness=8.0, eos_gamma=7.0,
         base_viscosity=5.0, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.15, heat_capacity=2000.0,
         temp_melt=250.0, temp_boil=570.0, temp_ignite=480.0,
@@ -237,7 +237,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     ACID: MaterialDef(
         id=ACID, name="ACID",
-        rest_density=1200.0, eos_stiffness=10.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=10.0, eos_gamma=7.0,
         base_viscosity=1.5, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=2500.0,
         temp_melt=250.0, temp_boil=380.0, temp_ignite=0.0,
@@ -300,7 +300,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     GUNPOWDER: MaterialDef(
         id=GUNPOWDER, name="GUNPOWDER",
-        rest_density=1700.0, eos_stiffness=20.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=20.0, eos_gamma=7.0,
         base_viscosity=0.0, friction_coeff=0.5, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.2, heat_capacity=800.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=480.0,

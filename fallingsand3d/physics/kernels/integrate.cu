@@ -35,7 +35,7 @@
 #define GAS_DRAG_COEFF     2.0f
 #define VELOCITY_LIMIT     50.0f
 #define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
-#define ACCEL_MAX          5000.0f
+#define ACCEL_MAX          200.0f
 #define ACCEL_MAX_SQ       (ACCEL_MAX * ACCEL_MAX)
 
 /* Temperature integration constants */

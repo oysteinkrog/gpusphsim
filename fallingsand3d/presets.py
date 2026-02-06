@@ -65,7 +65,7 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         min_corner=(-0.8, -0.9, 0.4),
         max_corner=(0.8, -0.4, 0.8),
         material_id=WATER,
-        spacing=0.03,
+        spacing=0.02,
     )
     total += n
 
@@ -74,7 +74,7 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         min_corner=(-0.8, -0.9, -0.8),
         max_corner=(0.8, -0.4, -0.4),
         material_id=WATER,
-        spacing=0.03,
+        spacing=0.02,
     )
     total += n
 
@@ -83,7 +83,7 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         min_corner=(-0.8, -0.9, -0.4),
         max_corner=(-0.4, -0.4, 0.4),
         material_id=WATER,
-        spacing=0.03,
+        spacing=0.02,
     )
     total += n
 
@@ -92,7 +92,7 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         min_corner=(0.4, -0.9, -0.4),
         max_corner=(0.8, -0.4, 0.4),
         material_id=WATER,
-        spacing=0.03,
+        spacing=0.02,
     )
     total += n
 
@@ -193,7 +193,7 @@ def load_dam_break(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         min_corner=(-0.9, -0.9, -0.8),
         max_corner=(-0.05, 0.5, 0.8),
         material_id=WATER,
-        spacing=0.025,
+        spacing=0.02,
     )
     total += n
 
@@ -302,9 +302,13 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Water Drop: suspended water block falling under gravity.
 
-    ~37K water particles in a block suspended in the upper half of the
+    ~75K water particles in a block suspended in the upper half of the
     domain, dropping onto a stone floor. Inspired by the parent project's
     simple water demo.
+
+    NOTE: Water spacing must be <= 0.02 (the default particle spacing).
+    Larger spacing produces SPH density below rest_density, giving negative
+    Tait EOS pressure that causes particles to attract instead of repel.
     """
     _clear_world(world)
     total = 0
@@ -318,12 +322,12 @@ def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Large water block suspended high up
+    # Water block suspended high up
     n = world.spawn_cube(
         min_corner=(-0.5, 0.1, -0.5),
         max_corner=(0.5, 0.7, 0.5),
         material_id=WATER,
-        spacing=0.03,
+        spacing=0.02,
     )
     total += n
 
