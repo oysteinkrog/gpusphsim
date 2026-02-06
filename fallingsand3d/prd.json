@@ -458,8 +458,9 @@
         "Kernel runs without errors"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": "IMPORTANT: Dead particles are NOT contiguous — killing creates scattered holes. The atomic freelist (dead_indices stack + dead_count) is efficient for our typical spawn rates (~100-1000 particles/frame). Contention with ~1000 concurrent atomics is negligible on modern GPUs. Prefix-sum compaction is only needed for 50K+ simultaneous spawns, which doesn't happen here. Reactions kernel builds the freelist. Spawn kernel consumes from it. Compaction (US-029) periodically cleans up. See PHYSICS.md Dead Particle Management section."
+      "passes": true,
+      "notes": "IMPORTANT: Dead particles are NOT contiguous — killing creates scattered holes. The atomic freelist (dead_indices stack + dead_count) is efficient for our typical spawn rates (~100-1000 particles/frame). Contention with ~1000 concurrent atomics is negligible on modern GPUs. Prefix-sum compaction is only needed for 50K+ simultaneous spawns, which doesn't happen here. Reactions kernel builds the freelist. Spawn kernel consumes from it. Compaction (US-029) periodically cleans up. See PHYSICS.md Dead Particle Management section.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-024",
@@ -601,6 +602,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T16:58:38.238Z"
+    "updatedAt": "2026-02-06T17:13:28.123Z"
   }
 }

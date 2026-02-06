@@ -3,10 +3,10 @@
   "sessionId": "0a9bb7d7-e66b-4aa5-84c0-224e7a9d1534",
   "status": "running",
   "startedAt": "2026-02-06T10:16:15.178Z",
-  "updatedAt": "2026-02-06T16:58:38.245Z",
-  "currentIteration": 21,
+  "updatedAt": "2026-02-06T17:13:28.132Z",
+  "currentIteration": 22,
   "maxIterations": 0,
-  "tasksCompleted": 28,
+  "tasksCompleted": 29,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -143,8 +143,8 @@
       {
         "id": "US-022",
         "title": "Reactions kernel for phase transitions and corrosion",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "US-023",
@@ -406,6 +406,16 @@
       "durationMs": 519033,
       "startedAt": "2026-02-06T16:43:31.777Z",
       "endedAt": "2026-02-06T16:52:10.810Z"
+    },
+    {
+      "iteration": 22,
+      "status": "completed",
+      "taskId": "US-022",
+      "taskTitle": "Reactions kernel for phase transitions and corrosion",
+      "taskCompleted": true,
+      "durationMs": 385724,
+      "startedAt": "2026-02-06T16:52:12.511Z",
+      "endedAt": "2026-02-06T16:58:38.235Z"
     }
   ],
   "skippedTaskIds": [],
