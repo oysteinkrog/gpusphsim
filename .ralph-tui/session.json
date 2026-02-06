@@ -3,10 +3,10 @@
   "sessionId": "0a9bb7d7-e66b-4aa5-84c0-224e7a9d1534",
   "status": "running",
   "startedAt": "2026-02-06T10:16:15.178Z",
-  "updatedAt": "2026-02-06T16:14:50.067Z",
-  "currentIteration": 16,
+  "updatedAt": "2026-02-06T16:24:06.063Z",
+  "currentIteration": 17,
   "maxIterations": 0,
-  "tasksCompleted": 23,
+  "tasksCompleted": 24,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -113,8 +113,8 @@
       {
         "id": "US-017",
         "title": "Velocity clamp and anti-creep for granular",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "US-018",
@@ -356,6 +356,16 @@
       "durationMs": 112635,
       "startedAt": "2026-02-06T16:07:01.068Z",
       "endedAt": "2026-02-06T16:08:53.703Z"
+    },
+    {
+      "iteration": 17,
+      "status": "completed",
+      "taskId": "US-017",
+      "taskTitle": "Velocity clamp and anti-creep for granular",
+      "taskCompleted": true,
+      "durationMs": 354592,
+      "startedAt": "2026-02-06T16:08:55.465Z",
+      "endedAt": "2026-02-06T16:14:50.057Z"
     }
   ],
   "skippedTaskIds": [],

@@ -356,8 +356,9 @@
         "Test: new particles poured on sleeping pile cause wake-up at contact"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": "DEFERRED: Pure optimization — implement after integration test (US-027) proves correctness without sleeping. sleep_counter is uint8 (max 255, saturates). SLEEPING tested via IS_SLEEPING(packed_info). Set via SET_SLEEPING, clear via CLEAR_SLEEPING macros from common.cuh. Step2 and Integrate already have early-return checks for IS_SLEEPING (added in US-012/013) — they're just never triggered until this story sets the flag."
+      "passes": true,
+      "notes": "DEFERRED: Pure optimization — implement after integration test (US-027) proves correctness without sleeping. sleep_counter is uint8 (max 255, saturates). SLEEPING tested via IS_SLEEPING(packed_info). Set via SET_SLEEPING, clear via CLEAR_SLEEPING macros from common.cuh. Step2 and Integrate already have early-return checks for IS_SLEEPING (added in US-012/013) — they're just never triggered until this story sets the flag.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-019",
@@ -596,6 +597,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T16:14:50.061Z"
+    "updatedAt": "2026-02-06T16:24:05.999Z"
   }
 }
