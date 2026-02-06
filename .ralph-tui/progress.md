@@ -568,3 +568,24 @@
   - The `packed_info[index_j]` read for mat_id_j in the exposure block reuses data already loaded for the neighbor -- but since exposure is inside the `index_j != index_i` branch, it requires its own `__ldg()` load. This could be optimized by hoisting the pi_j read to share with strain-rate, but register pressure is not an issue at current kernel complexity
   - Water-water interaction correctly produces zero exposure because `c_interactions[5][5]` has both reaction_rate=0 and heat_exchange=0 (no self-interaction in the interaction matrix)
 ---
+
+## 2026-02-06 - US-022
+- What was implemented:
+  - `fallingsand3d/physics/kernels/reactions.cu` -- K_Reactions kernel: per-particle state machine for phase transitions, combustion, corrosion, and gas lifetime. No neighbor loop. Reads exposure accumulators from Step1, checks temperature/exposure thresholds, modifies material type, behavior class, temperature, health, lifetime, velocity.
+  - `fallingsand3d/reactions.py` -- Python module: CuPy RawModule compilation from external .cu file with --use_fast_math, constant memory upload (c_sim, c_materials), `compute_reactions()` kernel launch wrapper with block size 256.
+  - `fallingsand3d/test_reactions.py` -- 22 integration tests: compilation, block size, ICE->WATER, ICE stays frozen, LAVA->STONE, LAVA stays liquid, WATER boil SPAWN_GAS flag, WATER cool no-spawn, STEAM->WATER, STEAM stays gas, WOOD ignites, WOOD no-ignite, OIL ignites, GUNPOWDER explosion (velocity burst), corrosion reduces health, corrosion kills particle, GAS lifetime decay, GAS lifetime expires, DEAD particles unchanged, ice+lava together, acid-metal multi-step corrosion, 500K stress test.
+  - `fallingsand3d/simulation.py` -- Updated: import reactions module, upload c_sim/c_materials to reactions, insert reactions step between Step1 and Step2, frame counter for RNG seed.
+- Files changed:
+  - `fallingsand3d/physics/kernels/reactions.cu` (new)
+  - `fallingsand3d/reactions.py` (new)
+  - `fallingsand3d/test_reactions.py` (new)
+  - `fallingsand3d/simulation.py` (modified -- reactions import, constant memory upload, pipeline insertion)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - K_Reactions runs on SORTED arrays between Step1 and Step2. This allows it to read exposure_heat/exposure_corrode (computed by Step1 in sorted order) and modify sorted_packed_info before Step2 sees the updated material types. Integrate then writes the modified packed_info back to unsorted arrays.
+  - The kernel uses early returns for each transition to avoid multiple transitions in one step. The ordering of checks matters: temperature-based transitions (ICE, LAVA, WATER, STEAM) are checked first, then combustion (WOOD, OIL, GUNPOWDER), then corrosion, then gas lifetime. This prevents a particle from, e.g., igniting and then immediately dying from corrosion in the same step.
+  - Wang hash RNG for gunpowder explosion direction: `wang_hash(i + frame * 0x9E3779B9)` gives different random directions per particle and per frame. The golden ratio hash constant provides good mixing of the frame number.
+  - Corrosion uses `health -= exposure_corrode * dt` which is frame-rate dependent but correctly accumulates over time since exposure_corrode is re-computed each step from Step1's neighbor loop. With dt=0.001 and exposure=10.0, it takes ~100 steps to reduce health from 1.0 to 0.0 -- slightly more due to float32 accumulation error.
+  - WATER boiling sets SPAWN_GAS flag (bit 11) but does NOT change material_id -- the spawn kernel (US-023) will handle the actual water->steam conversion. This avoids creating a density mismatch in a single step.
+  - The reactions module only needs c_sim (for dt) and c_materials (for material lookups, though currently unused in the kernel -- it reads mat_id from packed_info). No c_grid or c_precalc needed since there's no spatial computation.
+---

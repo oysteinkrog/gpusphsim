@@ -29,6 +29,7 @@ import build_grid
 import step1
 import step2
 import integrate
+import reactions
 import wake
 
 
@@ -63,6 +64,7 @@ class Simulation:
         self._last_frame_time: Optional[float] = None
         self._last_substeps = 0
         self.sim_time = 0.0
+        self._frame_counter = 0
 
         # Grid cell tables (pre-allocated, reused every frame)
         self._cell_start, self._cell_end = build_grid.allocate_cell_tables()
@@ -123,6 +125,10 @@ class Simulation:
         integrate.upload_sim_params(sim_params)
         integrate.upload_materials(materials_data)
 
+        # --- reactions module: c_sim, c_materials ---
+        reactions.upload_sim_params(sim_params)
+        reactions.upload_materials(materials_data)
+
         # --- wake module: c_grid ---
         wake.upload_grid_params(grid_params)
 
@@ -179,6 +185,20 @@ class Simulation:
         )
         w._density_initialized = True
 
+        # 5b. Reactions: phase transitions, combustion, corrosion, gas lifetime
+        #     Runs on sorted arrays, modifies packed_info/temperature/health/
+        #     lifetime/velocity in-place before Step2 sees them.
+        reactions.compute_reactions(
+            w.sorted_packed_info[:n],
+            w.sorted_temperature[:n],
+            w.sorted_health[:n],
+            w.sorted_lifetime[:n],
+            w.sorted_velocity[:n],
+            w.sorted_exposure_heat[:n],
+            w.sorted_exposure_corrode[:n],
+            frame=self._frame_counter,
+        )
+
         # 6. Step2: pressure + viscosity + XSPH forces
         step2.compute_step2(
             w.sorted_position[:n],
@@ -228,6 +248,7 @@ class Simulation:
         )
 
         self.sim_time += self.dt
+        self._frame_counter += 1
 
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
