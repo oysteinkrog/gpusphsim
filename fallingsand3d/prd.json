@@ -153,8 +153,9 @@
         "Kernel runs without errors for 500K particles"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": "Port from SPHSimLib/K_UniformGrid_Utils.inl:calcGridCell and calcGridHash (non-Morton). Upload GridParams to c_grid constant memory from Python before first kernel launch. grid_delta = float3(grid_res) / (grid_max - grid_min)."
+      "passes": true,
+      "notes": "Port from SPHSimLib/K_UniformGrid_Utils.inl:calcGridCell and calcGridHash (non-Morton). Upload GridParams to c_grid constant memory from Python before first kernel launch. grid_delta = float3(grid_res) / (grid_max - grid_min).",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-009",
@@ -586,6 +587,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:17:22.140Z"
+    "updatedAt": "2026-02-06T15:21:16.996Z"
   }
 }
