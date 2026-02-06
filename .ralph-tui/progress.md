@@ -250,3 +250,18 @@
   - PrecalcParams is kept separate from SimParams to clearly distinguish config parameters (change per scenario) from derived coefficients (recomputed from smoothing_length)
   - Total constant memory usage: materials 2048 + interactions 8192 + grid 52 + sim 64 + precalc 20 = ~10,376 bytes, well under the 64 KB limit
 ---
+
+## 2026-02-06 - US-006 (fallingsand3d/)
+- What was implemented:
+  - `fallingsand3d/materials.py` -- Material property table (16 materials + 16 reserved) and 32x32 interaction matrix with GPU upload via CuPy RawModule constant memory. Struct layout matches `fallingsand3d/physics/kernels/common.cuh` (MaterialProps with eos_stiffness/eos_gamma/behavior_class/color_rgb fields, not the root-level prototype's id/gas_stiffness/is_solid fields)
+  - `fallingsand3d/test_materials.py` -- Host-side and GPU integration tests: struct sizes, material count, water rest_density=1000.0, acid-metal reaction_rate=0.3, reserved slots zeroed, constant memory readback via test kernel
+- Files changed:
+  - `fallingsand3d/materials.py` (implemented from placeholder)
+  - `fallingsand3d/test_materials.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The fallingsand3d `MaterialProps` struct has different fields from the root-level prototype (US-005/US-006 root): rest_density, eos_stiffness, eos_gamma, base_viscosity, friction_coeff, cohesion, buoyancy_extra, thermal_conductivity, heat_capacity, temp_melt, temp_boil, temp_ignite, behavior_class(int), color_r, color_g, color_b. All 16 fields x 4 bytes = 64 bytes with no extra padding needed
+  - The `upload_to_gpu()` function accepts an optional `module` parameter to upload to any CuPy RawModule's constant memory symbols (needed because each compiled .cu file has its own __constant__ symbol space)
+  - `np.float32(0.3)` is `0.30000001192092896` due to IEEE 754 -- test comparisons use `abs(x - 0.3) < 1e-6` for GPU readback
+  - Behavior classes (FLUID=0, GRANULAR=1, GAS=2, STATIC=3) are stored as int in MaterialProps and used to assign physics behavior (EOS type, mu(I) vs constant viscosity, buoyancy)
+---
