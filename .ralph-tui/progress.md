@@ -342,3 +342,21 @@
   - The kernel is straightforward global-memory-only (no shared memory optimization) since modern GPUs' L1/L2 caches handle the `sorted_hashes[idx-1]` reads efficiently
   - `cell_end` is zeroed (memset 0x00) for safety even though only written cells matter -- prevents stale data from previous frames if code ever reads cell_end without checking cell_start sentinel first
 ---
+
+## 2026-02-06 - US-011
+- What was implemented:
+  - `fallingsand3d/physics/kernels/step1.cu` -- K_Step1 SPH density summation kernel (Poly6): inline 27-cell neighbor iteration, self-interaction included, per-particle mass m_j for multi-material support, density clamped to >= 1.0, neighbor positions loaded via `__ldg()`, uses `c_grid`/`c_sim`/`c_precalc` from common.cuh (no redeclaration)
+  - `fallingsand3d/step1.py` -- Python module: SimParams/PrecalcParams numpy dtypes, `build_sim_params()`/`build_precalc_params()` builders, CuPy RawModule compilation from external .cu file with --use_fast_math, constant memory upload (c_grid, c_sim, c_precalc), `compute_step1()` kernel launch wrapper with block size 128, optional pre-allocated density output buffer
+  - `fallingsand3d/test_step1.py` -- Integration tests: compilation, block size, struct sizes (SimParams=64, PrecalcParams=20), precalc coefficients, single isolated particle density (mass * poly6_coeff * h^6), two particles within/beyond h, per-particle mass asymmetry, density clamp >= 1.0, uniform field rest density within 10% of rho0, self-contribution verified, 500K particle stress test
+- Files changed:
+  - `fallingsand3d/physics/kernels/step1.cu` (new)
+  - `fallingsand3d/step1.py` (new)
+  - `fallingsand3d/test_step1.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The fallingsand3d step1.cu uses `c_sim.smoothing_length_sq` and `c_precalc.poly6_coeff` from common.cuh's shared constant memory, unlike the root-level prototype which declared its own `FluidParams_Step1`/`PrecalcParams_Step1` structs with their own `__constant__` symbols. This simplifies the kernel and avoids symbol duplication
+  - Per-particle mass (`__ldg(&mass[index_j])`) inside the neighbor loop enables multi-material density computation. The old prototype used a single constant mass from `c_fluid.particle_mass`, which doesn't support mass splitting or different material densities
+  - For a uniform grid of water particles (spacing=0.02, h=0.04, rho0=1000), interior particles produce density ~1009.78 (0.98% error from rho0=1000), which is well within the 10% acceptance criterion. The slight overestimate is typical for SPH poly6 density at exactly the kernel support boundary
+  - SimParams dtype with `align=False` totals exactly 64 bytes, matching the GPU sizeof. CUDA float3 fields have 4-byte alignment (not 16 like float4), so no padding is inserted between consecutive float3 and float fields
+  - Grid cell computation is inlined directly in K_Step1 (no helper function call like the root prototype's `calcGridCell_step1`) since each kernel module is compiled independently via NVRTC -- there's no benefit to factoring out device functions that can't be shared across modules
+---
