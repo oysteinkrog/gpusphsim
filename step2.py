@@ -56,6 +56,13 @@ DEFAULT_GAMMA = np.float32(7.0)
 DEFAULT_VISCOSITY = np.float32(3.5)
 DEFAULT_XSPH_EPSILON = np.float32(0.5)
 
+# mu(I) granular rheology defaults
+DEFAULT_MU_S = np.float32(0.36)          # static friction coefficient
+DEFAULT_MU_2 = np.float32(0.70)          # dynamic friction coefficient
+DEFAULT_I0 = np.float32(0.3)             # inertial number reference
+DEFAULT_MU_MAX = np.float32(10000.0)     # viscosity clamp (Pa·s)
+DEFAULT_PARTICLE_SPACING = np.float32(0.02)  # particle spacing d
+
 # ---------------------------------------------------------------------------
 # Numpy dtypes matching CUDA structs in step2.cu
 # ---------------------------------------------------------------------------
@@ -80,6 +87,20 @@ PRECALC_PARAMS_DTYPE = np.dtype(
         ("pressure_precalc", np.float32),
         ("viscosity_precalc", np.float32),
         ("kernel_poly6_coeff", np.float32),
+    ],
+    align=True,
+)
+
+GRANULAR_PARAMS_DTYPE = np.dtype(
+    [
+        ("mu_s", np.float32),
+        ("mu_2", np.float32),
+        ("I0", np.float32),
+        ("mu_max", np.float32),
+        ("particle_spacing", np.float32),
+        ("mu0", np.float32),
+        ("_pad0", np.float32),
+        ("_pad1", np.float32),
     ],
     align=True,
 )
@@ -126,6 +147,25 @@ def build_precalc_params(
     params[0]["pressure_precalc"] = lap_const
     params[0]["viscosity_precalc"] = mu * lap_const
     params[0]["kernel_poly6_coeff"] = 315.0 / (64.0 * math.pi * h**9)
+    return params
+
+
+def build_granular_params(
+    mu_s: float = DEFAULT_MU_S,
+    mu_2: float = DEFAULT_MU_2,
+    I0: float = DEFAULT_I0,
+    mu_max: float = DEFAULT_MU_MAX,
+    particle_spacing: float = DEFAULT_PARTICLE_SPACING,
+    mu0: float = DEFAULT_VISCOSITY,
+) -> np.ndarray:
+    """Build a GranularParams struct for mu(I) rheology."""
+    params = np.zeros(1, dtype=GRANULAR_PARAMS_DTYPE)
+    params[0]["mu_s"] = mu_s
+    params[0]["mu_2"] = mu_2
+    params[0]["I0"] = I0
+    params[0]["mu_max"] = mu_max
+    params[0]["particle_spacing"] = particle_spacing
+    params[0]["mu0"] = mu0
     return params
 
 
@@ -205,6 +245,15 @@ def upload_precalc_params(params: Optional[np.ndarray] = None) -> None:
         params = build_precalc_params()
     module = _get_module()
     d_ptr = module.get_global("c_precalc")  # type: ignore[union-attr]
+    cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
+
+
+def upload_granular_params(params: Optional[np.ndarray] = None) -> None:
+    """Upload GranularParams to ``__constant__ GranularParams c_granular``."""
+    if params is None:
+        params = build_granular_params()
+    module = _get_module()
+    d_ptr = module.get_global("c_granular")  # type: ignore[union-attr]
     cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
 
 

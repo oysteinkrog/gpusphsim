@@ -3,9 +3,17 @@
  *
  * Per-particle computation:
  *   1. Tait EOS pressure from density
- *   2. Neighbor loop: accumulate pressure force (spiky gradient),
+ *   2. For GRANULAR: first pass to compute gamma_dot (strain rate) for mu(I) rheology
+ *   3. Neighbor loop: accumulate pressure force (spiky gradient),
  *      viscosity force (viscosity Laplacian), and XSPH correction (FLUID only)
- *   3. Write sph_force (float4) and veleval (float4, XSPH-corrected) to sorted buffers
+ *   4. Write sph_force (float4) and veleval (float4, XSPH-corrected) to sorted buffers
+ *
+ * mu(I) rheology (GRANULAR only):
+ *   - gamma_dot computed from SPH velocity gradient in first neighbor pass
+ *   - I = gamma_dot * spacing / sqrt(p_eff / rho_i)
+ *   - mu_I = mu_s + (mu_2 - mu_s) / (1 + I0 / max(I, 1e-8))
+ *   - eta_i = min(mu_max, mu0 + mu_I * p_eff / (gamma_dot + 1e-6))
+ *   - Harmonic mean eta_ij for GRANULAR-GRANULAR pairs
  *
  * Skips STATIC (behavior_class == 3) and SLEEPING particles (early return).
  *
@@ -39,12 +47,25 @@ struct FluidParams {
 struct PrecalcParams {
     float smoothing_length_pow2;    // h^2
     float pressure_precalc;         // +45/(pi*h^6) -- POSITIVE
-    float viscosity_precalc;        // 45/(pi*h^6)
+    float viscosity_precalc;        // mu * 45/(pi*h^6)
     float kernel_poly6_coeff;       // 315/(64*pi*h^9) -- for XSPH W_poly6
 };
 
-__constant__ FluidParams   c_fluid;
-__constant__ PrecalcParams c_precalc;
+// mu(I) granular rheology parameters
+struct GranularParams {
+    float mu_s;               // static friction coefficient (0.36)
+    float mu_2;               // dynamic friction coefficient (0.70)
+    float I0;                 // inertial number reference (0.3)
+    float mu_max;             // viscosity clamp (10000 Pa·s)
+    float particle_spacing;   // particle spacing d (0.02)
+    float mu0;                // base viscosity for GRANULAR (same as c_fluid.viscosity)
+    float _pad0;              // padding to 32 bytes
+    float _pad1;
+};
+
+__constant__ FluidParams    c_fluid;
+__constant__ PrecalcParams  c_precalc;
+__constant__ GranularParams c_granular;
 
 // ---------------------------------------------------------------------------
 // Behavior classes and flags
@@ -156,6 +177,23 @@ __device__ inline float W_poly6(float rlen_sq) {
     return c_precalc.kernel_poly6_coeff * diff * diff * diff;
 }
 
+/**
+ * Compute mu(I) effective viscosity for a particle.
+ *
+ * gamma_dot : local shear rate
+ * p_eff     : effective pressure (clamped >= 1)
+ * rho       : particle density
+ */
+__device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho) {
+    float spacing = c_granular.particle_spacing;
+    float I_number = gamma_dot * spacing / sqrtf(p_eff / rho);
+    float mu_I = c_granular.mu_s
+               + (c_granular.mu_2 - c_granular.mu_s)
+                 / (1.0f + c_granular.I0 / fmaxf(I_number, 1e-8f));
+    return fminf(c_granular.mu_max,
+                 c_granular.mu0 + mu_I * p_eff / (gamma_dot + 1e-6f));
+}
+
 // ---------------------------------------------------------------------------
 // K_Step2 kernel
 // ---------------------------------------------------------------------------
@@ -208,6 +246,8 @@ void K_Step2(
     float h_sq = c_precalc.smoothing_length_pow2;
     float m_j  = c_fluid.particle_mass;
 
+    bool is_granular_i = (bclass_i == BEHAVIOR_GRANULAR);
+
     // --- Grid cell of particle i ---
     int3 cell_i = calcGridCell_step2(pos_i);
     cell_i = clampCell_step2(cell_i);
@@ -216,7 +256,72 @@ void K_Step2(
     int ry = (int)c_grid.grid_res.y;
     int rz = (int)c_grid.grid_res.z;
 
-    // --- Iterate 27 neighbor cells ---
+    // ---------------------------------------------------------------
+    // For GRANULAR particles: first pass to compute gamma_dot_i
+    // (strain rate magnitude from SPH velocity gradient)
+    // ---------------------------------------------------------------
+    float gamma_dot_i = 0.0f;
+    float eta_i = 0.0f;
+
+    if (is_granular_i) {
+        float gamma_dot_sq_sum = 0.0f;
+
+        for (int dz = -1; dz <= 1; dz++) {
+            int cz = cell_i.z + dz;
+            if (cz < 0 || cz >= rz) continue;
+            for (int dy = -1; dy <= 1; dy++) {
+                int cy = cell_i.y + dy;
+                if (cy < 0 || cy >= ry) continue;
+                for (int dx = -1; dx <= 1; dx++) {
+                    int cx = cell_i.x + dx;
+                    if (cx < 0 || cx >= rx) continue;
+
+                    uint hash = (uint)(cz * ry * rx + cy * rx + cx);
+                    uint start = cell_start[hash];
+                    if (start == 0xFFFFFFFFu) continue;
+                    uint end = cell_end[hash];
+
+                    for (uint index_j = start; index_j < end; index_j++) {
+                        if (index_j == index_i) continue;
+
+                        float4 pos4_j = __ldg(&position[index_j]);
+                        float3 r = make_float3(
+                            pos_i.x - pos4_j.x,
+                            pos_i.y - pos4_j.y,
+                            pos_i.z - pos4_j.z
+                        );
+                        float rlen_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+                        if (rlen_sq > h_sq || rlen_sq < 1e-12f) continue;
+
+                        float rlen = sqrtf(rlen_sq);
+                        float4 vel4_j = __ldg(&veleval[index_j]);
+                        float dvx = vel_i.x - vel4_j.x;
+                        float dvy = vel_i.y - vel4_j.y;
+                        float dvz = vel_i.z - vel4_j.z;
+                        float dv_sq = dvx * dvx + dvy * dvy + dvz * dvz;
+
+                        float rho_j = __ldg(&density[index_j]);
+                        // Spiky gradient magnitude for strain rate: (h - r)^2 / r
+                        float h_r = c_fluid.smoothing_length - rlen;
+                        float grad_mag = h_r * h_r / rlen;
+                        gamma_dot_sq_sum += (m_j / rho_j) * dv_sq * grad_mag;
+                    }
+                }
+            }
+        }
+
+        // Apply SPH gradient normalization: 45/(pi*h^6)
+        float lap_const = c_precalc.pressure_precalc;  // = 45/(pi*h^6)
+        gamma_dot_i = sqrtf(fmaxf(lap_const * gamma_dot_sq_sum, 0.0f));
+
+        // --- mu(I) rheology computation for particle i ---
+        float p_eff_i = fmaxf(p_i, 1.0f);
+        eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
+    }
+
+    // ---------------------------------------------------------------
+    // Main neighbor loop: pressure, viscosity, XSPH
+    // ---------------------------------------------------------------
     for (int dz = -1; dz <= 1; dz++) {
         int cz = cell_i.z + dz;
         if (cz < 0 || cz >= rz) continue;
@@ -260,8 +365,7 @@ void K_Step2(
                     float3 vel_j = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
                     float rho_j = __ldg(&density[index_j]);
 
-                    // Neighbor pressure (use same behavior class as i for simplicity;
-                    // in multi-material, each neighbor would have its own)
+                    // Neighbor pressure
                     int bclass_j = __ldg(&behavior_class[index_j]);
                     float p_j = compute_pressure(rho_j, bclass_j);
 
@@ -274,12 +378,44 @@ void K_Step2(
                     f_pressure.z += m_j * press_sym * grad_s.z;
 
                     // ---- Viscosity force ----
-                    // f_visc += viscosity_precalc * m_j * (v_j - v_i) / rho_j * lap_visc_variable(r)
                     float lap_v = lap_visc_variable(rlen);
-                    float visc_factor = m_j * lap_v / rho_j;
-                    f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
-                    f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
-                    f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+
+                    if (is_granular_i && bclass_j == BEHAVIOR_GRANULAR) {
+                        // mu(I) viscosity for GRANULAR-GRANULAR pairs:
+                        // Estimate eta_j from pair-wise strain rate
+                        float dvx = vel_i.x - vel_j.x;
+                        float dvy = vel_i.y - vel_j.y;
+                        float dvz = vel_i.z - vel_j.z;
+                        float gamma_dot_j = sqrtf(dvx * dvx + dvy * dvy + dvz * dvz)
+                                          / fmaxf(rlen, 1e-8f);
+
+                        float p_eff_j = fmaxf(p_j, 1.0f);
+                        float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j);
+
+                        // Harmonic mean viscosity
+                        float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);
+
+                        // Full viscosity force: eta_ij * lap_const * m_j * (v_j - v_i) / rho_j * (h - |r|)
+                        float visc_lap_const = c_precalc.pressure_precalc;  // = 45/(pi*h^6)
+                        float visc_factor = eta_ij * visc_lap_const * m_j * lap_v / rho_j;
+                        f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
+                        f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
+                        f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                    } else if (is_granular_i) {
+                        // GRANULAR-nonGRANULAR pair: use constant mu0 but with
+                        // full coefficient baked in (same scale as granular path)
+                        float visc_factor = c_precalc.viscosity_precalc * m_j * lap_v / rho_j;
+                        f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
+                        f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
+                        f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                    } else {
+                        // FLUID/GAS particle i: constant mu0 viscosity
+                        // (viscosity_precalc applied in PostCalc)
+                        float visc_factor = m_j * lap_v / rho_j;
+                        f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
+                        f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
+                        f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                    }
 
                     // ---- XSPH correction (FLUID only) ----
                     if (bclass_i == BEHAVIOR_FLUID) {
@@ -297,12 +433,21 @@ void K_Step2(
 
     // --- PostCalc: apply precalc coefficients and write output ---
     float3 total_force;
-    total_force.x = c_precalc.pressure_precalc  * f_pressure.x
-                  + c_precalc.viscosity_precalc  * f_viscosity.x;
-    total_force.y = c_precalc.pressure_precalc  * f_pressure.y
-                  + c_precalc.viscosity_precalc  * f_viscosity.y;
-    total_force.z = c_precalc.pressure_precalc  * f_pressure.z
-                  + c_precalc.viscosity_precalc  * f_viscosity.z;
+    if (is_granular_i) {
+        // GRANULAR: all viscosity contributions already have full coefficients
+        // baked in per-pair (eta_ij * lap_const for granular, viscosity_precalc for mixed)
+        total_force.x = c_precalc.pressure_precalc * f_pressure.x + f_viscosity.x;
+        total_force.y = c_precalc.pressure_precalc * f_pressure.y + f_viscosity.y;
+        total_force.z = c_precalc.pressure_precalc * f_pressure.z + f_viscosity.z;
+    } else {
+        // FLUID/GAS: viscosity_precalc = mu0 * 45/(pi*h^6) applied uniformly
+        total_force.x = c_precalc.pressure_precalc  * f_pressure.x
+                      + c_precalc.viscosity_precalc  * f_viscosity.x;
+        total_force.y = c_precalc.pressure_precalc  * f_pressure.y
+                      + c_precalc.viscosity_precalc  * f_viscosity.y;
+        total_force.z = c_precalc.pressure_precalc  * f_pressure.z
+                      + c_precalc.viscosity_precalc  * f_viscosity.z;
+    }
 
     // sph_force = total_force * particle_mass (mass is constant, moved outside loop)
     sph_force_out[index_i] = make_float4(

@@ -14,6 +14,8 @@
 - **SPH precalc sign convention:** `pressure_precalc = +45/(pi*h^6)` is POSITIVE because it absorbs the double negative from the SPH momentum equation (negative gradient) and the spiky gradient constant (-45/(pi*h^6)). The force formula `f += pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable(r)` produces correct repulsive forces for positive pressure.
 - **Sim/render decoupling pattern:** Each render frame computes `sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps)`, runs that many simulation steps, then renders ONCE. The `speed` parameter controls how many sim-seconds elapse per wall-second. `max_substeps` (default 20) prevents spiral-of-death when sim_dt is very small relative to wall_dt.
 - **Sorted vs unsorted array lifecycle:** Unsorted arrays (indexed by original particle ID) persist across frames. Sorted arrays (indexed by grid-sorted slot) are ephemeral within a single step. The reorder kernel gathers unsorted->sorted, and the integrate kernel scatters sorted->unsorted using `sort_indexes[sorted_slot] = original_id`.
+- **mu(I) rheology two-pass neighbor loop:** For GRANULAR particles, the Step2 kernel does TWO neighbor traversals: (1) first pass computes gamma_dot_i (strain rate magnitude) from SPH velocity gradient, then derives eta_i via mu(I); (2) second pass accumulates viscosity force using harmonic mean eta_ij per pair. For eta_j, the pair-wise strain rate approximation `|v_ij|/|r_ij|` is used since we can't access j's full SPH-computed gamma_dot without an extra array. This avoids storing gamma_dot per particle at the cost of one extra neighbor traversal for GRANULAR only.
+- **Mixed viscosity accumulator pattern:** When GRANULAR particles use per-pair variable viscosity (eta_ij * lap_const baked in), the f_viscosity accumulator has full coefficients already. For FLUID/GAS particles, the accumulator stores raw sums that get multiplied by viscosity_precalc in PostCalc. The `is_granular_i` branch in PostCalc handles this split: GRANULAR adds f_viscosity directly, FLUID/GAS multiplies by viscosity_precalc.
 
 ---
 
@@ -138,4 +140,28 @@
   - The fused_reorder is a separate kernel from build_data_struct (unlike the C++ K_Grid_UpdateSorted which fuses both). This simplifies the code at the cost of one extra kernel launch per step
   - Wall boundary forces use a spring-damper model: force = stiffness * penetration_depth - dampening * velocity_component. The boundary_distance parameter controls how far from the wall the force activates
   - Each CuPy RawModule compilation creates its own __constant__ symbol space, so constant memory must be uploaded separately to each module (hash, build, step1, step2, integrate, materials = 6 modules total)
+---
+
+## 2026-02-06 - US-016
+- What was implemented:
+  - mu(I) frictional yield viscosity for GRANULAR particles in Step2 kernel
+  - `GranularParams` struct in step2.cu with mu_s=0.36, mu_2=0.70, I0=0.3, mu_max=10000, particle_spacing=0.02, mu0 constants
+  - Two-pass neighbor loop for GRANULAR: first pass computes gamma_dot_i (SPH velocity gradient strain rate), second pass accumulates viscosity using harmonic mean eta_ij
+  - `compute_muI_eta()` device function: I = gamma_dot * spacing / sqrt(p_eff / rho), mu_I = mu_s + (mu_2 - mu_s) / (1 + I0/max(I,1e-8)), eta = min(mu_max, mu0 + mu_I * p_eff / (gamma_dot + 1e-6))
+  - Harmonic mean eta_ij = 2*eta_i*eta_j / (eta_i + eta_j + 1e-8) for GRANULAR-GRANULAR pairs
+  - FLUID and GAS particles unchanged (constant mu0 viscosity via viscosity_precalc)
+  - Python wrapper: GranularParams dtype, build_granular_params(), upload_granular_params()
+  - Tests: mu(I) viscosity differs from constant mu0, harmonic mean produces finite forces, FLUID unaffected by granular params, no NaN at near-zero shear rate, 500K mixed particle stress test
+- Files changed:
+  - `physics/kernels/step2.cu` (modified -- added GranularParams, compute_muI_eta, two-pass neighbor loop for GRANULAR, per-pair viscosity branching)
+  - `step2.py` (modified -- added GRANULAR_PARAMS_DTYPE, build_granular_params, upload_granular_params, DEFAULT_MU_S/MU_2/I0/MU_MAX/PARTICLE_SPACING)
+  - `simulation.py` (modified -- imports and uploads granular_params to step2 module)
+  - `test_step2.py` (modified -- added test_granular_muI_viscosity, test_granular_muI_harmonic_mean, test_fluid_unchanged_by_muI, test_granular_no_nan; updated 500K test with mixed particles; added c_granular symbol check and GranularParams struct size check)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - mu(I) rheology requires gamma_dot (strain rate) which is a field quantity computed from the velocity gradient tensor via SPH. This creates a chicken-and-egg problem: eta depends on gamma_dot which depends on neighbor sums. Solution: two-pass neighbor loop -- first pass computes gamma_dot, second pass uses it for viscosity
+  - For eta_j in the harmonic mean, we can't access particle j's full SPH-computed gamma_dot (would need an extra per-particle array). The pair-wise approximation gamma_dot_j = |v_ij|/|r_ij| is a common simplification in granular SPH literature
+  - When mixing per-pair variable viscosity (GRANULAR, with eta_ij * lap_const baked in) and constant viscosity (FLUID, with raw accumulation * viscosity_precalc in PostCalc), the f_viscosity accumulator must be handled differently in PostCalc. The cleanest approach: bake all coefficients per-pair for GRANULAR (including viscosity_precalc for GRANULAR-nonGRANULAR pairs), and keep the deferred pattern for FLUID/GAS
+  - The mu_max clamp (10000 Pa·s) prevents infinite viscosity when gamma_dot approaches zero. The additional 1e-6 epsilon in the denominator (gamma_dot + 1e-6) provides a second safety net
+  - GranularParams struct needs explicit padding fields (_pad0, _pad1) to reach 32 bytes (8 floats) for alignment compatibility with CUDA constant memory
 ---

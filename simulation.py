@@ -34,6 +34,7 @@ from step2 import (
     BEHAVIOR_FLUID,
     BEHAVIOR_GRANULAR,
     build_fluid_params,
+    build_granular_params,
     build_precalc_params,
 )
 
@@ -101,6 +102,7 @@ class SPHSimulation:
         grid_params = build_grid_params()
         fluid_params = build_fluid_params()
         precalc_params = build_precalc_params()
+        granular_params = build_granular_params()
         integrate_params = build_integrate_params(delta_time=self.dt)
 
         # Hash kernel: GridParams
@@ -114,10 +116,11 @@ class SPHSimulation:
         step1.upload_fluid_params(fluid_params)
         step1.upload_precalc_params(precalc_params)
 
-        # Step2 kernel: GridParams + FluidParams + PrecalcParams
+        # Step2 kernel: GridParams + FluidParams + PrecalcParams + GranularParams
         step2.upload_grid_params(grid_params)
         step2.upload_fluid_params(fluid_params)
         step2.upload_precalc_params(precalc_params)
+        step2.upload_granular_params(granular_params)
 
         # Integrate kernel: GridParams + IntegrateParams
         integrate.upload_grid_params(grid_params)

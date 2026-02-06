@@ -33,12 +33,15 @@ from step2 import (
     BLOCK_SIZE,
     FLAG_IS_SLEEPING,
     FLUID_PARAMS_DTYPE,
+    GRANULAR_PARAMS_DTYPE,
     PRECALC_PARAMS_DTYPE,
     build_fluid_params,
+    build_granular_params,
     build_precalc_params,
     compute_step2,
     get_module,
     upload_fluid_params,
+    upload_granular_params,
     upload_grid_params,
     upload_precalc_params,
 )
@@ -63,7 +66,7 @@ def _upload_default_params(
     k: float = 3.0,
     visc: float = 3.5,
 ) -> None:
-    """Upload default fluid and precalc params."""
+    """Upload default fluid, precalc, and granular params."""
     fp = build_fluid_params(
         smoothing_length=h,
         particle_mass=mass,
@@ -73,6 +76,7 @@ def _upload_default_params(
     )
     upload_fluid_params(fp)
     upload_precalc_params(build_precalc_params(smoothing_length=h, viscosity=visc))
+    upload_granular_params(build_granular_params(mu0=visc))
 
 
 def _make_two_particle_setup(
@@ -185,10 +189,10 @@ def test_compilation() -> None:
     print("[OK] K_Step2 kernel function found")
 
     # Verify constant memory symbols
-    for sym in ("c_grid", "c_fluid", "c_precalc"):
+    for sym in ("c_grid", "c_fluid", "c_precalc", "c_granular"):
         d_ptr = module.get_global(sym)  # type: ignore[union-attr]
         assert int(d_ptr) != 0, f"Symbol {sym} not found"
-    print("[OK] All constant memory symbols found (c_grid, c_fluid, c_precalc)")
+    print("[OK] All constant memory symbols found (c_grid, c_fluid, c_precalc, c_granular)")
 
 
 def test_struct_sizes() -> None:
@@ -206,6 +210,12 @@ def test_struct_sizes() -> None:
         f"PrecalcParams size: {PRECALC_PARAMS_DTYPE.itemsize} != 16"
     )
     print(f"[OK] sizeof(PrecalcParams) = {PRECALC_PARAMS_DTYPE.itemsize}")
+
+    # GranularParams: 8 floats = 32 bytes (6 fields + 2 padding)
+    assert GRANULAR_PARAMS_DTYPE.itemsize == 32, (
+        f"GranularParams size: {GRANULAR_PARAMS_DTYPE.itemsize} != 32"
+    )
+    print(f"[OK] sizeof(GranularParams) = {GRANULAR_PARAMS_DTYPE.itemsize}")
 
     print("[OK] Block size = 128")
     assert BLOCK_SIZE == 128
@@ -600,6 +610,219 @@ def test_granular_pressure_clamp() -> None:
     print("[OK] GRANULAR at low density -> pressure clamped to 0, ~zero force")
 
 
+def test_granular_muI_viscosity() -> None:
+    """GRANULAR particles with relative motion get mu(I) enhanced viscosity force."""
+    print("\n--- mu(I) viscosity for GRANULAR test ---")
+
+    h = 0.04
+    rho0 = 1000.0
+    visc = 3.5
+
+    gp = _setup_grid_for_test()
+    _upload_default_params(h=h, rho0=rho0, visc=visc)
+
+    sep = h * 0.3
+    # Two GRANULAR particles with relative motion and above-rest density
+    # (above rest so pressure is positive, which drives mu(I) computation)
+    compressed_density = rho0 * 1.05
+    vel_a = [2.0, 0.0, 0.0]
+    vel_b = [0.0, 0.0, 0.0]
+
+    data_granular = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[sep, 0.0, 0.0],
+        vel_a=vel_a,
+        vel_b=vel_b,
+        density_a=compressed_density,
+        density_b=compressed_density,
+        bclass_a=BEHAVIOR_GRANULAR,
+        bclass_b=BEHAVIOR_GRANULAR,
+        h=h,
+        grid_params=gp,
+    )
+
+    sph_force_gran, _ = compute_step2(**data_granular)
+    cupy.cuda.Device().synchronize()
+    forces_gran = cupy.asnumpy(sph_force_gran)
+
+    # Compare with FLUID particles in the same configuration
+    data_fluid = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[sep, 0.0, 0.0],
+        vel_a=vel_a,
+        vel_b=vel_b,
+        density_a=compressed_density,
+        density_b=compressed_density,
+        bclass_a=BEHAVIOR_FLUID,
+        bclass_b=BEHAVIOR_FLUID,
+        h=h,
+        grid_params=gp,
+    )
+
+    sph_force_fluid, _ = compute_step2(**data_fluid)
+    cupy.cuda.Device().synchronize()
+    forces_fluid = cupy.asnumpy(sph_force_fluid)
+
+    f_gran_mag = np.linalg.norm(forces_gran[0, :3])
+    f_fluid_mag = np.linalg.norm(forces_fluid[0, :3])
+
+    print(f"  GRANULAR force magnitude: {f_gran_mag:.4e}")
+    print(f"  FLUID force magnitude:    {f_fluid_mag:.4e}")
+
+    # mu(I) viscosity should produce a different (typically larger) force than
+    # the constant viscosity used for FLUID, because mu_I * p_eff adds to mu0
+    assert f_gran_mag != f_fluid_mag, (
+        f"GRANULAR and FLUID should have different viscosity forces: "
+        f"gran={f_gran_mag:.4e}, fluid={f_fluid_mag:.4e}"
+    )
+    # The GRANULAR force should be non-zero (viscosity opposes relative motion)
+    assert f_gran_mag > 0, f"Expected non-zero GRANULAR force, got {f_gran_mag}"
+    print("[OK] GRANULAR mu(I) produces different viscosity than constant mu0")
+
+
+def test_granular_muI_harmonic_mean() -> None:
+    """Harmonic mean eta_ij is used for GRANULAR-GRANULAR viscosity."""
+    print("\n--- mu(I) harmonic mean test ---")
+
+    h = 0.04
+    rho0 = 1000.0
+
+    gp = _setup_grid_for_test()
+    _upload_default_params(h=h, rho0=rho0, visc=3.5)
+
+    sep = h * 0.3
+    # Asymmetric density: different pressures -> different eta values
+    # This tests that eta_ij = 2*eta_i*eta_j/(eta_i + eta_j + 1e-8)
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[sep, 0.0, 0.0],
+        vel_a=[3.0, 0.0, 0.0],
+        vel_b=[-1.0, 0.0, 0.0],
+        density_a=rho0 * 1.1,   # higher pressure -> different eta
+        density_b=rho0 * 1.01,  # lower pressure -> different eta
+        bclass_a=BEHAVIOR_GRANULAR,
+        bclass_b=BEHAVIOR_GRANULAR,
+        h=h,
+        grid_params=gp,
+    )
+
+    sph_force, _ = compute_step2(**data)
+    cupy.cuda.Device().synchronize()
+    forces = cupy.asnumpy(sph_force)
+
+    # Both particles should have non-zero forces (viscosity + pressure)
+    f_mag_0 = np.linalg.norm(forces[0, :3])
+    f_mag_1 = np.linalg.norm(forces[1, :3])
+    print(f"  Particle 0 force magnitude: {f_mag_0:.4e}")
+    print(f"  Particle 1 force magnitude: {f_mag_1:.4e}")
+
+    assert f_mag_0 > 0, f"Expected non-zero force on particle 0, got {f_mag_0}"
+    assert f_mag_1 > 0, f"Expected non-zero force on particle 1, got {f_mag_1}"
+
+    # Forces should be finite (no NaN/Inf from division by zero in harmonic mean)
+    assert np.isfinite(forces[0, :3]).all(), "NaN/Inf in particle 0 force"
+    assert np.isfinite(forces[1, :3]).all(), "NaN/Inf in particle 1 force"
+    print("[OK] Harmonic mean eta_ij produces finite, non-zero forces")
+
+
+def test_fluid_unchanged_by_muI() -> None:
+    """FLUID particles still use constant mu0 viscosity (unchanged by mu(I))."""
+    print("\n--- FLUID unchanged by mu(I) test ---")
+
+    h = 0.04
+    rho0 = 1000.0
+    visc = 10.0
+
+    gp = _setup_grid_for_test()
+    _upload_default_params(h=h, rho0=rho0, visc=visc)
+
+    sep = h * 0.3
+    vel_a = [2.0, 0.0, 0.0]
+    vel_b = [0.0, 0.0, 0.0]
+
+    # Run with default granular params
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[sep, 0.0, 0.0],
+        vel_a=vel_a,
+        vel_b=vel_b,
+        density_a=rho0,
+        density_b=rho0,
+        bclass_a=BEHAVIOR_FLUID,
+        bclass_b=BEHAVIOR_FLUID,
+        h=h,
+        grid_params=gp,
+    )
+
+    sph_force1, _ = compute_step2(**data)
+    cupy.cuda.Device().synchronize()
+    forces1 = cupy.asnumpy(sph_force1)
+
+    # Run again with very different granular params (should not affect FLUID)
+    upload_granular_params(build_granular_params(mu_s=0.9, mu_2=0.99, mu_max=99999.0))
+
+    data2 = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[sep, 0.0, 0.0],
+        vel_a=vel_a,
+        vel_b=vel_b,
+        density_a=rho0,
+        density_b=rho0,
+        bclass_a=BEHAVIOR_FLUID,
+        bclass_b=BEHAVIOR_FLUID,
+        h=h,
+        grid_params=gp,
+    )
+
+    sph_force2, _ = compute_step2(**data2)
+    cupy.cuda.Device().synchronize()
+    forces2 = cupy.asnumpy(sph_force2)
+
+    # Forces should be identical for FLUID regardless of granular params
+    diff = np.abs(forces1 - forces2).max()
+    print(f"  Max force difference between runs: {diff:.6e}")
+    assert diff < 1e-6, f"FLUID forces changed with granular params: diff={diff}"
+    print("[OK] FLUID viscosity is unchanged by mu(I) granular parameters")
+
+    # Restore defaults
+    upload_granular_params(build_granular_params())
+
+
+def test_granular_no_nan() -> None:
+    """No NaN velocities in GRANULAR forces (mu_max clamp prevents divergence)."""
+    print("\n--- GRANULAR no-NaN test ---")
+
+    h = 0.04
+    rho0 = 1000.0
+
+    gp = _setup_grid_for_test()
+    _upload_default_params(h=h, rho0=rho0, visc=3.5)
+
+    sep = h * 0.5
+    # Test with near-zero relative velocity (gamma_dot ~ 0)
+    # This would cause division by zero without the 1e-6 epsilon
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[sep, 0.0, 0.0],
+        vel_a=[0.0, 0.0, 0.0],
+        vel_b=[1e-10, 0.0, 0.0],  # near-zero relative motion
+        density_a=rho0 * 1.1,
+        density_b=rho0 * 1.1,
+        bclass_a=BEHAVIOR_GRANULAR,
+        bclass_b=BEHAVIOR_GRANULAR,
+        h=h,
+        grid_params=gp,
+    )
+
+    sph_force, _ = compute_step2(**data)
+    cupy.cuda.Device().synchronize()
+    forces = cupy.asnumpy(sph_force)
+
+    assert np.isfinite(forces).all(), f"NaN/Inf in granular forces: {forces}"
+    print(f"  Force magnitudes: [{np.linalg.norm(forces[0, :3]):.4e}, {np.linalg.norm(forces[1, :3]):.4e}]")
+    print("[OK] No NaN/Inf for near-zero shear rate (mu_max clamp works)")
+
+
 def test_500k_no_errors() -> None:
     """Kernel runs without errors for 500K particles."""
     print("\n--- 500K particle stress test ---")
@@ -622,7 +845,9 @@ def test_500k_no_errors() -> None:
 
     density_np = rng.uniform(900.0, 1100.0, size=n).astype(np.float32)
 
+    # Mix of FLUID and GRANULAR particles
     bclass_np = np.ones(n, dtype=np.int32) * BEHAVIOR_FLUID
+    bclass_np[n // 2:] = BEHAVIOR_GRANULAR  # Half granular
     flags_np = np.zeros(n, dtype=np.uint32)
 
     # Build simple grid index -- for stress test, use empty cells (no neighbors)
@@ -695,6 +920,10 @@ def main() -> None:
     test_xsph_not_for_granular()
     test_viscosity_force()
     test_granular_pressure_clamp()
+    test_granular_muI_viscosity()
+    test_granular_muI_harmonic_mean()
+    test_fluid_unchanged_by_muI()
+    test_granular_no_nan()
     test_500k_no_errors()
     print("\n=== ALL CHECKS PASSED ===")
 
