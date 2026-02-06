@@ -182,3 +182,18 @@
   - Previous stories (US-003 through US-016) created Python files at the repo root level, not inside fallingsand3d/; those will need to be moved in a future restructuring task
   - All required packages (cupy, glfw, OpenGL, imgui_bundle) are already installed in the Windows Python environment
 ---
+
+## 2026-02-06 - US-002
+- What was implemented:
+  - `camera.py` -- OrbitCamera class with spherical coordinate math (azimuth/elevation/distance), view matrix (look-at), perspective projection matrix, orbit/zoom/pan controls with sensitivity and clamping
+  - `main.py` -- GLFW window (1280x720) with OpenGL 4.1 core profile context, orbit camera integration (right-drag=orbit, scroll=zoom, middle-drag=pan), ESC to close, dark gray background (glClearColor 0.15), FPS counter in window title, GL error checking
+- Files changed:
+  - `fallingsand3d/camera.py` (implemented from placeholder)
+  - `fallingsand3d/main.py` (implemented from placeholder)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - GLFW on Windows with NVIDIA driver reports "4.1.0 NVIDIA 591.74" when requesting 4.1 core profile -- the driver delivers exactly the requested version, not the max supported
+  - PyOpenGL `glGetString(GL_VERSION)` returns bytes on Windows -- must `.decode()` before use
+  - The orbit camera uses the convention: azimuth=0 looks down +Z axis, elevation=0 is horizontal, positive elevation looks up. Pan uses world-up vector for vertical movement
+  - `_look_at` and `_perspective` are module-level helper functions (not methods) since they're pure math with no state dependency
+---
