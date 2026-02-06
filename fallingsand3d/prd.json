@@ -320,8 +320,9 @@
         "Step2 kernel runs without errors for 500K particles"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": "See PHYSICS.md for mu(I) formulas. The mu_max clamp is critical to prevent infinite viscosity at zero shear rate. spacing = c_sim.particle_spacing = 0.02."
+      "passes": true,
+      "notes": "See PHYSICS.md for mu(I) formulas. The mu_max clamp is critical to prevent infinite viscosity at zero shear rate. spacing = c_sim.particle_spacing = 0.02.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-017",
@@ -594,6 +595,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T16:06:59.348Z"
+    "updatedAt": "2026-02-06T16:08:53.705Z"
   }
 }
