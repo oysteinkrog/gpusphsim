@@ -85,11 +85,14 @@ void K_MarkWakeCells(
 }
 
 /* ======================================================================
- * K_WakeSleepers -- Phase 2: wake sleeping particles in flagged cells.
+ * K_WakeSleepersAndClearJustWoke -- Phase 2+3 fused:
+ *   - Wake sleeping particles in flagged cells
+ *   - Clear JUST_WOKE flag from all particles
+ * Both iterate all particles and modify packed_info; no data dependency.
  * ====================================================================== */
 
 extern "C" __global__
-void K_WakeSleepers(
+void K_WakeSleepersAndClearJustWoke(
     uint          numParticles,
     const float4* __restrict__ position,       // unsorted positions
     uint*         __restrict__ packed_info,     // unsorted packed_info (read+write)
@@ -100,38 +103,28 @@ void K_WakeSleepers(
     if (i >= numParticles) return;
 
     uint pi = packed_info[i];
+    uint new_pi = pi;
 
-    // Only process sleeping particles
-    if (!IS_SLEEPING(pi)) return;
+    // Wake sleeping particles in flagged cells
+    if (IS_SLEEPING(pi)) {
+        float4 pos4 = position[i];
+        float3 pos = make_float3(pos4.x, pos4.y, pos4.z);
+        int3 cell = calcGridCell_wake(pos);
+        int hash = calcGridHash_wake(cell);
 
-    // Compute this particle's grid cell
-    float4 pos4 = position[i];
-    float3 pos = make_float3(pos4.x, pos4.y, pos4.z);
-    int3 cell = calcGridCell_wake(pos);
-    int hash = calcGridHash_wake(cell);
-
-    // If this cell was flagged by a just-woke particle, wake up
-    if (cell_wake_flags[hash] != 0u) {
-        packed_info[i] = CLEAR_SLEEPING(pi);
-        sleep_counter[i] = 0;
+        if (cell_wake_flags[hash] != 0u) {
+            new_pi = CLEAR_SLEEPING(new_pi);
+            sleep_counter[i] = 0;
+        }
     }
-}
 
-/* ======================================================================
- * K_ClearJustWoke -- Phase 3: clear the JUST_WOKE flag from all
- *                   particles that had it set.
- * ====================================================================== */
+    // Clear JUST_WOKE flag
+    if (HAS_JUST_WOKE(new_pi)) {
+        new_pi = CLEAR_JUST_WOKE(new_pi);
+    }
 
-extern "C" __global__
-void K_ClearJustWoke(
-    uint  numParticles,
-    uint* __restrict__ packed_info  // unsorted packed_info (read+write)
-) {
-    uint i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numParticles) return;
-
-    uint pi = packed_info[i];
-    if (HAS_JUST_WOKE(pi)) {
-        packed_info[i] = CLEAR_JUST_WOKE(pi);
+    // Only write back if modified
+    if (new_pi != pi) {
+        packed_info[i] = new_pi;
     }
 }

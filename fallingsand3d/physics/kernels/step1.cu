@@ -136,9 +136,17 @@ void K_Step1(
                     float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
 
                     if (r_sq <= h_sq) {
-                        // --- Density: self-interaction included ---
                         float diff = h_sq - r_sq;
                         float m_j = __ldg(&mass[index_j]);
+
+                        // Skip STATIC neighbors for density (keep self i==j)
+                        uint pi_j = __ldg(&packed_info[index_j]);
+                        int behavior_j = GET_BEHAVIOR(pi_j);
+                        if (behavior_j == STATIC && index_j != index_i) {
+                            continue;
+                        }
+
+                        // --- Density: self-interaction included ---
                         sum_density += m_j * diff * diff * diff;
 
                         // --- Heat diffusion + exposure: skip self ---
@@ -157,7 +165,6 @@ void K_Step1(
                             // Full W_poly6 = poly6_coeff * diff^3, but we use just diff^3
                             // as the weighting (unnormalized) -- the absolute magnitude
                             // is tuned via reaction_rate/heat_exchange in the table.
-                            uint pi_j = __ldg(&packed_info[index_j]);
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float w_poly6_var = diff * diff * diff;  // (h^2 - r^2)^3
 

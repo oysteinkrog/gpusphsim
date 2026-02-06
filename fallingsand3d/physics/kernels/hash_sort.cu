@@ -41,8 +41,7 @@ __device__ inline uint calcGridHash(int3 cell) {
 extern "C" __global__
 void K_CalcHash(uint numParticles,
                 const float4* __restrict__ positions,
-                uint* __restrict__ hashes,
-                uint* __restrict__ indices) {
+                uint* __restrict__ hashes) {
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numParticles) return;
 
@@ -54,5 +53,4 @@ void K_CalcHash(uint numParticles,
     uint hash = calcGridHash(cell);
 
     hashes[idx] = hash;
-    indices[idx] = idx;
 }

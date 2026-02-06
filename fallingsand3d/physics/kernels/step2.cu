@@ -51,33 +51,42 @@ struct GranularParams {
 __constant__ GranularParams c_granular;
 
 /* ======================================================================
- * Tait EOS pressure computation
+ * EOS pressure computation (per-material gamma)
  *
  * Reads per-material rest_density, eos_stiffness, eos_gamma from c_materials.
  *
- *   FLUID:    p_raw = k * (pow(rho/rho0, 7) - 1);  p = max(p_raw, -0.5*k)
- *   GRANULAR: p_raw = k * (pow(rho/rho0, 7) - 1);  p = max(p_raw, 0)
- *   GAS:      p = k_gas * max(rho - rho0, 0)        (gamma=1, linear)
+ *   gamma==1:  Linear EOS:  p = k * max(rho/rho0 - 1, 0)
+ *   gamma!=1:  Tait EOS:    p = k * (pow(rho/rho0, gamma) - 1)
+ *   GAS:       p = k * max(rho - rho0, 0)
+ *   All FLUID/GRANULAR: p clamped >= 0
  * ====================================================================== */
 
 __device__ inline float compute_pressure(float rho_i, int behavior, uint mat_id) {
-    float rho0 = c_materials[mat_id].rest_density;
-    float k    = c_materials[mat_id].eos_stiffness;
+    float rho0  = c_materials[mat_id].rest_density;
+    float k     = c_materials[mat_id].eos_stiffness;
+    float gamma = c_materials[mat_id].eos_gamma;
 
     if (behavior == GAS) {
         // GAS: linear EOS with gamma=1
         return k * fmaxf(rho_i - rho0, 0.0f);
     }
 
-    // FLUID / GRANULAR: Tait EOS with gamma=7
     float ratio = rho_i / fmaxf(rho0, 1e-6f);
-    float p_raw = k * (powf(ratio, 7.0f) - 1.0f);
+
+    float p_raw;
+    if (gamma == 1.0f) {
+        // Linear EOS (Game SPH): p = k * max(ratio - 1, 0)
+        p_raw = k * fmaxf(ratio - 1.0f, 0.0f);
+    } else {
+        // Tait EOS: p = k * (pow(ratio, gamma) - 1)
+        p_raw = k * (powf(ratio, gamma) - 1.0f);
+    }
 
     if (behavior == GRANULAR) {
         return fmaxf(p_raw, 0.0f);
     }
-    // FLUID: allow small tensile pressure
-    return fmaxf(p_raw, -0.5f * k);
+    // FLUID: clamp >= 0 (no tensile/negative pressure)
+    return fmaxf(p_raw, 0.0f);
 }
 
 /* ======================================================================
@@ -298,6 +307,11 @@ void K_Step2(
                     float rlen_sq = r.x * r.x + r.y * r.y + r.z * r.z;
                     if (rlen_sq > h_sq || rlen_sq < 1e-12f) continue;
 
+                    // Skip STATIC neighbors early (before expensive reads)
+                    uint pi_j = __ldg(&packed_info[index_j]);
+                    int behavior_j = GET_BEHAVIOR(pi_j);
+                    if (behavior_j == STATIC) continue;
+
                     float rlen = sqrtf(rlen_sq);
 
                     // Read neighbor data
@@ -307,8 +321,6 @@ void K_Step2(
                     float m_j = __ldg(&mass[index_j]);
 
                     // Neighbor pressure (per-material EOS)
-                    uint pi_j = __ldg(&packed_info[index_j]);
-                    int behavior_j = GET_BEHAVIOR(pi_j);
                     uint mat_id_j = GET_MATERIAL_ID(pi_j);
                     float p_j = compute_pressure(rho_j, behavior_j, mat_id_j);
 

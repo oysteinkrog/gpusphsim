@@ -44,7 +44,7 @@ DEFAULT_MU_2 = np.float32(0.70)
 DEFAULT_I0 = np.float32(0.3)
 DEFAULT_MU_MAX = np.float32(10000.0)
 DEFAULT_PARTICLE_SPACING = np.float32(0.02)
-DEFAULT_MU0 = np.float32(3.5)
+DEFAULT_MU0 = np.float32(0.1)
 DEFAULT_XSPH_EPSILON = np.float32(0.5)
 DEFAULT_FORCE_SCALE = np.float32(0.02)
 
@@ -206,7 +206,7 @@ def upload_materials(materials_data: np.ndarray) -> None:
 # Kernel launch
 # ---------------------------------------------------------------------------
 
-BLOCK_SIZE = 128
+BLOCK_SIZE = 256
 
 
 def compute_step2(

@@ -53,6 +53,7 @@ class World:
     def __init__(self, max_particles: int = 500_000) -> None:
         self.max_particles: int = max_particles
         self._high_water: int = 0  # one past last allocated slot
+        self._spawned_material_ids: set = set()  # CPU-side tracking for conditional skip
         self._allocate()
 
     def _allocate(self) -> None:
@@ -98,16 +99,15 @@ class World:
         self.sorted_exposure_corrode = cp.zeros(n, dtype=cp.float32)
         self.sorted_packed_info = cp.zeros(n, dtype=cp.uint32)
         self.sorted_sleep_counter = cp.zeros(n, dtype=cp.uint8)
-        # Sort index arrays (hash + original index, plus sorted versions)
+        # Sort index arrays (hash + sorted versions)
         self.hashes = cp.zeros(n, dtype=cp.uint32)
-        self.indices = cp.zeros(n, dtype=cp.uint32)
         self.sorted_hashes = cp.zeros(n, dtype=cp.uint32)
-        self.sorted_indices = cp.zeros(n, dtype=cp.uint32)
 
     def resize(self, new_max: int) -> None:
         """Reallocate all arrays for a new max_particles. Kills all particles."""
         self.max_particles = new_max
         self._high_water = 0
+        self._spawned_material_ids = set()
         self._allocate()
 
     @property
@@ -273,6 +273,7 @@ class World:
         self.sleep_counter[sl] = 0
 
         self._high_water += actual
+        self._spawned_material_ids.add(material_id)
         return actual
 
     def spawn_cube(
@@ -353,6 +354,7 @@ class World:
         self.sleep_counter[sl] = 0
 
         self._high_water += actual
+        self._spawned_material_ids.add(material_id)
         return actual
 
     def kill_in_sphere(

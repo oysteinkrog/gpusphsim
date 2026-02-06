@@ -376,19 +376,27 @@ void K_Integrate(
     }
 
     // --- Position update ---
-    // Use actual velocity (not XSPH-corrected), matching parent project convention.
-    // XSPH veleval is stored for evaluation purposes but not used for advection.
+    // FLUID: use XSPH-corrected velocity for smoother advection (Game SPH).
+    // Others: use actual velocity.
+    float3 advect_vel;
+    if (behavior == FLUID) {
+        advect_vel = veleval_xsph;
+    } else {
+        advect_vel = vel_new;
+    }
     float3 pos_new = make_float3(
-        pos.x + dt * vel_new.x,
-        pos.y + dt * vel_new.y,
-        pos.z + dt * vel_new.z
+        pos.x + dt * advect_vel.x,
+        pos.y + dt * advect_vel.y,
+        pos.z + dt * advect_vel.z
     );
 
     // --- Impulse-style SDF boundary ---
+    // FLUID: zero wall friction to prevent sticking to domain walls
+    float friction = (behavior == FLUID) ? 0.0f : c_sim.wall_friction;
     sdf_box_boundary(
         pos_new, vel_new,
         c_sim.world_min, c_sim.world_max,
-        c_sim.restitution, c_sim.wall_friction
+        c_sim.restitution, friction
     );
 
     // --- Sleep counter update ---

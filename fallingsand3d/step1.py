@@ -242,7 +242,7 @@ def upload_interactions(interactions_data: np.ndarray) -> None:
 # Kernel launch
 # ---------------------------------------------------------------------------
 
-BLOCK_SIZE = 128
+BLOCK_SIZE = 256
 
 
 def compute_step1(

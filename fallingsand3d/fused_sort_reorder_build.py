@@ -1,11 +1,13 @@
-"""Fused reorder kernel -- gathers ALL SoA particle arrays in one pass.
+"""Fused sort-reorder-build kernel -- combines reorder + build_grid in one pass.
 
-Compiles physics/kernels/fused_reorder.cu via CuPy RawModule and provides
-a single ``fused_reorder()`` call that gathers all unsorted arrays into
-sorted-order temporary buffers using the sorted_index permutation.
+Compiles physics/kernels/fused_sort_reorder_build.cu via CuPy RawModule.
+Replaces the separate K_FusedReorder + K_BuildDataStruct pipeline with a
+single kernel launch that reads sort_perm once per thread, gathers 8 particle
+arrays, writes sorted hashes, and detects cell boundaries.
 
-This is far more bandwidth-efficient than N separate CuPy fancy-indexing
-calls because sorted_index is read from global memory only once per thread.
+Pre-conditions:
+  - cell_start memset to 0xFFFFFFFF before launch
+  - cell_end memset to 0x00 before launch
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ def _ensure_ptx_if_needed() -> None:
 
 
 def _get_module() -> "object":
-    """Compile (or return cached) CuPy RawModule from fused_reorder.cu."""
+    """Compile (or return cached) CuPy RawModule from fused_sort_reorder_build.cu."""
     global _module
     if _module is not None:
         return _module
@@ -49,7 +51,7 @@ def _get_module() -> "object":
     _ensure_ptx_if_needed()
 
     kernel_dir = os.path.join(os.path.dirname(__file__), "physics", "kernels")
-    cu_path = os.path.join(kernel_dir, "fused_reorder.cu")
+    cu_path = os.path.join(kernel_dir, "fused_sort_reorder_build.cu")
     with open(cu_path) as f:
         source = f.read()
 
@@ -66,14 +68,32 @@ def get_module() -> "object":
 
 
 # ---------------------------------------------------------------------------
+# Constant memory upload
+# ---------------------------------------------------------------------------
+
+
+def upload_grid_params(params: np.ndarray) -> None:
+    """Upload GridParams to ``__constant__ GridParams c_grid``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_grid")
+    cupy.cuda.runtime.memcpy(
+        int(d_ptr), params.ctypes.data, params.nbytes, 1
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kernel launch
 # ---------------------------------------------------------------------------
 
 
-def fused_reorder(
+def fused_sort_reorder_build(
     num_particles: int,
-    sorted_index: cupy.ndarray,
-    # Unsorted source arrays (8 arrays; veleval/color/shear_rate omitted)
+    sort_perm: cupy.ndarray,
+    hashes: cupy.ndarray,
+    sorted_hashes: cupy.ndarray,
+    cell_start: cupy.ndarray,
+    cell_end: cupy.ndarray,
+    # Unsorted source arrays (8 arrays)
     position: cupy.ndarray,
     velocity: cupy.ndarray,
     mass: cupy.ndarray,
@@ -82,7 +102,7 @@ def fused_reorder(
     health: cupy.ndarray,
     lifetime: cupy.ndarray,
     sleep_counter: cupy.ndarray,
-    # Sorted destination arrays
+    # Sorted destination arrays (8 arrays)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
     sorted_mass: cupy.ndarray,
@@ -92,27 +112,33 @@ def fused_reorder(
     sorted_lifetime: cupy.ndarray,
     sorted_sleep_counter: cupy.ndarray,
 ) -> None:
-    """Launch K_FusedReorder to gather 8 SoA arrays into sorted order.
+    """Launch K_FusedSortReorderBuild.
 
-    veleval, color, and shear_rate are omitted because they are overwritten
-    by K_Step2, K_Integrate, and K_Step1 respectively before being read.
+    Combines sort-gather, reorder, and build_grid into a single kernel.
+    cell_start must be memset to 0xFF and cell_end to 0x00 before calling.
 
     Parameters
     ----------
     num_particles : int
-        Number of active particles to process.
-    sorted_index : cupy.ndarray, shape (N,), dtype uint32
-        Permutation array: sorted_index[sorted_slot] = original_id.
+        Number of active particles.
+    sort_perm : cupy.ndarray, (N,) uint32
+        Argsort result (permutation that sorts by hash).
+    hashes : cupy.ndarray, (N,) uint32
+        Unsorted per-particle hashes from K_CalcHash.
+    sorted_hashes : cupy.ndarray, (N,) uint32
+        Output: sorted hashes.
+    cell_start, cell_end : cupy.ndarray, (num_cells,) uint32
+        Output: cell boundary tables.
     position .. sleep_counter : cupy.ndarray
-        Unsorted source arrays (indexed by original particle ID).
+        Unsorted source arrays.
     sorted_position .. sorted_sleep_counter : cupy.ndarray
-        Pre-allocated sorted destination arrays (indexed by sorted slot).
+        Sorted destination arrays.
     """
     if num_particles == 0:
         return
 
     module = _get_module()
-    kernel = module.get_function("K_FusedReorder")
+    kernel = module.get_function("K_FusedSortReorderBuild")
 
     grid = ((num_particles + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
@@ -122,7 +148,11 @@ def fused_reorder(
         block,
         (
             np.uint32(num_particles),
-            sorted_index,
+            sort_perm,
+            hashes,
+            sorted_hashes,
+            cell_start,
+            cell_end,
             # Unsorted inputs (8 arrays)
             position,
             velocity,

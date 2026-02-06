@@ -156,22 +156,26 @@ BLOCK_SIZE = 256
 
 def calc_hash(
     positions: cupy.ndarray,
-) -> Tuple[cupy.ndarray, cupy.ndarray]:
-    """Launch K_CalcHash and return (hashes, indices) arrays.
+    hashes_out: Optional[cupy.ndarray] = None,
+) -> cupy.ndarray:
+    """Launch K_CalcHash and return hashes array.
 
     Parameters
     ----------
     positions : cupy.ndarray
         (N, 4) float32 array of particle positions (x, y, z, w).
+    hashes_out : cupy.ndarray, optional
+        Pre-allocated (N,) uint32 output buffer. If None, allocates new.
 
     Returns
     -------
     hashes : cupy.ndarray, shape (N,), dtype uint32
-    indices : cupy.ndarray, shape (N,), dtype uint32
     """
     n = positions.shape[0]
-    hashes = cupy.empty(n, dtype=cupy.uint32)
-    indices = cupy.empty(n, dtype=cupy.uint32)
+    if hashes_out is not None:
+        hashes = hashes_out[:n]
+    else:
+        hashes = cupy.empty(n, dtype=cupy.uint32)
 
     module = _get_module()
     kernel = module.get_function("K_CalcHash")
@@ -179,9 +183,9 @@ def calc_hash(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
 
-    kernel(grid, block, (np.uint32(n), positions, hashes, indices))
+    kernel(grid, block, (np.uint32(n), positions, hashes))
 
-    return hashes, indices
+    return hashes
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +195,6 @@ def calc_hash(
 
 def sort_by_hash(
     hashes: cupy.ndarray,
-    indices: cupy.ndarray,
     sorted_hashes_out: Optional[cupy.ndarray] = None,
     sorted_indices_out: Optional[cupy.ndarray] = None,
 ) -> Tuple[cupy.ndarray, cupy.ndarray]:
@@ -201,12 +204,10 @@ def sort_by_hash(
     ----------
     hashes : cupy.ndarray, shape (N,), dtype uint32
         Per-particle grid hash values from ``calc_hash()``.
-    indices : cupy.ndarray, shape (N,), dtype uint32
-        Per-particle original indices (0..N-1) from ``calc_hash()``.
     sorted_hashes_out : cupy.ndarray, optional
         Pre-allocated output buffer for sorted hashes.  If *None*, allocates.
     sorted_indices_out : cupy.ndarray, optional
-        Pre-allocated output buffer for sorted original indices.  If *None*,
+        Pre-allocated output buffer for sorted indices.  If *None*,
         allocates.
 
     Returns
@@ -214,24 +215,28 @@ def sort_by_hash(
     sorted_hashes : cupy.ndarray, shape (N,), dtype uint32
         Hash values in non-decreasing order.
     sorted_indices : cupy.ndarray, shape (N,), dtype uint32
-        Original particle indices reordered by hash (sorted->original map).
+        sort_perm itself: sorted_indices[i] = original particle index for
+        sorted slot i. (Formerly indices[sort_perm], but indices was always
+        identity, so sort_perm == sorted_indices.)
     """
     n = hashes.shape[0]
 
-    # cupy.argsort uses Thrust radix sort internally for integer dtypes
-    sort_perm = cupy.argsort(hashes)
+    # cupy.argsort uses Thrust radix sort internally for integer dtypes;
+    # cast to uint32 since CUDA kernels expect uint* pointers
+    sort_perm = cupy.argsort(hashes).astype(cupy.uint32)
 
-    # Gather into output buffers
+    # Gather sorted hashes
     if sorted_hashes_out is not None:
         sorted_hashes_out[:n] = hashes[sort_perm]
         sorted_hashes = sorted_hashes_out[:n]
     else:
         sorted_hashes = hashes[sort_perm]
 
+    # sort_perm IS sorted_indices (indices was always identity 0..N-1)
     if sorted_indices_out is not None:
-        sorted_indices_out[:n] = indices[sort_perm]
+        sorted_indices_out[:n] = sort_perm
         sorted_indices = sorted_indices_out[:n]
     else:
-        sorted_indices = indices[sort_perm]
+        sorted_indices = sort_perm
 
     return sorted_hashes, sorted_indices

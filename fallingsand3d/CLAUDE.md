@@ -39,3 +39,16 @@ Requires: Python 3.13+, CUDA GPU, and these packages:
 
 Presets (Sand Castle, Volcano, Dam Break, Acid Rain, Water Drop) are loaded
 via the ImGui UI at runtime. There are no command-line arguments.
+
+## Performance: No GPU-CPU sync per frame
+
+NEVER introduce GPU→CPU synchronization in the per-frame or per-substep path.
+This includes:
+- `float(cp_array)`, `int(cp_array)` — forces device→host transfer
+- `cp.max()`, `cp.sum()`, `cp.count_nonzero()` passed to Python `float()`/`int()`
+- `.get()`, `.item()` on CuPy arrays
+- `len()` on CuPy operation results
+- `cp.asnumpy()` in hot paths
+
+The render loop must be fully async: launch GPU kernels, copy to VBOs, render.
+No host readback until the user explicitly requests it (e.g. debug UI).

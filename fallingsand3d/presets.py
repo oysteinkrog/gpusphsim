@@ -313,15 +313,6 @@ def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     _clear_world(world)
     total = 0
 
-    # Stone floor
-    n = world.spawn_cube(
-        min_corner=(-0.9, -0.95, -0.9),
-        max_corner=(0.9, -0.85, 0.9),
-        material_id=STONE,
-        spacing=0.04,
-    )
-    total += n
-
     # Water block suspended high up
     n = world.spawn_cube(
         min_corner=(-0.5, 0.1, -0.5),

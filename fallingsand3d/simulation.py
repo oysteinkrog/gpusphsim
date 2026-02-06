@@ -92,7 +92,7 @@ class Simulation:
         self._sort_perm = cupy.empty(world.max_particles, dtype=cupy.uint32)
         self._frame_counter_d = cupy.zeros(1, dtype=cupy.uint32)
         self._cuda_graph = None   # cupy.cuda.Graph or None
-        self._graph_n = 0         # n used when graph was captured
+        self._graph_n = 0         # exact n used when graph was captured
 
         # Precompute acoustic speed from materials table
         self._c_sound = self._compute_c_sound()
@@ -398,6 +398,10 @@ class Simulation:
           1. K_CalcHash           — normal launch
           2. cupy.argsort + copy  — normal launch (Thrust can't be captured)
           3-14. CUDA graph launch — single dispatch for all remaining ops
+
+        Graph strategy: when n changes (brush painting, compaction), fall back
+        to direct kernel launches — no graph capture overhead. When n is stable
+        across substeps, capture a graph and replay it for subsequent calls.
         """
         w = self.world
 
@@ -416,10 +420,19 @@ class Simulation:
         # Mark density as initialized (needed for step1 prev_density path)
         w._density_initialized = True
 
-        # 3-14. Capture or replay CUDA graph
-        if self._cuda_graph is None or self._graph_n != n:
+        # 3-14. Graph capture/replay
+        if self._graph_n != n:
+            # n changed — invalidate graph, run directly (no capture overhead)
+            self._cuda_graph = None
+            self._graph_n = n
+            self._run_graph_body(n)
+        elif self._cuda_graph is None:
+            # n stable but no graph yet — capture then launch
+            # (capture records but does NOT execute)
             self._capture_graph(n)
+            self._cuda_graph.launch()
         else:
+            # n stable, graph exists — fast replay
             self._cuda_graph.launch()
 
         self.sim_time += self.dt
