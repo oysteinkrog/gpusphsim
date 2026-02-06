@@ -45,7 +45,7 @@ struct GranularParams {
     float particle_spacing;   // particle spacing d (0.02)
     float mu0;                // base viscosity for GRANULAR
     float xsph_epsilon;       // XSPH blending factor (0.5)
-    float _pad0;              // padding to 32 bytes
+    float force_scale;        // SPH force output scaling (0.05 matches parent convention)
 };
 
 __constant__ GranularParams c_granular;
@@ -389,7 +389,8 @@ void K_Step2(
                       + c_precalc.viscosity_precalc  * f_viscosity.z;
     }
 
-    sph_force_out[index_i] = make_float4(total_force.x, total_force.y, total_force.z, 0.0f);
+    float fs = c_granular.force_scale;
+    sph_force_out[index_i] = make_float4(total_force.x * fs, total_force.y * fs, total_force.z * fs, 0.0f);
 
     // XSPH-corrected veleval (FLUID only; others keep original velocity)
     if (is_fluid_i) {

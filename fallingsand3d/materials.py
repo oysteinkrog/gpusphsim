@@ -210,8 +210,8 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     WATER: MaterialDef(
         id=WATER, name="WATER",
-        rest_density=1000.0, eos_stiffness=10.0, eos_gamma=7.0,
-        base_viscosity=1.0, friction_coeff=0.0, cohesion=0.0,
+        rest_density=1000.0, eos_stiffness=3.0, eos_gamma=7.0,
+        base_viscosity=3.5, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.6, heat_capacity=4186.0,
         temp_melt=273.0, temp_boil=373.0, temp_ignite=0.0,
         behavior_class=FLUID,

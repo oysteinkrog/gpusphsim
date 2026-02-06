@@ -300,9 +300,9 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
 
 def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """Water Drop: large suspended water block falling under gravity.
+    """Water Drop: suspended water block falling under gravity.
 
-    ~200K water particles in a wide block suspended in the upper half of the
+    ~37K water particles in a block suspended in the upper half of the
     domain, dropping onto a stone floor. Inspired by the parent project's
     simple water demo.
     """
@@ -320,10 +320,10 @@ def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Large water block suspended high up
     n = world.spawn_cube(
-        min_corner=(-0.6, 0.0, -0.6),
-        max_corner=(0.6, 0.8, 0.6),
+        min_corner=(-0.5, 0.1, -0.5),
+        max_corner=(0.5, 0.7, 0.5),
         material_id=WATER,
-        spacing=0.018,
+        spacing=0.03,
     )
     total += n
 

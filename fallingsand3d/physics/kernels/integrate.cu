@@ -4,7 +4,7 @@
  * color computation, and writeback to UNSORTED arrays via sort_indexes.
  *
  * Per-particle computation:
- *   1. Compute acceleration: accel = sph_force/mass + gravity + gas_buoyancy
+ *   1. Compute acceleration: accel = sph_force + gravity + gas_buoyancy
  *   2. Symplectic Euler: vel_new = vel + dt * accel
  *   3. GAS drag: vel_new *= (1 - c_drag * dt)
  *   4. Velocity clamp: |vel| <= velocity_limit
@@ -313,11 +313,11 @@ void K_Integrate(
     float dt = c_sim.dt;
 
     // --- Compute acceleration ---
-    float inv_mass = 1.0f / fmaxf(mass_i, 1e-12f);
+    // step2.cu already outputs acceleration (force/mass), so use directly.
     float3 accel = make_float3(
-        sph_force.x * inv_mass + c_sim.gravity.x,
-        sph_force.y * inv_mass + c_sim.gravity.y,
-        sph_force.z * inv_mass + c_sim.gravity.z
+        sph_force.x + c_sim.gravity.x,
+        sph_force.y + c_sim.gravity.y,
+        sph_force.z + c_sim.gravity.z
     );
 
     // GAS buoyancy: f_buoy = beta * (T - 293) * (0, 9.81, 0)

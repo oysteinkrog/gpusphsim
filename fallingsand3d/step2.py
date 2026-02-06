@@ -46,6 +46,7 @@ DEFAULT_MU_MAX = np.float32(10000.0)
 DEFAULT_PARTICLE_SPACING = np.float32(0.02)
 DEFAULT_MU0 = np.float32(3.5)
 DEFAULT_XSPH_EPSILON = np.float32(0.5)
+DEFAULT_FORCE_SCALE = np.float32(0.05)
 
 # ---------------------------------------------------------------------------
 # Numpy dtype matching GranularParams struct in step2.cu
@@ -58,7 +59,7 @@ DEFAULT_XSPH_EPSILON = np.float32(0.5)
 #     float particle_spacing;   //  4 bytes
 #     float mu0;                //  4 bytes
 #     float xsph_epsilon;       //  4 bytes
-#     float _pad0;              //  4 bytes
+#     float force_scale;        //  4 bytes
 # };                            // Total: 32 bytes
 # ---------------------------------------------------------------------------
 
@@ -71,7 +72,7 @@ GRANULAR_PARAMS_DTYPE = np.dtype(
         ("particle_spacing", np.float32),
         ("mu0", np.float32),
         ("xsph_epsilon", np.float32),
-        ("_pad0", np.float32),
+        ("force_scale", np.float32),
     ],
     align=False,
 )
@@ -89,6 +90,7 @@ def build_granular_params(
     particle_spacing: float = DEFAULT_PARTICLE_SPACING,
     mu0: float = DEFAULT_MU0,
     xsph_epsilon: float = DEFAULT_XSPH_EPSILON,
+    force_scale: float = DEFAULT_FORCE_SCALE,
 ) -> np.ndarray:
     """Build a GranularParams struct as a numpy structured array."""
     params = np.zeros(1, dtype=GRANULAR_PARAMS_DTYPE)
@@ -99,6 +101,7 @@ def build_granular_params(
     params[0]["particle_spacing"] = particle_spacing
     params[0]["mu0"] = mu0
     params[0]["xsph_epsilon"] = xsph_epsilon
+    params[0]["force_scale"] = force_scale
     return params
 
 
