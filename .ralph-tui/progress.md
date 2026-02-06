@@ -360,3 +360,21 @@
   - SimParams dtype with `align=False` totals exactly 64 bytes, matching the GPU sizeof. CUDA float3 fields have 4-byte alignment (not 16 like float4), so no padding is inserted between consecutive float3 and float fields
   - Grid cell computation is inlined directly in K_Step1 (no helper function call like the root prototype's `calcGridCell_step1`) since each kernel module is compiled independently via NVRTC -- there's no benefit to factoring out device functions that can't be shared across modules
 ---
+
+## 2026-02-06 - US-012 (fallingsand3d/)
+- What was implemented:
+  - `fallingsand3d/physics/kernels/step2.cu` -- K_Step2 kernel: Tait EOS pressure (per-material via c_materials), pressure force (spiky gradient, viscoplastic symmetrization), viscosity force (viscosity Laplacian), XSPH velocity correction (FLUID only), mu(I) rheology two-pass neighbor loop for GRANULAR. Skips STATIC and SLEEPING particles. Uses c_grid/c_sim/c_precalc/c_materials from common.cuh plus local c_granular for mu(I) params and xsph_epsilon.
+  - `fallingsand3d/step2.py` -- Python module: GranularParams numpy dtype (32 bytes), build_granular_params(), CuPy RawModule compilation from external .cu file with --use_fast_math, constant memory upload (c_grid, c_sim, c_precalc, c_materials, c_granular), compute_step2() kernel launch wrapper with block size 128, per-particle mass support via mass array argument.
+  - `fallingsand3d/test_step2.py` -- Integration tests: compilation, struct sizes, precalc coefficients, rest-density zero-force, compressed repulsive forces (Newton's 3rd law), STATIC skip, SLEEPING skip, XSPH for FLUID, no XSPH for GRANULAR, viscosity opposing relative motion, GRANULAR pressure clamp, mu(I) viscosity differs from constant, harmonic mean finite forces, FLUID unchanged by mu(I), no NaN at near-zero shear rate, 500K mixed particle stress test.
+- Files changed:
+  - `fallingsand3d/physics/kernels/step2.cu` (new)
+  - `fallingsand3d/step2.py` (new)
+  - `fallingsand3d/test_step2.py` (new)
+  - `.ralph-tui/progress.md` (updated)
+- **Learnings:**
+  - The fallingsand3d step2.cu uses `c_materials[mat_id].rest_density` / `eos_stiffness` for per-material Tait EOS instead of the root prototype's single `c_fluid.rest_density` / `c_fluid.gas_stiffness`. This enables multi-material pressure computation without branching on material type.
+  - The root prototype used separate `behavior_class` (int32 array) and `flags` (uint32 array) kernel arguments. The fallingsand3d version consolidates these into `packed_info` (uint32) using GET_BEHAVIOR() and IS_SLEEPING() macros from common.cuh, reducing kernel argument count and memory reads.
+  - XSPH epsilon was stored in `c_fluid.xsph_epsilon` in the root prototype's FluidParams. In fallingsand3d, it's tucked into `c_granular.xsph_epsilon` (repurposing a padding slot) since there's no separate FluidParams struct -- c_sim/c_precalc handle the shared SPH params.
+  - Per-particle mass (`__ldg(&mass[index_j])`) is used throughout the neighbor loop instead of the root prototype's constant `c_fluid.particle_mass`. This supports multi-material simulations where different materials have different rest densities and therefore different particle masses.
+  - The `viscosity_lap_coeff` field in PrecalcParams (= 45/(pi*h^6)) is used for GRANULAR mu(I) per-pair viscosity baking, while `viscosity_precalc` (= mu * 45/(pi*h^6)) is used for FLUID/GAS constant-mu paths. These are separate fields in common.cuh's PrecalcParams to keep the coefficients clear.
+---
