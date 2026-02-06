@@ -233,8 +233,9 @@
         "Block size = 128, kernel runs without errors for 500K particles"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": "Port spiky gradient from SPHSimLib/K_SPH_Kernels_spiky.inl. Port viscosity Laplacian from SPHSimLib/K_SPH_Kernels_viscosity.inl. Self-interaction (j==i) IS skipped for forces (unlike density). gamma=7 for FLUID/GRANULAR, gamma=1 for GAS. See PHYSICS.md for all formulas and XSPH details."
+      "passes": true,
+      "notes": "Port spiky gradient from SPHSimLib/K_SPH_Kernels_spiky.inl. Port viscosity Laplacian from SPHSimLib/K_SPH_Kernels_viscosity.inl. Self-interaction (j==i) IS skipped for forces (unlike density). gamma=7 for FLUID/GRANULAR, gamma=1 for GAS. See PHYSICS.md for all formulas and XSPH details.",
+      "completionNotes": "Completed by agent"
     },
     {
       "id": "US-013",
@@ -590,6 +591,6 @@
     }
   ],
   "metadata": {
-    "updatedAt": "2026-02-06T15:37:50.152Z"
+    "updatedAt": "2026-02-06T15:46:32.532Z"
   }
 }
