@@ -203,6 +203,86 @@ __device__ inline float4 compute_color(uint mat_id, float temperature, float hea
     return make_float4(r, g, b, 1.0f);
 }
 
+/**
+ * FLUID-specific color: depth gradient + velocity foam + density variation.
+ *
+ *   depth_t   = normalized Y position [0=bottom, 1=top of domain]
+ *               -> dark blue at bottom, lighter cyan near surface
+ *   foam      = velocity magnitude mapped to white highlight
+ *               -> fast-moving splash particles look like foam/spray
+ *   density_t = compression ratio above rest density
+ *               -> slightly darker in compressed regions (depth cue)
+ */
+__device__ inline float4 compute_fluid_color(
+    uint mat_id, float temperature, float health,
+    float pos_y, float vel_sq, float density
+) {
+    float rho0 = c_materials[mat_id].rest_density;
+
+    // --- Base color from material ---
+    float base_r = c_materials[mat_id].color_r;
+    float base_g = c_materials[mat_id].color_g;
+    float base_b = c_materials[mat_id].color_b;
+
+    // --- Depth gradient: normalize Y within world bounds ---
+    // depth_t: 0 at bottom, 1 at top
+    float y_range = c_sim.world_max.y - c_sim.world_min.y;
+    float depth_t = (pos_y - c_sim.world_min.y) / fmaxf(y_range, 0.01f);
+    depth_t = fmaxf(0.0f, fminf(depth_t, 1.0f));
+
+    // Deep color and shallow color (relative to material base)
+    float deep_r = base_r * 0.45f;
+    float deep_g = base_g * 0.50f;
+    float deep_b = base_b * 0.65f;
+    float shal_r = base_r * 1.15f;
+    float shal_g = base_g * 1.15f;
+    float shal_b = base_b * 1.05f;
+
+    // Smooth depth curve
+    float d = depth_t;
+    float r = deep_r + (shal_r - deep_r) * d;
+    float g = deep_g + (shal_g - deep_g) * d;
+    float b = deep_b + (shal_b - deep_b) * d;
+
+    // --- Density darkening: compressed regions slightly darker ---
+    float ratio = density / fmaxf(rho0, 1.0f);
+    float compress = fmaxf(ratio - 1.0f, 0.0f);  // >0 when compressed
+    float darken = 1.0f / (1.0f + 0.5f * compress);  // 1.0 at rest, ~0.9 at 25% compression
+    r *= darken;
+    g *= darken;
+    b *= darken;
+
+    // --- Velocity foam: white highlight for fast particles ---
+    float speed = sqrtf(vel_sq);
+    float foam_t = fminf(speed / 3.0f, 1.0f);  // ramp: 0 at rest, 1 at speed>=3
+    foam_t = foam_t * foam_t;  // quadratic onset: subtle at low speed, strong at high
+    // Blend toward white
+    r = r + (1.0f - r) * foam_t * 0.7f;
+    g = g + (1.0f - g) * foam_t * 0.7f;
+    b = b + (1.0f - b) * foam_t * 0.7f;
+
+    // --- Hot tint (same as base compute_color) ---
+    if (temperature > 293.0f) {
+        float t_excess = fminf((temperature - 293.0f) / 1000.0f, 1.0f);
+        r = r + (1.0f - r) * t_excess;
+        g = g * (1.0f - 0.5f * t_excess);
+        b = b * (1.0f - 0.8f * t_excess);
+    }
+
+    // --- Health fade ---
+    float h = fmaxf(fminf(health, 1.0f), 0.0f);
+    r *= h;
+    g *= h;
+    b *= h;
+
+    // Clamp
+    r = fminf(r, 1.0f);
+    g = fminf(g, 1.0f);
+    b = fminf(b, 1.0f);
+
+    return make_float4(r, g, b, 1.0f);
+}
+
 /* ======================================================================
  * K_Integrate kernel
  * ====================================================================== */
@@ -424,7 +504,13 @@ void K_Integrate(
     temp = fmaxf(T_MIN, fminf(temp, T_MAX));
 
     // --- Compute color ---
-    float4 color = compute_color(mat_id, temp, hlth);
+    float4 color;
+    if (behavior == FLUID) {
+        float rho_i = sorted_density[i];
+        color = compute_fluid_color(mat_id, temp, hlth, pos_new.y, vel_sq_sleep, rho_i);
+    } else {
+        color = compute_color(mat_id, temp, hlth);
+    }
 
     // --- Write to UNSORTED arrays ---
     position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, 1.0f);

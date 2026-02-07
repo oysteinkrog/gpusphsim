@@ -87,9 +87,10 @@ Both are mathematically equivalent when all particles have the same mass.
 
 ### 2.3 Expected density at rest
 
-For cubic lattice at spacing `dx = 0.02`, mass `m = 0.008`, h=0.04:
-- 27 neighbors within h (3x3x3 cube, all at distance <= sqrt(3)*dx = 0.0346 < h)
-- rho ≈ 1000 kg/m^3 (by construction: m = rho_0 * dx^3)
+For cubic lattice at spacing `dx = 0.02`, mass `m = 0.02`, h=0.04:
+- ~30+ neighbors within h (all at distance <= h from particle i)
+- SPH kernel-sum density ≈ 2500 kg/m³ (with m=0.02, Poly6 at h=0.04)
+- rest_density is set to 2500 to match, giving rho/rho0 ≈ 1.0 at rest
 
 ---
 
@@ -114,14 +115,14 @@ GAS:      p = k * max(rho - rho_0, 0)
 
 All FLUID and GRANULAR pressure clamped >= 0 (no tensile pressure).
 
-| Material | k | gamma | EOS |
-|----------|-----|-------|------|
-| WATER | 100.0 | 1.0 | Linear |
-| OIL | 80.0 | 1.0 | Linear |
-| ACID | 90.0 | 1.0 | Linear |
-| LAVA | 30.0 | 7.0 | Tait |
-| SAND | 20.0 | 7.0 | Tait |
-| DIRT | 18.0 | 7.0 | Tait |
+| Material | rho_0 | k | gamma | EOS |
+|----------|-------|-----|-------|------|
+| WATER | 2500.0 | 500.0 | 7.0 | Tait |
+| OIL | 2500.0 | 400.0 | 7.0 | Tait |
+| ACID | 2500.0 | 450.0 | 7.0 | Tait |
+| LAVA | 2500.0 | 30.0 | 7.0 | Tait |
+| SAND | 2500.0 | 20.0 | 7.0 | Tait |
+| DIRT | 2500.0 | 18.0 | 7.0 | Tait |
 
 **Source**: `step2.cu:63-82`
 
@@ -177,7 +178,7 @@ where rho_avg_ij = 0.5 * (rho_i + rho_j)
 veleval_out_i = v_i + epsilon * xsph_sum_i
 ```
 
-`epsilon = 0.5` (from `c_granular.xsph_epsilon`)
+`epsilon = 0.8` (from `c_granular.xsph_epsilon`)
 
 **Source**: `step2.cu:362-369` (accumulation), `step2.cu:395-402` (output)
 
@@ -230,7 +231,7 @@ accel = sph_force + gravity                    [sph_force is acceleration]
 
 For GAS: `accel.y += 0.01 * (T - 293) * 9.81`  (buoyancy)
 
-Clamped: `|accel| <= 5000 m/s^2`
+Clamped: `|accel| <= 30 m/s^2`
 
 **Source**: `integrate.cu:316-336`
 
@@ -242,7 +243,7 @@ v_new = v + dt * accel
 
 GAS drag: `v_new *= (1 - 2.0 * dt)`
 
-Clamped: `|v| <= 50 m/s`
+Clamped: `|v| <= 10 m/s`
 
 GRANULAR anti-creep: if `|v| < 0.01` AND `rho > 0.95*rho_0` AND `gamma_dot < 0.05`:
 set `v_new = 0`
@@ -327,7 +328,7 @@ Default: mu_s=0.36, mu_2=0.70, I0=0.3
 eta = min(mu_max, mu0 + mu(I) * p_eff / (gamma_dot + 1e-6))
 ```
 
-Default: mu_max=10000, mu0=3.5
+Default: mu_max=10000, mu0=1.0
 
 ### 5.5 Viscosity Force (GRANULAR-GRANULAR)
 
@@ -347,20 +348,20 @@ f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
 | h (smoothing length) | 0.04 | 0.04 | Same |
 | m (particle mass) | 0.02 | 0.02 | Matched to parent (was 0.008 = rho0*dx^3) |
 | dx (particle spacing) | 0.02 | ~0.02 | Same |
-| rho_0 (rest density) | 1000 | 1000 | Same; SPH density ≈ 2500 at rest (see §7) |
-| k (EOS stiffness) | 100.0 (Water) | 3.0 | Game SPH: higher k with linear EOS |
-| gamma (EOS exponent) | 1.0 (FLUID), 7 (GRANULAR) | 7 | Per-material; FLUID uses linear EOS |
-| mu_0 (viscosity) | 3.5 | 3.5 | Same |
-| epsilon (XSPH) | 0.5 | 0.5 | Same (computed but not used in position update) |
+| rho_0 (rest density) | 2500 | 1000 | Matches actual SPH kernel-sum density at rest (see §7) |
+| k (EOS stiffness) | 500.0 (Water) | 3.0 | High k needed to resist gravity with force_scale=0.02 |
+| gamma (EOS exponent) | 7.0 (all) | 7 | Tait EOS for all materials |
+| mu_0 (viscosity) | 1.0 | 3.5 | Lowered; effective viscosity = mu0 * force_scale |
+| epsilon (XSPH) | 0.8 | 0.5 | Higher for smoother FLUID advection |
 | gravity | -9.8 | -9.8 | Same |
-| dt | adaptive | 0.001 (fixed) | CFL: min(acoustic, viscous) ∈ [1e-5, 0.005]; DT_MAX=0.005; CPU-only (no GPU sync) |
+| dt | adaptive | 0.001 (fixed) | CFL: min(acoustic, viscous) ∈ [1e-5, 0.001]; DT_MAX=0.001 |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
 | integrate | accel = sph + g | accel = sph + g | Both treat step2 output as acceleration |
 | position update | FLUID: pos += veleval_xsph * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
 | boundaries | impulse SDF | penalty springs | Fundamentally different |
-| velocity_limit | 50 | 200 | Different |
-| accel_max | 5000 | N/A | Only in fallingsand3d |
+| velocity_limit | 10 | 200 | Tight clamp prevents particles escaping grid cells |
+| accel_max | 30 | N/A | Prevents shockwave-level accelerations |
 | boundary_stiffness | N/A | 20000 | Only in parent |
 | boundary_dampening | N/A | 256 | Only in parent |
 | restitution | 0.3 | N/A | Only in fallingsand3d |
@@ -401,19 +402,18 @@ Effective SPH scaling = m_j * force_scale = 0.02 * 0.02 = 0.0004
 Parent SPH scaling    = m_j * m_j         = 0.02 * 0.02 = 0.0004  (identical)
 ```
 
-### 7.3 Why mass = 0.02 (not rho0 * dx^3 = 0.008)
+### 7.3 Why mass = 0.02 and rest_density = 2500
 
 With m = rho0 * dx^3 = 0.008, the SPH density at rest ≈ 1000 (physical).
-With m = 0.02, the SPH density at rest ≈ 2500 (inflated, ~2.5x rho0).
+With m = 0.02, the SPH density at rest ≈ 2500 (inflated by particle mass choice).
 
-The Tait EOS pressure depends on rho/rho0:
-- m=0.008: rho/rho0 ≈ 1.0 → p ≈ 0 (near zero pressure at rest)
-- m=0.02:  rho/rho0 ≈ 2.5 → p = k * (2.5^7 - 1) = 3 * 609 = 1828
+Setting `rest_density = 2500` to MATCH the actual SPH kernel-sum density means:
+- At rest: rho/rho0 ≈ 1.0 → p ≈ 0 (correct zero pressure in equilibrium)
+- Under compression: rho/rho0 > 1.0 → Tait EOS provides restoring force
 
-The inflated density keeps the EOS in a stable high-pressure regime where
-small density changes produce large pressure gradients (strong restoring force).
-With the "correct" mass (0.008), k would need to be ~128,000 to achieve the
-same stiffness, requiring a much smaller timestep for stability.
+If rest_density were left at 1000 (physical), the ratio rho/rho0 ≈ 2.5 at rest,
+causing massive baseline pressure even in equilibrium. With gamma=7:
+p = k * (2.5^7 - 1) ≈ 610*k, leading to immediate explosion.
 
 ---
 
@@ -491,27 +491,43 @@ Parent uses penalty-force walls (smooth, damped).
 fallingsand3d uses impulse SDF (sharp reflection + friction).
 May cause different settling behavior.
 
-### 10.6 FIXED: Game SPH overhaul (performance + visual quality)
-Water physics had two problems: (1) DT_MAX=0.001 forced ~17 substeps/frame due to
-stiff Tait EOS (gamma=7), and (2) STATIC particles inflated density at interfaces,
-creating pressure spikes and wall-sticking.
+### 10.6 STATIC neighbor skipping + FLUID boundary improvements
+STATIC particles inflated density at interfaces, creating pressure spikes and
+wall-sticking.
 
 Changes:
 1. **Skip STATIC neighbors** in step1 density/heat/exposure and step2 force loops.
    Prevents wall density inflation. Self-interaction (i==j) preserved for density.
-2. **Per-material EOS gamma**: gamma=1 → linear EOS for FLUID (Water, Oil, Acid).
-   gamma=7 → Tait EOS for GRANULAR (Sand, Dirt, Lava). Removes `powf()` for FLUID.
-3. **FLUID EOS stiffness increased**: Water k=100, Oil k=80, Acid k=90 (was 3-10).
-   Higher k compensates for linear EOS being less stiff than Tait at high compression.
-4. **DT_MAX 0.001 → 0.005**: Linear EOS has constant speed of sound, CFL allows
-   larger timesteps. Expected 3-5 substeps/frame instead of 17.
-5. **XSPH position advection for FLUID**: Smooths compression artifacts at larger dt.
-6. **Zero wall friction for FLUID**: Prevents domain-wall sticking.
-7. **All FLUID pressure clamped >= 0**: No tensile/negative pressure.
+2. **XSPH position advection for FLUID**: Smooths compression artifacts.
+3. **Zero wall friction for FLUID**: Prevents domain-wall sticking.
+4. **All FLUID pressure clamped >= 0**: No tensile/negative pressure.
 
-**Source**: step1.cu, step2.cu, integrate.cu, materials.py, simulation.py
+**Source**: step1.cu, step2.cu, integrate.cu
 
-### 10.7 OPTIMIZATION: Fused sort-reorder-build pipeline
+### 10.7a FIXED: SPH stability overhaul (Tait EOS + safety clamps)
+With force_scale=0.02, SPH pressure forces are 50x weaker than gravity.
+For deep water columns (500K particles), this causes CFL violations at
+compressed densities, leading to shockwave cycles and explosions.
+
+Root cause: CFL computed from rest-state speed of sound, but actual speed
+of sound at compressed bottom (ratio 2-4x) is much higher, making dt too large.
+
+Changes:
+1. **All materials use Tait EOS (gamma=7)**: Nonlinear pressure response provides
+   strong compression resistance. Linear EOS (gamma=1) was too soft for deep columns.
+2. **rest_density=2500 for FLUID**: Matches actual SPH kernel-sum density at rest
+   (m=0.02, dx=0.02, h=0.04), giving rho/rho0≈1.0 and near-zero pressure at rest.
+3. **DT_MAX 0.005 → 0.001**: Respects CFL at compressed densities.
+   ~17 substeps/frame at 60 FPS with speed=1.0.
+4. **ACCEL_MAX 200 → 30**: Prevents shockwave-level accelerations.
+5. **VELOCITY_LIMIT 50 → 10**: Prevents particles jumping multiple grid cells.
+6. **mu0 0.1 → 1.0**: Higher viscous damping prevents oscillations.
+7. **XSPH epsilon 0.5 → 0.8**: Smoother velocity field for FLUID.
+8. **max_substeps 20 → 40**: Accommodates smaller dt at higher speeds.
+
+**Source**: simulation.py, integrate.cu, step2.py, materials.py
+
+### 10.8 OPTIMIZATION: Fused sort-reorder-build pipeline
 The per-substep pipeline was restructured for performance (no physics changes):
 1. **Removed redundant indices array**: K_CalcHash no longer writes `indices[idx]=idx`
    (always identity). sort_perm from argsort is used directly as sorted_indices.
@@ -529,7 +545,7 @@ The per-substep pipeline was restructured for performance (no physics changes):
 
 **Source**: simulation.py, fused_sort_reorder_build.py/.cu, wake.py/.cu
 
-### 10.8 FIXED: GPU→CPU sync every frame in adaptive timestep
+### 10.9 FIXED: GPU→CPU sync every frame in adaptive timestep
 `_compute_adaptive_dt()` used `float(cp.max(...))` on GPU velocity arrays to
 compute advection CFL, forcing a GPU→CPU sync (device→host transfer) every frame.
 With current parameters, the acoustic CFL (dt≈0.05) always exceeds DT_MAX (0.005)
@@ -539,7 +555,7 @@ entirely; adaptive dt now uses only acoustic and viscous CFL, both precomputed
 from the materials table at init time — zero GPU sync in the hot path.
 **Source**: `simulation.py:151-175`
 
-### 10.9 OPTIMIZATION: CUDA graph capture for SPH pipeline
+### 10.10 OPTIMIZATION: CUDA graph capture for SPH pipeline
 The per-substep pipeline launches ~14 GPU operations (memsets + kernel calls) with
 Python→CUDA round-trip overhead for each. CUDA graph capture records ops 3-14 into
 a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
@@ -566,3 +582,19 @@ a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
 
 **Source**: `simulation.py:256-426`, `reactions.cu:80-81`, `reactions.py:106-186`,
 `spawn.py:118-120`
+
+### 10.11 VISUAL: FLUID particle coloring (depth + foam + density)
+FLUID particles use `compute_fluid_color()` instead of the generic `compute_color()`.
+Three visual effects combined:
+
+1. **Depth gradient**: Y-position normalized within world bounds. Linear blend from
+   dark blue (bottom) to bright cyan-blue (surface). Deep multipliers: 0.45-0.65x
+   base color. Shallow multipliers: 1.05-1.15x base color.
+2. **Density darkening**: Compressed regions (rho > rho0) darken slightly via
+   `1 / (1 + 0.5 * max(rho/rho0 - 1, 0))`. Subtle depth cue reinforcement.
+3. **Velocity foam**: Speed mapped to white blend via quadratic ramp (full at speed>=3).
+   Fast-moving splash particles appear as white foam/spray.
+
+Hot tint and health fade applied on top (same as base color function).
+
+**Source**: `integrate.cu:207-280`

@@ -479,8 +479,10 @@ class UI:
 
         # --- Kernel Timing Panel ---
         if sim.timing_enabled and sim._timing_ema:
+            vp_timing = imgui.get_main_viewport()
             imgui.set_next_window_pos(
-                imgui.ImVec2(240, 10), imgui.Cond_.first_use_ever,
+                imgui.ImVec2(vp_timing.pos.x + vp_timing.size.x - 310, 10),
+                imgui.Cond_.first_use_ever,
             )
             imgui.set_next_window_size(
                 imgui.ImVec2(300, 0), imgui.Cond_.first_use_ever,
