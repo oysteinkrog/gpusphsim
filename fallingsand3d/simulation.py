@@ -38,7 +38,7 @@ import wake
 
 # Adaptive timestep limits
 DT_MIN = 1e-5
-DT_MAX = 0.005
+DT_MAX = 0.001
 
 
 class Simulation:
@@ -69,9 +69,10 @@ class Simulation:
         speed: float = 1.0,
         accuracy: float = 0.4,
         fixed_dt: bool = False,
-        max_substeps: int = 20,
+        max_substeps: int = 40,
         compact_interval: int = 60,
         compact_threshold: int = 100,
+        world_half_size: float = 1.0,
     ) -> None:
         self.world = world
         self.dt = dt
@@ -94,6 +95,16 @@ class Simulation:
         self._cuda_graph = None   # cupy.cuda.Graph or None
         self._graph_n = 0         # exact n used when graph was captured
 
+        # --- World size ---
+        self._world_half_size = world_half_size
+        self._num_cells = 0  # set by _upload_constants
+
+        # --- Kernel timing mode ---
+        self.timing_enabled = False
+        self._last_timings: dict = {}      # stage_name -> ms (raw last frame)
+        self._timing_ema: dict = {}        # stage_name -> ms (exponential moving avg)
+        self._timing_ema_alpha = 0.1       # EMA smoothing factor
+
         # Precompute acoustic speed from materials table
         self._c_sound = self._compute_c_sound()
         # Precompute max viscosity and min density for viscous CFL
@@ -102,13 +113,12 @@ class Simulation:
         # Smoothing length (must match _upload_constants)
         self._h = 0.04
 
-        # Grid cell tables (pre-allocated, reused every frame)
-        from hash_sort import NUM_CELLS
-        self._cell_start = cupy.empty(NUM_CELLS, dtype=cupy.uint32)
-        self._cell_end = cupy.empty(NUM_CELLS, dtype=cupy.uint32)
+        # Grid cell tables — allocated in _upload_constants based on world size
+        self._cell_start = None
+        self._cell_end = None
 
-        # Cell wake flags for wake propagation (pre-allocated, cleared each step)
-        self._cell_wake_flags = wake.allocate_cell_wake_flags()
+        # Cell wake flags — allocated in _upload_constants based on world size
+        self._cell_wake_flags = None
 
         # Freelist for spawn/kill system (pre-allocated, reset each step)
         self._dead_indices, self._dead_count = spawn.allocate_freelist(
@@ -191,10 +201,36 @@ class Simulation:
         reactions.upload_sim_params(self._sim_params)
         spawn.upload_sim_params(self._sim_params)
 
+    @property
+    def world_half_size(self) -> float:
+        return self._world_half_size
+
+    def set_world_size(self, half_size: float) -> None:
+        """Change the world half-extent and re-upload all constants."""
+        self._world_half_size = half_size
+        self._upload_constants()
+        # Invalidate CUDA graph (grid changed)
+        self._cuda_graph = None
+        self._graph_n = 0
+
     def _upload_constants(self) -> None:
         """Compile all .cu kernels and upload constant memory to each module."""
+        hs = self._world_half_size
+        wmin = (-hs, -hs, -hs)
+        wmax = (hs, hs, hs)
+
         # Build shared param structs
-        grid_params = hash_sort.build_grid_params()
+        grid_params, num_cells = hash_sort.build_grid_params_for_world(
+            wmin, wmax, self._h,
+        )
+
+        # Reallocate cell arrays if grid size changed
+        if num_cells != self._num_cells:
+            self._num_cells = num_cells
+            self._cell_start = cupy.empty(num_cells, dtype=cupy.uint32)
+            self._cell_end = cupy.empty(num_cells, dtype=cupy.uint32)
+            self._cell_wake_flags = wake.allocate_cell_wake_flags(num_cells)
+
         sim_params = step1.build_sim_params(
             smoothing_length=self._h,
             particle_mass=0.02,
@@ -203,13 +239,13 @@ class Simulation:
             dt=self.dt,
             restitution=0.3,
             wall_friction=0.5,
-            world_min=(-1.0, -1.0, -1.0),
-            world_max=(1.0, 1.0, 1.0),
+            world_min=wmin,
+            world_max=wmax,
         )
         self._sim_params = sim_params
         precalc_params = step1.build_precalc_params(
             smoothing_length=0.04,
-            viscosity=0.1,
+            viscosity=1.0,
         )
         granular_params = step2.build_granular_params()
         materials_data = build_material_array()
@@ -438,6 +474,144 @@ class Simulation:
         self.sim_time += self.dt
         self._frame_counter += 1
 
+    def _sim_step_timed(self, n: int) -> None:
+        """Run one substep with CUDA event timing (bypasses graph capture)."""
+        w = self.world
+        events = []
+        labels = []
+
+        def mark(label):
+            e = cupy.cuda.Event()
+            e.record()
+            events.append(e)
+            labels.append(label)
+
+        mark("start")
+
+        # 1. Hash
+        hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
+        mark("hash")
+
+        # 2. Sort + copy
+        sort_perm = cupy.argsort(hashes).astype(cupy.uint32)
+        self._sort_perm[:n] = sort_perm
+        mark("sort")
+
+        self._frame_counter_d.fill(self._frame_counter)
+        w._density_initialized = True
+
+        # 3. Memset cell tables
+        self._cell_start.data.memset_async(0xFF, self._cell_start.nbytes)
+        self._cell_end.data.memset_async(0x00, self._cell_end.nbytes)
+
+        # 4. Fused sort-reorder-build
+        fused_sort_reorder_build.fused_sort_reorder_build(
+            n, self._sort_perm[:n], w.hashes,
+            w.sorted_hashes, self._cell_start, self._cell_end,
+            w.position, w.velocity,
+            w.mass, w.packed_info, w.temperature,
+            w.health, w.lifetime,
+            w.sleep_counter,
+            w.sorted_position, w.sorted_velocity,
+            w.sorted_mass, w.sorted_packed_info, w.sorted_temperature,
+            w.sorted_health, w.sorted_lifetime,
+            w.sorted_sleep_counter,
+        )
+        mark("reorder")
+
+        # 5. Step1
+        step1.compute_step1(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_mass[:n],
+            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
+            self._cell_start, self._cell_end,
+            density_out=w.sorted_density,
+            shear_rate_out=w.sorted_shear_rate,
+            dTdt_out=w.sorted_dTdt,
+            exposure_heat_out=w.sorted_exposure_heat,
+            exposure_corrode_out=w.sorted_exposure_corrode,
+        )
+        mark("step1")
+
+        # 6. Reactions
+        spawn.reset_freelist(self._dead_count)
+        reactions.compute_reactions(
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
+            w.sorted_health[:n], w.sorted_lifetime[:n],
+            w.sorted_velocity[:n], w.sorted_exposure_heat[:n],
+            w.sorted_exposure_corrode[:n],
+            frame_d=self._frame_counter_d,
+            dead_indices=self._dead_indices, dead_count=self._dead_count,
+        )
+        mark("reactions")
+
+        # 7. Spawn
+        spawn.compute_spawn(
+            w.sorted_packed_info[:n], w.sorted_position[:n],
+            w.sorted_velocity[:n], w.sorted_veleval[:n],
+            w.sorted_mass[:n], w.sorted_temperature[:n],
+            w.sorted_health[:n], w.sorted_lifetime[:n],
+            w.sorted_color[:n], w.sorted_sleep_counter[:n],
+            w.sorted_density[:n], w.sorted_shear_rate[:n],
+            self._dead_indices, self._dead_count,
+        )
+        mark("spawn")
+
+        # 8. Step2
+        step2.compute_step2(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n],
+            self._cell_start, self._cell_end,
+            sph_force_out=w.sorted_sph_force,
+            veleval_out=w.sorted_veleval,
+        )
+        mark("step2")
+
+        # 9. Integrate
+        integrate.integrate(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_veleval[:n], w.sorted_sph_force[:n],
+            w.sorted_mass[:n], w.sorted_packed_info[:n],
+            w.sorted_temperature[:n], w.sorted_health[:n],
+            sorted_density=w.sorted_density[:n],
+            sorted_shear_rate=w.sorted_shear_rate[:n],
+            sorted_dTdt=w.sorted_dTdt[:n],
+            sorted_sleep_counter=w.sorted_sleep_counter[:n],
+            sort_indexes=self._sort_perm[:n],
+            position_out=w.position, velocity_out=w.velocity,
+            color_out=w.color, packed_info_out=w.packed_info,
+            sleep_counter_out=w.sleep_counter,
+            temperature_out=w.temperature,
+        )
+        mark("integrate")
+
+        # 10. Wake
+        wake.run_wake_propagation(
+            w.position[:n], w.packed_info[:n], w.sleep_counter[:n],
+            self._cell_wake_flags, num_particles=n,
+        )
+        mark("wake")
+
+        # Single sync then read all timings
+        events[-1].synchronize()
+        raw = {}
+        for i in range(1, len(events)):
+            raw[labels[i]] = cupy.cuda.get_elapsed_time(events[i - 1], events[i])
+        self._last_timings = raw
+
+        # Update EMA
+        alpha = self._timing_ema_alpha
+        for k, v in raw.items():
+            if k in self._timing_ema:
+                self._timing_ema[k] = alpha * v + (1 - alpha) * self._timing_ema[k]
+            else:
+                self._timing_ema[k] = v
+
+        self.sim_time += self.dt
+        self._frame_counter += 1
+
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
         now = time.perf_counter()
@@ -469,8 +643,9 @@ class Simulation:
             round(self.speed * wall_dt / self.dt),
         ))
 
+        step_fn = self._sim_step_timed if self.timing_enabled else self._sim_step
         for _ in range(sim_steps):
-            self._sim_step(n)
+            step_fn(n)
 
         # Periodic compaction: remove dead particles from the active range
         if sim_steps > 0:

@@ -326,6 +326,25 @@ def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     return total, None
 
 
+def load_water_max(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Water Max: fill the world with as many water particles as possible.
+
+    Spawns a large water cube that fills up to max_particles. The cube
+    extends across most of the domain, leaving a small margin from the walls.
+    """
+    _clear_world(world)
+
+    n = world.spawn_cube(
+        min_corner=(-0.9, -0.9, -0.9),
+        max_corner=(0.9, 0.9, 0.9),
+        material_id=WATER,
+        spacing=0.02,
+    )
+
+    print(f"  Water Max: {n:,} particles")
+    return n, None
+
+
 # Registry of all presets for UI access
 PRESETS = {
     "Sand Castle": load_sand_castle,
@@ -333,4 +352,5 @@ PRESETS = {
     "Dam Break": load_dam_break,
     "Acid Rain": load_acid_rain,
     "Water Drop": load_water_drop,
+    "Water Max": load_water_max,
 }

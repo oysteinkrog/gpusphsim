@@ -210,8 +210,8 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     WATER: MaterialDef(
         id=WATER, name="WATER",
-        rest_density=1000.0, eos_stiffness=100.0, eos_gamma=1.0,
-        base_viscosity=0.1, friction_coeff=0.0, cohesion=0.0,  # base_viscosity for CFL only
+        rest_density=2500.0, eos_stiffness=500.0, eos_gamma=7.0,
+        base_viscosity=1.0, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.6, heat_capacity=4186.0,
         temp_melt=273.0, temp_boil=373.0, temp_ignite=0.0,
         behavior_class=FLUID,
@@ -219,7 +219,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     OIL: MaterialDef(
         id=OIL, name="OIL",
-        rest_density=800.0, eos_stiffness=80.0, eos_gamma=1.0,
+        rest_density=2500.0, eos_stiffness=400.0, eos_gamma=7.0,
         base_viscosity=5.0, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.15, heat_capacity=2000.0,
         temp_melt=250.0, temp_boil=570.0, temp_ignite=480.0,
@@ -237,8 +237,8 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     ACID: MaterialDef(
         id=ACID, name="ACID",
-        rest_density=1000.0, eos_stiffness=90.0, eos_gamma=1.0,
-        base_viscosity=1.5, friction_coeff=0.0, cohesion=0.0,
+        rest_density=2500.0, eos_stiffness=450.0, eos_gamma=7.0,
+        base_viscosity=2.0, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=2500.0,
         temp_melt=250.0, temp_boil=380.0, temp_ignite=0.0,
         behavior_class=FLUID,

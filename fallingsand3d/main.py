@@ -252,7 +252,7 @@ def main():
         renderer.draw(view, proj)
 
         # --- Draw ImGui UI ---
-        new_max = ui.draw(sim, world, fps)
+        ui_changes = ui.draw(sim, world, fps)
 
         # --- Handle preset loading ---
         preset_name = ui.pending_preset
@@ -270,7 +270,8 @@ def main():
                 sim.copy_to_vbos(pos_buf, col_buf)
 
         # Handle max_particles change
-        if new_max is not None:
+        if 'new_max' in ui_changes:
+            new_max = ui_changes['new_max']
             world.resize(new_max)
             renderer.close()
             renderer = Renderer(new_max, point_scale=20.0)
@@ -282,6 +283,10 @@ def main():
             spawner_frame_counter = 0
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
                 sim.copy_to_vbos(pos_buf, col_buf)
+
+        # Handle world size change
+        if 'new_world_size' in ui_changes:
+            sim.set_world_size(ui_changes['new_world_size'])
 
         # --- ImGui frame end (render ImGui draw data) ---
         ui.end_frame()

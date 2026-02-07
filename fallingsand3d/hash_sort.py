@@ -63,7 +63,7 @@ assert GRID_PARAMS_DTYPE.itemsize == 52, (
 
 
 def build_grid_params() -> np.ndarray:
-    """Build a single GridParams struct as a numpy structured array."""
+    """Build a single GridParams struct using the default grid constants."""
     params = np.zeros(1, dtype=GRID_PARAMS_DTYPE)
     params[0]["grid_min"] = GRID_MIN
     params[0]["grid_max"] = GRID_MAX
@@ -71,6 +71,36 @@ def build_grid_params() -> np.ndarray:
     params[0]["grid_delta"] = GRID_DELTA
     params[0]["num_cells"] = NUM_CELLS
     return params
+
+
+def build_grid_params_for_world(
+    grid_min,
+    grid_max,
+    cell_size: float = 0.04,
+) -> Tuple[np.ndarray, int]:
+    """Build a GridParams struct from arbitrary world bounds and cell size.
+
+    Returns
+    -------
+    params : np.ndarray
+        A single GridParams structured array element.
+    num_cells : int
+        Total number of grid cells.
+    """
+    gmin = np.array(grid_min, dtype=np.float32)
+    gmax = np.array(grid_max, dtype=np.float32)
+    grid_size = gmax - gmin
+    grid_res = np.ceil(grid_size / cell_size).astype(np.int32)
+    grid_delta = grid_res.astype(np.float32) / grid_size
+    num_cells = int(grid_res[0]) * int(grid_res[1]) * int(grid_res[2])
+
+    params = np.zeros(1, dtype=GRID_PARAMS_DTYPE)
+    params[0]["grid_min"] = gmin
+    params[0]["grid_max"] = gmax
+    params[0]["grid_res"] = grid_res
+    params[0]["grid_delta"] = grid_delta
+    params[0]["num_cells"] = num_cells
+    return params, num_cells
 
 
 # ---------------------------------------------------------------------------

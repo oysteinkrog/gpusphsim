@@ -33,9 +33,9 @@
 #define GAS_AMBIENT_TEMP   293.0f
 #define GAS_BUOYANCY_G     9.81f
 #define GAS_DRAG_COEFF     2.0f
-#define VELOCITY_LIMIT     50.0f
+#define VELOCITY_LIMIT     10.0f
 #define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
-#define ACCEL_MAX          200.0f
+#define ACCEL_MAX          30.0f
 #define ACCEL_MAX_SQ       (ACCEL_MAX * ACCEL_MAX)
 
 /* Temperature integration constants */

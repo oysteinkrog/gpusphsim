@@ -125,6 +125,7 @@ class UI:
         self._brush_radius: float = 0.1
         self._speed_log: float = 0.0  # log10(speed), maps to 0.1-10.0
         self._max_particles_idx: int = 0  # index into _MAX_PARTICLES_OPTIONS
+        self._world_half_size: float = 1.0  # current world half-extent
 
         # ImGui context + renderer
         imgui.create_context()
@@ -297,8 +298,10 @@ class UI:
         imgui.render()
         self._imgui_renderer.render(imgui.get_draw_data())
 
-    def draw(self, sim, world, fps: float) -> Optional[int]:
-        """Draw all UI panels. Returns new max_particles if changed, else None.
+    def draw(self, sim, world, fps: float) -> dict:
+        """Draw all UI panels. Returns dict of changes (empty if nothing changed).
+
+        Possible keys: 'new_max', 'new_world_size'.
 
         Parameters
         ----------
@@ -309,7 +312,7 @@ class UI:
         fps : float
             Current frames per second
         """
-        new_max = None
+        changes = {}
 
         # --- Material Picker Panel ---
         imgui.set_next_window_pos(imgui.ImVec2(10, 10), imgui.Cond_.first_use_ever)
@@ -446,16 +449,65 @@ class UI:
                     is_sel = (idx == cur_idx)
                     clicked, _ = imgui.selectable(label, is_sel)
                     if clicked and val != cur_max:
-                        new_max = val
+                        changes['new_max'] = val
                     if is_sel:
                         imgui.set_item_default_focus()
                 imgui.end_combo()
+
+            # World size slider
+            changed, new_hs = imgui.slider_float(
+                "World size", self._world_half_size, 0.5, 3.0, "%.1f",
+            )
+            if changed:
+                self._world_half_size = new_hs
+            # Only apply on release (avoid re-upload every drag frame)
+            if imgui.is_item_deactivated_after_edit():
+                changes['new_world_size'] = self._world_half_size
 
             # Pause button
             if imgui.button("Pause [Space]" if not sim.paused else "Resume [Space]"):
                 sim.toggle_pause()
 
+            imgui.same_line()
+
+            # Timing toggle
+            changed, new_timing = imgui.checkbox("Timing", sim.timing_enabled)
+            if changed:
+                sim.timing_enabled = new_timing
+
         imgui.end()
+
+        # --- Kernel Timing Panel ---
+        if sim.timing_enabled and sim._timing_ema:
+            imgui.set_next_window_pos(
+                imgui.ImVec2(240, 10), imgui.Cond_.first_use_ever,
+            )
+            imgui.set_next_window_size(
+                imgui.ImVec2(300, 0), imgui.Cond_.first_use_ever,
+            )
+            imgui.set_next_window_bg_alpha(0.8)
+            if imgui.begin(
+                "Kernel Timings",
+                None,
+                imgui.WindowFlags_.always_auto_resize,
+            )[0]:
+                total = 0.0
+                order = [
+                    "hash", "sort", "reorder", "step1",
+                    "reactions", "spawn", "step2", "integrate", "wake",
+                ]
+                for name in order:
+                    ms = sim._timing_ema.get(name, 0.0)
+                    total += ms
+                    bar_frac = min(ms / 2.0, 1.0)  # 2ms = full bar
+                    imgui.text(f"{name:>9s}")
+                    imgui.same_line()
+                    imgui.progress_bar(bar_frac, imgui.ImVec2(120, 14), "")
+                    imgui.same_line()
+                    imgui.text(f"{ms:6.2f}ms")
+                imgui.separator()
+                imgui.text(f"{'total':>9s}             {total:6.2f}ms")
+            imgui.end()
 
         # --- Status Bar ---
         vp = imgui.get_main_viewport()
@@ -494,7 +546,7 @@ class UI:
 
         imgui.end()
 
-        return new_max
+        return changes
 
     def handle_key_shortcuts(self, key: int, action: int, sim) -> bool:
         """Handle keyboard shortcuts for material selection etc.
