@@ -27,6 +27,7 @@ from materials import (
     WOOD, METAL, ICE, STEAM, SMOKE, FIRE, GUNPOWDER,
 )
 from presets import PRESETS
+from solver_profiles import PROFILES, PROFILE_NAMES
 
 # Material IDs for the picker (exclude DEAD=0)
 _PICKER_MATERIALS = [
@@ -145,6 +146,10 @@ class UI:
         # Preset loading state (set by Scenes panel, consumed by main loop)
         self._pending_preset: Optional[str] = None
 
+        # Solver switching state (consumed by main loop)
+        self._pending_solver: Optional[str] = None
+        self._solver_idx: int = 0  # current index into PROFILE_NAMES
+
         # Cached viewport size
         w, h = glfw.get_framebuffer_size(window)
         self._viewport_w = w
@@ -244,6 +249,13 @@ class UI:
         return name
 
     @property
+    def pending_solver(self) -> Optional[str]:
+        """Return and clear the pending solver profile name, if any."""
+        name = self._pending_solver
+        self._pending_solver = None
+        return name
+
+    @property
     def want_capture_mouse(self) -> bool:
         return imgui.get_io().want_capture_mouse
 
@@ -298,7 +310,7 @@ class UI:
         imgui.render()
         self._imgui_renderer.render(imgui.get_draw_data())
 
-    def draw(self, sim, world, fps: float) -> dict:
+    def draw(self, sim, world, fps: float, renderer=None) -> dict:
         """Draw all UI panels. Returns dict of changes (empty if nothing changed).
 
         Possible keys: 'new_max', 'new_world_size'.
@@ -311,6 +323,8 @@ class UI:
             The particle world (for particle count, max_particles)
         fps : float
             Current frames per second
+        renderer : Renderer, optional
+            The renderer (for SSFR controls)
         """
         changes = {}
 
@@ -475,7 +489,68 @@ class UI:
             if changed:
                 sim.timing_enabled = new_timing
 
+            # Solver dropdown
+            imgui.separator()
+            preview = PROFILE_NAMES[self._solver_idx]
+            if imgui.begin_combo("Solver", preview):
+                for idx, name in enumerate(PROFILE_NAMES):
+                    is_sel = (idx == self._solver_idx)
+                    clicked, _ = imgui.selectable(name, is_sel)
+                    if clicked and idx != self._solver_idx:
+                        self._solver_idx = idx
+                        self._pending_solver = name
+                    if is_sel:
+                        imgui.set_item_default_focus()
+                imgui.end_combo()
+
         imgui.end()
+
+        # --- Rendering Panel (SSFR controls) ---
+        if renderer is not None:
+            imgui.set_next_window_pos(imgui.ImVec2(10, 560), imgui.Cond_.first_use_ever)
+            imgui.set_next_window_size(imgui.ImVec2(220, 0), imgui.Cond_.first_use_ever)
+
+            if imgui.begin("Rendering", None, imgui.WindowFlags_.always_auto_resize)[0]:
+                changed, new_ssfr = imgui.checkbox("SSFR (fluid surface)", renderer.ssfr_enabled)
+                if changed:
+                    renderer.ssfr_enabled = new_ssfr
+
+                if renderer.ssfr_enabled:
+                    changed, val = imgui.slider_float(
+                        "Blur radius", renderer.ssfr_blur_radius, 1.0, 30.0, "%.0f",
+                    )
+                    if changed:
+                        renderer.ssfr_blur_radius = val
+
+                    changed, val = imgui.slider_float(
+                        "Depth range", renderer.ssfr_depth_range, 0.01, 0.5, "%.2f",
+                    )
+                    if changed:
+                        renderer.ssfr_depth_range = val
+
+                    changed, val = imgui.slider_float(
+                        "Absorption", renderer.ssfr_absorption_scale, 1.0, 100.0, "%.0f",
+                    )
+                    if changed:
+                        renderer.ssfr_absorption_scale = val
+
+                    changed, val = imgui.slider_float(
+                        "Specular", renderer.ssfr_specular_power, 8.0, 256.0, "%.0f",
+                    )
+                    if changed:
+                        renderer.ssfr_specular_power = val
+
+                imgui.separator()
+
+                # Foam controls
+                changed, new_foam = imgui.checkbox("Foam / Spray", renderer.foam_enabled)
+                if changed:
+                    renderer.foam_enabled = new_foam
+
+                if renderer.foam_enabled:
+                    imgui.text(f"Foam particles: {renderer.num_foam:,}")
+
+            imgui.end()
 
         # --- Kernel Timing Panel ---
         if sim.timing_enabled and sim._timing_ema:
@@ -549,6 +624,25 @@ class UI:
         imgui.end()
 
         return changes
+
+    def get_cursor_world_pos(self, camera) -> Optional[np.ndarray]:
+        """Compute 3D cursor position from current mouse pos when brush is active.
+
+        Returns world-space intersection with y=0 plane, or None if brush
+        mode is off or mouse is over ImGui.
+        """
+        if self._selected_material is None:
+            return None
+        if imgui.get_io().want_capture_mouse:
+            return None
+
+        mx, my = glfw.get_cursor_pos(self._window)
+        view = camera.view_matrix()
+        proj = camera.projection_matrix()
+        origin, direction = _unproject_mouse_ray(
+            mx, my, self._viewport_w, self._viewport_h, view, proj,
+        )
+        return _ray_plane_intersect(origin, direction, plane_y=0.0)
 
     def handle_key_shortcuts(self, key: int, action: int, sim) -> bool:
         """Handle keyboard shortcuts for material selection etc.

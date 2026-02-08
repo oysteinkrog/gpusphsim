@@ -28,7 +28,7 @@ enum BehaviorClass {
 
 /* ======================================================================
  * MaterialProps -- per-material constants uploaded to constant memory.
- * 16 fields x 4 bytes = 64 bytes (no extra padding needed).
+ * 18 fields x 4 bytes = 72 bytes (includes 1 pad field).
  * ====================================================================== */
 
 struct MaterialProps {
@@ -48,8 +48,10 @@ struct MaterialProps {
     float color_r;               // default material color R
     float color_g;               // default material color G
     float color_b;               // default material color B
+    float thermal_expansion;     // Boussinesq thermal expansion coefficient (1/K)
+    float _pad0;                 // padding to 72 bytes (18 fields x 4)
 };
-// Static assert: sizeof(MaterialProps) must be 64 bytes
+// Static assert: sizeof(MaterialProps) must be 72 bytes
 
 /* ======================================================================
  * Interaction -- per-pair (i,j) reaction parameters.
@@ -63,28 +65,64 @@ struct Interaction {
 
 /* ======================================================================
  * Constant memory: materials and interactions
- * Total: 32*64 + 32*32*8 = 2048 + 8192 = 10240 bytes (well under 64 KB)
+ * Total: 32*72 + 32*32*8 = 2304 + 8192 = 10496 bytes (well under 64 KB)
  * ====================================================================== */
 
 __constant__ MaterialProps c_materials[32];
 __constant__ Interaction   c_interactions[32][32];
 
 /* ======================================================================
- * GridParams -- uniform grid parameters for spatial hashing.
+ * GridParams -- spatial hash grid parameters.
  *
- * grid_res uses int3 (not float3 as in the root-level prototype) for
- * correct integer arithmetic in hash computation.
+ * Uses a spatial hash with fixed-size table (power of 2) instead of
+ * dense arrays sized grid_res^3.  This enables arbitrarily large worlds
+ * without memory blowup.  Hash collisions cause extra (harmless) distance
+ * checks in neighbor loops but never miss neighbors.
+ *
+ * 40 bytes total (10 fields × 4 bytes).
  * ====================================================================== */
 
 struct GridParams {
-    float3 grid_min;    // world-space minimum corner
-    float3 grid_max;    // world-space maximum corner
-    int3   grid_res;    // number of cells per axis
-    float3 grid_delta;  // 1 / cell_size = grid_res / grid_size
-    int    num_cells;   // grid_res.x * grid_res.y * grid_res.z
+    float3 grid_min;    // world-space minimum corner (for pos → cell)
+    float3 grid_delta;  // 1 / cell_size per axis (≈ 1/h)
+    uint   table_size;  // hash table size (power of 2, e.g. 262144)
+    uint   table_mask;  // table_size - 1 (for & masking)
 };
 
 __constant__ GridParams c_grid;
+
+/* ======================================================================
+ * Spatial hash helpers -- shared by ALL kernel files.
+ *
+ * Position → cell:   int3 cell = calcGridCell(pos)
+ * Cell → hash:       uint h = spatialHash(cell)
+ * Neighbor cell hash: uint h = spatialHash(make_int3(cx+dx, cy+dy, cz+dz))
+ *
+ * No bounds checking needed — any integer cell coords produce a valid
+ * hash in [0, table_size).  Particles are already boundary-clamped in
+ * the integrate kernel.
+ * ====================================================================== */
+
+__device__ inline int3 calcGridCell(float3 p) {
+    return make_int3(
+        (int)floorf((p.x - c_grid.grid_min.x) * c_grid.grid_delta.x),
+        (int)floorf((p.y - c_grid.grid_min.y) * c_grid.grid_delta.y),
+        (int)floorf((p.z - c_grid.grid_min.z) * c_grid.grid_delta.z)
+    );
+}
+
+__device__ inline uint spatialHash(int3 cell) {
+    // Large primes for spatial hashing (widely used in GPU SPH literature)
+    return ((uint)(cell.x * 73856093)
+          ^ (uint)(cell.y * 19349669)
+          ^ (uint)(cell.z * 83492791)) & c_grid.table_mask;
+}
+
+__device__ inline uint spatialHash(int cx, int cy, int cz) {
+    return ((uint)(cx * 73856093)
+          ^ (uint)(cy * 19349669)
+          ^ (uint)(cz * 83492791)) & c_grid.table_mask;
+}
 
 /* ======================================================================
  * SimParams -- simulation-wide parameters.

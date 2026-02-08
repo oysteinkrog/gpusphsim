@@ -259,6 +259,10 @@ def compute_step1(
     dTdt_out: Optional[cupy.ndarray] = None,
     exposure_heat_out: Optional[cupy.ndarray] = None,
     exposure_corrode_out: Optional[cupy.ndarray] = None,
+    vorticity_out: Optional[cupy.ndarray] = None,
+    normal_out: Optional[cupy.ndarray] = None,
+    particle_dye_in: Optional[cupy.ndarray] = None,
+    dye_rate_out: Optional[cupy.ndarray] = None,
 ) -> tuple:
     """Launch K_Step1 and return (density, shear_rate, dTdt, exposure_heat, exposure_corrode).
 
@@ -312,6 +316,14 @@ def compute_step1(
         exposure_heat_out = cupy.empty(n, dtype=cupy.float32)
     if exposure_corrode_out is None:
         exposure_corrode_out = cupy.empty(n, dtype=cupy.float32)
+    if vorticity_out is None:
+        vorticity_out = cupy.empty((n, 4), dtype=cupy.float32)
+    if normal_out is None:
+        normal_out = cupy.empty((n, 4), dtype=cupy.float32)
+    if particle_dye_in is None:
+        particle_dye_in = cupy.zeros((n, 4), dtype=cupy.float32)
+    if dye_rate_out is None:
+        dye_rate_out = cupy.empty((n, 4), dtype=cupy.float32)
 
     # density_in can be None (first frame) -- pass null pointer
     density_in_ptr = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
@@ -340,7 +352,31 @@ def compute_step1(
             dTdt_out,
             exposure_heat_out,
             exposure_corrode_out,
+            vorticity_out,
+            normal_out,
+            particle_dye_in,
+            dye_rate_out,
         ),
     )
 
     return density_out, shear_rate_out, dTdt_out, exposure_heat_out, exposure_corrode_out
+
+
+PACK_BLOCK_SIZE = 256
+
+
+def pack_density(
+    position: cupy.ndarray,
+    density: cupy.ndarray,
+    n: int,
+) -> None:
+    """Launch K_PackDensity to write density into position.w.
+
+    Must be called between Step1 and Step2 so that Step2 can read
+    density from position.w instead of a separate array.
+    """
+    module = _get_module()
+    kernel = module.get_function("K_PackDensity")
+    grid = ((n + PACK_BLOCK_SIZE - 1) // PACK_BLOCK_SIZE,)
+    block = (PACK_BLOCK_SIZE,)
+    kernel(grid, block, (position, density, np.uint32(n)))

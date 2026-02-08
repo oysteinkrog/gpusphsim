@@ -24,17 +24,20 @@ from materials import (
     WATER, SAND, MATERIALS, GRANULAR, GAS, STATIC,
     build_material_array, build_interaction_matrix, upload_to_gpu,
 )
+from solver_profiles import SolverType, SolverProfile, PROFILES
 
 import cupy
 
 import hash_sort
 import fused_sort_reorder_build
+import counting_sort
 import step1
 import step2
 import integrate
 import reactions
 import spawn
 import wake
+import foam
 
 # Adaptive timestep limits
 DT_MIN = 1e-5
@@ -81,10 +84,12 @@ class Simulation:
         self.fixed_dt = fixed_dt
         self.fixed_dt_value = dt
         self.max_substeps = max_substeps
+        self._profile = PROFILES["WCSPH (Default)"]
         self._paused = False
         self._prev_speed = speed
         self._last_frame_time: Optional[float] = None
         self._last_substeps = 0
+        self._time_accumulator = 0.0  # fractional time carried between frames
         self.sim_time = 0.0
         self._frame_counter = 0
         self.compact_interval = compact_interval
@@ -95,9 +100,13 @@ class Simulation:
         self._cuda_graph = None   # cupy.cuda.Graph or None
         self._graph_n = 0         # exact n used when graph was captured
 
+        # --- Counting sort scratch buffers (allocated in _upload_constants) ---
+        self._cs_histogram = None
+        self._cs_write_offset = None
+
         # --- World size ---
         self._world_half_size = world_half_size
-        self._num_cells = 0  # set by _upload_constants
+        self._table_size = 0  # set by _upload_constants
 
         # --- Kernel timing mode ---
         self.timing_enabled = False
@@ -112,6 +121,17 @@ class Simulation:
 
         # Smoothing length (must match _upload_constants)
         self._h = 0.04
+
+        # --- Grid reuse state ---
+        # When max displacement since last sort < threshold, skip full counting
+        # sort and use gather_reorder (reuse cell_start/cell_end).
+        # Safety: force sort after MAX_SORT_SKIP_FRAMES consecutive skipped frames.
+        self._sort_skip_next = False
+        # Threshold: (0.25 * h)^2 -- max displacement since last sort
+        self._sort_skip_threshold_sq = (0.25 * 0.04) ** 2  # 0.0001
+        self._sort_skipped_count = 0  # stats for UI
+        self._sort_skip_consecutive = 0  # consecutive frames with sort skipped
+        self._MAX_SORT_SKIP_FRAMES = 4  # force sort after this many frames
 
         # Grid cell tables — allocated in _upload_constants based on world size
         self._cell_start = None
@@ -194,12 +214,23 @@ class Simulation:
             return
         self._sim_params[0]["dt"] = np.float32(new_dt)
         self.dt = new_dt
-        # Upload to all modules that read c_sim.dt
+        # Upload to all WCSPH modules that read c_sim.dt
         step1.upload_sim_params(self._sim_params)
         step2.upload_sim_params(self._sim_params)
         integrate.upload_sim_params(self._sim_params)
         reactions.upload_sim_params(self._sim_params)
         spawn.upload_sim_params(self._sim_params)
+        # Also upload to active solver module
+        if self._profile.solver_type == SolverType.PBF:
+            import pbf_solver
+            pbf_solver.upload_sim_params(self._sim_params)
+        elif self._profile.solver_type == SolverType.DFSPH:
+            import dfsph_solver
+            dfsph_solver.upload_sim_params(self._sim_params)
+        # Update foam dt
+        if self._foam_params is not None:
+            self._foam_params[0]["dt"] = np.float32(new_dt)
+            foam.upload_foam_params(self._foam_params)
 
     @property
     def world_half_size(self) -> float:
@@ -209,9 +240,11 @@ class Simulation:
         """Change the world half-extent and re-upload all constants."""
         self._world_half_size = half_size
         self._upload_constants()
-        # Invalidate CUDA graph (grid changed)
+        # Invalidate CUDA graph (grid changed) and reset sort skip
         self._cuda_graph = None
         self._graph_n = 0
+        self._sort_skip_next = False
+        self._sort_skip_consecutive = 0
 
     def _upload_constants(self) -> None:
         """Compile all .cu kernels and upload constant memory to each module."""
@@ -220,16 +253,19 @@ class Simulation:
         wmax = (hs, hs, hs)
 
         # Build shared param structs
-        grid_params, num_cells = hash_sort.build_grid_params_for_world(
+        grid_params, table_size = hash_sort.build_grid_params_for_world(
             wmin, wmax, self._h,
         )
 
-        # Reallocate cell arrays if grid size changed
-        if num_cells != self._num_cells:
-            self._num_cells = num_cells
-            self._cell_start = cupy.empty(num_cells, dtype=cupy.uint32)
-            self._cell_end = cupy.empty(num_cells, dtype=cupy.uint32)
-            self._cell_wake_flags = wake.allocate_cell_wake_flags(num_cells)
+        # Reallocate cell arrays if table size changed
+        if table_size != self._table_size:
+            self._table_size = table_size
+            self._cell_start = cupy.empty(table_size, dtype=cupy.uint32)
+            self._cell_end = cupy.empty(table_size, dtype=cupy.uint32)
+            self._cell_wake_flags = wake.allocate_cell_wake_flags(table_size)
+            # Counting sort scratch buffers
+            self._cs_histogram = cupy.zeros(table_size, dtype=cupy.uint32)
+            self._cs_write_offset = cupy.zeros(table_size, dtype=cupy.uint32)
 
         sim_params = step1.build_sim_params(
             smoothing_length=self._h,
@@ -256,6 +292,9 @@ class Simulation:
 
         # --- fused_sort_reorder_build module: c_grid ---
         fused_sort_reorder_build.upload_grid_params(grid_params)
+
+        # --- counting_sort module: c_grid ---
+        counting_sort.upload_grid_params(grid_params)
 
         # --- step1 module: c_grid, c_sim, c_precalc, c_materials, c_interactions ---
         step1.upload_grid_params(grid_params)
@@ -289,55 +328,164 @@ class Simulation:
         # --- materials module (its own internal module): c_materials, c_interactions ---
         upload_to_gpu()
 
-    def _run_graph_body(self, n: int) -> None:
-        """Execute the graph-capturable portion of the pipeline (ops 3-14).
+        # --- foam module: c_foam, c_sim ---
+        foam_params = foam.build_foam_params(
+            max_foam=self.world._max_foam,
+            dt=self.dt,
+        )
+        self._foam_params = foam_params
+        foam.upload_foam_params(foam_params)
+        foam.upload_sim_params(sim_params)
 
-        This method is called both during graph capture (on capture stream)
-        and can be called directly for debugging. All operations use
-        pre-allocated arrays with stable pointers.
+    @property
+    def solver_profile(self) -> SolverProfile:
+        return self._profile
+
+    def set_solver_profile(self, profile: SolverProfile) -> None:
+        """Switch to a new solver profile.
+
+        Updates timestep, substep budget, and solver-specific parameters.
+        Invalidates CUDA graph. Allocates solver-specific arrays if needed.
+        Uploads ALL shared constant memory to the solver module.
+        """
+        self._profile = profile
+        self.dt = profile.dt
+        self.fixed_dt_value = profile.dt
+        self.fixed_dt = profile.fixed_dt
+        self.max_substeps = profile.max_substeps
+        self.accuracy = profile.accuracy
+
+        # Upload new dt to all WCSPH modules
+        self._upload_dt(profile.dt)
+
+        # Allocate solver-specific arrays
+        if profile.solver_type == SolverType.PBF:
+            self.world.allocate_pbf_arrays()
+        elif profile.solver_type == SolverType.DFSPH:
+            self.world.allocate_dfsph_arrays()
+
+        # Upload ALL shared constants to solver module (each RawModule has own address space)
+        if profile.solver_type == SolverType.PBF:
+            import pbf_solver
+            self._upload_solver_constants(pbf_solver)
+            pbf_solver.upload_pbf_params(profile)
+            granular_params = step2.build_granular_params()
+            pbf_solver.upload_granular_params(granular_params)
+        elif profile.solver_type == SolverType.DFSPH:
+            import dfsph_solver
+            self._upload_solver_constants(dfsph_solver)
+            dfsph_solver.upload_dfsph_params(profile)
+
+        # Invalidate CUDA graph and reset grid reuse
+        self._cuda_graph = None
+        self._graph_n = 0
+        self._sort_skip_next = False
+        self._sort_skip_consecutive = 0
+
+    def _upload_solver_constants(self, solver_module) -> None:
+        """Upload all shared constants (grid, sim, precalc, materials) to a solver module."""
+        hs = self._world_half_size
+        wmin = (-hs, -hs, -hs)
+        wmax = (hs, hs, hs)
+        grid_params, _ = hash_sort.build_grid_params_for_world(wmin, wmax, self._h)
+        precalc_params = step1.build_precalc_params(smoothing_length=0.04, viscosity=1.0)
+        materials_data = build_material_array()
+
+        solver_module.upload_grid_params(grid_params)
+        solver_module.upload_sim_params(self._sim_params)
+        solver_module.upload_precalc_params(precalc_params)
+        solver_module.upload_materials(materials_data)
+
+    def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
+        """Common grid setup: full counting sort or gather-only (grid reuse).
+
+        When _sort_skip_next is True and force_sort is False, uses gather_reorder
+        to re-scatter unsorted data using the previous sort_perm.  Cell_start/cell_end
+        are reused from the previous frame.  Saves hash, histogram, prefix_sum, and
+        cell_end computation.
         """
         w = self.world
-        sort_perm = self._sort_perm[:n]
 
-        # 3. Memset cell tables before fused kernel (async for graph capture)
-        self._cell_start.data.memset_async(0xFF, self._cell_start.nbytes)
-        self._cell_end.data.memset_async(0x00, self._cell_end.nbytes)
+        if self._sort_skip_next and not force_sort:
+            # Grid reuse: just re-gather unsorted -> sorted using old sort_perm
+            self._sort_skipped_count += 1
+            counting_sort.gather_reorder(
+                num_particles=n,
+                sort_perm=self._sort_perm[:n],
+                position=w.position,
+                velocity=w.velocity,
+                mass=w.mass,
+                packed_info=w.packed_info,
+                temperature=w.temperature,
+                health=w.health,
+                lifetime=w.lifetime,
+                sleep_counter=w.sleep_counter,
+                kappa=w.kappa,
+                particle_dye=w.particle_dye,
+                angular_velocity=w.angular_velocity,
+                sorted_position=w.sorted_position,
+                sorted_velocity=w.sorted_velocity,
+                sorted_mass=w.sorted_mass,
+                sorted_packed_info=w.sorted_packed_info,
+                sorted_temperature=w.sorted_temperature,
+                sorted_health=w.sorted_health,
+                sorted_lifetime=w.sorted_lifetime,
+                sorted_sleep_counter=w.sorted_sleep_counter,
+                sorted_kappa=w.sorted_kappa,
+                sorted_particle_dye=w.sorted_particle_dye,
+                sorted_angular_velocity=w.sorted_angular_velocity,
+            )
+            return
 
-        # 4. Fused sort-reorder-build
-        fused_sort_reorder_build.fused_sort_reorder_build(
-            n, sort_perm, w.hashes,
-            w.sorted_hashes, self._cell_start, self._cell_end,
-            w.position, w.velocity,
-            w.mass, w.packed_info, w.temperature,
-            w.health, w.lifetime,
-            w.sleep_counter,
-            w.sorted_position, w.sorted_velocity,
-            w.sorted_mass, w.sorted_packed_info, w.sorted_temperature,
-            w.sorted_health, w.sorted_lifetime,
-            w.sorted_sleep_counter,
+        # Full sort: reset max_displacement tracker (fresh baseline for grid reuse)
+        w.max_displacement.data.memset_async(0x00, w.max_displacement.nbytes)
+
+        counting_sort.counting_sort_full(
+            num_particles=n,
+            num_cells=self._table_size,
+            # Scratch buffers
+            histogram=self._cs_histogram,
+            write_offset=self._cs_write_offset,
+            cell_start=self._cell_start,
+            cell_end=self._cell_end,
+            sort_perm=self._sort_perm[:n],
+            # Hash I/O
+            positions=w.position[:n],
+            hashes=w.hashes,
+            sorted_hashes=w.sorted_hashes,
+            # Unsorted particle arrays
+            position=w.position,
+            velocity=w.velocity,
+            mass=w.mass,
+            packed_info=w.packed_info,
+            temperature=w.temperature,
+            health=w.health,
+            lifetime=w.lifetime,
+            sleep_counter=w.sleep_counter,
+            kappa=w.kappa,
+            particle_dye=w.particle_dye,
+            angular_velocity=w.angular_velocity,
+            # Sorted particle arrays
+            sorted_position=w.sorted_position,
+            sorted_velocity=w.sorted_velocity,
+            sorted_mass=w.sorted_mass,
+            sorted_packed_info=w.sorted_packed_info,
+            sorted_temperature=w.sorted_temperature,
+            sorted_health=w.sorted_health,
+            sorted_lifetime=w.sorted_lifetime,
+            sorted_sleep_counter=w.sorted_sleep_counter,
+            sorted_kappa=w.sorted_kappa,
+            sorted_particle_dye=w.sorted_particle_dye,
+            sorted_angular_velocity=w.sorted_angular_velocity,
         )
 
-        # 5. Step1: density summation + strain-rate tensor + heat diffusion + exposure
-        step1.compute_step1(
-            w.sorted_position[:n],
-            w.sorted_velocity[:n],
-            w.sorted_mass[:n],
-            w.sorted_density if hasattr(w, '_density_initialized') else None,
-            w.sorted_packed_info[:n],
-            w.sorted_temperature[:n],
-            self._cell_start,
-            self._cell_end,
-            density_out=w.sorted_density,
-            shear_rate_out=w.sorted_shear_rate,
-            dTdt_out=w.sorted_dTdt,
-            exposure_heat_out=w.sorted_exposure_heat,
-            exposure_corrode_out=w.sorted_exposure_corrode,
-        )
-
-        # 5b. Reset freelist counter (graph-safe memset)
+    def _run_reactions_spawn(self, n: int) -> None:
+        """Common reactions + spawn pass (used by all solvers after density)."""
+        w = self.world
+        # Reset freelist counter (graph-safe memset)
         spawn.reset_freelist(self._dead_count)
 
-        # 5c. Reactions (always included — zero-cost early-exit for non-reactive)
+        # Reactions (always included — zero-cost early-exit for non-reactive)
         reactions.compute_reactions(
             w.sorted_packed_info[:n],
             w.sorted_temperature[:n],
@@ -351,7 +499,7 @@ class Simulation:
             dead_count=self._dead_count,
         )
 
-        # 5d. Spawn (always included — zero-cost when no SPAWN_GAS flags set)
+        # Spawn (always included — zero-cost when no SPAWN_GAS flags set)
         spawn.compute_spawn(
             w.sorted_packed_info[:n],
             w.sorted_position[:n],
@@ -369,20 +517,71 @@ class Simulation:
             self._dead_count,
         )
 
-        # 6. Step2: pressure + viscosity + XSPH forces
+    def _run_graph_body(self, n: int) -> None:
+        """Execute the graph-capturable portion of the pipeline.
+
+        Dispatches to the correct solver body based on the active profile.
+        """
+        if self._profile.solver_type == SolverType.PBF:
+            self._run_pbf_body(n)
+        elif self._profile.solver_type == SolverType.DFSPH:
+            self._run_dfsph_body(n)
+        else:
+            self._run_wcsph_body(n)
+
+    def _run_wcsph_body(self, n: int) -> None:
+        """WCSPH pipeline: Grid -> Step1 -> Reactions -> Spawn -> Step2 -> Integrate -> Wake."""
+        w = self.world
+
+        # Grid setup (may skip sort if particles barely moved).
+        # max_displacement is reset only on full sort (in _run_grid_setup),
+        # so it accumulates across substeps since the last full sort.
+        self._run_grid_setup(n)
+
+        # Step1: density + strain-rate + heat diffusion + exposure + vorticity + normal + dye
+        step1.compute_step1(
+            w.sorted_position[:n],
+            w.sorted_velocity[:n],
+            w.sorted_mass[:n],
+            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_packed_info[:n],
+            w.sorted_temperature[:n],
+            self._cell_start,
+            self._cell_end,
+            density_out=w.sorted_density,
+            shear_rate_out=w.sorted_shear_rate,
+            dTdt_out=w.sorted_dTdt,
+            exposure_heat_out=w.sorted_exposure_heat,
+            exposure_corrode_out=w.sorted_exposure_corrode,
+            vorticity_out=w.sorted_vorticity,
+            normal_out=w.sorted_normal,
+            particle_dye_in=w.sorted_particle_dye[:n],
+            dye_rate_out=w.sorted_dye_rate,
+        )
+
+        # Pack density into position.w for Step2 (OPT-4.1)
+        step1.pack_density(w.sorted_position, w.sorted_density, n)
+
+        # Reactions + Spawn
+        self._run_reactions_spawn(n)
+
+        # Step2: pressure + viscosity + XSPH + vorticity confinement + surface tension
+        # (density read from position.w, packed by K_PackDensity above)
         step2.compute_step2(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
-            w.sorted_density[:n],
             w.sorted_mass[:n],
             w.sorted_packed_info[:n],
+            w.sorted_shear_rate[:n],
             self._cell_start,
             self._cell_end,
+            vorticity_in=w.sorted_vorticity,
+            normal_in=w.sorted_normal,
             sph_force_out=w.sorted_sph_force,
             veleval_out=w.sorted_veleval,
         )
 
-        # 7. Integrate
+        # Integrate (pass max_displacement for grid reuse tracking)
         integrate.integrate(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -396,6 +595,10 @@ class Simulation:
             sorted_shear_rate=w.sorted_shear_rate[:n],
             sorted_dTdt=w.sorted_dTdt[:n],
             sorted_sleep_counter=w.sorted_sleep_counter[:n],
+            sorted_dye_rate=w.sorted_dye_rate[:n],
+            sorted_particle_dye=w.sorted_particle_dye[:n],
+            sorted_vorticity=w.sorted_vorticity[:n],
+            sorted_angular_velocity=w.sorted_angular_velocity[:n],
             sort_indexes=self._sort_perm[:n],
             position_out=w.position,
             velocity_out=w.velocity,
@@ -403,15 +606,195 @@ class Simulation:
             packed_info_out=w.packed_info,
             sleep_counter_out=w.sleep_counter,
             temperature_out=w.temperature,
+            particle_dye_out=w.particle_dye,
+            angular_velocity_out=w.angular_velocity,
+            max_displacement=w.max_displacement,
         )
 
-        # 8. Wake propagation (memset + 2 kernels)
+        # Wake propagation (memset + 2 kernels)
         wake.run_wake_propagation(
             w.position[:n],
+            w.velocity[:n],
             w.packed_info[:n],
             w.sleep_counter[:n],
             self._cell_wake_flags,
             num_particles=n,
+        )
+
+    def _run_pbf_body(self, n: int) -> None:
+        """PBF pipeline: Grid -> Predict -> [Lambda -> Delta -> Apply]xN -> Finalize."""
+        import pbf_solver
+        w = self.world
+
+        # Grid setup
+        self._run_grid_setup(n)
+
+        # 1. Predict positions (gravity integration)
+        pbf_solver.pbf_predict(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_packed_info[:n],
+            w.sorted_predicted_position,
+        )
+
+        # 2. Initial density + lambda (needed for reactions)
+        pbf_solver.pbf_compute_lambda(
+            w.sorted_predicted_position[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n],
+            self._cell_start, self._cell_end,
+            w.sorted_density, w.sorted_lambda_pbf,
+            w.sorted_pressure_normal,
+        )
+
+        # 3. Reactions + Spawn
+        self._run_reactions_spawn(n)
+
+        # 4. Solver iterations (fixed count for CUDA graph)
+        for i in range(self._profile.pbf_iterations):
+            if i > 0:
+                pbf_solver.pbf_compute_lambda(
+                    w.sorted_predicted_position[:n], w.sorted_mass[:n],
+                    w.sorted_packed_info[:n],
+                    self._cell_start, self._cell_end,
+                    w.sorted_density, w.sorted_lambda_pbf,
+                    w.sorted_pressure_normal,
+                )
+
+            pbf_solver.pbf_compute_delta(
+                w.sorted_predicted_position[:n], w.sorted_lambda_pbf[:n],
+                w.sorted_mass[:n], w.sorted_packed_info[:n],
+                self._cell_start, self._cell_end,
+                w.sorted_delta_position,
+            )
+
+            pbf_solver.pbf_apply_delta(
+                w.sorted_predicted_position[:n], w.sorted_delta_position[:n],
+                w.sorted_packed_info[:n],
+                w.sorted_pressure_normal[:n],
+            )
+
+        # 5. Finalize: velocity update, XSPH, color, sleep, writeback
+        pbf_solver.pbf_finalize(
+            w.sorted_predicted_position[:n], w.sorted_position[:n],
+            w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
+            w.sorted_health[:n], w.sorted_dTdt[:n], w.sorted_sleep_counter[:n],
+            self._sort_perm[:n], self._cell_start, self._cell_end,
+            w.position, w.velocity, w.color, w.packed_info,
+            w.sleep_counter, w.temperature,
+            sorted_particle_dye=w.sorted_particle_dye[:n],
+            particle_dye_out=w.particle_dye,
+            sorted_angular_velocity=w.sorted_angular_velocity[:n],
+            angular_velocity_out=w.angular_velocity,
+        )
+
+    def _run_dfsph_body(self, n: int) -> None:
+        """DFSPH pipeline: Grid -> DensityAlpha -> NonPressure -> DivSolve -> PredictPos -> DensAdv -> DensSolve -> Finalize."""
+        import dfsph_solver
+        w = self.world
+
+        # Grid setup
+        self._run_grid_setup(n)
+
+        # 1. Density + alpha precompute (also computes shear_rate for GRANULAR)
+        dfsph_solver.compute_density_alpha(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_mass[:n],
+            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
+            self._cell_start, self._cell_end,
+            w.sorted_density, w.sorted_alpha_dfsph,
+            w.sorted_shear_rate, w.sorted_dTdt,
+            w.sorted_exposure_heat, w.sorted_exposure_corrode,
+        )
+
+        # 2. Reactions + Spawn
+        self._run_reactions_spawn(n)
+
+        # 3. Non-pressure forces (viscosity, gravity, mu(I) for GRANULAR)
+        dfsph_solver.compute_non_pressure_forces(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n], w.sorted_shear_rate[:n],
+            w.sorted_temperature[:n],
+            self._cell_start, self._cell_end,
+            w.sorted_velocity,  # velocity updated in-place
+        )
+
+        # 4. Divergence solver (fixed iterations)
+        for _ in range(self._profile.dfsph_div_iters):
+            dfsph_solver.compute_kappa_v(
+                w.sorted_velocity[:n], w.sorted_density[:n],
+                w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+                w.sorted_packed_info[:n], w.sorted_position[:n],
+                self._cell_start, self._cell_end,
+                w.sorted_kappa_v,
+            )
+            dfsph_solver.correct_velocity_div(
+                w.sorted_velocity, w.sorted_density[:n],
+                w.sorted_mass[:n], w.sorted_kappa_v[:n],
+                w.sorted_packed_info[:n], w.sorted_position[:n],
+                self._cell_start, self._cell_end,
+            )
+
+        # 5. Density solver (SPlisHSPlasH-style Jacobi iteration on pressure)
+        # Key insight: iterate on PRESSURE variable p/rho^2, not velocity.
+        # Each iteration:
+        #   a) DensitySolverUpdate: predict density using v + dt*a_press,
+        #      compute residual, update p_rho2 via Jacobi step
+        #   b) ComputePressureAccel: compute a_press from updated p_rho2
+        # After convergence: apply final a_press to velocity once.
+        # Buffer reuse: sorted_kappa -> p_rho2 (warm-started from prev frame),
+        #               sorted_predicted_position -> a_press
+        p_rho2 = w.sorted_kappa  # already contains warm-started values from reorder
+        a_press = w.sorted_predicted_position
+        # Warm-start: scale previous pressure by decay factor (0.5 = carry 50%)
+        p_rho2[:n] *= self._profile.dfsph_warm_start
+        # Compute initial a_press from warm-started p_rho2
+        dfsph_solver.compute_pressure_accel(
+            p_rho2[:n], w.sorted_position[:n],
+            w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n],
+            self._cell_start, self._cell_end,
+            a_press,
+        )
+        for _ in range(self._profile.dfsph_dens_iters):
+            dfsph_solver.density_solver_update(
+                w.sorted_velocity[:n], a_press[:n],
+                w.sorted_position[:n], w.sorted_density[:n],
+                w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+                w.sorted_packed_info[:n],
+                self._cell_start, self._cell_end,
+                p_rho2,
+            )
+            dfsph_solver.compute_pressure_accel(
+                p_rho2[:n], w.sorted_position[:n],
+                w.sorted_density[:n], w.sorted_mass[:n],
+                w.sorted_packed_info[:n],
+                self._cell_start, self._cell_end,
+                a_press,
+            )
+        dfsph_solver.apply_pressure_velocity(
+            w.sorted_velocity[:n], a_press[:n],
+            w.sorted_packed_info[:n],
+        )
+
+        # 8. Finalize + writeback (includes sleep logic via velocity magnitude)
+        # Pass sorted_kappa (= p_rho2) through to unsorted kappa for warm-start next frame
+        dfsph_solver.finalize(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
+            w.sorted_health[:n], w.sorted_dTdt[:n],
+            w.sorted_sleep_counter[:n],
+            p_rho2[:n],  # sorted_kappa with current pressure values
+            self._sort_perm[:n], self._cell_start, self._cell_end,
+            w.position, w.velocity, w.color, w.packed_info,
+            w.sleep_counter, w.temperature,
+            w.kappa,  # unsorted kappa out for warm-start
+            sorted_particle_dye=w.sorted_particle_dye[:n],
+            particle_dye_out=w.particle_dye,
+            sorted_angular_velocity=w.sorted_angular_velocity[:n],
+            angular_velocity_out=w.angular_velocity,
         )
 
     def _capture_graph(self, n: int) -> None:
@@ -430,25 +813,20 @@ class Simulation:
     def _sim_step(self, n: int) -> None:
         """Run one simulation substep on n particles.
 
-        Pipeline:
-          1. K_CalcHash           — normal launch
-          2. cupy.argsort + copy  — normal launch (Thrust can't be captured)
-          3-14. CUDA graph launch — single dispatch for all remaining ops
+        Pipeline (fully graph-capturable when sort is not skipped):
+          1. Counting sort: hash + histogram + prefix_sum + scatter + cell_end
+          2. Step1/Step2/Integrate/Wake (solver-specific)
 
+        All operations are inside the CUDA graph — no Thrust sync needed.
         Graph strategy: when n changes (brush painting, compaction), fall back
         to direct kernel launches — no graph capture overhead. When n is stable
         across substeps, capture a graph and replay it for subsequent calls.
+
+        Grid reuse: when _sort_skip_next is True, counting sort is replaced by
+        a cheaper gather_reorder. This path bypasses CUDA graph capture since
+        the graph topology changes.
         """
         w = self.world
-
-        # 1. Hash particle positions (normal launch)
-        hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-
-        # 2. Argsort (normal — Thrust uses internal cudaStreamSynchronize)
-        sort_perm = cupy.argsort(hashes).astype(cupy.uint32)
-
-        # Copy into pre-allocated buffer (stable pointer for graph)
-        self._sort_perm[:n] = sort_perm
 
         # Update device frame counter (value changes, pointer stays stable)
         self._frame_counter_d.fill(self._frame_counter)
@@ -456,8 +834,12 @@ class Simulation:
         # Mark density as initialized (needed for step1 prev_density path)
         w._density_initialized = True
 
-        # 3-14. Graph capture/replay
-        if self._graph_n != n:
+        # When sort is being skipped, bypass CUDA graph (different kernel sequence)
+        if self._sort_skip_next:
+            self._cuda_graph = None
+            self._graph_n = 0
+            self._run_graph_body(n)
+        elif self._graph_n != n:
             # n changed — invalidate graph, run directly (no capture overhead)
             self._cuda_graph = None
             self._graph_n = n
@@ -471,11 +853,67 @@ class Simulation:
             # n stable, graph exists — fast replay
             self._cuda_graph.launch()
 
+        # Foam generation + physics (outside graph -- uses atomicAdd with variable count)
+        self._run_foam_step(n)
+
         self.sim_time += self.dt
         self._frame_counter += 1
 
+    def _run_foam_step(self, n: int) -> None:
+        """Run foam generate + physics + compaction (outside CUDA graph).
+
+        No GPU->CPU sync: kernels read foam_count from device memory,
+        grid sizes use max_foam upper bound.
+        """
+        w = self.world
+        if not w.foam_enabled:
+            return
+
+        max_foam = w._max_foam
+
+        # 1. Physics for existing foam (before generate, so new particles
+        #    get physics next step). Kernel reads count from device pointer.
+        foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count, max_foam)
+
+        # 2. Generate new foam from FLUID particles
+        foam.foam_generate(
+            w.sorted_position[:n],
+            w.sorted_velocity[:n],
+            w.sorted_normal[:n],
+            w.sorted_packed_info[:n],
+            w.foam_position,
+            w.foam_velocity,
+            w.foam_count,
+            n,
+            self._frame_counter,
+        )
+
+        # 3. Compact dead particles every 8th frame (amortize cost)
+        if self._frame_counter % 8 == 0:
+            foam.foam_compact(
+                w.foam_position, w.foam_velocity,
+                w.foam_position_b, w.foam_velocity_b,
+                w.foam_alive_count,
+                w.foam_count,
+                max_foam,
+            )
+            # Swap buffers
+            w.foam_position, w.foam_position_b = w.foam_position_b, w.foam_position
+            w.foam_velocity, w.foam_velocity_b = w.foam_velocity_b, w.foam_velocity
+            # Update count from compaction result (device-to-device copy, no sync)
+            w.foam_count[:] = w.foam_alive_count
+
     def _sim_step_timed(self, n: int) -> None:
-        """Run one substep with CUDA event timing (bypasses graph capture)."""
+        """Run one substep with CUDA event timing (bypasses graph capture).
+
+        Note: Detailed per-kernel timing only available for WCSPH.
+        PBF/DFSPH fall through to a single timed graph body call.
+        """
+        # For non-WCSPH solvers, run un-timed (timing panel shows WCSPH stages)
+        if self._profile.solver_type != SolverType.WCSPH:
+            self._sim_step(n)
+            return
+
         w = self.world
         events = []
         labels = []
@@ -488,36 +926,13 @@ class Simulation:
 
         mark("start")
 
-        # 1. Hash
-        hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-        mark("hash")
-
-        # 2. Sort + copy
-        sort_perm = cupy.argsort(hashes).astype(cupy.uint32)
-        self._sort_perm[:n] = sort_perm
-        mark("sort")
-
         self._frame_counter_d.fill(self._frame_counter)
         w._density_initialized = True
 
-        # 3. Memset cell tables
-        self._cell_start.data.memset_async(0xFF, self._cell_start.nbytes)
-        self._cell_end.data.memset_async(0x00, self._cell_end.nbytes)
-
-        # 4. Fused sort-reorder-build
-        fused_sort_reorder_build.fused_sort_reorder_build(
-            n, self._sort_perm[:n], w.hashes,
-            w.sorted_hashes, self._cell_start, self._cell_end,
-            w.position, w.velocity,
-            w.mass, w.packed_info, w.temperature,
-            w.health, w.lifetime,
-            w.sleep_counter,
-            w.sorted_position, w.sorted_velocity,
-            w.sorted_mass, w.sorted_packed_info, w.sorted_temperature,
-            w.sorted_health, w.sorted_lifetime,
-            w.sorted_sleep_counter,
-        )
-        mark("reorder")
+        # 1-4. Grid setup (counting sort or gather-only if skipping)
+        # max_displacement reset happens inside _run_grid_setup on full sort
+        self._run_grid_setup(n)
+        mark("sort")
 
         # 5. Step1
         step1.compute_step1(
@@ -531,6 +946,10 @@ class Simulation:
             dTdt_out=w.sorted_dTdt,
             exposure_heat_out=w.sorted_exposure_heat,
             exposure_corrode_out=w.sorted_exposure_corrode,
+            vorticity_out=w.sorted_vorticity,
+            normal_out=w.sorted_normal,
+            particle_dye_in=w.sorted_particle_dye[:n],
+            dye_rate_out=w.sorted_dye_rate,
         )
         mark("step1")
 
@@ -558,18 +977,22 @@ class Simulation:
         )
         mark("spawn")
 
-        # 8. Step2
+        # 8. Pack density + Step2
+        step1.pack_density(w.sorted_position, w.sorted_density, n)
         step2.compute_step2(
             w.sorted_position[:n], w.sorted_velocity[:n],
-            w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_mass[:n],
             w.sorted_packed_info[:n],
+            w.sorted_shear_rate[:n],
             self._cell_start, self._cell_end,
+            vorticity_in=w.sorted_vorticity,
+            normal_in=w.sorted_normal,
             sph_force_out=w.sorted_sph_force,
             veleval_out=w.sorted_veleval,
         )
         mark("step2")
 
-        # 9. Integrate
+        # 9. Integrate (with max_displacement tracking for grid reuse)
         integrate.integrate(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_veleval[:n], w.sorted_sph_force[:n],
@@ -579,20 +1002,31 @@ class Simulation:
             sorted_shear_rate=w.sorted_shear_rate[:n],
             sorted_dTdt=w.sorted_dTdt[:n],
             sorted_sleep_counter=w.sorted_sleep_counter[:n],
+            sorted_dye_rate=w.sorted_dye_rate[:n],
+            sorted_particle_dye=w.sorted_particle_dye[:n],
+            sorted_vorticity=w.sorted_vorticity[:n],
+            sorted_angular_velocity=w.sorted_angular_velocity[:n],
             sort_indexes=self._sort_perm[:n],
             position_out=w.position, velocity_out=w.velocity,
             color_out=w.color, packed_info_out=w.packed_info,
             sleep_counter_out=w.sleep_counter,
             temperature_out=w.temperature,
+            particle_dye_out=w.particle_dye,
+            angular_velocity_out=w.angular_velocity,
+            max_displacement=w.max_displacement,
         )
         mark("integrate")
 
         # 10. Wake
         wake.run_wake_propagation(
-            w.position[:n], w.packed_info[:n], w.sleep_counter[:n],
-            self._cell_wake_flags, num_particles=n,
+            w.position[:n], w.velocity[:n], w.packed_info[:n],
+            w.sleep_counter[:n], self._cell_wake_flags, num_particles=n,
         )
         mark("wake")
+
+        # 11. Foam (secondary particles)
+        self._run_foam_step(n)
+        mark("foam")
 
         # Single sync then read all timings
         events[-1].synchronize()
@@ -617,6 +1051,7 @@ class Simulation:
         now = time.perf_counter()
         if self._last_frame_time is None:
             self._last_frame_time = now
+            self._time_accumulator = 0.0
             return 0
 
         wall_dt = now - self._last_frame_time
@@ -637,15 +1072,44 @@ class Simulation:
             if abs(new_dt - self.dt) > 1e-8:
                 self._upload_dt(new_dt)
 
-        # Compute number of substeps: sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max)
+        # Accumulate sim time; fire substeps when accumulator >= dt.
+        # This correctly handles high FPS with large fixed_dt (e.g. PBF/DFSPH at dt=1/60).
+        self._time_accumulator += self.speed * wall_dt
         sim_steps = max(0, min(
             self.max_substeps,
-            round(self.speed * wall_dt / self.dt),
+            int(self._time_accumulator / self.dt),
         ))
+        self._time_accumulator -= sim_steps * self.dt
+        # Clamp accumulator to prevent runaway after long stalls
+        self._time_accumulator = min(self._time_accumulator, self.dt * 2.0)
 
         step_fn = self._sim_step_timed if self.timing_enabled else self._sim_step
         for _ in range(sim_steps):
             step_fn(n)
+
+        # --- Grid reuse decision for next frame ---
+        # max_displacement accumulates since the last full sort (atomicMax across all
+        # substeps). Read once at the frame boundary (same sync as foam_count).
+        # Skip sort if: displacement below threshold AND consecutive skip limit not hit.
+        if sim_steps > 0 and self._profile.solver_type == SolverType.WCSPH:
+            import struct
+            max_disp_sq_uint = int(self.world.max_displacement[0])
+            if max_disp_sq_uint > 0:
+                max_disp_sq = struct.unpack('f', struct.pack('I', max_disp_sq_uint))[0]
+            else:
+                max_disp_sq = 0.0
+            can_skip = (max_disp_sq < self._sort_skip_threshold_sq
+                        and self._sort_skip_consecutive < self._MAX_SORT_SKIP_FRAMES)
+            if can_skip:
+                self._sort_skip_next = True
+                self._sort_skip_consecutive += 1
+            else:
+                self._sort_skip_next = False
+                self._sort_skip_consecutive = 0
+        elif self._profile.solver_type != SolverType.WCSPH:
+            self._sort_skip_next = False
+            self._sort_skip_consecutive = 0
+        # else: sim_steps==0 for WCSPH — keep previous _sort_skip_next
 
         # Periodic compaction: remove dead particles from the active range
         if sim_steps > 0:
@@ -673,6 +1137,9 @@ class Simulation:
             return n
 
         self.world.compact()
+        # After compaction, n changed — force full sort next time
+        self._sort_skip_next = False
+        self._sort_skip_consecutive = 0
         return self.world._high_water
 
     def copy_to_vbos(self, cuda_pos, cuda_col) -> None:
@@ -700,6 +1167,27 @@ class Simulation:
             (cuda_col.nbytes // 16, 4), np.float32,
         )
         col_arr[:n] = self.world.color[:n]
+
+    def copy_foam_to_vbo(self, cuda_foam_pos) -> int:
+        """Copy foam positions to a mapped GL VBO.
+
+        Returns the number of active foam particles (requires GPU->CPU sync,
+        but this happens once per frame at the rendering boundary, not per substep).
+        """
+        w = self.world
+        if not w.foam_enabled:
+            return 0
+
+        foam_n = int(w.foam_count[0])  # single int32 readback at frame boundary
+        if foam_n <= 0:
+            return 0
+
+        foam_n = min(foam_n, w._max_foam)
+        foam_arr = cuda_foam_pos.device_pointer_as_cupy_array(
+            (cuda_foam_pos.nbytes // 16, 4), np.float32,
+        )
+        foam_arr[:foam_n] = w.foam_position[:foam_n]
+        return foam_n
 
     @property
     def paused(self) -> bool:

@@ -102,7 +102,8 @@ def fused_sort_reorder_build(
     health: cupy.ndarray,
     lifetime: cupy.ndarray,
     sleep_counter: cupy.ndarray,
-    # Sorted destination arrays (8 arrays)
+    kappa: cupy.ndarray,
+    # Sorted destination arrays (9 arrays)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
     sorted_mass: cupy.ndarray,
@@ -111,6 +112,7 @@ def fused_sort_reorder_build(
     sorted_health: cupy.ndarray,
     sorted_lifetime: cupy.ndarray,
     sorted_sleep_counter: cupy.ndarray,
+    sorted_kappa: cupy.ndarray,
 ) -> None:
     """Launch K_FusedSortReorderBuild.
 
@@ -153,7 +155,7 @@ def fused_sort_reorder_build(
             sorted_hashes,
             cell_start,
             cell_end,
-            # Unsorted inputs (8 arrays)
+            # Unsorted inputs (9 arrays)
             position,
             velocity,
             mass,
@@ -162,7 +164,8 @@ def fused_sort_reorder_build(
             health,
             lifetime,
             sleep_counter,
-            # Sorted outputs (8 arrays)
+            kappa,
+            # Sorted outputs (9 arrays)
             sorted_position,
             sorted_velocity,
             sorted_mass,
@@ -171,5 +174,6 @@ def fused_sort_reorder_build(
             sorted_health,
             sorted_lifetime,
             sorted_sleep_counter,
+            sorted_kappa,
         ),
     )

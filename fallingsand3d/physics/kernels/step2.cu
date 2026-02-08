@@ -3,13 +3,13 @@
  *
  * Per-particle computation:
  *   1. Tait EOS pressure from density and per-material EOS parameters
- *   2. For GRANULAR: first pass to compute gamma_dot (strain rate) for mu(I)
+ *   2. For GRANULAR: read gamma_dot from shear_rate_in (computed by Step1)
  *   3. Neighbor loop: accumulate pressure force (spiky gradient),
  *      viscosity force (viscosity Laplacian), and XSPH correction (FLUID only)
  *   4. Write sph_force (float4) and veleval (float4, XSPH-corrected)
  *
  * mu(I) rheology (GRANULAR only):
- *   - gamma_dot computed from SPH velocity gradient in first neighbor pass
+ *   - gamma_dot read from shear_rate_in (Step1's tensor-based computation)
  *   - I = gamma_dot * spacing / sqrt(p_eff / rho_i)
  *   - mu_I = mu_s + (mu_2 - mu_s) / (1 + I0 / max(I, 1e-8))
  *   - eta_i = min(mu_max, mu0 + mu_I * p_eff / (gamma_dot + 1e-6))
@@ -46,6 +46,10 @@ struct GranularParams {
     float mu0;                // base viscosity for GRANULAR
     float xsph_epsilon;       // XSPH blending factor (0.5)
     float force_scale;        // SPH force output scaling (0.05 matches parent convention)
+    float vorticity_epsilon;  // vorticity confinement strength (0.05)
+    float surface_tension_gamma; // Akinci surface tension coefficient (1.0)
+    float tan_phi_f;          // tan(friction_angle) for Drucker-Prager (default tan(32°)=0.625)
+    float cohesion;           // small cohesion for DP stability (default 0.001)
 };
 
 __constant__ GranularParams c_granular;
@@ -142,16 +146,18 @@ __device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho)
  * K_Step2 kernel
  * ====================================================================== */
 
-extern "C" __global__
+extern "C" __global__ __launch_bounds__(256, 4)
 void K_Step2(
     uint            numParticles,
-    const float4*   __restrict__ position,      // sorted positions
+    const float4*   __restrict__ position,      // sorted positions (density packed in .w by K_PackDensity)
     const float4*   __restrict__ velocity,      // sorted evaluation velocity
-    const float*    __restrict__ density,        // sorted density (from Step1)
     const float*    __restrict__ mass,           // sorted per-particle mass
     const uint*     __restrict__ packed_info,    // sorted packed_info (material + behavior + flags)
+    const float*    __restrict__ shear_rate_in,  // sorted shear rate (gamma_dot from Step1)
     const uint*     __restrict__ cell_start,     // grid cell start indices
     const uint*     __restrict__ cell_end,       // grid cell end indices
+    const float4*   __restrict__ vorticity_in,   // (omega_x, omega_y, omega_z, |omega|) from Step1
+    const float4*   __restrict__ normal_in,      // (n_x, n_y, n_z, neighbor_count) from Step1
     float4*         __restrict__ sph_force_out,  // output: accumulated SPH force
     float4*         __restrict__ veleval_out     // output: XSPH-corrected veleval
 ) {
@@ -184,7 +190,7 @@ void K_Step2(
     float4 vel4_i = velocity[index_i];
     float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
 
-    float rho_i = density[index_i];
+    float rho_i = pos4_i.w;  // density packed into position.w by K_PackDensity (OPT-4.1)
     float p_i = compute_pressure(rho_i, behavior_i, mat_id_i);
 
     // Accumulators
@@ -197,79 +203,20 @@ void K_Step2(
 
     bool is_granular_i = (behavior_i == GRANULAR);
     bool is_fluid_i    = (behavior_i == FLUID);
+    bool is_gas_i      = (behavior_i == GAS);
 
     // --- Grid cell of particle i ---
-    int3 cell_i = make_int3(
-        (int)((pos_i.x - c_grid.grid_min.x) * c_grid.grid_delta.x),
-        (int)((pos_i.y - c_grid.grid_min.y) * c_grid.grid_delta.y),
-        (int)((pos_i.z - c_grid.grid_min.z) * c_grid.grid_delta.z)
-    );
-    cell_i.x = max(0, min(cell_i.x, c_grid.grid_res.x - 1));
-    cell_i.y = max(0, min(cell_i.y, c_grid.grid_res.y - 1));
-    cell_i.z = max(0, min(cell_i.z, c_grid.grid_res.z - 1));
-
-    int rx = c_grid.grid_res.x;
-    int ry = c_grid.grid_res.y;
-    int rz = c_grid.grid_res.z;
+    int3 cell_i = calcGridCell(make_float3(pos_i.x, pos_i.y, pos_i.z));
 
     // ---------------------------------------------------------------
-    // For GRANULAR particles: first pass to compute gamma_dot_i
-    // (strain rate magnitude from SPH velocity gradient)
+    // For GRANULAR particles: read gamma_dot from Step1 (tensor-based)
+    // and compute mu(I) effective viscosity
     // ---------------------------------------------------------------
     float gamma_dot_i = 0.0f;
     float eta_i = 0.0f;
 
     if (is_granular_i) {
-        float gamma_dot_sq_sum = 0.0f;
-
-        for (int dz = -1; dz <= 1; dz++) {
-            int cz = cell_i.z + dz;
-            if (cz < 0 || cz >= rz) continue;
-            for (int dy = -1; dy <= 1; dy++) {
-                int cy = cell_i.y + dy;
-                if (cy < 0 || cy >= ry) continue;
-                for (int dx = -1; dx <= 1; dx++) {
-                    int cx = cell_i.x + dx;
-                    if (cx < 0 || cx >= rx) continue;
-
-                    uint hash_c = (uint)(cz * ry * rx + cy * rx + cx);
-                    uint start = cell_start[hash_c];
-                    if (start == 0xFFFFFFFFu) continue;
-                    uint end_idx = cell_end[hash_c];
-
-                    for (uint index_j = start; index_j < end_idx; index_j++) {
-                        if (index_j == index_i) continue;
-
-                        float4 pos4_j = __ldg(&position[index_j]);
-                        float3 r = make_float3(
-                            pos_i.x - pos4_j.x,
-                            pos_i.y - pos4_j.y,
-                            pos_i.z - pos4_j.z
-                        );
-                        float rlen_sq = r.x * r.x + r.y * r.y + r.z * r.z;
-                        if (rlen_sq > h_sq || rlen_sq < 1e-12f) continue;
-
-                        float rlen = sqrtf(rlen_sq);
-                        float4 vel4_j = __ldg(&velocity[index_j]);
-                        float dvx = vel_i.x - vel4_j.x;
-                        float dvy = vel_i.y - vel4_j.y;
-                        float dvz = vel_i.z - vel4_j.z;
-                        float dv_sq = dvx * dvx + dvy * dvy + dvz * dvz;
-
-                        float rho_j = __ldg(&density[index_j]);
-                        float m_j = __ldg(&mass[index_j]);
-                        // Spiky gradient magnitude for strain rate: (h - r)^2 / r
-                        float h_r = h - rlen;
-                        float grad_mag = h_r * h_r / rlen;
-                        gamma_dot_sq_sum += (m_j / rho_j) * dv_sq * grad_mag;
-                    }
-                }
-            }
-        }
-
-        // Apply SPH gradient normalization: 45/(pi*h^6)
-        float lap_const = c_precalc.pressure_precalc;  // = 45/(pi*h^6)
-        gamma_dot_i = sqrtf(fmaxf(lap_const * gamma_dot_sq_sum, 0.0f));
+        gamma_dot_i = __ldg(&shear_rate_in[index_i]);
 
         // mu(I) rheology computation for particle i
         float p_eff_i = fmaxf(p_i, 1.0f);
@@ -280,16 +227,10 @@ void K_Step2(
     // Main neighbor loop: pressure, viscosity, XSPH
     // ---------------------------------------------------------------
     for (int dz = -1; dz <= 1; dz++) {
-        int cz = cell_i.z + dz;
-        if (cz < 0 || cz >= rz) continue;
         for (int dy = -1; dy <= 1; dy++) {
-            int cy = cell_i.y + dy;
-            if (cy < 0 || cy >= ry) continue;
             for (int dx = -1; dx <= 1; dx++) {
-                int cx = cell_i.x + dx;
-                if (cx < 0 || cx >= rx) continue;
 
-                uint hash_c = (uint)(cz * ry * rx + cy * rx + cx);
+                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
                 if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
@@ -298,7 +239,16 @@ void K_Step2(
                     // Skip self-interaction for forces
                     if (index_j == index_i) continue;
 
+                    // --- Speculative ILP: issue ALL loads before distance check ---
+                    // All __ldg loads go through texture cache (~200 cycle latency).
+                    // By issuing them in parallel before the branch, we hide latency.
+                    // ~30% of loads are wasted (out-of-range), but latency savings
+                    // on in-range neighbors more than compensate.
                     float4 pos4_j = __ldg(&position[index_j]);
+                    uint pi_j = __ldg(&packed_info[index_j]);
+                    float4 vel4_j = __ldg(&velocity[index_j]);
+                    float m_j = __ldg(&mass[index_j]);
+
                     float3 r = make_float3(
                         pos_i.x - pos4_j.x,
                         pos_i.y - pos4_j.y,
@@ -307,18 +257,17 @@ void K_Step2(
                     float rlen_sq = r.x * r.x + r.y * r.y + r.z * r.z;
                     if (rlen_sq > h_sq || rlen_sq < 1e-12f) continue;
 
-                    // Skip STATIC neighbors early (before expensive reads)
-                    uint pi_j = __ldg(&packed_info[index_j]);
                     int behavior_j = GET_BEHAVIOR(pi_j);
                     if (behavior_j == STATIC) continue;
 
+                    // GAS↔non-GAS phase separation: no pressure/viscosity across phases
+                    if (is_gas_i != (behavior_j == GAS)) continue;
+
                     float rlen = sqrtf(rlen_sq);
 
-                    // Read neighbor data
-                    float4 vel4_j = __ldg(&velocity[index_j]);
+                    // density_j packed into position.w by K_PackDensity (OPT-4.1)
                     float3 vel_j = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
-                    float rho_j = __ldg(&density[index_j]);
-                    float m_j = __ldg(&mass[index_j]);
+                    float rho_j = pos4_j.w;
 
                     // Neighbor pressure (per-material EOS)
                     uint mat_id_j = GET_MATERIAL_ID(pi_j);
@@ -384,6 +333,77 @@ void K_Step2(
         }
     }  // end 27-cell loop
 
+    // --- Vorticity confinement (FLUID only) ---
+    // Read vorticity of particle i computed in step1
+    float3 f_vorticity_conf = make_float3(0.0f, 0.0f, 0.0f);
+    if (is_fluid_i && c_granular.vorticity_epsilon > 0.0f) {
+        float4 vort_i = __ldg(&vorticity_in[index_i]);
+        float omega_mag_i = vort_i.w;
+
+        if (omega_mag_i > 1e-6f) {
+            // Compute eta = grad(|omega|) via neighbors
+            float3 eta = make_float3(0.0f, 0.0f, 0.0f);
+            for (int dz2 = -1; dz2 <= 1; dz2++) {
+                for (int dy2 = -1; dy2 <= 1; dy2++) {
+                    for (int dx2 = -1; dx2 <= 1; dx2++) {
+                        uint hash_v = spatialHash(cell_i.x + dx2, cell_i.y + dy2, cell_i.z + dz2);
+                        uint start_v = cell_start[hash_v];
+                        if (start_v == 0xFFFFFFFFu) continue;
+                        uint end_v = cell_end[hash_v];
+                        for (uint jv = start_v; jv < end_v; jv++) {
+                            if (jv == index_i) continue;
+                            float4 pj_v = __ldg(&position[jv]);
+                            float3 rv = make_float3(pos_i.x - pj_v.x, pos_i.y - pj_v.y, pos_i.z - pj_v.z);
+                            float r2v = rv.x*rv.x + rv.y*rv.y + rv.z*rv.z;
+                            if (r2v > h_sq || r2v < 1e-12f) continue;
+                            float rlv = sqrtf(r2v);
+                            float h_rl = h - rlv;
+                            float inv_rl = 1.0f / rlv;
+                            float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
+                            float omega_j = __ldg(&vorticity_in[jv]).w;
+                            float mj_v = __ldg(&mass[jv]);
+                            float rj_v = pj_v.w;  // density from position.w (OPT-4.1)
+                            float wt = mj_v / fmaxf(rj_v, 1.0f);
+                            eta.x += wt * omega_j * gs * rv.x;
+                            eta.y += wt * omega_j * gs * rv.y;
+                            eta.z += wt * omega_j * gs * rv.z;
+                        }
+                    }
+                }
+            }
+            // N = eta / |eta|
+            float eta_mag = sqrtf(eta.x*eta.x + eta.y*eta.y + eta.z*eta.z);
+            if (eta_mag > 1e-6f) {
+                float inv_eta = 1.0f / eta_mag;
+                float3 N = make_float3(eta.x*inv_eta, eta.y*inv_eta, eta.z*inv_eta);
+                // f_conf = epsilon * (N x omega_i)
+                float eps_v = c_granular.vorticity_epsilon;
+                f_vorticity_conf.x = eps_v * (N.y * vort_i.z - N.z * vort_i.y);
+                f_vorticity_conf.y = eps_v * (N.z * vort_i.x - N.x * vort_i.z);
+                f_vorticity_conf.z = eps_v * (N.x * vort_i.y - N.y * vort_i.x);
+            }
+        }
+    }
+
+    // --- Akinci surface tension (FLUID only, surface particles) ---
+    float3 f_surface_tension = make_float3(0.0f, 0.0f, 0.0f);
+    if (is_fluid_i && c_granular.surface_tension_gamma > 0.0f) {
+        float4 norm_i = __ldg(&normal_in[index_i]);
+        float nc_i = norm_i.w;  // neighbor count
+
+        // Surface particles have fewer neighbors than interior particles
+        if (nc_i < 25.0f) {
+            float gamma = c_granular.surface_tension_gamma;
+            // Curvature force: -gamma * n_i (pulls surface inward)
+            float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
+            if (n_mag > 0.01f) {
+                f_surface_tension.x = -gamma * norm_i.x;
+                f_surface_tension.y = -gamma * norm_i.y;
+                f_surface_tension.z = -gamma * norm_i.z;
+            }
+        }
+    }
+
     // --- PostCalc: apply precalc coefficients and write output ---
     float3 total_force;
     if (is_granular_i) {
@@ -401,7 +421,15 @@ void K_Step2(
                       + c_precalc.viscosity_precalc  * f_viscosity.z;
     }
 
-    float fs = c_granular.force_scale;
+    // Add vorticity confinement + surface tension (FLUID only, already zero for non-FLUID)
+    total_force.x += f_vorticity_conf.x + f_surface_tension.x;
+    total_force.y += f_vorticity_conf.y + f_surface_tension.y;
+    total_force.z += f_vorticity_conf.z + f_surface_tension.z;
+
+    // GRANULAR uses force_scale=1.0 (full-strength SPH forces).
+    // With force_scale=0.02 and rho0=2500, SPH pressure is ~50x too weak vs gravity,
+    // causing 200%+ compression instead of 2-5%.  FLUID keeps 0.02 (game-tuned).
+    float fs = is_granular_i ? 1.0f : c_granular.force_scale;
     sph_force_out[index_i] = make_float4(total_force.x * fs, total_force.y * fs, total_force.z * fs, 0.0f);
 
     // XSPH-corrected veleval (FLUID only; others keep original velocity)

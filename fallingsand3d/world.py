@@ -40,6 +40,9 @@ _DEFAULT_TEMPS = {
 # Ambient temperature
 T_AMBIENT = 293.0
 
+# Default max foam particles
+MAX_FOAM_PARTICLES = 200_000
+
 
 class World:
     """Manages all per-particle SoA arrays on GPU.
@@ -99,9 +102,70 @@ class World:
         self.sorted_exposure_corrode = cp.zeros(n, dtype=cp.float32)
         self.sorted_packed_info = cp.zeros(n, dtype=cp.uint32)
         self.sorted_sleep_counter = cp.zeros(n, dtype=cp.uint8)
+        # Warm-start pressure (DFSPH uses this; always allocated for reorder kernel)
+        self.kappa = cp.zeros(n, dtype=cp.float32)
+        self.sorted_kappa = cp.zeros(n, dtype=cp.float32)
+        # Vorticity (float4: omega_x, omega_y, omega_z, |omega|) -- computed in step1
+        self.sorted_vorticity = cp.zeros((n, 4), dtype=cp.float32)
+        # Surface normal (float4: n_x, n_y, n_z, neighbor_count_as_float) -- computed in step1
+        self.sorted_normal = cp.zeros((n, 4), dtype=cp.float32)
+        # Particle dye color (float4: r, g, b, unused) -- persistent, scattered through sort
+        self.particle_dye = cp.zeros((n, 4), dtype=cp.float32)
+        self.sorted_particle_dye = cp.zeros((n, 4), dtype=cp.float32)
+        # Dye diffusion rate (float4: dr, dg, db, unused) -- computed in step1, applied in integrate
+        self.sorted_dye_rate = cp.zeros((n, 4), dtype=cp.float32)
+        # Micropolar: angular velocity (float4: omega_x, omega_y, omega_z, unused)
+        # Persistent (like velocity), scattered through sort pipeline
+        self.angular_velocity = cp.zeros((n, 4), dtype=cp.float32)
+        self.sorted_angular_velocity = cp.zeros((n, 4), dtype=cp.float32)
         # Sort index arrays (hash + sorted versions)
         self.hashes = cp.zeros(n, dtype=cp.uint32)
         self.sorted_hashes = cp.zeros(n, dtype=cp.uint32)
+
+        # --- Foam (secondary particle) pool ---
+        self._max_foam = MAX_FOAM_PARTICLES
+        self.foam_position = cp.zeros((self._max_foam, 4), dtype=cp.float32)
+        self.foam_velocity = cp.zeros((self._max_foam, 4), dtype=cp.float32)
+        # Double buffer for compaction
+        self.foam_position_b = cp.zeros((self._max_foam, 4), dtype=cp.float32)
+        self.foam_velocity_b = cp.zeros((self._max_foam, 4), dtype=cp.float32)
+        # Active count (device atomic counter)
+        self.foam_count = cp.zeros(1, dtype=cp.uint32)
+        self.foam_alive_count = cp.zeros(1, dtype=cp.uint32)  # scratch for compact
+        self.foam_enabled = False
+
+        # --- Grid reuse: max displacement tracking ---
+        self.max_displacement = cp.zeros(1, dtype=cp.uint32)
+
+    def allocate_pbf_arrays(self) -> None:
+        """Lazily allocate PBF-specific arrays."""
+        n = self.max_particles
+        # Shared with DFSPH -- allocate only if missing
+        if not hasattr(self, 'predicted_position'):
+            self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
+            self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
+        # PBF-specific arrays -- check independently
+        if not hasattr(self, 'lambda_pbf'):
+            self.lambda_pbf = cp.zeros(n, dtype=cp.float32)
+            self.sorted_lambda_pbf = cp.zeros(n, dtype=cp.float32)
+            self.delta_position = cp.zeros((n, 4), dtype=cp.float32)
+            self.sorted_delta_position = cp.zeros((n, 4), dtype=cp.float32)
+        # Pressure normal for Drucker-Prager friction (only used within PBF iterations)
+        if not hasattr(self, 'sorted_pressure_normal'):
+            self.sorted_pressure_normal = cp.zeros((n, 4), dtype=cp.float32)
+
+    def allocate_dfsph_arrays(self) -> None:
+        """Lazily allocate DFSPH-specific arrays."""
+        n = self.max_particles
+        # DFSPH also needs predicted_position
+        if not hasattr(self, 'predicted_position'):
+            self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
+            self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
+        if not hasattr(self, 'alpha_dfsph'):
+            self.alpha_dfsph = cp.zeros(n, dtype=cp.float32)
+            self.sorted_alpha_dfsph = cp.zeros(n, dtype=cp.float32)
+            self.kappa_v = cp.zeros(n, dtype=cp.float32)
+            self.sorted_kappa_v = cp.zeros(n, dtype=cp.float32)
 
     def resize(self, new_max: int) -> None:
         """Reallocate all arrays for a new max_particles. Kills all particles."""
@@ -171,6 +235,10 @@ class World:
         self.sorted_packed_info[:num_alive] = self.packed_info[:n][alive_idx]
         # uint8 arrays
         self.sorted_sleep_counter[:num_alive] = self.sleep_counter[:n][alive_idx]
+        # Persistent per-particle state (kappa, dye, angular_velocity)
+        self.sorted_kappa[:num_alive] = self.kappa[:n][alive_idx]
+        self.sorted_particle_dye[:num_alive] = self.particle_dye[:n][alive_idx]
+        self.sorted_angular_velocity[:num_alive] = self.angular_velocity[:n][alive_idx]
 
         # Copy back from scratch to primary arrays
         self.position[:num_alive] = self.sorted_position[:num_alive]
@@ -188,6 +256,9 @@ class World:
         self.exposure_corrode[:num_alive] = self.sorted_exposure_corrode[:num_alive]
         self.packed_info[:num_alive] = self.sorted_packed_info[:num_alive]
         self.sleep_counter[:num_alive] = self.sorted_sleep_counter[:num_alive]
+        self.kappa[:num_alive] = self.sorted_kappa[:num_alive]
+        self.particle_dye[:num_alive] = self.sorted_particle_dye[:num_alive]
+        self.angular_velocity[:num_alive] = self.sorted_angular_velocity[:num_alive]
 
         # Zero out the dead tail to prevent stale data
         if num_alive < n:
@@ -269,6 +340,12 @@ class World:
         self.color[sl, 2] = mat.color_b
         self.color[sl, 3] = 1.0
 
+        # Initialize particle dye from material color
+        self.particle_dye[sl, 0] = mat.color_r
+        self.particle_dye[sl, 1] = mat.color_g
+        self.particle_dye[sl, 2] = mat.color_b
+        self.particle_dye[sl, 3] = 0.0
+
         self.density[sl] = mat.rest_density
         self.sleep_counter[sl] = 0
 
@@ -349,6 +426,12 @@ class World:
         self.color[sl, 1] = mat.color_g
         self.color[sl, 2] = mat.color_b
         self.color[sl, 3] = 1.0
+
+        # Initialize particle dye from material color
+        self.particle_dye[sl, 0] = mat.color_r
+        self.particle_dye[sl, 1] = mat.color_g
+        self.particle_dye[sl, 2] = mat.color_b
+        self.particle_dye[sl, 3] = 0.0
 
         self.density[sl] = mat.rest_density
         self.sleep_counter[sl] = 0

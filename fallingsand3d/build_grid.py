@@ -19,7 +19,7 @@ from typing import Optional, Tuple
 import cupy
 import numpy as np
 
-from hash_sort import NUM_CELLS, build_grid_params
+from hash_sort import TABLE_SIZE as NUM_CELLS, build_grid_params
 
 # Sentinel value for empty cells (matches 0xFFFFFFFF memset).
 EMPTY_CELL = np.uint32(0xFFFFFFFF)

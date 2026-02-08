@@ -21,23 +21,7 @@
  * Grid cell computation (inlined, same as hash_sort.cu)
  * ====================================================================== */
 
-__device__ inline int calcGridHash_wake(int3 cell) {
-    return cell.z * c_grid.grid_res.y * c_grid.grid_res.x
-         + cell.y * c_grid.grid_res.x
-         + cell.x;
-}
-
-__device__ inline int3 calcGridCell_wake(float3 pos) {
-    int3 cell;
-    cell.x = (int)((pos.x - c_grid.grid_min.x) * c_grid.grid_delta.x);
-    cell.y = (int)((pos.y - c_grid.grid_min.y) * c_grid.grid_delta.y);
-    cell.z = (int)((pos.z - c_grid.grid_min.z) * c_grid.grid_delta.z);
-    // Clamp to valid range
-    cell.x = max(0, min(cell.x, c_grid.grid_res.x - 1));
-    cell.y = max(0, min(cell.y, c_grid.grid_res.y - 1));
-    cell.z = max(0, min(cell.z, c_grid.grid_res.z - 1));
-    return cell;
-}
+// Uses calcGridCell() and spatialHash() from common.cuh.
 
 /* ======================================================================
  * K_MarkWakeCells -- Phase 1: mark 3x3x3 neighbor cells for just-woke
@@ -48,6 +32,7 @@ extern "C" __global__
 void K_MarkWakeCells(
     uint        numParticles,
     const float4* __restrict__ position,       // unsorted positions
+    const float4* __restrict__ velocity,       // unsorted velocities
     const uint*   __restrict__ packed_info,     // unsorted packed_info
     uint*         __restrict__ cell_wake_flags  // num_cells uint32 array
 ) {
@@ -56,28 +41,28 @@ void K_MarkWakeCells(
 
     uint pi = packed_info[i];
 
-    // Only process particles that just woke up this frame
-    if (!HAS_JUST_WOKE(pi)) return;
+    // Mark cells for two categories of particles:
+    // 1. Particles that just woke up this frame (wake cascade)
+    // 2. Active non-sleeping, non-STATIC particles moving fast enough
+    //    (so flowing water wakes sleeping sand in adjacent cells)
+    bool should_mark = HAS_JUST_WOKE(pi);
+    if (!should_mark && !IS_SLEEPING(pi) && GET_BEHAVIOR(pi) != STATIC) {
+        float4 v = velocity[i];
+        float v_sq = v.x*v.x + v.y*v.y + v.z*v.z;
+        should_mark = (v_sq > 0.02f * 0.02f);  // V_WAKE_SQ
+    }
+    if (!should_mark) return;
 
     // Compute this particle's grid cell
     float4 pos4 = position[i];
     float3 pos = make_float3(pos4.x, pos4.y, pos4.z);
-    int3 cell = calcGridCell_wake(pos);
+    int3 cell = calcGridCell(pos);
 
     // Mark own cell and 26 neighbors (3x3x3 block)
     for (int dz = -1; dz <= 1; dz++) {
-        int nz = cell.z + dz;
-        if (nz < 0 || nz >= c_grid.grid_res.z) continue;
         for (int dy = -1; dy <= 1; dy++) {
-            int ny = cell.y + dy;
-            if (ny < 0 || ny >= c_grid.grid_res.y) continue;
             for (int dx = -1; dx <= 1; dx++) {
-                int nx = cell.x + dx;
-                if (nx < 0 || nx >= c_grid.grid_res.x) continue;
-
-                int hash = nz * c_grid.grid_res.y * c_grid.grid_res.x
-                         + ny * c_grid.grid_res.x
-                         + nx;
+                uint hash = spatialHash(cell.x + dx, cell.y + dy, cell.z + dz);
                 atomicOr(&cell_wake_flags[hash], 1u);
             }
         }
@@ -109,8 +94,8 @@ void K_WakeSleepersAndClearJustWoke(
     if (IS_SLEEPING(pi)) {
         float4 pos4 = position[i];
         float3 pos = make_float3(pos4.x, pos4.y, pos4.z);
-        int3 cell = calcGridCell_wake(pos);
-        int hash = calcGridHash_wake(cell);
+        int3 cell = calcGridCell(pos);
+        uint hash = spatialHash(cell);
 
         if (cell_wake_flags[hash] != 0u) {
             new_pi = CLEAR_SLEEPING(new_pi);

@@ -12,5 +12,5 @@ void main() {
 
     // Simple depth-based shading: darken towards edges for a sphere look
     float shade = 1.0 - 0.4 * r2;
-    FragColor = vec4(vColor.rgb * shade, vColor.a);
+    FragColor = vec4(vColor.rgb * shade, 1.0);
 }

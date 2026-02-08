@@ -34,7 +34,7 @@
 
 #include "common.cuh"
 
-extern "C" __global__
+extern "C" __global__ __launch_bounds__(256, 4)
 void K_Step1(
     uint            numParticles,
     const float4*   __restrict__ position,      // sorted positions
@@ -49,7 +49,11 @@ void K_Step1(
     float*          __restrict__ shear_rate_out, // output: gamma_dot per particle (0 for non-GRANULAR)
     float*          __restrict__ dTdt_out,       // output: temperature rate of change (heat diffusion)
     float*          __restrict__ exposure_heat_out,    // output: heat exposure from interactions
-    float*          __restrict__ exposure_corrode_out  // output: corrosion exposure from interactions
+    float*          __restrict__ exposure_corrode_out, // output: corrosion exposure from interactions
+    float4*         __restrict__ vorticity_out,        // output: (omega_x, omega_y, omega_z, |omega|) -- FLUID only
+    float4*         __restrict__ normal_out,           // output: (n_x, n_y, n_z, neighbor_count) -- FLUID only
+    const float4*   __restrict__ particle_dye_in,      // input: particle dye color (r, g, b, unused)
+    float4*         __restrict__ dye_rate_out          // output: dye diffusion rate (dr, dg, db, unused)
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -66,13 +70,16 @@ void K_Step1(
     int behavior_i = GET_BEHAVIOR(pi_i);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
     bool is_granular = (behavior_i == GRANULAR);
+    bool is_gas_i = (behavior_i == GAS);
 
-    // Read velocity for strain-rate (only used if GRANULAR, but cheap to read)
-    float3 vel_i;
-    if (is_granular) {
-        float4 vel4_i = velocity[index_i];
-        vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
-    }
+    bool is_fluid = (behavior_i == FLUID);
+
+    // Read velocity for strain-rate (GRANULAR) and vorticity (FLUID)
+    float4 vel4_i = velocity[index_i];
+    float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
+
+    // Read dye color for diffusion
+    float4 dye_i = __ldg(&particle_dye_in[index_i]);
 
     // Read temperature for heat diffusion
     float T_i = __ldg(&temperature_in[index_i]);
@@ -93,33 +100,25 @@ void K_Step1(
     float Dxx = 0.0f, Dyy = 0.0f, Dzz = 0.0f;
     float Dxy = 0.0f, Dxz = 0.0f, Dyz = 0.0f;
 
-    // Grid cell of particle i
-    int3 cell_i = make_int3(
-        (int)((pos_i.x - c_grid.grid_min.x) * c_grid.grid_delta.x),
-        (int)((pos_i.y - c_grid.grid_min.y) * c_grid.grid_delta.y),
-        (int)((pos_i.z - c_grid.grid_min.z) * c_grid.grid_delta.z)
-    );
-    // Clamp to valid range
-    cell_i.x = max(0, min(cell_i.x, c_grid.grid_res.x - 1));
-    cell_i.y = max(0, min(cell_i.y, c_grid.grid_res.y - 1));
-    cell_i.z = max(0, min(cell_i.z, c_grid.grid_res.z - 1));
+    // Vorticity accumulator (FLUID only): omega = curl(v)
+    float3 omega = make_float3(0.0f, 0.0f, 0.0f);
 
-    int rx = c_grid.grid_res.x;
-    int ry = c_grid.grid_res.y;
-    int rz = c_grid.grid_res.z;
+    // Surface normal accumulator (FLUID only): n = grad(color field)
+    float3 normal = make_float3(0.0f, 0.0f, 0.0f);
+    float neighbor_count = 0.0f;
+
+    // Dye diffusion rate accumulator
+    float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
+
+    // Grid cell of particle i
+    int3 cell_i = calcGridCell(make_float3(pos_i.x, pos_i.y, pos_i.z));
 
     // Iterate 27 neighbor cells
     for (int dz = -1; dz <= 1; dz++) {
-        int cz = cell_i.z + dz;
-        if (cz < 0 || cz >= rz) continue;
         for (int dy = -1; dy <= 1; dy++) {
-            int cy = cell_i.y + dy;
-            if (cy < 0 || cy >= ry) continue;
             for (int dx = -1; dx <= 1; dx++) {
-                int cx = cell_i.x + dx;
-                if (cx < 0 || cx >= rx) continue;
 
-                uint hash = (uint)(cz * ry * rx + cy * rx + cx);
+                uint hash = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash];
 
                 // Empty cell sentinel
@@ -127,7 +126,12 @@ void K_Step1(
                 uint end_idx = cell_end[hash];
 
                 for (uint index_j = start; index_j < end_idx; index_j++) {
+                    // --- Speculative ILP: issue ALL loads before distance check ---
                     float4 pos4_j = __ldg(&position[index_j]);
+                    float m_j = __ldg(&mass[index_j]);
+                    uint pi_j = __ldg(&packed_info[index_j]);
+                    float T_j = __ldg(&temperature_in[index_j]);
+
                     float3 r = make_float3(
                         pos_i.x - pos4_j.x,
                         pos_i.y - pos4_j.y,
@@ -137,12 +141,21 @@ void K_Step1(
 
                     if (r_sq <= h_sq) {
                         float diff = h_sq - r_sq;
-                        float m_j = __ldg(&mass[index_j]);
 
                         // Skip STATIC neighbors for density (keep self i==j)
-                        uint pi_j = __ldg(&packed_info[index_j]);
                         int behavior_j = GET_BEHAVIOR(pi_j);
                         if (behavior_j == STATIC && index_j != index_i) {
+                            continue;
+                        }
+
+                        // GAS↔non-GAS phase separation: skip density/heat/forces,
+                        // keep only exposure (so fire→wood ignition still works)
+                        bool is_gas_j = (behavior_j == GAS);
+                        if (is_gas_i != is_gas_j && index_j != index_i) {
+                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                            float w_poly6_var = diff * diff * diff;
+                            sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                            sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
                             continue;
                         }
 
@@ -152,7 +165,7 @@ void K_Step1(
                         // --- Heat diffusion + exposure: skip self ---
                         if (index_j != index_i) {
                             float rlen = sqrtf(r_sq);
-                            float T_j = __ldg(&temperature_in[index_j]);
+                            // T_j already loaded speculatively before distance check (OPT-4.2)
                             float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
                             // SPH Laplacian of temperature using viscosity Laplacian kernel:
                             // lap_W_visc(r) = (h - |r|)  (variable part, coeff is viscosity_lap_coeff)
@@ -170,6 +183,50 @@ void K_Step1(
 
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                        }
+
+                        // --- Vorticity + Normal + Dye: skip self, need gradient ---
+                        if (index_j != index_i && r_sq > 1e-12f) {
+                            float rlen_v = sqrtf(r_sq);
+                            float h_rlen_v = h - rlen_v;
+                            float inv_rlen_v = 1.0f / rlen_v;
+
+                            // Spiky gradient: gradW = spiky_grad_coeff * (h-r)^2 * r/|r|
+                            float grad_scalar_v = c_precalc.spiky_grad_coeff * h_rlen_v * h_rlen_v * inv_rlen_v;
+                            float gWx_v = grad_scalar_v * r.x;
+                            float gWy_v = grad_scalar_v * r.y;
+                            float gWz_v = grad_scalar_v * r.z;
+
+                            float rho_j_v = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
+                            float vol_j = m_j / fmaxf(rho_j_v, 1.0f);  // V_j = m_j / rho_j
+
+                            if (is_fluid) {
+                                // Vorticity: omega += V_j * (v_j - v_i) x gradW
+                                float4 vel4_j_v = __ldg(&velocity[index_j]);
+                                float dvx_v = vel4_j_v.x - vel_i.x;
+                                float dvy_v = vel4_j_v.y - vel_i.y;
+                                float dvz_v = vel4_j_v.z - vel_i.z;
+                                omega.x += vol_j * (dvy_v * gWz_v - dvz_v * gWy_v);
+                                omega.y += vol_j * (dvz_v * gWx_v - dvx_v * gWz_v);
+                                omega.z += vol_j * (dvx_v * gWy_v - dvy_v * gWx_v);
+
+                                // Surface normal: n += V_j * gradW
+                                normal.x += vol_j * gWx_v;
+                                normal.y += vol_j * gWy_v;
+                                normal.z += vol_j * gWz_v;
+                            }
+
+                            // Neighbor count (all behaviors)
+                            neighbor_count += 1.0f;
+
+                            // Dye diffusion: dC/dt += D * V_j * (C_j - C_i) * lap_W
+                            // Use viscosity Laplacian kernel: lap_W_var = (h - |r|)
+                            float lap_var_d = h - rlen_v;
+                            float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var_d;
+                            float4 dye_j = __ldg(&particle_dye_in[index_j]);
+                            dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
+                            dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
+                            dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
                         }
 
                         // --- Strain-rate: skip self, GRANULAR only ---
@@ -233,6 +290,16 @@ void K_Step1(
     exposure_heat_out[index_i] = c_precalc.poly6_coeff * sum_exposure_heat;
     exposure_corrode_out[index_i] = c_precalc.poly6_coeff * sum_exposure_corrode;
 
+    // --- PostCalc: vorticity ---
+    float omega_mag = sqrtf(omega.x * omega.x + omega.y * omega.y + omega.z * omega.z);
+    vorticity_out[index_i] = make_float4(omega.x, omega.y, omega.z, omega_mag);
+
+    // --- PostCalc: surface normal + neighbor count ---
+    normal_out[index_i] = make_float4(normal.x, normal.y, normal.z, neighbor_count);
+
+    // --- PostCalc: dye diffusion rate ---
+    dye_rate_out[index_i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
+
     // --- PostCalc: strain-rate magnitude (gamma_dot) ---
     if (is_granular) {
         // gamma_dot = sqrt(2 * D:D)
@@ -244,4 +311,24 @@ void K_Step1(
     } else {
         shear_rate_out[index_i] = 0.0f;
     }
+}
+
+
+/* ======================================================================
+ * K_PackDensity -- Pack density into sorted_position.w
+ *
+ * Runs between Step1 and Step2. After this, Step2 can read
+ * density_j = position[j].w instead of a separate density array load.
+ * Eliminates one global memory load per neighbor interaction.
+ * ====================================================================== */
+
+extern "C" __global__ __launch_bounds__(256)
+void K_PackDensity(
+    float4*       __restrict__ position,    // sorted positions (write .w)
+    const float*  __restrict__ density,     // density computed by Step1
+    uint          numParticles
+) {
+    uint i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numParticles) return;
+    position[i].w = density[i];
 }

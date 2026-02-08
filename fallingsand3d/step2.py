@@ -47,6 +47,10 @@ DEFAULT_PARTICLE_SPACING = np.float32(0.02)
 DEFAULT_MU0 = np.float32(1.0)
 DEFAULT_XSPH_EPSILON = np.float32(0.8)
 DEFAULT_FORCE_SCALE = np.float32(0.02)
+DEFAULT_VORTICITY_EPSILON = np.float32(0.05)
+DEFAULT_SURFACE_TENSION_GAMMA = np.float32(1.0)
+DEFAULT_TAN_PHI_F = np.float32(0.781)  # tan(38°) for Drucker-Prager friction
+DEFAULT_COHESION = np.float32(0.002)   # small cohesion for DP stability
 
 # ---------------------------------------------------------------------------
 # Numpy dtype matching GranularParams struct in step2.cu
@@ -73,12 +77,16 @@ GRANULAR_PARAMS_DTYPE = np.dtype(
         ("mu0", np.float32),
         ("xsph_epsilon", np.float32),
         ("force_scale", np.float32),
+        ("vorticity_epsilon", np.float32),
+        ("surface_tension_gamma", np.float32),
+        ("tan_phi_f", np.float32),
+        ("cohesion", np.float32),
     ],
     align=False,
 )
 
-assert GRANULAR_PARAMS_DTYPE.itemsize == 32, (
-    f"GranularParams size mismatch: {GRANULAR_PARAMS_DTYPE.itemsize} != 32"
+assert GRANULAR_PARAMS_DTYPE.itemsize == 48, (
+    f"GranularParams size mismatch: {GRANULAR_PARAMS_DTYPE.itemsize} != 48"
 )
 
 
@@ -91,6 +99,10 @@ def build_granular_params(
     mu0: float = DEFAULT_MU0,
     xsph_epsilon: float = DEFAULT_XSPH_EPSILON,
     force_scale: float = DEFAULT_FORCE_SCALE,
+    vorticity_epsilon: float = DEFAULT_VORTICITY_EPSILON,
+    surface_tension_gamma: float = DEFAULT_SURFACE_TENSION_GAMMA,
+    tan_phi_f: float = DEFAULT_TAN_PHI_F,
+    cohesion: float = DEFAULT_COHESION,
 ) -> np.ndarray:
     """Build a GranularParams struct as a numpy structured array."""
     params = np.zeros(1, dtype=GRANULAR_PARAMS_DTYPE)
@@ -102,6 +114,10 @@ def build_granular_params(
     params[0]["mu0"] = mu0
     params[0]["xsph_epsilon"] = xsph_epsilon
     params[0]["force_scale"] = force_scale
+    params[0]["vorticity_epsilon"] = vorticity_epsilon
+    params[0]["surface_tension_gamma"] = surface_tension_gamma
+    params[0]["tan_phi_f"] = tan_phi_f
+    params[0]["cohesion"] = cohesion
     return params
 
 
@@ -212,28 +228,32 @@ BLOCK_SIZE = 256
 def compute_step2(
     position: cupy.ndarray,
     velocity: cupy.ndarray,
-    density: cupy.ndarray,
     mass: cupy.ndarray,
     packed_info: cupy.ndarray,
+    shear_rate: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
+    vorticity_in: "Optional[cupy.ndarray]" = None,
+    normal_in: "Optional[cupy.ndarray]" = None,
     sph_force_out: "Optional[cupy.ndarray]" = None,
     veleval_out: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Step2 and return (sph_force, veleval_out).
 
+    Density is read from position.w (packed by K_PackDensity after Step1).
+
     Parameters
     ----------
     position : cupy.ndarray, (N, 4) float32
-        Sorted particle positions.
+        Sorted particle positions (density packed in .w by K_PackDensity).
     velocity : cupy.ndarray, (N, 4) float32
         Sorted evaluation velocities.
-    density : cupy.ndarray, (N,) float32
-        Sorted particle densities (from Step1).
     mass : cupy.ndarray, (N,) float32
         Sorted per-particle mass.
     packed_info : cupy.ndarray, (N,) uint32
         Sorted packed_info (material_id + behavior_class + flags).
+    shear_rate : cupy.ndarray, (N,) float32
+        Sorted shear rate / gamma_dot (from Step1).
     cell_start : cupy.ndarray, (num_cells,) uint32
         Grid cell start indices (0xFFFFFFFF for empty).
     cell_end : cupy.ndarray, (num_cells,) uint32
@@ -251,6 +271,10 @@ def compute_step2(
         XSPH-corrected evaluation velocity (FLUID only; others unchanged).
     """
     n = position.shape[0]
+    if vorticity_in is None:
+        vorticity_in = cupy.zeros((n, 4), dtype=cupy.float32)
+    if normal_in is None:
+        normal_in = cupy.zeros((n, 4), dtype=cupy.float32)
     if sph_force_out is None:
         sph_force_out = cupy.zeros((n, 4), dtype=cupy.float32)
     if veleval_out is None:
@@ -269,11 +293,13 @@ def compute_step2(
             np.uint32(n),
             position,
             velocity,
-            density,
             mass,
             packed_info,
+            shear_rate,
             cell_start,
             cell_end,
+            vorticity_in,
+            normal_in,
             sph_force_out,
             veleval_out,
         ),

@@ -112,6 +112,10 @@ def integrate(
     sorted_shear_rate: "Optional[cupy.ndarray]" = None,
     sorted_dTdt: "Optional[cupy.ndarray]" = None,
     sorted_sleep_counter: "Optional[cupy.ndarray]" = None,
+    sorted_dye_rate: "Optional[cupy.ndarray]" = None,
+    sorted_particle_dye: "Optional[cupy.ndarray]" = None,
+    sorted_vorticity: "Optional[cupy.ndarray]" = None,
+    sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
     sort_indexes: "Optional[cupy.ndarray]" = None,
     position_out: "Optional[cupy.ndarray]" = None,
     velocity_out: "Optional[cupy.ndarray]" = None,
@@ -119,6 +123,9 @@ def integrate(
     packed_info_out: "Optional[cupy.ndarray]" = None,
     sleep_counter_out: "Optional[cupy.ndarray]" = None,
     temperature_out: "Optional[cupy.ndarray]" = None,
+    particle_dye_out: "Optional[cupy.ndarray]" = None,
+    angular_velocity_out: "Optional[cupy.ndarray]" = None,
+    max_displacement: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Integrate and return outputs tuple.
 
@@ -181,6 +188,14 @@ def integrate(
         sorted_dTdt = cupy.zeros(n, dtype=cupy.float32)
     if sorted_sleep_counter is None:
         sorted_sleep_counter = cupy.zeros(n, dtype=cupy.uint8)
+    if sorted_dye_rate is None:
+        sorted_dye_rate = cupy.zeros((n, 4), dtype=cupy.float32)
+    if sorted_particle_dye is None:
+        sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
+    if sorted_vorticity is None:
+        sorted_vorticity = cupy.zeros((n, 4), dtype=cupy.float32)
+    if sorted_angular_velocity is None:
+        sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
 
     # Allocate outputs if not provided
     if position_out is None:
@@ -201,12 +216,21 @@ def integrate(
     if temperature_out is None:
         max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         temperature_out = cupy.zeros(max_idx, dtype=cupy.float32)
+    if particle_dye_out is None:
+        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
+        particle_dye_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
+    if angular_velocity_out is None:
+        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
+        angular_velocity_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
 
     module = _get_module()
     kernel = module.get_function("K_Integrate")  # type: ignore[union-attr]
 
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
+
+    # Use null pointer (0) when max_displacement not provided
+    max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
 
     kernel(
         grid,
@@ -225,6 +249,10 @@ def integrate(
             sorted_shear_rate,
             sorted_dTdt,
             sorted_sleep_counter,
+            sorted_dye_rate,
+            sorted_particle_dye,
+            sorted_vorticity,
+            sorted_angular_velocity,
             sort_indexes,
             position_out,
             velocity_out,
@@ -232,8 +260,12 @@ def integrate(
             packed_info_out,
             sleep_counter_out,
             temperature_out,
+            particle_dye_out,
+            angular_velocity_out,
+            max_disp_ptr,
         ),
     )
 
     return (position_out, velocity_out, color_out, packed_info_out,
-            sleep_counter_out, temperature_out)
+            sleep_counter_out, temperature_out, particle_dye_out,
+            angular_velocity_out)

@@ -42,7 +42,8 @@ void K_FusedSortReorderBuild(
     const float*  __restrict__ health_in,
     const float*  __restrict__ lifetime_in,
     const unsigned char* __restrict__ sleep_counter_in,
-    // Sorted outputs (write) -- 8 arrays
+    const float*  __restrict__ kappa_in,
+    // Sorted outputs (write) -- 9 arrays
     float4*       __restrict__ position_out,
     float4*       __restrict__ velocity_out,
     float*        __restrict__ mass_out,
@@ -50,7 +51,8 @@ void K_FusedSortReorderBuild(
     float*        __restrict__ temperature_out,
     float*        __restrict__ health_out,
     float*        __restrict__ lifetime_out,
-    unsigned char* __restrict__ sleep_counter_out
+    unsigned char* __restrict__ sleep_counter_out,
+    float*        __restrict__ kappa_out
 )
 {
     const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -80,7 +82,7 @@ void K_FusedSortReorderBuild(
         cell_indexes_end[hash] = idx + 1;
     }
 
-    // 4. Gather 8 particle arrays from unsorted[perm] -> sorted[idx]
+    // 4. Gather 9 particle arrays from unsorted[perm] -> sorted[idx]
     position_out[idx]      = __ldg(&position_in[perm]);
     velocity_out[idx]      = __ldg(&velocity_in[perm]);
     mass_out[idx]          = __ldg(&mass_in[perm]);
@@ -89,4 +91,5 @@ void K_FusedSortReorderBuild(
     health_out[idx]        = __ldg(&health_in[perm]);
     lifetime_out[idx]      = __ldg(&lifetime_in[perm]);
     sleep_counter_out[idx] = __ldg(&sleep_counter_in[perm]);
+    kappa_out[idx]         = __ldg(&kappa_in[perm]);
 }

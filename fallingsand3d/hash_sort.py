@@ -4,13 +4,14 @@ Compiles physics/kernels/hash_sort.cu via CuPy RawModule and provides
 functions to upload GridParams to ``__constant__ GridParams c_grid`` and
 launch the ``K_CalcHash`` kernel.
 
-Grid sizing (from acceptance criteria)
---------------------------------------
-- grid_min = (-1, -1, -1), grid_max = (1, 1, 1)
-- cell_size = h = 0.04
-- grid_res  = 50 per axis
-- grid_delta = (25, 25, 25)   (= grid_res / grid_size = 50/2)
-- num_cells  = 125000          (= 50^3)
+Uses a spatial hash with fixed-size table (power of 2) instead of
+dense arrays sized grid_res^3.  Enables arbitrarily large worlds.
+
+Grid params:
+- grid_min: world-space minimum corner
+- grid_delta: 1/cell_size per axis (= 1/h)
+- table_size: hash table size (power of 2)
+- table_mask: table_size - 1
 """
 
 from __future__ import annotations
@@ -25,51 +26,56 @@ import numpy as np
 # Grid constants
 # ---------------------------------------------------------------------------
 
-GRID_MIN = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
-GRID_MAX = np.array([1.0, 1.0, 1.0], dtype=np.float32)
 CELL_SIZE = np.float32(0.04)
-GRID_RES = np.array([50, 50, 50], dtype=np.int32)
-GRID_DELTA = np.array([25.0, 25.0, 25.0], dtype=np.float32)  # grid_res / grid_size
-NUM_CELLS = 125_000  # 50 * 50 * 50
+
+# Fixed hash table size -- works for any world size.
+# 2^18 = 262144 buckets.  At ~30 particles/cell with 500K particles,
+# ~17K active cells → ~6.5% load factor.  Collisions are rare and harmless
+# (just extra distance checks in neighbor loops).
+TABLE_SIZE = 262144
+TABLE_MASK = TABLE_SIZE - 1
+
+# Backward-compat alias for old test files
+NUM_CELLS = TABLE_SIZE
 
 # ---------------------------------------------------------------------------
 # Numpy dtype matching ``struct GridParams`` in common.cuh
 #
 # struct GridParams {
 #     float3 grid_min;    // 12 bytes
-#     float3 grid_max;    // 12 bytes
-#     int3   grid_res;    // 12 bytes
 #     float3 grid_delta;  // 12 bytes
-#     int    num_cells;   //  4 bytes
-# };                      // Total: 52 bytes
+#     uint   table_size;  //  4 bytes
+#     uint   table_mask;  //  4 bytes
+# };                      // Total: 32 bytes
 #
-# CUDA float3/int3 are 12 bytes with no trailing pad. align=False required.
+# CUDA float3 is 12 bytes with no trailing pad. align=False required.
 # ---------------------------------------------------------------------------
 
 GRID_PARAMS_DTYPE = np.dtype(
     [
         ("grid_min", np.float32, (3,)),
-        ("grid_max", np.float32, (3,)),
-        ("grid_res", np.int32, (3,)),
         ("grid_delta", np.float32, (3,)),
-        ("num_cells", np.int32),
+        ("table_size", np.uint32),
+        ("table_mask", np.uint32),
     ],
     align=False,
 )
 
-assert GRID_PARAMS_DTYPE.itemsize == 52, (
-    f"GridParams size mismatch: {GRID_PARAMS_DTYPE.itemsize} != 52"
+assert GRID_PARAMS_DTYPE.itemsize == 32, (
+    f"GridParams size mismatch: {GRID_PARAMS_DTYPE.itemsize} != 32"
 )
 
 
 def build_grid_params() -> np.ndarray:
     """Build a single GridParams struct using the default grid constants."""
+    gmin = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
+    inv_cs = 1.0 / float(CELL_SIZE)
+    grid_delta = np.array([inv_cs, inv_cs, inv_cs], dtype=np.float32)
     params = np.zeros(1, dtype=GRID_PARAMS_DTYPE)
-    params[0]["grid_min"] = GRID_MIN
-    params[0]["grid_max"] = GRID_MAX
-    params[0]["grid_res"] = GRID_RES
-    params[0]["grid_delta"] = GRID_DELTA
-    params[0]["num_cells"] = NUM_CELLS
+    params[0]["grid_min"] = gmin
+    params[0]["grid_delta"] = grid_delta
+    params[0]["table_size"] = np.uint32(TABLE_SIZE)
+    params[0]["table_mask"] = np.uint32(TABLE_MASK)
     return params
 
 
@@ -84,23 +90,19 @@ def build_grid_params_for_world(
     -------
     params : np.ndarray
         A single GridParams structured array element.
-    num_cells : int
-        Total number of grid cells.
+    table_size : int
+        Hash table size (fixed, independent of world bounds).
     """
     gmin = np.array(grid_min, dtype=np.float32)
-    gmax = np.array(grid_max, dtype=np.float32)
-    grid_size = gmax - gmin
-    grid_res = np.ceil(grid_size / cell_size).astype(np.int32)
-    grid_delta = grid_res.astype(np.float32) / grid_size
-    num_cells = int(grid_res[0]) * int(grid_res[1]) * int(grid_res[2])
+    inv_cs = 1.0 / cell_size
+    grid_delta = np.array([inv_cs, inv_cs, inv_cs], dtype=np.float32)
 
     params = np.zeros(1, dtype=GRID_PARAMS_DTYPE)
     params[0]["grid_min"] = gmin
-    params[0]["grid_max"] = gmax
-    params[0]["grid_res"] = grid_res
     params[0]["grid_delta"] = grid_delta
-    params[0]["num_cells"] = num_cells
-    return params, num_cells
+    params[0]["table_size"] = np.uint32(TABLE_SIZE)
+    params[0]["table_mask"] = np.uint32(TABLE_MASK)
+    return params, TABLE_SIZE
 
 
 # ---------------------------------------------------------------------------

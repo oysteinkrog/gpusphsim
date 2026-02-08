@@ -42,6 +42,8 @@ MATERIAL_PROPS_DTYPE = np.dtype(
         ("color_r", np.float32),
         ("color_g", np.float32),
         ("color_b", np.float32),
+        ("thermal_expansion", np.float32),
+        ("_pad0", np.float32),
     ],
     align=True,
 )
@@ -55,8 +57,8 @@ INTERACTION_DTYPE = np.dtype(
 )
 
 # Compile-time size checks (must match sizeof(MaterialProps) and sizeof(Interaction))
-assert MATERIAL_PROPS_DTYPE.itemsize == 64, (
-    f"MaterialProps size mismatch: {MATERIAL_PROPS_DTYPE.itemsize} != 64"
+assert MATERIAL_PROPS_DTYPE.itemsize == 72, (
+    f"MaterialProps size mismatch: {MATERIAL_PROPS_DTYPE.itemsize} != 72"
 )
 assert INTERACTION_DTYPE.itemsize == 8, (
     f"Interaction size mismatch: {INTERACTION_DTYPE.itemsize} != 8"
@@ -104,6 +106,7 @@ class MaterialDef:
     color_r: float  # default material color R [0,1]
     color_g: float  # default material color G [0,1]
     color_b: float  # default material color B [0,1]
+    thermal_expansion: float = 0.0  # Boussinesq thermal expansion coefficient (1/K)
 
     def to_numpy(self) -> np.void:
         """Pack into a single numpy structured-array element."""
@@ -125,6 +128,8 @@ class MaterialDef:
                 self.color_r,
                 self.color_g,
                 self.color_b,
+                self.thermal_expansion,
+                0.0,  # _pad0
             ),
             dtype=MATERIAL_PROPS_DTYPE,
         )
@@ -183,7 +188,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     SAND: MaterialDef(
         id=SAND, name="SAND",
-        rest_density=2500.0, eos_stiffness=20.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=5000.0, eos_gamma=7.0,
         base_viscosity=0.5, friction_coeff=0.6, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.3, heat_capacity=830.0,
         temp_melt=1700.0, temp_boil=2500.0, temp_ignite=0.0,
@@ -192,8 +197,8 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     DIRT: MaterialDef(
         id=DIRT, name="DIRT",
-        rest_density=2500.0, eos_stiffness=18.0, eos_gamma=7.0,
-        base_viscosity=0.8, friction_coeff=0.5, cohesion=0.1,
+        rest_density=2500.0, eos_stiffness=3000.0, eos_gamma=7.0,
+        base_viscosity=0.5, friction_coeff=0.5, cohesion=0.1,
         buoyancy_extra=0.0, thermal_conductivity=0.25, heat_capacity=900.0,
         temp_melt=1400.0, temp_boil=2200.0, temp_ignite=0.0,
         behavior_class=GRANULAR,
@@ -201,7 +206,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     GRAVEL: MaterialDef(
         id=GRAVEL, name="GRAVEL",
-        rest_density=2500.0, eos_stiffness=25.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=4000.0, eos_gamma=7.0,
         base_viscosity=0.3, friction_coeff=0.65, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=840.0,
         temp_melt=1500.0, temp_boil=2800.0, temp_ignite=0.0,
@@ -216,6 +221,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         temp_melt=273.0, temp_boil=373.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=0.2, color_g=0.5, color_b=0.9,
+        thermal_expansion=0.0003,  # Boussinesq beta for water (~3e-4 1/K)
     ),
     OIL: MaterialDef(
         id=OIL, name="OIL",
@@ -225,6 +231,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         temp_melt=250.0, temp_boil=570.0, temp_ignite=480.0,
         behavior_class=FLUID,
         color_r=0.15, color_g=0.10, color_b=0.05,
+        thermal_expansion=0.0007,  # oil expands more than water
     ),
     LAVA: MaterialDef(
         id=LAVA, name="LAVA",
@@ -234,6 +241,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         temp_melt=1000.0, temp_boil=2500.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=1.0, color_g=0.3, color_b=0.0,
+        thermal_expansion=0.0001,  # lava has low expansion
     ),
     ACID: MaterialDef(
         id=ACID, name="ACID",
@@ -243,6 +251,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         temp_melt=250.0, temp_boil=380.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=0.4, color_g=1.0, color_b=0.1,
+        thermal_expansion=0.0003,  # similar to water
     ),
     WOOD: MaterialDef(
         id=WOOD, name="WOOD",
@@ -300,7 +309,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     GUNPOWDER: MaterialDef(
         id=GUNPOWDER, name="GUNPOWDER",
-        rest_density=2500.0, eos_stiffness=20.0, eos_gamma=7.0,
+        rest_density=2500.0, eos_stiffness=3000.0, eos_gamma=7.0,
         base_viscosity=0.0, friction_coeff=0.5, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=0.2, heat_capacity=800.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=480.0,

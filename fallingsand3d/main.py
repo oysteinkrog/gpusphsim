@@ -103,8 +103,8 @@ def main():
     print("Spawning initial scene...")
     num_active = _spawn_initial_scene(world)
 
-    # Create renderer sized to max_particles
-    renderer = Renderer(MAX_PARTICLES, point_scale=20.0)
+    # Create renderer sized to max_particles (pass initial window dimensions for FBO allocation)
+    renderer = Renderer(MAX_PARTICLES, point_scale=20.0, width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
     renderer.num_active = num_active
 
     # Create simulation orchestrator (adaptive timestep, accuracy=0.4 CFL)
@@ -141,6 +141,7 @@ def main():
             # Reset to initial configuration
             world.packed_info[:] = 0
             world._high_water = 0
+            world.foam_count.fill(0)  # reset foam pool
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.sim_time = 0.0
@@ -191,6 +192,7 @@ def main():
         if width > 0 and height > 0:
             glViewport(0, 0, width, height)
             camera.set_aspect(width, height)
+            renderer.resize(width, height)
 
     # Install callbacks through UI (chains imgui + user callbacks)
     ui.set_callbacks(
@@ -244,6 +246,25 @@ def main():
         # Update active count for renderer
         renderer.num_active = world._high_water
 
+        # Sync foam enable state from renderer (UI) to world (sim)
+        world.foam_enabled = renderer.foam_enabled
+
+        # Copy foam particles to VBO (if enabled)
+        if renderer.foam_enabled:
+            with renderer.cuda_foam as foam_buf:
+                renderer.num_foam = sim.copy_foam_to_vbo(foam_buf)
+        else:
+            renderer.num_foam = 0
+
+        # --- Update 3D cursor ---
+        cursor_pos = ui.get_cursor_world_pos(camera)
+        if cursor_pos is not None:
+            renderer.cursor_visible = True
+            renderer.cursor_center = cursor_pos
+            renderer.cursor_radius = ui.brush_radius
+        else:
+            renderer.cursor_visible = False
+
         # --- Render 3D scene ---
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
@@ -252,7 +273,27 @@ def main():
         renderer.draw(view, proj)
 
         # --- Draw ImGui UI ---
-        ui_changes = ui.draw(sim, world, fps)
+        ui_changes = ui.draw(sim, world, fps, renderer)
+
+        # --- Handle solver switching ---
+        solver_name = ui.pending_solver
+        if solver_name is not None:
+            from solver_profiles import PROFILES as SOLVER_PROFILES
+            profile = SOLVER_PROFILES[solver_name]
+            print(f"Switching solver: {solver_name}")
+            # Clear world and reload current preset (avoids physics shock)
+            world.packed_info[:] = 0
+            world._high_water = 0
+            world.foam_count.fill(0)  # reset foam pool
+            num_active = _spawn_initial_scene(world)
+            renderer.num_active = num_active
+            sim.set_solver_profile(profile)
+            sim.sim_time = 0.0
+            sim._last_frame_time = None
+            active_spawner = None
+            spawner_frame_counter = 0
+            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
+                sim.copy_to_vbos(pos_buf, col_buf)
 
         # --- Handle preset loading ---
         preset_name = ui.pending_preset
@@ -261,6 +302,7 @@ def main():
             load_fn = PRESETS[preset_name]
             print(f"Loading preset: {preset_name}")
             n_spawned, spawner_cfg = load_fn(world)
+            world.foam_count.fill(0)  # reset foam pool on preset load
             active_spawner = spawner_cfg
             spawner_frame_counter = 0
             renderer.num_active = world._high_water
@@ -274,7 +316,8 @@ def main():
             new_max = ui_changes['new_max']
             world.resize(new_max)
             renderer.close()
-            renderer = Renderer(new_max, point_scale=20.0)
+            fb_w, fb_h = glfw.get_framebuffer_size(window)
+            renderer = Renderer(new_max, point_scale=20.0, width=fb_w, height=fb_h)
             renderer.num_active = 0
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active

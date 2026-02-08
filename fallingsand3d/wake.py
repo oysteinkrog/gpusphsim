@@ -102,19 +102,24 @@ def allocate_cell_wake_flags(num_cells: int = 125_000) -> cupy.ndarray:
 
 def mark_wake_cells(
     position: cupy.ndarray,
+    velocity: cupy.ndarray,
     packed_info: cupy.ndarray,
     cell_wake_flags: cupy.ndarray,
     num_particles: Optional[int] = None,
 ) -> None:
     """Launch K_MarkWakeCells (Phase 1).
 
-    For each particle with HAS_JUST_WOKE flag, atomicOr(1) on its own cell
-    and 26 neighboring cells.
+    Marks 3x3x3 neighbor cells for:
+    1. Particles with HAS_JUST_WOKE flag (wake cascade).
+    2. Active non-sleeping particles moving above V_WAKE threshold
+       (so flowing water wakes sleeping sand in adjacent cells).
 
     Parameters
     ----------
     position : cupy.ndarray, (N, 4) float32
         Unsorted particle positions.
+    velocity : cupy.ndarray, (N, 4) float32
+        Unsorted particle velocities.
     packed_info : cupy.ndarray, (N,) uint32
         Unsorted packed_info (read-only for this kernel).
     cell_wake_flags : cupy.ndarray, (num_cells,) uint32
@@ -132,7 +137,7 @@ def mark_wake_cells(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
 
-    kernel(grid, block, (np.uint32(n), position, packed_info, cell_wake_flags))
+    kernel(grid, block, (np.uint32(n), position, velocity, packed_info, cell_wake_flags))
 
 
 def wake_sleepers_and_clear_just_woke(
@@ -179,6 +184,7 @@ def wake_sleepers_and_clear_just_woke(
 
 def run_wake_propagation(
     position: cupy.ndarray,
+    velocity: cupy.ndarray,
     packed_info: cupy.ndarray,
     sleep_counter: cupy.ndarray,
     cell_wake_flags: cupy.ndarray,
@@ -194,6 +200,8 @@ def run_wake_propagation(
     ----------
     position : cupy.ndarray, (N, 4) float32
         Unsorted particle positions.
+    velocity : cupy.ndarray, (N, 4) float32
+        Unsorted particle velocities.
     packed_info : cupy.ndarray, (N,) uint32
         Unsorted packed_info (read+write).
     sleep_counter : cupy.ndarray, (N,) uint8
@@ -210,8 +218,8 @@ def run_wake_propagation(
     # Clear cell flags to 0 (async memset: graph-capture safe)
     cell_wake_flags.data.memset_async(0x00, cell_wake_flags.nbytes)
 
-    # Phase 1: mark cells near just-woke particles
-    mark_wake_cells(position, packed_info, cell_wake_flags, n)
+    # Phase 1: mark cells near just-woke and fast-moving particles
+    mark_wake_cells(position, velocity, packed_info, cell_wake_flags, n)
 
     # Phase 2+3 fused: wake sleepers + clear JUST_WOKE flag
     wake_sleepers_and_clear_just_woke(

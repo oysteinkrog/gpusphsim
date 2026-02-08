@@ -35,8 +35,11 @@
 #define GAS_DRAG_COEFF     2.0f
 #define VELOCITY_LIMIT     10.0f
 #define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
-#define ACCEL_MAX          30.0f
-#define ACCEL_MAX_SQ       (ACCEL_MAX * ACCEL_MAX)
+#define ACCEL_MAX_FLUID    30.0f
+#define ACCEL_MAX_GRANULAR 200.0f
+
+/* Micropolar SPH coupling parameter */
+#define MICROPOLAR_NU_T    0.1f
 
 /* Temperature integration constants */
 #define T_AMBIENT          293.0f
@@ -49,6 +52,8 @@
 #define GRANULAR_V_THRESHOLD_SQ  (GRANULAR_V_THRESHOLD * GRANULAR_V_THRESHOLD)
 #define GRANULAR_GAMMA_MIN       0.05f
 #define GRANULAR_RHO_FACTOR      0.95f
+#define GRANULAR_ACCEL_REST      5.0f   // equilibrium check: |accel| must be < this for anti-creep/sleep
+#define GRANULAR_ACCEL_REST_SQ   (GRANULAR_ACCEL_REST * GRANULAR_ACCEL_REST)
 
 /* Sleep system with hysteresis */
 #define V_SLEEP          0.005f
@@ -181,7 +186,13 @@ __device__ inline void sdf_box_boundary(
  * Health fade: multiply by health [0,1]
  * ====================================================================== */
 
-__device__ inline float4 compute_color(uint mat_id, float temperature, float health) {
+/* Encode behavior class into color.w for SSFR material filtering in shaders.
+ * FLUID=0.0, GRANULAR=0.25, GAS=0.5, STATIC=0.75 */
+__device__ inline float behavior_to_alpha(int behavior) {
+    return behavior * 0.25f;
+}
+
+__device__ inline float4 compute_color(uint mat_id, float temperature, float health, int behavior) {
     float r = c_materials[mat_id].color_r;
     float g = c_materials[mat_id].color_g;
     float b = c_materials[mat_id].color_b;
@@ -200,7 +211,7 @@ __device__ inline float4 compute_color(uint mat_id, float temperature, float hea
     g *= h;
     b *= h;
 
-    return make_float4(r, g, b, 1.0f);
+    return make_float4(r, g, b, behavior_to_alpha(behavior));
 }
 
 /**
@@ -280,14 +291,14 @@ __device__ inline float4 compute_fluid_color(
     g = fminf(g, 1.0f);
     b = fminf(b, 1.0f);
 
-    return make_float4(r, g, b, 1.0f);
+    return make_float4(r, g, b, 0.0f);  // FLUID always 0.0
 }
 
 /* ======================================================================
  * K_Integrate kernel
  * ====================================================================== */
 
-extern "C" __global__
+extern "C" __global__ __launch_bounds__(256, 4)
 void K_Integrate(
     uint            numParticles,
     // --- Sorted inputs (read) ---
@@ -303,6 +314,10 @@ void K_Integrate(
     const float*    __restrict__ sorted_shear_rate,     // sorted shear rate (from Step1)
     const float*    __restrict__ sorted_dTdt,           // sorted dTdt (heat diffusion from Step1)
     const unsigned char* __restrict__ sorted_sleep_counter, // sorted sleep counter (uint8)
+    const float4*   __restrict__ sorted_dye_rate,       // sorted dye diffusion rate from Step1
+    const float4*   __restrict__ sorted_particle_dye,   // sorted current particle dye color
+    const float4*   __restrict__ sorted_vorticity,      // sorted vorticity (curl_v) from Step1
+    const float4*   __restrict__ sorted_angular_velocity, // sorted micropolar angular velocity
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
     // --- Unsorted outputs (write via sort_indexes) ---
     float4*         __restrict__ position_out,          // unsorted position
@@ -310,7 +325,10 @@ void K_Integrate(
     float4*         __restrict__ color_out,             // unsorted color
     uint*           __restrict__ packed_info_out,       // unsorted packed_info (sleep flag updates)
     unsigned char*  __restrict__ sleep_counter_out,     // unsorted sleep counter
-    float*          __restrict__ temperature_out        // unsorted temperature (updated)
+    float*          __restrict__ temperature_out,       // unsorted temperature (updated)
+    float4*         __restrict__ particle_dye_out,       // unsorted particle dye (updated)
+    float4*         __restrict__ angular_velocity_out,   // unsorted angular velocity (micropolar update)
+    uint*           __restrict__ max_displacement_out    // [1] atomicMax of displacement^2 (float-as-uint)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -336,10 +354,12 @@ void K_Integrate(
         temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
         temp = fmaxf(T_MIN, fminf(temp, T_MAX));
         float hlth = sorted_health[i];
-        color_out[orig_idx] = compute_color(mat_id, temp, hlth);
+        color_out[orig_idx] = compute_color(mat_id, temp, hlth, STATIC);
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
         temperature_out[orig_idx] = temp;
+        particle_dye_out[orig_idx] = sorted_particle_dye[i];
+        angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
         return;
     }
 
@@ -369,10 +389,12 @@ void K_Integrate(
             temp = fmaxf(T_MIN, fminf(temp, T_MAX));
             position_out[orig_idx] = pos4;
             velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            color_out[orig_idx] = compute_color(mat_id, temp, hlth);
+            color_out[orig_idx] = compute_color(mat_id, temp, hlth, behavior);
             packed_info_out[orig_idx] = pi;  // keep SLEEPING flag set
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
+            particle_dye_out[orig_idx] = sorted_particle_dye[i];
+            angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
             return;
         }
         // Wake up: clear sleeping flag, set just_woke flag, reset counter
@@ -406,10 +428,23 @@ void K_Integrate(
         accel.y += buoyancy;
     }
 
+    // FLUID thermal convection: Boussinesq buoyancy
+    // rho_eff = rho_0 * (1 - beta*(T-T0)), lighter when hot -> rises
+    // a_buoy = +beta * (T - T_ambient) * g  (positive = upward for hot fluid)
+    if (behavior == FLUID) {
+        float beta = c_materials[mat_id].thermal_expansion;
+        if (beta > 0.0f) {
+            accel.y += beta * (temp - T_AMBIENT) * 9.81f;
+        }
+    }
+
     // --- Acceleration clamp (safety net against numerical blowups) ---
+    // GRANULAR uses higher limit because force_scale=1.0 gives full-strength SPH forces
+    float accel_limit = (behavior == GRANULAR) ? ACCEL_MAX_GRANULAR : ACCEL_MAX_FLUID;
+    float accel_limit_sq = accel_limit * accel_limit;
     float accel_sq = accel.x * accel.x + accel.y * accel.y + accel.z * accel.z;
-    if (accel_sq > ACCEL_MAX_SQ) {
-        float scale = ACCEL_MAX / sqrtf(accel_sq);
+    if (accel_sq > accel_limit_sq) {
+        float scale = accel_limit / sqrtf(accel_sq);
         accel.x *= scale;
         accel.y *= scale;
         accel.z *= scale;
@@ -440,14 +475,19 @@ void K_Integrate(
         vel_new.z *= scale;
     }
 
-    // --- GRANULAR anti-creep: zero velocity if nearly at rest ---
+    // --- GRANULAR anti-creep: zero velocity if nearly at rest AND in equilibrium ---
+    // Equilibrium check: only zero velocity when net acceleration is small.
+    // Without this, gravity (9.8 m/s^2 * dt=0.001 = 0.0098 m/s per frame) is always
+    // below the threshold (0.01), trapping unsupported particles in mid-air.
     if (behavior == GRANULAR) {
         float vel_sq_ac = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
         if (vel_sq_ac < GRANULAR_V_THRESHOLD_SQ) {
             float rho_i = sorted_density[i];
             float rho0_i = c_materials[mat_id].rest_density;
             float sr_i = sorted_shear_rate[i];
-            if (rho_i > GRANULAR_RHO_FACTOR * rho0_i && sr_i < GRANULAR_GAMMA_MIN) {
+            float accel_eq = accel.x * accel.x + accel.y * accel.y + accel.z * accel.z;
+            if (rho_i > GRANULAR_RHO_FACTOR * rho0_i && sr_i < GRANULAR_GAMMA_MIN
+                && accel_eq < GRANULAR_ACCEL_REST_SQ) {
                 vel_new.x = 0.0f;
                 vel_new.y = 0.0f;
                 vel_new.z = 0.0f;
@@ -481,12 +521,21 @@ void K_Integrate(
 
     // --- Sleep counter update ---
     // Check if particle should start sleeping (low velocity AND low shear rate)
+    // GRANULAR also requires equilibrium (no large unbalanced forces)
     float vel_sq_sleep = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
     float sr_sleep = sorted_shear_rate[i];
 
     if (vel_sq_sleep < V_SLEEP_SQ && sr_sleep < GAMMA_SLEEP) {
-        // Conditions met: increment sleep counter (saturate at 255)
-        if (sc < 255) sc++;
+        bool can_sleep = true;
+        if (behavior == GRANULAR) {
+            float a_eq = accel.x * accel.x + accel.y * accel.y + accel.z * accel.z;
+            can_sleep = (a_eq < GRANULAR_ACCEL_REST_SQ);
+        }
+        if (can_sleep) {
+            if (sc < 255) sc++;
+        } else {
+            sc = 0;
+        }
     } else {
         // Conditions not met: reset counter
         sc = 0;
@@ -504,12 +553,46 @@ void K_Integrate(
     temp = fmaxf(T_MIN, fminf(temp, T_MAX));
 
     // --- Compute color ---
+    // color.w encodes behavior class for SSFR shader filtering
     float4 color;
     if (behavior == FLUID) {
         float rho_i = sorted_density[i];
         color = compute_fluid_color(mat_id, temp, hlth, pos_new.y, vel_sq_sleep, rho_i);
     } else {
-        color = compute_color(mat_id, temp, hlth);
+        color = compute_color(mat_id, temp, hlth, behavior);
+    }
+
+    // --- Dye update: dye += dye_rate * dt ---
+    float4 dye = sorted_particle_dye[i];
+    float4 drate = sorted_dye_rate[i];
+    float dt_dye = c_sim.dt;
+    dye.x = fmaxf(0.0f, fminf(1.0f, dye.x + drate.x * dt_dye));
+    dye.y = fmaxf(0.0f, fminf(1.0f, dye.y + drate.y * dt_dye));
+    dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt_dye));
+
+    // --- Micropolar angular velocity update ---
+    // Relaxation: omega_new = omega + dt * nu_t * (0.5 * curl_v - omega)
+    // curl_v (vorticity) computed in step1, stored in sorted_vorticity.xyz
+    // Only for FLUID particles (GRANULAR/GAS don't benefit from micropolar)
+    float4 ang_vel = sorted_angular_velocity[i];
+    if (behavior == FLUID) {
+        float4 vort = sorted_vorticity[i];
+        float nu_t = MICROPOLAR_NU_T;
+        ang_vel.x += dt * nu_t * (0.5f * vort.x - ang_vel.x);
+        ang_vel.y += dt * nu_t * (0.5f * vort.y - ang_vel.y);
+        ang_vel.z += dt * nu_t * (0.5f * vort.z - ang_vel.z);
+    }
+
+    // --- Track max displacement for grid reuse (Phase 9.2) ---
+    // displacement^2 = |pos_new - pos_old|^2
+    // Uses float-as-uint trick: positive IEEE754 floats have monotonic bit order,
+    // so atomicMax on __float_as_uint gives the max float value.
+    if (max_displacement_out) {
+        float dx_d = pos_new.x - pos.x;
+        float dy_d = pos_new.y - pos.y;
+        float dz_d = pos_new.z - pos.z;
+        float disp_sq = dx_d * dx_d + dy_d * dy_d + dz_d * dz_d;
+        atomicMax(max_displacement_out, __float_as_uint(disp_sq));
     }
 
     // --- Write to UNSORTED arrays ---
@@ -519,4 +602,6 @@ void K_Integrate(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
+    particle_dye_out[orig_idx] = dye;
+    angular_velocity_out[orig_idx] = ang_vel;
 }
