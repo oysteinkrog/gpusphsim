@@ -38,6 +38,7 @@ import reactions
 import spawn
 import wake
 import foam
+import implicit_st
 
 # Adaptive timestep limits
 DT_MIN = 1e-5
@@ -145,6 +146,13 @@ class Simulation:
             world.max_particles
         )
 
+        # --- Implicit surface tension ---
+        self.ist_enabled = False
+        self.ist_sigma = 0.5
+        self.ist_iterations = 5
+        self.ist_surface_threshold = 25.0
+        self._IST_MAX_PARTICLES = 100_000  # disable above this count
+
         # Cached sim_params for dt updates (set during _upload_constants)
         self._sim_params: Optional[np.ndarray] = None
 
@@ -227,6 +235,8 @@ class Simulation:
         elif self._profile.solver_type == SolverType.DFSPH:
             import dfsph_solver
             dfsph_solver.upload_sim_params(self._sim_params)
+        # IST module also reads c_sim
+        implicit_st.upload_sim_params(self._sim_params)
         # Update foam dt
         if self._foam_params is not None:
             self._foam_params[0]["dt"] = np.float32(new_dt)
@@ -337,6 +347,25 @@ class Simulation:
         foam.upload_foam_params(foam_params)
         foam.upload_sim_params(sim_params)
 
+        # --- implicit_st module: c_grid, c_sim, c_precalc, c_materials, c_ist ---
+        implicit_st.upload_grid_params(grid_params)
+        implicit_st.upload_sim_params(sim_params)
+        implicit_st.upload_precalc_params(precalc_params)
+        implicit_st.upload_materials(materials_data)
+        implicit_st.upload_ist_params(
+            sigma=self.ist_sigma,
+            surface_threshold=self.ist_surface_threshold,
+            num_iterations=self.ist_iterations,
+        )
+
+    def update_ist_params(self) -> None:
+        """Re-upload IST constant memory after UI parameter change."""
+        implicit_st.upload_ist_params(
+            sigma=self.ist_sigma,
+            surface_threshold=self.ist_surface_threshold,
+            num_iterations=self.ist_iterations,
+        )
+
     @property
     def solver_profile(self) -> SolverProfile:
         return self._profile
@@ -369,7 +398,11 @@ class Simulation:
             import pbf_solver
             self._upload_solver_constants(pbf_solver)
             pbf_solver.upload_pbf_params(profile)
-            granular_params = step2.build_granular_params()
+            # PBF uses position-space friction (much lower ratio than force-space)
+            granular_params = step2.build_granular_params(
+                tan_phi_f=profile.pbf_friction_ratio,
+                cohesion=profile.pbf_friction_cohesion,
+            )
             pbf_solver.upload_granular_params(granular_params)
         elif profile.solver_type == SolverType.DFSPH:
             import dfsph_solver
@@ -580,6 +613,24 @@ class Simulation:
             sph_force_out=w.sorted_sph_force,
             veleval_out=w.sorted_veleval,
         )
+
+        # Implicit surface tension (WCSPH only, quality mode for < 100K particles)
+        if self.ist_enabled and n < self._IST_MAX_PARTICLES:
+            result = implicit_st.run_implicit_st(
+                w.sorted_velocity[:n],
+                w.sorted_veleval[:n],  # reuse veleval as scratch (overwritten by integrate anyway)
+                w.sorted_position[:n],
+                w.sorted_density[:n],
+                w.sorted_mass[:n],
+                w.sorted_packed_info[:n],
+                w.sorted_normal[:n],
+                self._cell_start,
+                self._cell_end,
+                num_iterations=self.ist_iterations,
+            )
+            # If result ended up in veleval (odd iteration count), copy back to velocity
+            if result.data.ptr != w.sorted_velocity[:n].data.ptr:
+                w.sorted_velocity[:n] = result
 
         # Integrate (pass max_displacement for grid reuse tracking)
         integrate.integrate(

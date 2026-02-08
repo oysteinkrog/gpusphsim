@@ -597,11 +597,13 @@ void K_PBF_ApplyDelta(
 
     float3 pos = make_float3(pos4.x + d4.x, pos4.y + d4.y, pos4.z + d4.z);
 
-    // GRANULAR: position-space Drucker-Prager friction using pressure normal.
-    // Force-space tan(phi_f)=0.78 allows 78% tangential -- far too permissive
-    // for position corrections which directly displace particles each iteration.
-    // Use a much tighter ratio (0.15) + static friction dead zone to prevent
-    // PBF incompressibility corrections from spreading granular material.
+    // GRANULAR: Drucker-Prager yield surface using pressure normal (density gradient).
+    // The density gradient points into the pile (maximum density increase direction),
+    // giving us the "pressure normal" for 3D normal/tangential decomposition.
+    // Drucker-Prager criterion: |delta_t| <= tan(phi_f) * |delta_n| + cohesion
+    // where tan(phi_f) and cohesion are set in c_granular (uploaded per-solver).
+    // PBF position-space needs much lower tan_phi_f (~0.25) than force-space (~0.78)
+    // because corrections directly displace particles each iteration.
     if (GET_BEHAVIOR(pi) == GRANULAR) {
         float4 pn4 = __ldg(&pressure_normal[i]);
         float3 n = make_float3(pn4.x, pn4.y, pn4.z);
@@ -616,20 +618,12 @@ void K_PBF_ApplyDelta(
             float tang_sq = delta_t.x*delta_t.x + delta_t.y*delta_t.y + delta_t.z*delta_t.z;
             float norm_mag = fabsf(d_dot_n);
 
-            // Position-space friction ratio (~8.5° effective angle)
-            // Much stricter than force-space tan(38°)=0.78 because PBF corrections
-            // directly move particles -- accumulated tangential drift causes water-like
-            // spreading at tan(38°).
-            #define PBF_POS_FRICTION  0.15f
-            #define PBF_STATIC_THRESH 0.00005f  // 0.05mm: below this normal, zero tangential
+            // Drucker-Prager: |delta_t| <= tan(phi_f) * |delta_n| + cohesion
+            float max_tang = c_granular.tan_phi_f * norm_mag + c_granular.cohesion;
 
-            float max_tang;
-            if (norm_mag < PBF_STATIC_THRESH) {
-                // Static friction: near-equilibrium, suppress all tangential
+            // Static friction dead zone: below minimum normal compression, zero tangential
+            if (norm_mag < 5e-5f) {
                 max_tang = 0.0f;
-            } else {
-                // Dynamic friction: allow limited tangential
-                max_tang = PBF_POS_FRICTION * norm_mag;
             }
 
             if (tang_sq > max_tang * max_tang) {

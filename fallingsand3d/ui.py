@@ -550,6 +550,41 @@ class UI:
                 if renderer.foam_enabled:
                     imgui.text(f"Foam particles: {renderer.num_foam:,}")
 
+                imgui.separator()
+
+                # Implicit surface tension controls (WCSPH only, < 100K)
+                from solver_profiles import SolverType
+                is_wcsph = sim._profile.solver_type == SolverType.WCSPH
+                n_active = sim.world._high_water
+                if not is_wcsph:
+                    imgui.begin_disabled()
+                changed, new_ist = imgui.checkbox(
+                    "Implicit ST (< 100K)", sim.ist_enabled,
+                )
+                if changed:
+                    sim.ist_enabled = new_ist
+                if not is_wcsph:
+                    imgui.end_disabled()
+
+                if sim.ist_enabled and is_wcsph:
+                    if n_active >= sim._IST_MAX_PARTICLES:
+                        imgui.text_colored(
+                            imgui.ImVec4(1.0, 0.5, 0.0, 1.0),
+                            f"Disabled: {n_active:,} > {sim._IST_MAX_PARTICLES:,}",
+                        )
+                    changed, val = imgui.slider_float(
+                        "ST Sigma", sim.ist_sigma, 0.01, 2.0, "%.2f",
+                    )
+                    if changed:
+                        sim.ist_sigma = val
+                        sim.update_ist_params()
+                    changed, val = imgui.slider_int(
+                        "ST Iters", sim.ist_iterations, 1, 20,
+                    )
+                    if changed:
+                        sim.ist_iterations = val
+                        sim.update_ist_params()
+
             imgui.end()
 
         # --- Kernel Timing Panel ---

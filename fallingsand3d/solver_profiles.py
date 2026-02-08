@@ -34,6 +34,8 @@ class SolverProfile:
     pbf_s_corr_n: int = 4         # artificial pressure exponent
     pbf_s_corr_dq: float = 0.3    # artificial pressure reference distance (fraction of h)
     pbf_xsph_c: float = 0.01      # XSPH viscosity factor for PBF
+    pbf_friction_ratio: float = 0.25  # position-space tan(phi_f) for PBF granular DP yield
+    pbf_friction_cohesion: float = 0.0  # position-space cohesion for PBF granular (meters)
     # DFSPH params
     dfsph_div_iters: int = 2       # divergence solver iterations
     dfsph_dens_iters: int = 8      # density solver iterations (Jacobi on pressure)

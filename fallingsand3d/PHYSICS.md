@@ -820,14 +820,23 @@ The tangential component is clamped to the Drucker-Prager friction cone.
 
 #### 12.7.3 Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `tan_phi_f` | 0.625 (= tan(32°)) | Friction cone slope |
-| `cohesion` | 0.001 | Small cohesion for stability |
+Parameters are read from `c_granular` constant memory (uploaded per-solver with
+different values for PBF vs WCSPH):
 
-The friction angle `phi_f = 32°` gives an angle of repose of ~32° for dry sand
-(realistic range: 25-40°). The old axis-aligned clamp with `mu_s = 0.36`
-(= tan(~20°)) gave only ~20° angle of repose.
+| Parameter | PBF Default | WCSPH Default | Description |
+|-----------|-------------|---------------|-------------|
+| `tan_phi_f` | 0.25 (= tan(14°)) | 0.781 (= tan(38°)) | Friction cone slope |
+| `cohesion` | 0.0 | 0.002 | Free tangential (meters) |
+
+**Why PBF needs a lower ratio than WCSPH**: In WCSPH, `tan_phi_f` relates
+normal force to tangential force limit (force-space). In PBF, the corrections
+are position deltas — each iteration directly moves particles. With 4 iterations
+per frame, `tan(38°)=0.781` in position space allows catastrophic tangential
+spreading (sand behaves like water). Position-space `tan(14°)=0.25` produces
+realistic 25-35° angle of repose.
+
+A static friction dead zone (`norm_mag < 5e-5`) zeroes all tangential correction
+when the normal compression is negligible (< 0.05mm), preventing numerical creep.
 
 #### 12.7.4 Comparison with XPBI
 
@@ -837,9 +846,47 @@ This implementation achieves similar angle-of-repose results without the
 deformation gradient overhead by leveraging the density gradient already
 available from the PBF constraint computation.
 
-**Source**: `pbf_solver.cu:K_PBF_ComputeLambda` (pressure normal output),
-`pbf_solver.cu:K_PBF_ApplyDelta` (Drucker-Prager friction),
-`step2.py:build_granular_params()` (tan_phi_f, cohesion parameters)
+**Source**: `pbf_solver.cu:K_PBF_ApplyDelta` (Drucker-Prager friction),
+`pbf_solver.cu:K_PBF_ComputeLambda` (pressure normal output),
+`solver_profiles.py` (`pbf_friction_ratio`, `pbf_friction_cohesion`),
+`step2.py:build_granular_params()` (builds params uploaded to PBF module)
+
+---
+
+## 12.8 Implicit Surface Tension (Quality Mode)
+
+Iterative Jacobi smoothing of surface particle velocities for smoother, more
+cohesive fluid surfaces. WCSPH only, limited to < 100K particles.
+
+### Algorithm
+
+For each Jacobi iteration (5-20 per substep):
+```
+For each FLUID particle i with neighbor_count < surface_threshold:
+  w_surface = 1 - neighbor_count / surface_threshold
+  dv_i = sigma * w_surface * SUM_j (m_j/rho_j) * (v_j - v_i) * W_poly6(r_ij)
+  v_new_i = v_old_i + dv_i
+```
+
+Surface particles (fewer neighbors) receive stronger smoothing. Interior
+particles pass through unchanged. Uses ping-pong velocity buffers for proper
+Jacobi iteration (read from old, write to new).
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `sigma` | 0.5 | Surface tension strength (higher = stronger smoothing) |
+| `surface_threshold` | 25.0 | Neighbor count below which particle is "surface" |
+| `num_iterations` | 5 | Jacobi iterations per substep |
+
+### Pipeline Position
+
+Runs between Step2 (force computation) and Integrate in the WCSPH pipeline.
+Modifies `sorted_velocity` in-place before integration uses it. Uses
+`sorted_veleval` as scratch buffer for ping-pong (overwritten by integrate).
+
+**Source**: `implicit_st.cu:K_IST_Iterate`, `implicit_st.py`, `simulation.py`
 
 ---
 
