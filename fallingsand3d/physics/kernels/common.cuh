@@ -195,6 +195,9 @@ __constant__ PrecalcParams c_precalc;
  * float4 arrays (w component unused, set to 0):
  *   position, velocity, veleval, sph_force, color
  *
+ * half4 arrays (FP16 copies for bandwidth reduction in neighbor loops):
+ *   sorted_velocity_h -- populated during sort, read in step1/step2
+ *
  * float arrays:
  *   density, mass, temperature, health, lifetime,
  *   shear_rate, exposure_heat, exposure_corrode
@@ -205,5 +208,33 @@ __constant__ PrecalcParams c_precalc;
  * uint8 arrays:
  *   sleep_counter
  * ====================================================================== */
+
+/* ======================================================================
+ * FP16 helpers -- load/store half4 as float4 via __half2.
+ *
+ * Half4 is stored as 8 bytes (4 x FP16). Loaded as uint2 (one 64-bit load)
+ * and converted to float4 via __half2float. Computation stays FP32.
+ * ====================================================================== */
+
+#include <cuda_fp16.h>
+
+__device__ inline float4 load_half4(const void* ptr) {
+    uint2 raw = __ldg((const uint2*)ptr);
+    __half2 xy = *reinterpret_cast<const __half2*>(&raw.x);
+    __half2 zw = *reinterpret_cast<const __half2*>(&raw.y);
+    return make_float4(
+        __low2float(xy), __high2float(xy),
+        __low2float(zw), __high2float(zw)
+    );
+}
+
+__device__ inline void store_half4(void* ptr, float4 v) {
+    __half2 xy = __floats2half2_rn(v.x, v.y);
+    __half2 zw = __floats2half2_rn(v.z, v.w);
+    uint2 raw;
+    raw.x = *reinterpret_cast<const uint*>(&xy);
+    raw.y = *reinterpret_cast<const uint*>(&zw);
+    *reinterpret_cast<uint2*>(ptr) = raw;
+}
 
 #endif /* FALLINGSAND3D_COMMON_CUH */

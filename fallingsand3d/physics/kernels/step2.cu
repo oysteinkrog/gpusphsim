@@ -159,7 +159,8 @@ void K_Step2(
     const float4*   __restrict__ vorticity_in,   // (omega_x, omega_y, omega_z, |omega|) from Step1
     const float4*   __restrict__ normal_in,      // (n_x, n_y, n_z, neighbor_count) from Step1
     float4*         __restrict__ sph_force_out,  // output: accumulated SPH force
-    float4*         __restrict__ veleval_out     // output: XSPH-corrected veleval
+    float4*         __restrict__ veleval_out,    // output: XSPH-corrected veleval
+    const void*     __restrict__ velocity_h      // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -246,7 +247,9 @@ void K_Step2(
                     // on in-range neighbors more than compensate.
                     float4 pos4_j = __ldg(&position[index_j]);
                     uint pi_j = __ldg(&packed_info[index_j]);
-                    float4 vel4_j = __ldg(&velocity[index_j]);
+                    // OPT-4.3: read from FP16 buffer (8B vs 16B per neighbor)
+                    float4 vel4_j = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
+                                               : __ldg(&velocity[index_j]);
                     float m_j = __ldg(&mass[index_j]);
 
                     float3 r = make_float3(

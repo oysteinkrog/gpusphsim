@@ -110,7 +110,9 @@ void K_ScatterReorder(
     unsigned char* __restrict__ sleep_counter_out,
     float*        __restrict__ kappa_out,
     float4*       __restrict__ particle_dye_out,
-    float4*       __restrict__ angular_velocity_out
+    float4*       __restrict__ angular_velocity_out,
+    // FP16 velocity output (OPT-4.3: half bandwidth in neighbor loops)
+    void*         __restrict__ velocity_h_out       // half4, stored as 8 bytes per particle
 ) {
     const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numParticles) return;
@@ -129,7 +131,8 @@ void K_ScatterReorder(
 
     // Gather and scatter all particle arrays
     position_out[sorted_idx]      = __ldg(&position_in[idx]);
-    velocity_out[sorted_idx]      = __ldg(&velocity_in[idx]);
+    float4 vel = __ldg(&velocity_in[idx]);
+    velocity_out[sorted_idx]      = vel;
     mass_out[sorted_idx]          = __ldg(&mass_in[idx]);
     packed_info_out[sorted_idx]   = __ldg(&packed_info_in[idx]);
     temperature_out[sorted_idx]   = __ldg(&temperature_in[idx]);
@@ -139,6 +142,9 @@ void K_ScatterReorder(
     kappa_out[sorted_idx]         = __ldg(&kappa_in[idx]);
     particle_dye_out[sorted_idx]  = __ldg(&particle_dye_in[idx]);
     angular_velocity_out[sorted_idx] = __ldg(&angular_velocity_in[idx]);
+
+    // Also write FP16 velocity copy for neighbor loop bandwidth reduction (OPT-4.3)
+    store_half4((uint2*)velocity_h_out + sorted_idx, vel);
 }
 
 /* ======================================================================
@@ -177,7 +183,9 @@ void K_GatherReorder(
     unsigned char* __restrict__ sleep_counter_out,
     float*        __restrict__ kappa_out,
     float4*       __restrict__ particle_dye_out,
-    float4*       __restrict__ angular_velocity_out
+    float4*       __restrict__ angular_velocity_out,
+    // FP16 velocity output (OPT-4.3)
+    void*         __restrict__ velocity_h_out
 ) {
     const uint sorted_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (sorted_idx >= numParticles) return;
@@ -186,7 +194,8 @@ void K_GatherReorder(
 
     // Simple indexed gather: coalesced writes, scattered reads through __ldg
     position_out[sorted_idx]      = __ldg(&position_in[orig_idx]);
-    velocity_out[sorted_idx]      = __ldg(&velocity_in[orig_idx]);
+    float4 vel = __ldg(&velocity_in[orig_idx]);
+    velocity_out[sorted_idx]      = vel;
     mass_out[sorted_idx]          = __ldg(&mass_in[orig_idx]);
     packed_info_out[sorted_idx]   = __ldg(&packed_info_in[orig_idx]);
     temperature_out[sorted_idx]   = __ldg(&temperature_in[orig_idx]);
@@ -196,6 +205,9 @@ void K_GatherReorder(
     kappa_out[sorted_idx]         = __ldg(&kappa_in[orig_idx]);
     particle_dye_out[sorted_idx]  = __ldg(&particle_dye_in[orig_idx]);
     angular_velocity_out[sorted_idx] = __ldg(&angular_velocity_in[orig_idx]);
+
+    // FP16 velocity copy (OPT-4.3)
+    store_half4((uint2*)velocity_h_out + sorted_idx, vel);
 }
 
 /* ======================================================================

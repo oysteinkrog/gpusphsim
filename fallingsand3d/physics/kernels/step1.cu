@@ -53,7 +53,8 @@ void K_Step1(
     float4*         __restrict__ vorticity_out,        // output: (omega_x, omega_y, omega_z, |omega|) -- FLUID only
     float4*         __restrict__ normal_out,           // output: (n_x, n_y, n_z, neighbor_count) -- FLUID only
     const float4*   __restrict__ particle_dye_in,      // input: particle dye color (r, g, b, unused)
-    float4*         __restrict__ dye_rate_out          // output: dye diffusion rate (dr, dg, db, unused)
+    float4*         __restrict__ dye_rate_out,         // output: dye diffusion rate (dr, dg, db, unused)
+    const void*     __restrict__ velocity_h            // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -202,7 +203,9 @@ void K_Step1(
 
                             if (is_fluid) {
                                 // Vorticity: omega += V_j * (v_j - v_i) x gradW
-                                float4 vel4_j_v = __ldg(&velocity[index_j]);
+                                // OPT-4.3: read from FP16 buffer (8B vs 16B per neighbor)
+                                float4 vel4_j_v = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
+                                                             : __ldg(&velocity[index_j]);
                                 float dvx_v = vel4_j_v.x - vel_i.x;
                                 float dvy_v = vel4_j_v.y - vel_i.y;
                                 float dvz_v = vel4_j_v.z - vel_i.z;
@@ -246,7 +249,9 @@ void K_Step1(
                             float gWz = grad_scalar * r.z;
 
                             // dv = v_i - v_j
-                            float4 vel4_j = __ldg(&velocity[index_j]);
+                            // OPT-4.3: read from FP16 buffer (8B vs 16B per neighbor)
+                            float4 vel4_j = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
+                                                       : __ldg(&velocity[index_j]);
                             float dvx = vel_i.x - vel4_j.x;
                             float dvy = vel_i.y - vel4_j.y;
                             float dvz = vel_i.z - vel4_j.z;

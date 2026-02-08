@@ -263,6 +263,7 @@ def compute_step1(
     normal_out: Optional[cupy.ndarray] = None,
     particle_dye_in: Optional[cupy.ndarray] = None,
     dye_rate_out: Optional[cupy.ndarray] = None,
+    velocity_h: Optional[cupy.ndarray] = None,
 ) -> tuple:
     """Launch K_Step1 and return (density, shear_rate, dTdt, exposure_heat, exposure_corrode).
 
@@ -327,6 +328,8 @@ def compute_step1(
 
     # density_in can be None (first frame) -- pass null pointer
     density_in_ptr = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
+    # velocity_h can be None -- pass null pointer (kernel falls back to float4 reads)
+    velocity_h_ptr = velocity_h if velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32)
 
     module = _get_module()
     kernel = module.get_function("K_Step1")  # type: ignore[union-attr]
@@ -356,6 +359,7 @@ def compute_step1(
             normal_out,
             particle_dye_in,
             dye_rate_out,
+            velocity_h_ptr,
         ),
     )
 

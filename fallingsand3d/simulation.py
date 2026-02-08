@@ -467,6 +467,7 @@ class Simulation:
                 sorted_kappa=w.sorted_kappa,
                 sorted_particle_dye=w.sorted_particle_dye,
                 sorted_angular_velocity=w.sorted_angular_velocity,
+                sorted_velocity_h=w.sorted_velocity_h,
             )
             return
 
@@ -510,6 +511,7 @@ class Simulation:
             sorted_kappa=w.sorted_kappa,
             sorted_particle_dye=w.sorted_particle_dye,
             sorted_angular_velocity=w.sorted_angular_velocity,
+            sorted_velocity_h=w.sorted_velocity_h,
         )
 
     def _run_reactions_spawn(self, n: int) -> None:
@@ -590,6 +592,7 @@ class Simulation:
             normal_out=w.sorted_normal,
             particle_dye_in=w.sorted_particle_dye[:n],
             dye_rate_out=w.sorted_dye_rate,
+            velocity_h=w.sorted_velocity_h,
         )
 
         # Pack density into position.w for Step2 (OPT-4.1)
@@ -612,6 +615,7 @@ class Simulation:
             normal_in=w.sorted_normal,
             sph_force_out=w.sorted_sph_force,
             veleval_out=w.sorted_veleval,
+            velocity_h=w.sorted_velocity_h,
         )
 
         # Implicit surface tension (WCSPH only, quality mode for < 100K particles)
@@ -1001,6 +1005,7 @@ class Simulation:
             normal_out=w.sorted_normal,
             particle_dye_in=w.sorted_particle_dye[:n],
             dye_rate_out=w.sorted_dye_rate,
+            velocity_h=w.sorted_velocity_h,
         )
         mark("step1")
 
@@ -1040,6 +1045,7 @@ class Simulation:
             normal_in=w.sorted_normal,
             sph_force_out=w.sorted_sph_force,
             veleval_out=w.sorted_veleval,
+            velocity_h=w.sorted_velocity_h,
         )
         mark("step2")
 

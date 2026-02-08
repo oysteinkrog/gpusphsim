@@ -118,6 +118,10 @@ class World:
         # Persistent (like velocity), scattered through sort pipeline
         self.angular_velocity = cp.zeros((n, 4), dtype=cp.float32)
         self.sorted_angular_velocity = cp.zeros((n, 4), dtype=cp.float32)
+        # FP16 velocity copy for neighbor loop bandwidth reduction (OPT-4.3)
+        # Written during sort (counting_sort), read by step1/step2 neighbor loops.
+        # 8 bytes per particle (half4) vs 16 bytes (float4) = 50% bandwidth savings on velocity reads.
+        self.sorted_velocity_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
         # Sort index arrays (hash + sorted versions)
         self.hashes = cp.zeros(n, dtype=cp.uint32)
         self.sorted_hashes = cp.zeros(n, dtype=cp.uint32)

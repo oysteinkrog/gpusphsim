@@ -237,6 +237,7 @@ def compute_step2(
     normal_in: "Optional[cupy.ndarray]" = None,
     sph_force_out: "Optional[cupy.ndarray]" = None,
     veleval_out: "Optional[cupy.ndarray]" = None,
+    velocity_h: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Step2 and return (sph_force, veleval_out).
 
@@ -286,6 +287,9 @@ def compute_step2(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
 
+    # velocity_h can be None -- pass null pointer (kernel falls back to float4 reads)
+    velocity_h_ptr = velocity_h if velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32)
+
     kernel(
         grid,
         block,
@@ -302,6 +306,7 @@ def compute_step2(
             normal_in,
             sph_force_out,
             veleval_out,
+            velocity_h_ptr,
         ),
     )
 

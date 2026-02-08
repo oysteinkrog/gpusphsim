@@ -146,6 +146,8 @@ def counting_sort_full(
     sorted_kappa: cupy.ndarray,
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
+    # FP16 velocity output (OPT-4.3)
+    sorted_velocity_h: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Run the full counting sort pipeline (hash + histogram + prefix_sum + scatter + cell_end).
 
@@ -229,6 +231,8 @@ def counting_sort_full(
         sorted_kappa,
         sorted_particle_dye,
         sorted_angular_velocity,
+        # FP16 velocity output (OPT-4.3)
+        sorted_velocity_h if sorted_velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32),
     ))
 
     # --- Phase 5: Build cell_end ---
@@ -268,6 +272,8 @@ def gather_reorder(
     sorted_kappa: cupy.ndarray,
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
+    # FP16 velocity output (OPT-4.3)
+    sorted_velocity_h: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Re-scatter unsorted data to sorted order using existing sort_perm.
 
@@ -311,4 +317,6 @@ def gather_reorder(
         sorted_kappa,
         sorted_particle_dye,
         sorted_angular_velocity,
+        # FP16 velocity output (OPT-4.3)
+        sorted_velocity_h if sorted_velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32),
     ))
