@@ -4,7 +4,7 @@ in vec2 vUV;
 
 uniform sampler2D uDepthTex;      // smoothed eye-space depth (R32F)
 uniform sampler2D uNormalTex;     // eye-space normal (RGB16F)
-uniform sampler2D uThicknessTex;  // accumulated thickness (R16F)
+uniform sampler2D uThicknessTex;  // accumulated thickness (RGBA16F: color*t, t)
 uniform sampler2D uSceneTex;      // background scene (for refraction)
 uniform samplerCube uSkybox;     // cubemap for environment reflections
 
@@ -13,9 +13,7 @@ uniform mat3 uViewRotInv;        // inverse view rotation (eye->world for reflec
 uniform vec2 uTexelSize;
 
 // Material parameters
-uniform vec3 uAbsorption;     // Beer-Lambert absorption color (default: blue tint)
 uniform float uAbsorptionScale;  // absorption strength multiplier
-uniform vec3 uFluidColor;    // base fluid color
 uniform float uFresnelPower;  // Fresnel exponent (default 5.0)
 uniform float uFresnelBias;   // Fresnel minimum reflectance (default 0.02)
 uniform float uSpecularPower; // specular exponent (default 64.0)
@@ -40,7 +38,11 @@ void main() {
     }
 
     vec3 normal = texture(uNormalTex, vUV).xyz;
-    float thickness = texture(uThicknessTex, vUV).r;
+    vec4 thick_raw = texture(uThicknessTex, vUV);
+    float thickness = thick_raw.a;
+
+    // Recover per-pixel material color from color-weighted thickness
+    vec3 materialColor = thick_raw.rgb / max(thick_raw.a, 0.001);
 
     // Reconstruct eye-space position
     vec3 eyePos = uvToEye(vUV, depth);
@@ -52,26 +54,34 @@ void main() {
     fresnel = clamp(fresnel, 0.0, 1.0);
 
     // --- Beer-Lambert absorption ---
-    // Transmitted light is attenuated exponentially with thickness
-    vec3 absorption = exp(-uAbsorption * thickness * uAbsorptionScale);
+    // Base absorption from color complement + minimum floor for opaque materials
+    // Floor of 2.0 ensures even bright materials (sand, stone) are visibly opaque
+    vec3 absorption = max(vec3(1.0) - materialColor, vec3(0.3)) * uAbsorptionScale;
+    vec3 transmittance = exp(-absorption * thickness);
+
+    // Material brightness: bright opaque materials (sand, stone) need less refraction
+    float brightness = (materialColor.r + materialColor.g + materialColor.b) / 3.0;
 
     // --- Refraction (simple screen-space offset) ---
-    vec2 refractionOffset = normal.xy * uTexelSize * 20.0;
+    // Reduce refraction for opaque-looking materials (high brightness = solid look)
+    float refrScale = mix(20.0, 5.0, brightness);
+    vec2 refractionOffset = normal.xy * uTexelSize * refrScale;
     vec3 background = texture(uSceneTex, vUV + refractionOffset).rgb;
 
     // Apply absorption to refracted background
-    vec3 refracted = background * absorption * uFluidColor;
+    vec3 refracted = background * transmittance * materialColor;
 
     // --- Diffuse lighting ---
     // Directional light from upper-right (eye-space)
     vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
     float NdotL = max(dot(normal, lightDir), 0.0);
-    vec3 diffuse = uFluidColor * NdotL * 0.4;
+    vec3 diffuse = materialColor * NdotL * 0.5;
 
     // --- Body color from absorption ---
-    // Thick regions show the fluid's own color (light scattered within the medium)
-    float opacity = 1.0 - (absorption.r + absorption.g + absorption.b) / 3.0;
-    vec3 bodyColor = uFluidColor * opacity * 0.35;
+    // Thick regions show the material's own color (light scattered within the medium)
+    // Stronger body color contribution makes opaque materials look solid
+    float opacity = 1.0 - (transmittance.r + transmittance.g + transmittance.b) / 3.0;
+    vec3 bodyColor = materialColor * opacity * 0.5;
 
     // --- Specular highlight ---
     vec3 halfVec = normalize(lightDir + viewDir);
@@ -85,7 +95,9 @@ void main() {
     vec3 envColor = texture(uSkybox, worldReflect).rgb;
 
     // --- Combine: Fresnel blend between refraction and reflection ---
-    vec3 color = mix(refracted + diffuse + bodyColor, envColor, fresnel) + specular;
+    // Reduce reflectivity for opaque materials (sand, stone don't reflect like water)
+    float reflectivity = mix(1.0, 0.15, brightness);
+    vec3 color = mix(refracted + diffuse + bodyColor, envColor, fresnel * reflectivity) + specular * reflectivity;
 
     // Slight edge darkening for depth cue
     float edge = 1.0 - pow(1.0 - NdotV, 2.0);

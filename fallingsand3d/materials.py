@@ -65,7 +65,7 @@ assert INTERACTION_DTYPE.itemsize == 8, (
 )
 
 MAX_MATERIALS = 32  # slots in constant memory (IDs 0-31)
-NUM_DEFINED = 16  # IDs 0-15 are defined; 16-31 reserved (zeroed)
+NUM_DEFINED = 18  # IDs 0-17 are defined; 18-31 reserved (zeroed)
 
 # ---------------------------------------------------------------------------
 # BehaviorClass enum (mirrors common.cuh)
@@ -155,9 +155,11 @@ STEAM = 12
 SMOKE = 13
 FIRE = 14
 GUNPOWDER = 15
+WET_SAND = 16
+MUD = 17
 
 # ---------------------------------------------------------------------------
-# Material definitions (16 entries, IDs 0-15)
+# Material definitions (18 entries, IDs 0-17)
 #
 # Property values chosen for a falling-sand / multi-material SPH game:
 #   - rest_density in kg/m^3 (approximate real-world)
@@ -316,6 +318,24 @@ MATERIALS: Dict[int, MaterialDef] = {
         behavior_class=GRANULAR,
         color_r=0.2, color_g=0.2, color_b=0.2,
     ),
+    WET_SAND: MaterialDef(
+        id=WET_SAND, name="WET_SAND",
+        rest_density=2600.0, eos_stiffness=5000.0, eos_gamma=7.0,
+        base_viscosity=2.0, friction_coeff=0.75, cohesion=0.15,
+        buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=1000.0,
+        temp_melt=1700.0, temp_boil=2500.0, temp_ignite=0.0,
+        behavior_class=GRANULAR,
+        color_r=0.55, color_g=0.48, color_b=0.30,
+    ),
+    MUD: MaterialDef(
+        id=MUD, name="MUD",
+        rest_density=2500.0, eos_stiffness=200.0, eos_gamma=7.0,
+        base_viscosity=50.0, friction_coeff=0.0, cohesion=0.0,
+        buoyancy_extra=0.0, thermal_conductivity=0.4, heat_capacity=1200.0,
+        temp_melt=1400.0, temp_boil=2200.0, temp_ignite=0.0,
+        behavior_class=FLUID,
+        color_r=0.35, color_g=0.22, color_b=0.10,
+    ),
 }
 
 # Materials that participate in reactions (phase transitions, combustion,
@@ -323,6 +343,7 @@ MATERIALS: Dict[int, MaterialDef] = {
 # in a scene, the reactions and spawn kernels can be skipped entirely.
 REACTIVE_MATERIAL_IDS = frozenset({
     ICE, LAVA, STEAM, FIRE, WOOD, OIL, GUNPOWDER, ACID, SMOKE,
+    SAND, WET_SAND, MUD,
 })
 
 assert len(MATERIALS) == NUM_DEFINED
@@ -350,37 +371,46 @@ assert len(MATERIALS) == NUM_DEFINED
 # (mat_a, mat_b): (reaction_rate, heat_exchange)
 _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     # water interactions
-    (WATER, LAVA, 0.5, 5.0),         # water + lava -> steam, cools lava
-    (WATER, ICE, 0.1, 2.0),          # water near ice -> freezing/melting
-    (WATER, FIRE, 0.8, 3.0),         # water extinguishes fire
-    (WATER, ACID, 0.05, 0.5),        # water dilutes acid slowly
+    (WATER, LAVA, 0.5, 50.0),        # water + lava -> steam, cools lava (high heat xfer)
+    (WATER, ICE, 0.1, 20.0),         # water near ice -> freezing/melting
+    (WATER, FIRE, 0.8, 30.0),        # water extinguishes fire
+    (WATER, ACID, 0.05, 5.0),        # water dilutes acid slowly
     # lava interactions
-    (LAVA, ICE, 0.6, 6.0),           # lava melts ice rapidly
-    (LAVA, WOOD, 0.7, 4.0),          # lava ignites wood
-    (LAVA, METAL, 0.05, 3.0),        # lava heats metal
-    (LAVA, STONE, 0.0, 2.0),         # lava heats stone (no reaction, just heat)
-    (LAVA, OIL, 0.8, 5.0),           # lava ignites oil
-    (LAVA, GUNPOWDER, 0.9, 5.0),     # lava detonates gunpowder
+    (LAVA, ICE, 0.6, 60.0),          # lava melts ice rapidly
+    (LAVA, WOOD, 0.7, 40.0),         # lava ignites wood
+    (LAVA, METAL, 0.05, 30.0),       # lava heats metal
+    (LAVA, STONE, 0.0, 20.0),        # lava heats stone (no reaction, just heat)
+    (LAVA, OIL, 0.8, 50.0),          # lava ignites oil
+    (LAVA, GUNPOWDER, 0.9, 50.0),    # lava detonates gunpowder
     # acid interactions
-    (ACID, STONE, 0.15, 0.3),        # acid slowly corrodes stone
-    (ACID, METAL, 0.3, 0.5),         # acid corrodes metal
-    (ACID, WOOD, 0.2, 0.2),          # acid corrodes wood
-    (ACID, DIRT, 0.1, 0.1),          # acid dissolves dirt
-    (ACID, ICE, 0.2, 1.0),           # acid melts ice
+    (ACID, STONE, 0.15, 3.0),        # acid slowly corrodes stone
+    (ACID, METAL, 0.3, 5.0),         # acid corrodes metal
+    (ACID, WOOD, 0.2, 2.0),          # acid corrodes wood
+    (ACID, DIRT, 0.1, 1.0),          # acid dissolves dirt
+    (ACID, ICE, 0.2, 10.0),          # acid melts ice
     # fire interactions
-    (FIRE, WOOD, 0.6, 2.0),          # fire burns wood
-    (FIRE, OIL, 0.8, 3.0),           # fire burns oil quickly
-    (FIRE, GUNPOWDER, 0.9, 4.0),     # fire detonates gunpowder
-    (FIRE, ICE, 0.3, 2.5),           # fire melts ice
-    (FIRE, SMOKE, 0.0, 0.5),         # fire produces smoke (heat only)
+    (FIRE, WOOD, 0.6, 20.0),         # fire burns wood
+    (FIRE, OIL, 0.8, 30.0),          # fire burns oil quickly
+    (FIRE, GUNPOWDER, 0.9, 40.0),    # fire detonates gunpowder
+    (FIRE, ICE, 0.3, 25.0),          # fire melts ice
+    (FIRE, SMOKE, 0.0, 5.0),         # fire produces smoke (heat only)
     # oil interactions
-    (OIL, WATER, 0.0, 0.3),          # oil floats on water (no reaction, low heat)
+    (OIL, WATER, 0.0, 3.0),          # oil floats on water (no reaction, low heat)
     # ice + steam
-    (ICE, STEAM, 0.2, 1.5),          # steam melts ice
+    (ICE, STEAM, 0.2, 15.0),         # steam melts ice
     # metal + fire
-    (FIRE, METAL, 0.0, 2.0),         # fire heats metal (no reaction, heat only)
+    (FIRE, METAL, 0.0, 20.0),        # fire heats metal (no reaction, heat only)
     # stone + fire
-    (FIRE, STONE, 0.0, 0.5),         # fire heats stone slowly
+    (FIRE, STONE, 0.0, 5.0),         # fire heats stone slowly
+    # sand wetting interactions
+    (SAND, WATER, 0.4, 5.0),         # water wets sand
+    (WET_SAND, WATER, 0.6, 5.0),     # water saturates wet sand -> mud
+    (WET_SAND, FIRE, 0.0, 25.0),     # fire dries wet sand
+    (WET_SAND, LAVA, 0.0, 40.0),     # lava dries wet sand
+    (MUD, FIRE, 0.0, 25.0),          # fire dries mud
+    (MUD, LAVA, 0.0, 40.0),          # lava dries mud
+    (MUD, WATER, 0.3, 3.0),          # mud stays wet near water
+    (MUD, ACID, 0.05, 3.0),          # acid corrodes mud
 ]
 
 
@@ -402,7 +432,7 @@ def build_interaction_matrix() -> np.ndarray:
 def build_material_array() -> np.ndarray:
     """Build the MaterialProps[32] array as a numpy structured array.
 
-    IDs 0-15 come from MATERIALS; IDs 16-31 are zeroed (reserved).
+    IDs 0-17 come from MATERIALS; IDs 18-31 are zeroed (reserved).
     """
     arr = np.zeros(MAX_MATERIALS, dtype=MATERIAL_PROPS_DTYPE)
     for mat_id, mat_def in MATERIALS.items():

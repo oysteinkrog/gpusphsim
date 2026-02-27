@@ -1,7 +1,8 @@
 #version 330 core
 
-// Same as particle.vert but culls FLUID particles (color.w < 0.1).
-// Used when SSFR is enabled: FLUID rendered via SSFR, others via point sprites.
+// When SSFR is enabled, ALL particles go through the SSFR pipeline.
+// This shader is kept for the non-SSFR fallback but culls everything
+// when called during SSFR Pass 0 (which now only draws skybox).
 
 layout(location = 0) in vec4 aPos;
 layout(location = 1) in vec4 aColor;

@@ -24,7 +24,7 @@ import glfw
 
 from materials import (
     MATERIALS, DEAD, STONE, SAND, DIRT, GRAVEL, WATER, OIL, LAVA, ACID,
-    WOOD, METAL, ICE, STEAM, SMOKE, FIRE, GUNPOWDER,
+    WOOD, METAL, ICE, STEAM, SMOKE, FIRE, GUNPOWDER, WET_SAND, MUD,
 )
 from presets import PRESETS
 from solver_profiles import PROFILES, PROFILE_NAMES
@@ -34,6 +34,7 @@ _PICKER_MATERIALS = [
     STONE, SAND, DIRT, GRAVEL, WATER,
     OIL, LAVA, ACID, WOOD, METAL,
     ICE, STEAM, SMOKE, FIRE, GUNPOWDER,
+    WET_SAND, MUD,
 ]
 
 # Quick-select mapping: keys 1-9 map to first 9 materials

@@ -35,7 +35,7 @@ struct MaterialProps {
     float rest_density;          // kg/m^3
     float eos_stiffness;         // Tait EOS k
     float eos_gamma;             // Tait EOS exponent (7 for liquid, 1 for gas)
-    float base_viscosity;        // Pa*s
+    float base_viscosity;        // viscosity coefficient (WCSPH: kinematic-like with force_scale; DFSPH: dynamic mu/rho_i)
     float friction_coeff;        // mu_s for granular friction
     float cohesion;              // cohesion coefficient
     float buoyancy_extra;        // extra buoyancy factor for gas
@@ -79,12 +79,12 @@ __constant__ Interaction   c_interactions[32][32];
  * without memory blowup.  Hash collisions cause extra (harmless) distance
  * checks in neighbor loops but never miss neighbors.
  *
- * 40 bytes total (10 fields × 4 bytes).
+ * 40 bytes total (10 fields x 4 bytes).
  * ====================================================================== */
 
 struct GridParams {
-    float3 grid_min;    // world-space minimum corner (for pos → cell)
-    float3 grid_delta;  // 1 / cell_size per axis (≈ 1/h)
+    float3 grid_min;    // world-space minimum corner (for pos -> cell)
+    float3 grid_delta;  // 1 / cell_size per axis (~1/h)
     uint   table_size;  // hash table size (power of 2, e.g. 262144)
     uint   table_mask;  // table_size - 1 (for & masking)
 };
@@ -94,11 +94,11 @@ __constant__ GridParams c_grid;
 /* ======================================================================
  * Spatial hash helpers -- shared by ALL kernel files.
  *
- * Position → cell:   int3 cell = calcGridCell(pos)
- * Cell → hash:       uint h = spatialHash(cell)
+ * Position -> cell:   int3 cell = calcGridCell(pos)
+ * Cell -> hash:       uint h = spatialHash(cell)
  * Neighbor cell hash: uint h = spatialHash(make_int3(cx+dx, cy+dy, cz+dz))
  *
- * No bounds checking needed — any integer cell coords produce a valid
+ * No bounds checking needed -- any integer cell coords produce a valid
  * hash in [0, table_size).  Particles are already boundary-clamped in
  * the integrate kernel.
  * ====================================================================== */
@@ -141,6 +141,7 @@ struct SimParams {
     float  wall_friction;        // wall friction coefficient
     float3 world_min;            // simulation domain min
     float3 world_max;            // simulation domain max
+    float  velocity_damping;     // spawn stabilization: 0.0=none, 0.8=heavy
 };
 
 __constant__ SimParams c_sim;

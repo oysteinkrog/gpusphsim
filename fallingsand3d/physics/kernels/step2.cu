@@ -26,121 +26,7 @@
  * behavior classes per acceptance criteria.
  */
 
-#include "common.cuh"
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846f
-#endif
-
-/* ======================================================================
- * GranularParams -- mu(I) rheology parameters.
- * Local to this module; uploaded from Python before kernel launch.
- * ====================================================================== */
-
-struct GranularParams {
-    float mu_s;               // static friction coefficient (0.36)
-    float mu_2;               // dynamic friction coefficient (0.70)
-    float I0;                 // inertial number reference (0.3)
-    float mu_max;             // viscosity clamp (10000 Pa*s)
-    float particle_spacing;   // particle spacing d (0.02)
-    float mu0;                // base viscosity for GRANULAR
-    float xsph_epsilon;       // XSPH blending factor (0.5)
-    float force_scale;        // SPH force output scaling (0.05 matches parent convention)
-    float vorticity_epsilon;  // vorticity confinement strength (0.05)
-    float surface_tension_gamma; // Akinci surface tension coefficient (1.0)
-    float tan_phi_f;          // tan(friction_angle) for Drucker-Prager (default tan(32°)=0.625)
-    float cohesion;           // small cohesion for DP stability (default 0.001)
-};
-
-__constant__ GranularParams c_granular;
-
-/* ======================================================================
- * EOS pressure computation (per-material gamma)
- *
- * Reads per-material rest_density, eos_stiffness, eos_gamma from c_materials.
- *
- *   gamma==1:  Linear EOS:  p = k * max(rho/rho0 - 1, 0)
- *   gamma!=1:  Tait EOS:    p = k * (pow(rho/rho0, gamma) - 1)
- *   GAS:       p = k * max(rho - rho0, 0)
- *   All FLUID/GRANULAR: p clamped >= 0
- * ====================================================================== */
-
-__device__ inline float compute_pressure(float rho_i, int behavior, uint mat_id) {
-    float rho0  = c_materials[mat_id].rest_density;
-    float k     = c_materials[mat_id].eos_stiffness;
-    float gamma = c_materials[mat_id].eos_gamma;
-
-    if (behavior == GAS) {
-        // GAS: linear EOS with gamma=1
-        return k * fmaxf(rho_i - rho0, 0.0f);
-    }
-
-    float ratio = rho_i / fmaxf(rho0, 1e-6f);
-
-    float p_raw;
-    if (gamma == 1.0f) {
-        // Linear EOS (Game SPH): p = k * max(ratio - 1, 0)
-        p_raw = k * fmaxf(ratio - 1.0f, 0.0f);
-    } else {
-        // Tait EOS: p = k * (pow(ratio, gamma) - 1)
-        p_raw = k * (powf(ratio, gamma) - 1.0f);
-    }
-
-    if (behavior == GRANULAR) {
-        return fmaxf(p_raw, 0.0f);
-    }
-    // FLUID: clamp >= 0 (no tensile/negative pressure)
-    return fmaxf(p_raw, 0.0f);
-}
-
-/* ======================================================================
- * SPH kernel variable parts
- * (constant coefficients applied in PostCalc via c_precalc)
- * ====================================================================== */
-
-/**
- * Spiky gradient variable part: (r/|r|) * (h - |r|)^2
- * Points AWAY from neighbor (r = pos_i - pos_j).
- * No coefficient -- that's in pressure_precalc.
- */
-__device__ inline float3 grad_spiky_variable(float3 r, float rlen, float h) {
-    float h_rlen = h - rlen;
-    float inv_rlen = 1.0f / rlen;
-    return make_float3(
-        r.x * inv_rlen * (h_rlen * h_rlen),
-        r.y * inv_rlen * (h_rlen * h_rlen),
-        r.z * inv_rlen * (h_rlen * h_rlen)
-    );
-}
-
-/**
- * Viscosity Laplacian variable part: (h - |r|)
- */
-__device__ inline float lap_visc_variable(float rlen, float h) {
-    return h - rlen;
-}
-
-/**
- * Poly6 kernel (for XSPH): W_poly6 = poly6_coeff * (h^2 - |r|^2)^3
- * Returns the FULL kernel value.
- */
-__device__ inline float W_poly6(float rlen_sq, float h_sq) {
-    float diff = h_sq - rlen_sq;
-    return c_precalc.poly6_coeff * diff * diff * diff;
-}
-
-/**
- * Compute mu(I) effective viscosity for a particle.
- */
-__device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho) {
-    float spacing = c_granular.particle_spacing;
-    float I_number = gamma_dot * spacing / sqrtf(p_eff / rho);
-    float mu_I = c_granular.mu_s
-               + (c_granular.mu_2 - c_granular.mu_s)
-                 / (1.0f + c_granular.I0 / fmaxf(I_number, 1e-8f));
-    return fminf(c_granular.mu_max,
-                 c_granular.mu0 + mu_I * p_eff / (gamma_dot + 1e-6f));
-}
+#include "sph_shared.cuh"
 
 /* ======================================================================
  * K_Step2 kernel
@@ -261,9 +147,8 @@ void K_Step2(
                     if (rlen_sq > h_sq || rlen_sq < 1e-12f) continue;
 
                     int behavior_j = GET_BEHAVIOR(pi_j);
-                    if (behavior_j == STATIC) continue;
 
-                    // GAS↔non-GAS phase separation: no pressure/viscosity across phases
+                    // GAS/non-GAS phase separation: no pressure/viscosity across phases
                     if (is_gas_i != (behavior_j == GAS)) continue;
 
                     float rlen = sqrtf(rlen_sq);
@@ -271,6 +156,25 @@ void K_Step2(
                     // density_j packed into position.w by K_PackDensity (OPT-4.1)
                     float3 vel_j = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
                     float rho_j = pos4_j.w;
+
+                    // ---- STATIC boundary: Akinci pressure mirroring + friction ----
+                    if (behavior_j == STATIC) {
+                        float3 grad_s = grad_spiky_variable(r, rlen, h);
+                        // Pressure mirroring: boundary pressure = fluid pressure
+                        float press_sym_b = 2.0f * (p_i / (rho_i * rho_i));
+                        f_pressure.x += m_j * press_sym_b * grad_s.x;
+                        f_pressure.y += m_j * press_sym_b * grad_s.y;
+                        f_pressure.z += m_j * press_sym_b * grad_s.z;
+                        // Boundary friction: vel_j=0, drag toward zero
+                        float lap_v_b = lap_visc_variable(rlen, h);
+                        float mu_b = is_granular_i ? c_precalc.viscosity_precalc
+                                   : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
+                        float visc_factor_b = mu_b * m_j * lap_v_b / fmaxf(rho_i, 1.0f);
+                        f_viscosity.x += (-vel_i.x) * visc_factor_b;
+                        f_viscosity.y += (-vel_i.y) * visc_factor_b;
+                        f_viscosity.z += (-vel_i.z) * visc_factor_b;
+                        continue;  // skip XSPH from STATIC
+                    }
 
                     // Neighbor pressure (per-material EOS)
                     uint mat_id_j = GET_MATERIAL_ID(pi_j);
@@ -315,8 +219,11 @@ void K_Step2(
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
                     } else {
-                        // FLUID/GAS: raw accumulation, viscosity_precalc applied in PostCalc
-                        float visc_factor = m_j * lap_v / rho_j;
+                        // FLUID/GAS: per-material viscosity via harmonic mean
+                        float mu_i = c_materials[mat_id_i].base_viscosity;
+                        float mu_j = c_materials[mat_id_j].base_viscosity;
+                        float mu_ij = 2.0f * mu_i * mu_j / (mu_i + mu_j + 1e-8f);
+                        float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v / rho_j;
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
@@ -415,13 +322,10 @@ void K_Step2(
         total_force.y = c_precalc.pressure_precalc * f_pressure.y + f_viscosity.y;
         total_force.z = c_precalc.pressure_precalc * f_pressure.z + f_viscosity.z;
     } else {
-        // FLUID/GAS: viscosity_precalc = mu0 * 45/(pi*h^6) applied uniformly
-        total_force.x = c_precalc.pressure_precalc  * f_pressure.x
-                      + c_precalc.viscosity_precalc  * f_viscosity.x;
-        total_force.y = c_precalc.pressure_precalc  * f_pressure.y
-                      + c_precalc.viscosity_precalc  * f_viscosity.y;
-        total_force.z = c_precalc.pressure_precalc  * f_pressure.z
-                      + c_precalc.viscosity_precalc  * f_viscosity.z;
+        // FLUID/GAS: per-material viscosity already baked in per-pair
+        total_force.x = c_precalc.pressure_precalc * f_pressure.x + f_viscosity.x;
+        total_force.y = c_precalc.pressure_precalc * f_pressure.y + f_viscosity.y;
+        total_force.z = c_precalc.pressure_precalc * f_pressure.z + f_viscosity.z;
     }
 
     // Add vorticity confinement + surface tension (FLUID only, already zero for non-FLUID)

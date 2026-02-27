@@ -23,29 +23,17 @@
  *   c_materials -- MaterialProps[32] from common.cuh (for color lookup)
  */
 
-#include "common.cuh"
+#include "sph_shared.cuh"
 
 /* ======================================================================
- * Constants
+ * Constants (integrate-specific, not in sph_shared.cuh)
  * ====================================================================== */
 
-#define GAS_BUOYANCY_BETA  0.01f
-#define GAS_AMBIENT_TEMP   293.0f
-#define GAS_BUOYANCY_G     9.81f
-#define GAS_DRAG_COEFF     2.0f
-#define VELOCITY_LIMIT     10.0f
-#define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
 #define ACCEL_MAX_FLUID    30.0f
 #define ACCEL_MAX_GRANULAR 200.0f
 
 /* Micropolar SPH coupling parameter */
 #define MICROPOLAR_NU_T    0.1f
-
-/* Temperature integration constants */
-#define T_AMBIENT          293.0f
-#define COOL_RATE          0.1f
-#define T_MIN              0.0f
-#define T_MAX              5000.0f
 
 /* Anti-creep thresholds for GRANULAR particles */
 #define GRANULAR_V_THRESHOLD     0.01f
@@ -55,244 +43,8 @@
 #define GRANULAR_ACCEL_REST      5.0f   // equilibrium check: |accel| must be < this for anti-creep/sleep
 #define GRANULAR_ACCEL_REST_SQ   (GRANULAR_ACCEL_REST * GRANULAR_ACCEL_REST)
 
-/* Sleep system with hysteresis */
-#define V_SLEEP          0.005f
-#define V_SLEEP_SQ       (V_SLEEP * V_SLEEP)
-#define V_WAKE           0.02f
-#define V_WAKE_SQ        (V_WAKE * V_WAKE)
+/* Sleep system: integrate-specific addition */
 #define GAMMA_SLEEP      0.01f
-#define SLEEP_THRESHOLD  10
-
-/* ======================================================================
- * Impulse-style SDF boundary collision for axis-aligned box.
- *
- * For each of 6 planes: if pos penetrates wall, project out and
- * apply impulse-style velocity correction:
- *   - Normal velocity reflected with restitution coefficient
- *   - Tangential velocity reduced by Coulomb friction
- * ====================================================================== */
-
-__device__ inline void sdf_box_boundary(
-    float3& pos,
-    float3& vel,
-    float3 world_min,
-    float3 world_max,
-    float restitution,
-    float mu_wall
-) {
-    // Process each axis: min then max boundary
-    // X-axis
-    if (pos.x < world_min.x) {
-        pos.x = world_min.x;
-        if (vel.x < 0.0f) {
-            float vn = vel.x;                        // normal component (negative)
-            float vt_y = vel.y, vt_z = vel.z;        // tangential components
-            vel.x = -restitution * vn;                // reflect + restitution
-            float tang_speed = sqrtf(vt_y * vt_y + vt_z * vt_z);
-            if (tang_speed > 1e-8f) {
-                float friction_impulse = mu_wall * fabsf(vn);
-                float reduction = fminf(friction_impulse / tang_speed, 1.0f);
-                vel.y *= (1.0f - reduction);
-                vel.z *= (1.0f - reduction);
-            }
-        }
-    }
-    if (pos.x > world_max.x) {
-        pos.x = world_max.x;
-        if (vel.x > 0.0f) {
-            float vn = vel.x;
-            float vt_y = vel.y, vt_z = vel.z;
-            vel.x = -restitution * vn;
-            float tang_speed = sqrtf(vt_y * vt_y + vt_z * vt_z);
-            if (tang_speed > 1e-8f) {
-                float friction_impulse = mu_wall * fabsf(vn);
-                float reduction = fminf(friction_impulse / tang_speed, 1.0f);
-                vel.y *= (1.0f - reduction);
-                vel.z *= (1.0f - reduction);
-            }
-        }
-    }
-
-    // Y-axis
-    if (pos.y < world_min.y) {
-        pos.y = world_min.y;
-        if (vel.y < 0.0f) {
-            float vn = vel.y;
-            float vt_x = vel.x, vt_z = vel.z;
-            vel.y = -restitution * vn;
-            float tang_speed = sqrtf(vt_x * vt_x + vt_z * vt_z);
-            if (tang_speed > 1e-8f) {
-                float friction_impulse = mu_wall * fabsf(vn);
-                float reduction = fminf(friction_impulse / tang_speed, 1.0f);
-                vel.x *= (1.0f - reduction);
-                vel.z *= (1.0f - reduction);
-            }
-        }
-    }
-    if (pos.y > world_max.y) {
-        pos.y = world_max.y;
-        if (vel.y > 0.0f) {
-            float vn = vel.y;
-            float vt_x = vel.x, vt_z = vel.z;
-            vel.y = -restitution * vn;
-            float tang_speed = sqrtf(vt_x * vt_x + vt_z * vt_z);
-            if (tang_speed > 1e-8f) {
-                float friction_impulse = mu_wall * fabsf(vn);
-                float reduction = fminf(friction_impulse / tang_speed, 1.0f);
-                vel.x *= (1.0f - reduction);
-                vel.z *= (1.0f - reduction);
-            }
-        }
-    }
-
-    // Z-axis
-    if (pos.z < world_min.z) {
-        pos.z = world_min.z;
-        if (vel.z < 0.0f) {
-            float vn = vel.z;
-            float vt_x = vel.x, vt_y = vel.y;
-            vel.z = -restitution * vn;
-            float tang_speed = sqrtf(vt_x * vt_x + vt_y * vt_y);
-            if (tang_speed > 1e-8f) {
-                float friction_impulse = mu_wall * fabsf(vn);
-                float reduction = fminf(friction_impulse / tang_speed, 1.0f);
-                vel.x *= (1.0f - reduction);
-                vel.y *= (1.0f - reduction);
-            }
-        }
-    }
-    if (pos.z > world_max.z) {
-        pos.z = world_max.z;
-        if (vel.z > 0.0f) {
-            float vn = vel.z;
-            float vt_x = vel.x, vt_y = vel.y;
-            vel.z = -restitution * vn;
-            float tang_speed = sqrtf(vt_x * vt_x + vt_y * vt_y);
-            if (tang_speed > 1e-8f) {
-                float friction_impulse = mu_wall * fabsf(vn);
-                float reduction = fminf(friction_impulse / tang_speed, 1.0f);
-                vel.x *= (1.0f - reduction);
-                vel.y *= (1.0f - reduction);
-            }
-        }
-    }
-}
-
-/* ======================================================================
- * Particle color computation
- *
- * base_color = c_materials[mat_id].(color_r, color_g, color_b)
- * Hot tint (T > 293K): blend toward red proportional to temperature
- * Health fade: multiply by health [0,1]
- * ====================================================================== */
-
-/* Encode behavior class into color.w for SSFR material filtering in shaders.
- * FLUID=0.0, GRANULAR=0.25, GAS=0.5, STATIC=0.75 */
-__device__ inline float behavior_to_alpha(int behavior) {
-    return behavior * 0.25f;
-}
-
-__device__ inline float4 compute_color(uint mat_id, float temperature, float health, int behavior) {
-    float r = c_materials[mat_id].color_r;
-    float g = c_materials[mat_id].color_g;
-    float b = c_materials[mat_id].color_b;
-
-    // Hot tint: blend toward red/orange for high temperatures
-    if (temperature > 293.0f) {
-        float t_excess = fminf((temperature - 293.0f) / 1000.0f, 1.0f);
-        r = r + (1.0f - r) * t_excess;
-        g = g * (1.0f - 0.5f * t_excess);
-        b = b * (1.0f - 0.8f * t_excess);
-    }
-
-    // Health fade: multiply all channels by health
-    float h = fmaxf(fminf(health, 1.0f), 0.0f);
-    r *= h;
-    g *= h;
-    b *= h;
-
-    return make_float4(r, g, b, behavior_to_alpha(behavior));
-}
-
-/**
- * FLUID-specific color: depth gradient + velocity foam + density variation.
- *
- *   depth_t   = normalized Y position [0=bottom, 1=top of domain]
- *               -> dark blue at bottom, lighter cyan near surface
- *   foam      = velocity magnitude mapped to white highlight
- *               -> fast-moving splash particles look like foam/spray
- *   density_t = compression ratio above rest density
- *               -> slightly darker in compressed regions (depth cue)
- */
-__device__ inline float4 compute_fluid_color(
-    uint mat_id, float temperature, float health,
-    float pos_y, float vel_sq, float density
-) {
-    float rho0 = c_materials[mat_id].rest_density;
-
-    // --- Base color from material ---
-    float base_r = c_materials[mat_id].color_r;
-    float base_g = c_materials[mat_id].color_g;
-    float base_b = c_materials[mat_id].color_b;
-
-    // --- Depth gradient: normalize Y within world bounds ---
-    // depth_t: 0 at bottom, 1 at top
-    float y_range = c_sim.world_max.y - c_sim.world_min.y;
-    float depth_t = (pos_y - c_sim.world_min.y) / fmaxf(y_range, 0.01f);
-    depth_t = fmaxf(0.0f, fminf(depth_t, 1.0f));
-
-    // Deep color and shallow color (relative to material base)
-    float deep_r = base_r * 0.45f;
-    float deep_g = base_g * 0.50f;
-    float deep_b = base_b * 0.65f;
-    float shal_r = base_r * 1.15f;
-    float shal_g = base_g * 1.15f;
-    float shal_b = base_b * 1.05f;
-
-    // Smooth depth curve
-    float d = depth_t;
-    float r = deep_r + (shal_r - deep_r) * d;
-    float g = deep_g + (shal_g - deep_g) * d;
-    float b = deep_b + (shal_b - deep_b) * d;
-
-    // --- Density darkening: compressed regions slightly darker ---
-    float ratio = density / fmaxf(rho0, 1.0f);
-    float compress = fmaxf(ratio - 1.0f, 0.0f);  // >0 when compressed
-    float darken = 1.0f / (1.0f + 0.5f * compress);  // 1.0 at rest, ~0.9 at 25% compression
-    r *= darken;
-    g *= darken;
-    b *= darken;
-
-    // --- Velocity foam: white highlight for fast particles ---
-    float speed = sqrtf(vel_sq);
-    float foam_t = fminf(speed / 3.0f, 1.0f);  // ramp: 0 at rest, 1 at speed>=3
-    foam_t = foam_t * foam_t;  // quadratic onset: subtle at low speed, strong at high
-    // Blend toward white
-    r = r + (1.0f - r) * foam_t * 0.7f;
-    g = g + (1.0f - g) * foam_t * 0.7f;
-    b = b + (1.0f - b) * foam_t * 0.7f;
-
-    // --- Hot tint (same as base compute_color) ---
-    if (temperature > 293.0f) {
-        float t_excess = fminf((temperature - 293.0f) / 1000.0f, 1.0f);
-        r = r + (1.0f - r) * t_excess;
-        g = g * (1.0f - 0.5f * t_excess);
-        b = b * (1.0f - 0.8f * t_excess);
-    }
-
-    // --- Health fade ---
-    float h = fmaxf(fminf(health, 1.0f), 0.0f);
-    r *= h;
-    g *= h;
-    b *= h;
-
-    // Clamp
-    r = fminf(r, 1.0f);
-    g = fminf(g, 1.0f);
-    b = fminf(b, 1.0f);
-
-    return make_float4(r, g, b, 0.0f);  // FLUID always 0.0
-}
 
 /* ======================================================================
  * K_Integrate kernel
@@ -473,6 +225,14 @@ void K_Integrate(
         vel_new.x *= scale;
         vel_new.y *= scale;
         vel_new.z *= scale;
+    }
+
+    // --- Spawn velocity damping (ramps to 0 after first ~30 substeps) ---
+    if (c_sim.velocity_damping > 0.0f) {
+        float damp = 1.0f - c_sim.velocity_damping;
+        vel_new.x *= damp;
+        vel_new.y *= damp;
+        vel_new.z *= damp;
     }
 
     // --- GRANULAR anti-creep: zero velocity if nearly at rest AND in equilibrium ---

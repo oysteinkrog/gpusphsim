@@ -32,7 +32,7 @@
  * Constant memory (c_grid, c_sim, c_precalc, c_materials, c_interactions) declared in common.cuh.
  */
 
-#include "common.cuh"
+#include "sph_shared.cuh"
 
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_Step1(
@@ -143,14 +143,10 @@ void K_Step1(
                     if (r_sq <= h_sq) {
                         float diff = h_sq - r_sq;
 
-                        // Skip STATIC neighbors for density (keep self i==j)
                         int behavior_j = GET_BEHAVIOR(pi_j);
-                        if (behavior_j == STATIC && index_j != index_i) {
-                            continue;
-                        }
 
-                        // GAS↔non-GAS phase separation: skip density/heat/forces,
-                        // keep only exposure (so fire→wood ignition still works)
+                        // GAS/non-GAS phase separation: skip density/heat/forces,
+                        // keep only exposure (so fire-to-wood ignition still works)
                         bool is_gas_j = (behavior_j == GAS);
                         if (is_gas_i != is_gas_j && index_j != index_i) {
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
@@ -172,7 +168,11 @@ void K_Step1(
                             // lap_W_visc(r) = (h - |r|)  (variable part, coeff is viscosity_lap_coeff)
                             // dTdt += kappa * (m_j / rho_j) * (T_j - T_i) * viscosity_lap_coeff * (h - |r|)
                             float lap_var = h - rlen;
-                            sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var;
+                            // Cross-material heat boost: use interaction table heat_exchange
+                            // as a multiplier (minimum 1.0 for same-material pairs where heat_exchange=0)
+                            uint mat_id_j_h = GET_MATERIAL_ID(pi_j);
+                            float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j_h].heat_exchange);
+                            sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var * heat_boost;
 
                             // --- Exposure accumulation: pure table lookup, no branching ---
                             // W_poly6 variable part: diff^3 = (h^2 - r^2)^3
@@ -224,12 +224,15 @@ void K_Step1(
 
                             // Dye diffusion: dC/dt += D * V_j * (C_j - C_i) * lap_W
                             // Use viscosity Laplacian kernel: lap_W_var = (h - |r|)
-                            float lap_var_d = h - rlen_v;
-                            float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var_d;
-                            float4 dye_j = __ldg(&particle_dye_in[index_j]);
-                            dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
-                            dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
-                            dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
+                            // Skip STATIC neighbors to avoid color bleeding from stone
+                            if (behavior_j != STATIC) {
+                                float lap_var_d = h - rlen_v;
+                                float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var_d;
+                                float4 dye_j = __ldg(&particle_dye_in[index_j]);
+                                dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
+                                dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
+                                dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
+                            }
                         }
 
                         // --- Strain-rate: skip self, GRANULAR only ---

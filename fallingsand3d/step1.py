@@ -51,7 +51,8 @@ import numpy as np
 #     float  wall_friction;        //  4 bytes
 #     float3 world_min;            // 12 bytes
 #     float3 world_max;            // 12 bytes
-# };                               // Total: 64 bytes
+#     float  velocity_damping;     //  4 bytes
+# };                               // Total: 68 bytes
 SIM_PARAMS_DTYPE = np.dtype(
     [
         ("smoothing_length", np.float32),
@@ -64,6 +65,7 @@ SIM_PARAMS_DTYPE = np.dtype(
         ("wall_friction", np.float32),
         ("world_min", np.float32, (3,)),
         ("world_max", np.float32, (3,)),
+        ("velocity_damping", np.float32),
     ],
     align=False,
 )
@@ -98,6 +100,7 @@ def build_sim_params(
     wall_friction: float = 0.5,
     world_min: tuple = (-1.0, -1.0, -1.0),
     world_max: tuple = (1.0, 1.0, 1.0),
+    velocity_damping: float = 0.0,
 ) -> np.ndarray:
     """Build a single SimParams struct as a numpy structured array."""
     params = np.zeros(1, dtype=SIM_PARAMS_DTYPE)
@@ -111,6 +114,7 @@ def build_sim_params(
     params[0]["wall_friction"] = wall_friction
     params[0]["world_min"] = world_min
     params[0]["world_max"] = world_max
+    params[0]["velocity_damping"] = velocity_damping
     return params
 
 

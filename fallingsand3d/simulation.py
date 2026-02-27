@@ -85,7 +85,7 @@ class Simulation:
         self.fixed_dt = fixed_dt
         self.fixed_dt_value = dt
         self.max_substeps = max_substeps
-        self._profile = PROFILES["WCSPH (Default)"]
+        self._profile = PROFILES["WCSPH"]
         self._paused = False
         self._prev_speed = speed
         self._last_frame_time: Optional[float] = None
@@ -155,6 +155,10 @@ class Simulation:
 
         # Cached sim_params for dt updates (set during _upload_constants)
         self._sim_params: Optional[np.ndarray] = None
+
+        # Spawn velocity damping: smooth PBF/DFSPH initial transient
+        self._spawn_substep = 0
+        self._damping_duration = 30  # substeps
 
         # Compile all kernel modules and upload constant memory
         self._upload_constants()
@@ -241,6 +245,21 @@ class Simulation:
         if self._foam_params is not None:
             self._foam_params[0]["dt"] = np.float32(new_dt)
             foam.upload_foam_params(self._foam_params)
+
+    def _upload_sim_params_all(self) -> None:
+        """Re-upload sim_params to all modules (without changing self.dt)."""
+        step1.upload_sim_params(self._sim_params)
+        step2.upload_sim_params(self._sim_params)
+        integrate.upload_sim_params(self._sim_params)
+        reactions.upload_sim_params(self._sim_params)
+        spawn.upload_sim_params(self._sim_params)
+        if self._profile.solver_type == SolverType.PBF:
+            import pbf_solver
+            pbf_solver.upload_sim_params(self._sim_params)
+        elif self._profile.solver_type == SolverType.DFSPH:
+            import dfsph_solver
+            dfsph_solver.upload_sim_params(self._sim_params)
+        implicit_st.upload_sim_params(self._sim_params)
 
     @property
     def world_half_size(self) -> float:
@@ -399,35 +418,46 @@ class Simulation:
             self._upload_solver_constants(pbf_solver)
             pbf_solver.upload_pbf_params(profile)
             # PBF uses position-space friction (much lower ratio than force-space)
+            # Lower vorticity/surface tension: fixed dt (no CFL) can cause energy feedback
             granular_params = step2.build_granular_params(
                 tan_phi_f=profile.pbf_friction_ratio,
                 cohesion=profile.pbf_friction_cohesion,
+                vorticity_epsilon=0.001,
+                surface_tension_gamma=0.0,
             )
             pbf_solver.upload_granular_params(granular_params)
         elif profile.solver_type == SolverType.DFSPH:
             import dfsph_solver
             self._upload_solver_constants(dfsph_solver)
             dfsph_solver.upload_dfsph_params(profile)
+            # DFSPH uses lower XSPH than WCSPH (implicit solver already smooths)
+            dfsph_solver.upload_granular_params(step2.build_granular_params(
+                xsph_epsilon=0.1,
+            ))
 
         # Invalidate CUDA graph and reset grid reuse
         self._cuda_graph = None
         self._graph_n = 0
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
+        # Reset spawn damping for new solver
+        self._spawn_substep = 0
 
     def _upload_solver_constants(self, solver_module) -> None:
-        """Upload all shared constants (grid, sim, precalc, materials) to a solver module."""
+        """Upload all shared constants (grid, sim, precalc, materials, interactions) to a solver module."""
         hs = self._world_half_size
         wmin = (-hs, -hs, -hs)
         wmax = (hs, hs, hs)
         grid_params, _ = hash_sort.build_grid_params_for_world(wmin, wmax, self._h)
         precalc_params = step1.build_precalc_params(smoothing_length=0.04, viscosity=1.0)
         materials_data = build_material_array()
+        interactions_data = build_interaction_matrix()
 
         solver_module.upload_grid_params(grid_params)
         solver_module.upload_sim_params(self._sim_params)
         solver_module.upload_precalc_params(precalc_params)
         solver_module.upload_materials(materials_data)
+        solver_module.upload_interactions(interactions_data)
 
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
@@ -687,17 +717,27 @@ class Simulation:
         # 1. Predict positions (gravity integration)
         pbf_solver.pbf_predict(
             w.sorted_position[:n], w.sorted_velocity[:n],
-            w.sorted_packed_info[:n],
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_predicted_position,
         )
 
-        # 2. Initial density + lambda (needed for reactions)
+        # 2. Initial density + lambda + heat diffusion + exposure (first call only)
         pbf_solver.pbf_compute_lambda(
             w.sorted_predicted_position[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n],
             self._cell_start, self._cell_end,
             w.sorted_density, w.sorted_lambda_pbf,
             w.sorted_pressure_normal,
+            temperature_in=w.sorted_temperature[:n],
+            density_in=w.sorted_density if hasattr(w, '_density_initialized') else None,
+            dTdt_out=w.sorted_dTdt,
+            exposure_heat_out=w.sorted_exposure_heat,
+            exposure_corrode_out=w.sorted_exposure_corrode,
+            particle_dye_in=w.sorted_particle_dye[:n],
+            dye_rate_out=w.sorted_dye_rate,
+            velocity_in=w.sorted_velocity[:n],
+            vorticity_out=w.sorted_vorticity,
+            normal_out=w.sorted_normal,
         )
 
         # 3. Reactions + Spawn
@@ -724,10 +764,9 @@ class Simulation:
             pbf_solver.pbf_apply_delta(
                 w.sorted_predicted_position[:n], w.sorted_delta_position[:n],
                 w.sorted_packed_info[:n],
-                w.sorted_pressure_normal[:n],
             )
 
-        # 5. Finalize: velocity update, XSPH, color, sleep, writeback
+        # 5. Finalize: velocity update, XSPH, friction, color, sleep, writeback
         pbf_solver.pbf_finalize(
             w.sorted_predicted_position[:n], w.sorted_position[:n],
             w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
@@ -737,9 +776,13 @@ class Simulation:
             w.position, w.velocity, w.color, w.packed_info,
             w.sleep_counter, w.temperature,
             sorted_particle_dye=w.sorted_particle_dye[:n],
+            sorted_dye_rate=w.sorted_dye_rate[:n],
             particle_dye_out=w.particle_dye,
             sorted_angular_velocity=w.sorted_angular_velocity[:n],
             angular_velocity_out=w.angular_velocity,
+            vorticity_in=w.sorted_vorticity[:n],
+            normal_in=w.sorted_normal[:n],
+            pressure_normal_in=w.sorted_pressure_normal[:n],
         )
 
     def _run_dfsph_body(self, n: int) -> None:
@@ -760,12 +803,16 @@ class Simulation:
             w.sorted_density, w.sorted_alpha_dfsph,
             w.sorted_shear_rate, w.sorted_dTdt,
             w.sorted_exposure_heat, w.sorted_exposure_corrode,
+            particle_dye_in=w.sorted_particle_dye[:n],
+            dye_rate_out=w.sorted_dye_rate,
+            vorticity_out=w.sorted_vorticity,
+            normal_out=w.sorted_normal,
         )
 
         # 2. Reactions + Spawn
         self._run_reactions_spawn(n)
 
-        # 3. Non-pressure forces (viscosity, gravity, mu(I) for GRANULAR)
+        # 3. Non-pressure forces (viscosity, gravity, mu(I), vorticity confinement, surface tension)
         dfsph_solver.compute_non_pressure_forces(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_density[:n], w.sorted_mass[:n],
@@ -773,6 +820,8 @@ class Simulation:
             w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
             w.sorted_velocity,  # velocity updated in-place
+            vorticity_in=w.sorted_vorticity[:n],
+            normal_in=w.sorted_normal[:n],
         )
 
         # 4. Divergence solver (fixed iterations)
@@ -847,9 +896,11 @@ class Simulation:
             w.sleep_counter, w.temperature,
             w.kappa,  # unsorted kappa out for warm-start
             sorted_particle_dye=w.sorted_particle_dye[:n],
+            sorted_dye_rate=w.sorted_dye_rate[:n],
             particle_dye_out=w.particle_dye,
             sorted_angular_velocity=w.sorted_angular_velocity[:n],
             angular_velocity_out=w.angular_velocity,
+            vorticity_in=w.sorted_vorticity[:n],
         )
 
     def _capture_graph(self, n: int) -> None:
@@ -888,6 +939,24 @@ class Simulation:
 
         # Mark density as initialized (needed for step1 prev_density path)
         w._density_initialized = True
+
+        # --- Spawn velocity damping ramp ---
+        if self._spawn_substep < self._damping_duration:
+            t = self._spawn_substep / self._damping_duration
+            damping = 0.8 * (1.0 - t)  # linear ramp 0.8 -> 0.0
+            self._spawn_substep += 1
+            # Invalidate CUDA graph during damping (constant changes each step)
+            self._cuda_graph = None
+            self._graph_n = 0
+        else:
+            damping = 0.0
+        # Upload damping to c_sim.velocity_damping (reuse _upload_dt which
+        # re-uploads full sim_params to all modules without changing self.dt)
+        if self._sim_params is not None:
+            old_damping = float(self._sim_params[0]["velocity_damping"])
+            if abs(damping - old_damping) > 1e-8:
+                self._sim_params[0]["velocity_damping"] = np.float32(damping)
+                self._upload_sim_params_all()
 
         # When sort is being skipped, bypass CUDA graph (different kernel sequence)
         if self._sort_skip_next:
@@ -1260,6 +1329,10 @@ class Simulation:
     def adjust_accuracy(self, delta: float) -> None:
         """Adjust accuracy (CFL number) by delta, clamping to [0.1, 1.0]."""
         self.accuracy = max(0.1, min(1.0, self.accuracy + delta))
+
+    def reset_spawn_damping(self) -> None:
+        """Reset spawn damping counter (call after preset load or world reset)."""
+        self._spawn_substep = 0
 
     def toggle_fixed_dt(self) -> None:
         """Toggle between adaptive and fixed timestep modes."""

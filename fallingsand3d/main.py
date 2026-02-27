@@ -308,6 +308,7 @@ def main():
             renderer.num_active = world._high_water
             sim.sim_time = 0.0
             sim._last_frame_time = None
+            sim.reset_spawn_damping()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
                 sim.copy_to_vbos(pos_buf, col_buf)
 

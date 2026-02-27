@@ -5,11 +5,11 @@
  *   K_PBF_Predict       -- Apply gravity, predict position
  *   K_PBF_ComputeLambda -- Density + Lagrange multiplier
  *   K_PBF_ComputeDelta  -- Position correction + artificial pressure
- *   K_PBF_ApplyDelta    -- Apply correction + boundary clamp + friction
- *   K_PBF_Finalize      -- Velocity update, XSPH, color, sleep, writeback
+ *   K_PBF_ApplyDelta    -- Apply correction + boundary clamp
+ *   K_PBF_Finalize      -- Velocity update, XSPH, friction, color, sleep, writeback
  *
  * All particles participate in density constraints (FLUID + GRANULAR + GAS).
- * GRANULAR gets friction position-corrections in ApplyDelta.
+ * GRANULAR gets velocity-space Drucker-Prager friction in Finalize (iteration-independent).
  * GAS gets linear drag instead of PBF constraints.
  * STATIC particles are skipped but contribute to neighbor density sums.
  *
@@ -19,11 +19,7 @@
  *   c_granular -- mu(I) parameters (for GRANULAR friction)
  */
 
-#include "common.cuh"
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846f
-#endif
+#include "sph_shared.cuh"
 
 /* ======================================================================
  * PBF Parameters
@@ -37,235 +33,10 @@ struct PBFParams {
     float s_corr_dq_sq;       // (dq * h)^2 for s_corr reference
     float s_corr_W_dq;        // W_poly6(dq*h) precomputed
     float xsph_c;             // XSPH smoothing coefficient
-    float padding;            // pad to 32 bytes
+    float neg_c_scale;        // scale factor for negative C (surface cohesion, default 0.05)
 };
 
 __constant__ PBFParams c_pbf;
-
-/* Reuse GranularParams for friction clamp on GRANULAR particles */
-struct GranularParams {
-    float mu_s;
-    float mu_2;
-    float I0;
-    float mu_max;
-    float particle_spacing;
-    float mu0;
-    float xsph_epsilon;
-    float force_scale;
-    float vorticity_epsilon;
-    float surface_tension_gamma;
-    float tan_phi_f;          // tan(friction_angle) for Drucker-Prager (default tan(32°)=0.625)
-    float cohesion;           // small cohesion for DP stability (default 0.001)
-};
-
-__constant__ GranularParams c_granular;
-
-/* ======================================================================
- * SPH kernel functions (same as step2.cu)
- * ====================================================================== */
-
-__device__ inline float W_poly6(float rlen_sq, float h_sq) {
-    float diff = h_sq - rlen_sq;
-    return c_precalc.poly6_coeff * diff * diff * diff;
-}
-
-__device__ inline float3 grad_spiky(float3 r, float rlen, float h) {
-    float h_rlen = h - rlen;
-    float coeff = c_precalc.spiky_grad_coeff * h_rlen * h_rlen / rlen;
-    return make_float3(coeff * r.x, coeff * r.y, coeff * r.z);
-}
-
-/* ======================================================================
- * Boundary clamp helper
- * ====================================================================== */
-
-__device__ inline void clamp_boundary(float3& pos) {
-    pos.x = fmaxf(c_sim.world_min.x, fminf(pos.x, c_sim.world_max.x));
-    pos.y = fmaxf(c_sim.world_min.y, fminf(pos.y, c_sim.world_max.y));
-    pos.z = fmaxf(c_sim.world_min.z, fminf(pos.z, c_sim.world_max.z));
-}
-
-/* ======================================================================
- * Impulse-style SDF boundary for finalize (matches integrate.cu)
- * ====================================================================== */
-
-__device__ inline void sdf_box_boundary(
-    float3& pos, float3& vel,
-    float3 wmin, float3 wmax,
-    float restitution, float mu_wall
-) {
-    // X-axis
-    if (pos.x < wmin.x) {
-        pos.x = wmin.x;
-        if (vel.x < 0.0f) {
-            float vn = vel.x;
-            vel.x = -restitution * vn;
-            float ts = sqrtf(vel.y * vel.y + vel.z * vel.z);
-            if (ts > 1e-8f) {
-                float red = fminf(mu_wall * fabsf(vn) / ts, 1.0f);
-                vel.y *= (1.0f - red);
-                vel.z *= (1.0f - red);
-            }
-        }
-    }
-    if (pos.x > wmax.x) {
-        pos.x = wmax.x;
-        if (vel.x > 0.0f) {
-            float vn = vel.x;
-            vel.x = -restitution * vn;
-            float ts = sqrtf(vel.y * vel.y + vel.z * vel.z);
-            if (ts > 1e-8f) {
-                float red = fminf(mu_wall * fabsf(vn) / ts, 1.0f);
-                vel.y *= (1.0f - red);
-                vel.z *= (1.0f - red);
-            }
-        }
-    }
-    // Y-axis
-    if (pos.y < wmin.y) {
-        pos.y = wmin.y;
-        if (vel.y < 0.0f) {
-            float vn = vel.y;
-            vel.y = -restitution * vn;
-            float ts = sqrtf(vel.x * vel.x + vel.z * vel.z);
-            if (ts > 1e-8f) {
-                float red = fminf(mu_wall * fabsf(vn) / ts, 1.0f);
-                vel.x *= (1.0f - red);
-                vel.z *= (1.0f - red);
-            }
-        }
-    }
-    if (pos.y > wmax.y) {
-        pos.y = wmax.y;
-        if (vel.y > 0.0f) {
-            float vn = vel.y;
-            vel.y = -restitution * vn;
-            float ts = sqrtf(vel.x * vel.x + vel.z * vel.z);
-            if (ts > 1e-8f) {
-                float red = fminf(mu_wall * fabsf(vn) / ts, 1.0f);
-                vel.x *= (1.0f - red);
-                vel.z *= (1.0f - red);
-            }
-        }
-    }
-    // Z-axis
-    if (pos.z < wmin.z) {
-        pos.z = wmin.z;
-        if (vel.z < 0.0f) {
-            float vn = vel.z;
-            vel.z = -restitution * vn;
-            float ts = sqrtf(vel.x * vel.x + vel.y * vel.y);
-            if (ts > 1e-8f) {
-                float red = fminf(mu_wall * fabsf(vn) / ts, 1.0f);
-                vel.x *= (1.0f - red);
-                vel.y *= (1.0f - red);
-            }
-        }
-    }
-    if (pos.z > wmax.z) {
-        pos.z = wmax.z;
-        if (vel.z > 0.0f) {
-            float vn = vel.z;
-            vel.z = -restitution * vn;
-            float ts = sqrtf(vel.x * vel.x + vel.y * vel.y);
-            if (ts > 1e-8f) {
-                float red = fminf(mu_wall * fabsf(vn) / ts, 1.0f);
-                vel.x *= (1.0f - red);
-                vel.y *= (1.0f - red);
-            }
-        }
-    }
-}
-
-/* ======================================================================
- * Fluid color (matches integrate.cu)
- * ====================================================================== */
-
-/* Encode behavior class into color.w for SSFR material filtering.
- * FLUID=0.0, GRANULAR=0.25, GAS=0.5, STATIC=0.75 */
-__device__ inline float behavior_to_alpha(int behavior) {
-    return behavior * 0.25f;
-}
-
-__device__ inline float4 compute_color(uint mat_id, float temperature, float health, int behavior) {
-    float r = c_materials[mat_id].color_r;
-    float g = c_materials[mat_id].color_g;
-    float b = c_materials[mat_id].color_b;
-    if (temperature > 293.0f) {
-        float t_excess = fminf((temperature - 293.0f) / 1000.0f, 1.0f);
-        r = r + (1.0f - r) * t_excess;
-        g = g * (1.0f - 0.5f * t_excess);
-        b = b * (1.0f - 0.8f * t_excess);
-    }
-    float h = fmaxf(fminf(health, 1.0f), 0.0f);
-    return make_float4(r * h, g * h, b * h, behavior_to_alpha(behavior));
-}
-
-__device__ inline float4 compute_fluid_color(
-    uint mat_id, float temperature, float health,
-    float pos_y, float vel_sq, float density
-) {
-    float rho0 = c_materials[mat_id].rest_density;
-    float base_r = c_materials[mat_id].color_r;
-    float base_g = c_materials[mat_id].color_g;
-    float base_b = c_materials[mat_id].color_b;
-    float y_range = c_sim.world_max.y - c_sim.world_min.y;
-    float depth_t = (pos_y - c_sim.world_min.y) / fmaxf(y_range, 0.01f);
-    depth_t = fmaxf(0.0f, fminf(depth_t, 1.0f));
-    float r = base_r * (0.45f + 0.70f * depth_t);
-    float g = base_g * (0.50f + 0.65f * depth_t);
-    float b = base_b * (0.65f + 0.40f * depth_t);
-    float ratio = density / fmaxf(rho0, 1.0f);
-    float compress = fmaxf(ratio - 1.0f, 0.0f);
-    float darken = 1.0f / (1.0f + 0.5f * compress);
-    r *= darken; g *= darken; b *= darken;
-    float speed = sqrtf(vel_sq);
-    float foam_t = fminf(speed / 3.0f, 1.0f);
-    foam_t = foam_t * foam_t;
-    r = r + (1.0f - r) * foam_t * 0.7f;
-    g = g + (1.0f - g) * foam_t * 0.7f;
-    b = b + (1.0f - b) * foam_t * 0.7f;
-    if (temperature > 293.0f) {
-        float t_excess = fminf((temperature - 293.0f) / 1000.0f, 1.0f);
-        r = r + (1.0f - r) * t_excess;
-        g = g * (1.0f - 0.5f * t_excess);
-        b = b * (1.0f - 0.8f * t_excess);
-    }
-    float h = fmaxf(fminf(health, 1.0f), 0.0f);
-    r = fminf(r * h, 1.0f);
-    g = fminf(g * h, 1.0f);
-    b = fminf(b * h, 1.0f);
-    return make_float4(r, g, b, 0.0f);  // FLUID always 0.0
-}
-
-/* ======================================================================
- * Sleep/wake constants (match integrate.cu)
- * ====================================================================== */
-
-#define V_SLEEP          0.005f
-#define V_SLEEP_SQ       (V_SLEEP * V_SLEEP)
-#define V_WAKE           0.02f
-#define V_WAKE_SQ        (V_WAKE * V_WAKE)
-#define SLEEP_THRESHOLD  10
-
-/* Temperature integration constants */
-#define T_AMBIENT        293.0f
-#define COOL_RATE        0.1f
-#define T_MIN            0.0f
-#define T_MAX            5000.0f
-
-/* GAS constants */
-#define GAS_BUOYANCY_BETA  0.01f
-#define GAS_AMBIENT_TEMP   293.0f
-#define GAS_BUOYANCY_G     9.81f
-#define GAS_DRAG_COEFF     2.0f
-
-#define VELOCITY_LIMIT     10.0f
-#define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
-
-// Uses calcGridCell() and spatialHash() from common.cuh.
-// get_cell() is an alias for calcGridCell().
-__device__ inline int3 get_cell(float3 pos) { return calcGridCell(pos); }
 
 /* ======================================================================
  * K_PBF_Predict -- Apply gravity, predict position
@@ -278,6 +49,7 @@ void K_PBF_Predict(
     const float4*   __restrict__ position,
     const float4*   __restrict__ velocity,
     const uint*     __restrict__ packed_info,
+    const float*    __restrict__ temperature_in,
     float4*         __restrict__ predicted_out
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -307,13 +79,23 @@ void K_PBF_Predict(
 
     // GAS: add buoyancy + drag
     if (behavior == GAS) {
-        float temp = 293.0f;  // approx (temperature not passed to predict)
+        float temp = __ldg(&temperature_in[i]);
         v_star.y += GAS_BUOYANCY_BETA * (temp - GAS_AMBIENT_TEMP) * GAS_BUOYANCY_G * dt;
         float drag = 1.0f - GAS_DRAG_COEFF * dt;
         drag = fmaxf(drag, 0.0f);
         v_star.x *= drag;
         v_star.y *= drag;
         v_star.z *= drag;
+    }
+
+    // FLUID thermal convection: Boussinesq buoyancy in prediction
+    if (behavior == FLUID) {
+        uint mat_id = GET_MATERIAL_ID(pi);
+        float beta = c_materials[mat_id].thermal_expansion;
+        if (beta > 0.0f) {
+            float temp = __ldg(&temperature_in[i]);
+            v_star.y += beta * (temp - T_AMBIENT) * 9.81f * dt;
+        }
     }
 
     // x* = x + dt * v*
@@ -344,7 +126,18 @@ void K_PBF_ComputeLambda(
     const uint*     __restrict__ cell_end,
     float*          __restrict__ density_out,
     float*          __restrict__ lambda_out,
-    float4*         __restrict__ pressure_normal_out
+    float4*         __restrict__ pressure_normal_out,
+    // Optional heat diffusion + exposure + dye (NULL to skip, used only on first call)
+    const float*    __restrict__ temperature_in,
+    const float*    __restrict__ density_in,
+    float*          __restrict__ dTdt_out,
+    float*          __restrict__ exposure_heat_out,
+    float*          __restrict__ exposure_corrode_out,
+    const float4*   __restrict__ particle_dye_in,
+    float4*         __restrict__ dye_rate_out,
+    const float4*   __restrict__ velocity_in,           // for vorticity (NULL to skip)
+    float4*         __restrict__ vorticity_out,          // (curl_v.x, .y, .z, |curl_v|), NULL to skip
+    float4*         __restrict__ normal_out              // (n_x, n_y, n_z, neighbor_count), NULL to skip
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -352,8 +145,17 @@ void K_PBF_ComputeLambda(
     uint pi_i = packed_info[i];
     int behavior_i = GET_BEHAVIOR(pi_i);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
+    bool is_gas_i = (behavior_i == GAS);
 
-    if (behavior_i == STATIC) {
+    bool do_heat = (dTdt_out != 0);
+    bool do_vort = (vorticity_out != 0) && (behavior_i == FLUID);
+
+    // STATIC/GAS early return: skip density/lambda/gradient when no heat/exposure needed.
+    // When do_heat is true (first call), STATIC particles still need exposure from
+    // cross-phase neighbors (e.g., fire-to-wood ignition), so they fall through to the
+    // neighbor loop but get lambda=0 forced after (see below).
+    // GAS skips PBF constraints entirely (compressible phase).
+    if ((behavior_i == STATIC || behavior_i == GAS) && !do_heat) {
         density_out[i] = c_materials[mat_id_i].rest_density;
         lambda_out[i] = 0.0f;
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -372,6 +174,33 @@ void K_PBF_ComputeLambda(
     // Gradient sum for constraint denominator (Spiky)
     float3 grad_ci = make_float3(0.0f, 0.0f, 0.0f);  // grad_pi C_i
     float sum_grad_sq = 0.0f;  // SUM_j |grad_pj C_i|^2 for j != i
+
+    // Heat diffusion + exposure + dye accumulators (only when do_heat)
+    float sum_dTdt = 0.0f;
+    float sum_exposure_heat = 0.0f;
+    float sum_exposure_corrode = 0.0f;
+    float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
+    float T_i = 0.0f;
+    float kappa_i = 0.0f;
+    float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (do_heat) {
+        T_i = __ldg(&temperature_in[i]);
+        kappa_i = c_materials[mat_id_i].thermal_conductivity;
+        dye_i = __ldg(&particle_dye_in[i]);
+    }
+
+    // Vorticity accumulator (FLUID only)
+    float3 omega = make_float3(0.0f, 0.0f, 0.0f);
+    float3 vel_i_vort = make_float3(0.0f, 0.0f, 0.0f);
+    if (do_vort) {
+        float4 v4 = __ldg(&velocity_in[i]);
+        vel_i_vort = make_float3(v4.x, v4.y, v4.z);
+    }
+
+    // Surface normal accumulator (FLUID only)
+    bool do_normal = (behavior_i == FLUID && normal_out != 0);
+    float3 normal = make_float3(0.0f, 0.0f, 0.0f);
+    float neighbor_count = 0.0f;
 
     int3 cell_i = get_cell(pos_i);
 
@@ -398,14 +227,28 @@ void K_PBF_ComputeLambda(
                     float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
                     if (r_sq > h_sq) continue;
 
-                    // Skip STATIC neighbors for density
-                    if (GET_BEHAVIOR(pi_j) == STATIC && j != i) continue;
+                    int behavior_j = GET_BEHAVIOR(pi_j);
+
+                    // GAS/non-GAS phase separation: skip density/gradient,
+                    // keep only exposure (fire-to-wood ignition still works)
+                    bool is_gas_j = (behavior_j == GAS);
+                    if (is_gas_i != is_gas_j && j != i) {
+                        if (do_heat) {
+                            float diff_xp = h_sq - r_sq;
+                            float T_j = __ldg(&temperature_in[j]);
+                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                            float w_poly6_var = diff_xp * diff_xp * diff_xp;
+                            sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                            sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                        }
+                        continue;
+                    }
 
                     // Density (Poly6, self-included)
                     float diff = h_sq - r_sq;
                     sum_density += m_j * diff * diff * diff;
 
-                    // Gradient (Spiky, skip self)
+                    // Gradient + heat + exposure (skip self)
                     if (j != i && r_sq > 1e-12f) {
                         float rlen = sqrtf(r_sq);
                         float3 gW = grad_spiky(r, rlen, h);
@@ -420,6 +263,56 @@ void K_PBF_ComputeLambda(
                         grad_ci.x += gx;
                         grad_ci.y += gy;
                         grad_ci.z += gz;
+
+                        // Heat diffusion + exposure (only on first call)
+                        if (do_heat) {
+                            float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                            float T_j = __ldg(&temperature_in[j]);
+
+                            // Heat: dTdt += kappa_i * lap_coeff * (m_j/rho_j) * (T_j-T_i) * (h-r) * boost
+                            float lap_var = h - rlen;
+                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                            float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
+                            sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var * heat_boost;
+
+                            // Exposure
+                            float w_poly6_var = diff * diff * diff;
+                            sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                            sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+
+                            // Dye diffusion: dC/dt += D * (m_j/rho_j) * lap_coeff * (h-r) * (C_j-C_i)
+                            // Skip STATIC neighbors to avoid color bleeding from stone
+                            if (behavior_j != STATIC) {
+                                float vol_j = m_j / fmaxf(rho_j, 1.0f);
+                                float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
+                                float4 dye_j = __ldg(&particle_dye_in[j]);
+                                dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
+                                dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
+                                dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
+                            }
+                        }
+
+                        // Vorticity + surface normal (FLUID only, share rho_j load)
+                        if (do_vort || do_normal) {
+                            float rho_j_v = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                            float vol_jv = m_j / fmaxf(rho_j_v, 1.0f);
+                            if (do_vort) {
+                                float4 vj4 = __ldg(&velocity_in[j]);
+                                float dvx = vel_i_vort.x - vj4.x;
+                                float dvy = vel_i_vort.y - vj4.y;
+                                float dvz = vel_i_vort.z - vj4.z;
+                                // dv = v_i - v_j, (v_j-v_i)xgW = -dvxgW = gWxdv
+                                omega.x += vol_jv * (gW.y * dvz - gW.z * dvy);
+                                omega.y += vol_jv * (gW.z * dvx - gW.x * dvz);
+                                omega.z += vol_jv * (gW.x * dvy - gW.y * dvx);
+                            }
+                            if (do_normal) {
+                                normal.x += vol_jv * gW.x;
+                                normal.y += vol_jv * gW.y;
+                                normal.z += vol_jv * gW.z;
+                                neighbor_count += 1.0f;
+                            }
+                        }
                     }
                 }
             }
@@ -429,6 +322,31 @@ void K_PBF_ComputeLambda(
     float rho = c_precalc.poly6_coeff * sum_density;
     rho = fmaxf(rho, 1.0f);
     density_out[i] = rho;
+
+    // Heat diffusion + exposure + dye output
+    if (do_heat) {
+        dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt;
+        exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
+        exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+        dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
+    }
+
+    // Vorticity output
+    if (do_vort) {
+        float omega_mag = sqrtf(omega.x * omega.x + omega.y * omega.y + omega.z * omega.z);
+        vorticity_out[i] = make_float4(omega.x, omega.y, omega.z, omega_mag);
+    } else if (vorticity_out != 0) {
+        vorticity_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    // Surface normal output (FLUID: n + neighbor_count, others: zero)
+    if (normal_out != 0) {
+        if (do_normal) {
+            normal_out[i] = make_float4(normal.x, normal.y, normal.z, neighbor_count);
+        } else {
+            normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+    }
 
     // Store normalized density gradient as pressure normal for GRANULAR friction
     // grad_ci points in the direction of maximum density increase (into the pile)
@@ -445,11 +363,21 @@ void K_PBF_ComputeLambda(
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
+    // STATIC and GAS: always lambda=0 (Akinci one-way boundary / compressible phase).
+    // They may reach here on the do_heat path to accumulate exposure/heat, but must not
+    // participate in PBF constraint solving.
+    if (behavior_i == STATIC || behavior_i == GAS) {
+        density_out[i] = (behavior_i == STATIC) ? c_materials[mat_id_i].rest_density : rho;
+        lambda_out[i] = 0.0f;
+        pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
     // Constraint: C_i = rho_i / rho0 - 1
     // Over-dense (C>0): full repulsive correction (incompressibility)
     // Under-dense (C<0): weak attractive correction (5%) for surface cohesion
     float C_raw = rho / rho0 - 1.0f;
-    float C_i = (C_raw >= 0.0f) ? C_raw : C_raw * 0.05f;
+    float C_i = (C_raw >= 0.0f) ? C_raw : C_raw * c_pbf.neg_c_scale;
 
     if (fabsf(C_i) < 1e-8f) {
         lambda_out[i] = 0.0f;
@@ -486,8 +414,11 @@ void K_PBF_ComputeDelta(
     uint pi_i = packed_info[i];
     int behavior_i = GET_BEHAVIOR(pi_i);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
+    bool is_gas_i = (behavior_i == GAS);
 
-    if (behavior_i == STATIC || IS_SLEEPING(pi_i)) {
+    // GAS skips PBF constraints (compressible phase, not position-corrected).
+    // STATIC and sleeping particles also skip.
+    if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) {
         delta_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
@@ -524,7 +455,10 @@ void K_PBF_ComputeDelta(
                     float lambda_j = __ldg(&lambda_pbf[j]);
                     float m_j = __ldg(&mass[j]);
 
-                    if (GET_BEHAVIOR(pi_j) == STATIC) continue;
+                    int bj_delta = GET_BEHAVIOR(pi_j);
+
+                    // GAS/non-GAS phase separation
+                    if (is_gas_i != (bj_delta == GAS)) continue;
 
                     float3 r = make_float3(
                         pos_i.x - pos4_j.x,
@@ -537,13 +471,16 @@ void K_PBF_ComputeDelta(
                     float rlen = sqrtf(r_sq);
 
                     // Artificial pressure (tensile instability fix)
+                    // NOTE: Exponent is hardcoded n=4 for performance (avoids powf).
+                    // c_pbf.s_corr_n exists but is not used here. At h=0.04, s_corr
+                    // is typically disabled (k=0) because Spiky gradients are already
+                    // large enough for stability. See PHYSICS.md §10.6.
                     float W_ij = W_poly6(r_sq, h_sq);
                     float s_corr = 0.0f;
                     if (W_dq > 1e-12f) {
                         float ratio = W_ij / W_dq;
-                        // ratio^n (integer power)
-                        float rn = ratio * ratio;  // n=4: ratio^2
-                        rn = rn * rn;              // ratio^4
+                        float rn = ratio * ratio;  // ratio^2
+                        rn = rn * rn;              // ratio^4 (hardcoded n=4)
                         s_corr = -c_pbf.s_corr_k * rn;
                     }
 
@@ -575,7 +512,8 @@ void K_PBF_ComputeDelta(
 }
 
 /* ======================================================================
- * K_PBF_ApplyDelta -- Apply correction + boundary + GRANULAR friction
+ * K_PBF_ApplyDelta -- Apply correction + boundary clamp
+ * (GRANULAR friction moved to K_PBF_Finalize for iteration-independence)
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -583,8 +521,7 @@ void K_PBF_ApplyDelta(
     uint            numParticles,
     float4*         __restrict__ predicted_pos,   // in-out
     const float4*   __restrict__ delta_pos,
-    const uint*     __restrict__ packed_info,
-    const float4*   __restrict__ pressure_normal
+    const uint*     __restrict__ packed_info
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -596,56 +533,6 @@ void K_PBF_ApplyDelta(
     float4 d4 = delta_pos[i];
 
     float3 pos = make_float3(pos4.x + d4.x, pos4.y + d4.y, pos4.z + d4.z);
-
-    // GRANULAR: Drucker-Prager yield surface using pressure normal (density gradient).
-    // The density gradient points into the pile (maximum density increase direction),
-    // giving us the "pressure normal" for 3D normal/tangential decomposition.
-    // Drucker-Prager criterion: |delta_t| <= tan(phi_f) * |delta_n| + cohesion
-    // where tan(phi_f) and cohesion are set in c_granular (uploaded per-solver).
-    // PBF position-space needs much lower tan_phi_f (~0.25) than force-space (~0.78)
-    // because corrections directly displace particles each iteration.
-    if (GET_BEHAVIOR(pi) == GRANULAR) {
-        float4 pn4 = __ldg(&pressure_normal[i]);
-        float3 n = make_float3(pn4.x, pn4.y, pn4.z);
-        float n_len_sq = n.x*n.x + n.y*n.y + n.z*n.z;
-
-        if (n_len_sq > 0.5f) {  // valid normal (len ~1)
-            // Decompose delta into normal and tangential components
-            float d_dot_n = d4.x*n.x + d4.y*n.y + d4.z*n.z;
-            float3 delta_n = make_float3(d_dot_n*n.x, d_dot_n*n.y, d_dot_n*n.z);
-            float3 delta_t = make_float3(d4.x - delta_n.x, d4.y - delta_n.y, d4.z - delta_n.z);
-
-            float tang_sq = delta_t.x*delta_t.x + delta_t.y*delta_t.y + delta_t.z*delta_t.z;
-            float norm_mag = fabsf(d_dot_n);
-
-            // Drucker-Prager: |delta_t| <= tan(phi_f) * |delta_n| + cohesion
-            float max_tang = c_granular.tan_phi_f * norm_mag + c_granular.cohesion;
-
-            // Static friction dead zone: below minimum normal compression, zero tangential
-            if (norm_mag < 5e-5f) {
-                max_tang = 0.0f;
-            }
-
-            if (tang_sq > max_tang * max_tang) {
-                if (max_tang > 0.0f && tang_sq > 1e-12f) {
-                    float scale = max_tang / sqrtf(tang_sq);
-                    delta_t.x *= scale;
-                    delta_t.y *= scale;
-                    delta_t.z *= scale;
-                } else {
-                    delta_t.x = 0.0f;
-                    delta_t.y = 0.0f;
-                    delta_t.z = 0.0f;
-                }
-            }
-
-            // Recombine: pos = original + clamped_normal + clamped_tangential
-            pos.x = pos4.x + delta_n.x + delta_t.x;
-            pos.y = pos4.y + delta_n.y + delta_t.y;
-            pos.z = pos4.z + delta_n.z + delta_t.z;
-        }
-        // else: fallback to unclamped delta (already applied above)
-    }
 
     clamp_boundary(pos);
     predicted_pos[i] = make_float4(pos.x, pos.y, pos.z, 1.0f);
@@ -679,9 +566,13 @@ void K_PBF_Finalize(
     unsigned char*  __restrict__ sleep_counter_out,
     float*          __restrict__ temperature_out,
     const float4*   __restrict__ sorted_particle_dye,
+    const float4*   __restrict__ sorted_dye_rate,
     float4*         __restrict__ particle_dye_out,
     const float4*   __restrict__ sorted_angular_velocity,
-    float4*         __restrict__ angular_velocity_out
+    float4*         __restrict__ angular_velocity_out,
+    const float4*   __restrict__ vorticity_in,     // (omega_x,y,z, |omega|) from ComputeLambda, or NULL
+    const float4*   __restrict__ normal_in,         // (n_x,n_y,n_z, neighbor_count) from ComputeLambda, or NULL
+    const float4*   __restrict__ pressure_normal_in // density gradient normal for GRANULAR friction, or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -758,12 +649,50 @@ void K_PBF_Finalize(
         (pred.z - orig.z) * inv_dt
     );
 
-    // FLUID thermal convection: Boussinesq buoyancy
-    // rho_eff = rho_0 * (1 - beta*(T-T0)), lighter when hot -> rises
-    if (behavior == FLUID) {
-        float beta = c_materials[mat_id].thermal_expansion;
-        if (beta > 0.0f) {
-            vel_new.y += beta * (temp - T_AMBIENT) * 9.81f * dt;
+    // NOTE: Thermal convection (Boussinesq buoyancy) is applied ONLY in K_PBF_Predict,
+    // not here. PBF derives velocity from corrected positions: v = (x* - x_old)/dt.
+    // Adding buoyancy here would double-count it since it's already in predicted positions.
+
+    // GRANULAR: Velocity-space Drucker-Prager friction (applied once, iteration-independent).
+    // Uses pressure_normal (density gradient) from ComputeLambda for normal/tangential decomposition.
+    // Drucker-Prager criterion: |v_t| <= tan(phi_f) * |v_n| + cohesion / dt
+    if (behavior == GRANULAR && pressure_normal_in != 0) {
+        float4 pn4 = __ldg(&pressure_normal_in[i]);
+        float3 n = make_float3(pn4.x, pn4.y, pn4.z);
+        float n_len_sq = n.x*n.x + n.y*n.y + n.z*n.z;
+
+        if (n_len_sq > 0.5f) {  // valid unit normal
+            // n points into pile (direction of increasing density).
+            // v_dot_n > 0 means compressing into pile -> friction applies.
+            // v_dot_n <= 0 means separating (tension) -> no friction.
+            float v_dot_n = vel_new.x*n.x + vel_new.y*n.y + vel_new.z*n.z;
+
+            if (v_dot_n > 0.0f) {
+                float3 v_n = make_float3(v_dot_n*n.x, v_dot_n*n.y, v_dot_n*n.z);
+                float3 v_t = make_float3(vel_new.x - v_n.x, vel_new.y - v_n.y, vel_new.z - v_n.z);
+
+                float tang_sq = v_t.x*v_t.x + v_t.y*v_t.y + v_t.z*v_t.z;
+
+                // Static friction dead zone: below minimum normal velocity, zero tangential
+                float max_tang = (v_dot_n < 5e-4f) ? 0.0f
+                               : c_granular.tan_phi_f * v_dot_n + c_granular.cohesion * inv_dt;
+
+                if (tang_sq > max_tang * max_tang) {
+                    if (max_tang > 0.0f && tang_sq > 1e-12f) {
+                        float scale = max_tang / sqrtf(tang_sq);
+                        v_t.x *= scale;
+                        v_t.y *= scale;
+                        v_t.z *= scale;
+                    } else {
+                        v_t.x = 0.0f;
+                        v_t.y = 0.0f;
+                        v_t.z = 0.0f;
+                    }
+                    vel_new.x = v_n.x + v_t.x;
+                    vel_new.y = v_n.y + v_t.y;
+                    vel_new.z = v_n.z + v_t.z;
+                }
+            }
         }
     }
 
@@ -788,7 +717,8 @@ void K_PBF_Finalize(
                         if (j == i) continue;
 
                         uint pi_j = __ldg(&packed_info[j]);
-                        if (GET_BEHAVIOR(pi_j) == STATIC) continue;
+                        int bj = GET_BEHAVIOR(pi_j);
+                        if (bj == GAS) continue;  // no XSPH across phases
 
                         float4 pred4_j = __ldg(&predicted_pos[j]);
                         float3 r = make_float3(
@@ -819,11 +749,81 @@ void K_PBF_Finalize(
         }
 
         float c_xsph = c_pbf.xsph_c;
+        // Per-material viscosity scaling: OIL 5x, LAVA 10x, etc.
+        c_xsph *= c_materials[mat_id].base_viscosity;
         // GRANULAR: higher artificial viscosity
         if (behavior == GRANULAR) c_xsph *= 10.0f;
         vel_new.x += c_xsph * xsph.x;
         vel_new.y += c_xsph * xsph.y;
         vel_new.z += c_xsph * xsph.z;
+    }
+
+    // Vorticity confinement (FLUID only): vel += dt * epsilon * (N x omega)
+    if (behavior == FLUID && vorticity_in != 0 && c_granular.vorticity_epsilon > 0.0f) {
+        float4 vort_i = __ldg(&vorticity_in[i]);
+        float omega_mag_i = vort_i.w;
+
+        if (omega_mag_i > 1e-6f) {
+            float h = c_sim.smoothing_length;
+            float h_sq = c_sim.smoothing_length_sq;
+            int3 cell_iv = get_cell(pred);
+
+            // Compute eta = grad(|omega|) via neighbor loop
+            float3 eta = make_float3(0.0f, 0.0f, 0.0f);
+            for (int dz2 = -1; dz2 <= 1; dz2++) {
+                for (int dy2 = -1; dy2 <= 1; dy2++) {
+                    for (int dx2 = -1; dx2 <= 1; dx2++) {
+                        uint hash_v = spatialHash(cell_iv.x + dx2, cell_iv.y + dy2, cell_iv.z + dz2);
+                        uint start_v = cell_start[hash_v];
+                        if (start_v == 0xFFFFFFFFu) continue;
+                        uint end_v = cell_end[hash_v];
+                        for (uint jv = start_v; jv < end_v; jv++) {
+                            if (jv == i) continue;
+                            float4 pj_v = __ldg(&predicted_pos[jv]);
+                            float3 rv = make_float3(pred.x - pj_v.x, pred.y - pj_v.y, pred.z - pj_v.z);
+                            float r2v = rv.x*rv.x + rv.y*rv.y + rv.z*rv.z;
+                            if (r2v > h_sq || r2v < 1e-12f) continue;
+                            float rlv = sqrtf(r2v);
+                            float h_rl = h - rlv;
+                            float inv_rl = 1.0f / rlv;
+                            float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
+                            float omega_j = __ldg(&vorticity_in[jv]).w;
+                            float mj_v = __ldg(&mass[jv]);
+                            float rj_v = __ldg(&density[jv]);
+                            float wt = mj_v / fmaxf(rj_v, 1.0f);
+                            eta.x += wt * omega_j * gs * rv.x;
+                            eta.y += wt * omega_j * gs * rv.y;
+                            eta.z += wt * omega_j * gs * rv.z;
+                        }
+                    }
+                }
+            }
+            // N = eta / |eta|, vel += dt * epsilon * (N x omega)
+            float eta_mag = sqrtf(eta.x*eta.x + eta.y*eta.y + eta.z*eta.z);
+            if (eta_mag > 1e-6f) {
+                float inv_eta = 1.0f / eta_mag;
+                float3 N = make_float3(eta.x*inv_eta, eta.y*inv_eta, eta.z*inv_eta);
+                float eps_v = c_granular.vorticity_epsilon;
+                vel_new.x += dt * eps_v * (N.y * vort_i.z - N.z * vort_i.y);
+                vel_new.y += dt * eps_v * (N.z * vort_i.x - N.x * vort_i.z);
+                vel_new.z += dt * eps_v * (N.x * vort_i.y - N.y * vort_i.x);
+            }
+        }
+    }
+
+    // Akinci surface tension (FLUID only, surface particles): vel += dt * (-gamma * n)
+    if (behavior == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f) {
+        float4 norm_i = __ldg(&normal_in[i]);
+        float nc_i = norm_i.w;  // neighbor count
+        if (nc_i < 25.0f) {
+            float gamma = c_granular.surface_tension_gamma;
+            float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
+            if (n_mag > 0.01f) {
+                vel_new.x += dt * (-gamma * norm_i.x);
+                vel_new.y += dt * (-gamma * norm_i.y);
+                vel_new.z += dt * (-gamma * norm_i.z);
+            }
+        }
     }
 
     // GRANULAR: friction velocity damping when in dense packing.
@@ -855,6 +855,15 @@ void K_PBF_Finalize(
         vel_new.y *= scale;
         vel_new.z *= scale;
         vel_sq = VELOCITY_LIMIT_SQ;
+    }
+
+    // Spawn velocity damping (ramps to 0 after first ~30 substeps)
+    if (c_sim.velocity_damping > 0.0f) {
+        float damp = 1.0f - c_sim.velocity_damping;
+        vel_new.x *= damp;
+        vel_new.y *= damp;
+        vel_new.z *= damp;
+        vel_sq = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
     }
 
     // GRANULAR anti-creep: zero velocity when nearly at rest and well-packed.
@@ -898,6 +907,15 @@ void K_PBF_Finalize(
         color = compute_color(mat_id, temp, hlth, behavior);
     }
 
+    // Dye update: dye += dye_rate * dt
+    float4 dye = sorted_particle_dye[i];
+    if (sorted_dye_rate != 0) {
+        float4 drate = sorted_dye_rate[i];
+        dye.x = fmaxf(0.0f, fminf(1.0f, dye.x + drate.x * dt));
+        dye.y = fmaxf(0.0f, fminf(1.0f, dye.y + drate.y * dt));
+        dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt));
+    }
+
     // Writeback (unsorted)
     position_out[orig_idx] = make_float4(final_pos.x, final_pos.y, final_pos.z, 1.0f);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);
@@ -905,6 +923,15 @@ void K_PBF_Finalize(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
-    particle_dye_out[orig_idx] = sorted_particle_dye[i];
-    angular_velocity_out[orig_idx] = sorted_angular_velocity[i];  // passthrough (no vorticity in PBF)
+    particle_dye_out[orig_idx] = dye;
+    // Micropolar angular velocity: relax toward 0.5 * curl_v (FLUID only)
+    float4 ang_vel = sorted_angular_velocity[i];
+    if (behavior == FLUID && vorticity_in != 0) {
+        float4 vort = __ldg(&vorticity_in[i]);
+        const float nu_t = 0.1f;
+        ang_vel.x += dt * nu_t * (0.5f * vort.x - ang_vel.x);
+        ang_vel.y += dt * nu_t * (0.5f * vort.y - ang_vel.y);
+        ang_vel.z += dt * nu_t * (0.5f * vort.z - ang_vel.z);
+    }
+    angular_velocity_out[orig_idx] = ang_vel;
 }

@@ -187,7 +187,6 @@ class Renderer:
         self.ssfr_enabled = False
         self.ssfr_blur_radius = 15.0
         self.ssfr_depth_range = 0.15
-        self.ssfr_absorption = np.array([3.0, 1.5, 0.2], dtype=np.float32)  # absorb red most, blue least = blue tint
         self.ssfr_absorption_scale = 5.0
         self.ssfr_fresnel_power = 5.0
         self.ssfr_fresnel_bias = 0.02
@@ -260,9 +259,7 @@ class Renderer:
         self._u_comp_scene = glGetUniformLocation(self._prog_composite, "uSceneTex")
         self._u_comp_proj_inv = glGetUniformLocation(self._prog_composite, "uProjInv")
         self._u_comp_texel = glGetUniformLocation(self._prog_composite, "uTexelSize")
-        self._u_comp_absorption = glGetUniformLocation(self._prog_composite, "uAbsorption")
         self._u_comp_abs_scale = glGetUniformLocation(self._prog_composite, "uAbsorptionScale")
-        self._u_comp_fluid_color = glGetUniformLocation(self._prog_composite, "uFluidColor")
         self._u_comp_fresnel_pow = glGetUniformLocation(self._prog_composite, "uFresnelPower")
         self._u_comp_fresnel_bias = glGetUniformLocation(self._prog_composite, "uFresnelBias")
         self._u_comp_spec_pow = glGetUniformLocation(self._prog_composite, "uSpecularPower")
@@ -460,8 +457,8 @@ void main() {
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, self._rbo_depth_hw)
         assert glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
 
-        # 2. Thickness FBO: R16F
-        self._tex_thickness = _create_texture(w, h, GL_R16F, GL_RED, GL_FLOAT)
+        # 2. Thickness FBO: RGBA16F (color-weighted thickness for per-pixel material color)
+        self._tex_thickness = _create_texture(w, h, GL_RGBA16F, GL_RGBA, GL_FLOAT)
         self._fbo_thickness = int(glGenFramebuffers(1))
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo_thickness)
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self._tex_thickness, 0)
@@ -648,17 +645,8 @@ void main() {
         glDepthMask(GL_TRUE)
 
         # Draw skybox into scene FBO (background for refraction)
+        # All particles (including non-FLUID) go through SSFR depth/thickness passes
         self._draw_skybox(view, proj)
-
-        # Draw non-FLUID particles as point sprites
-        glUseProgram(self._prog_nonfluid)
-        glUniformMatrix4fv(self._u_nf_mvp, 1, GL_TRUE, mvp)
-        glUniformMatrix4fv(self._u_nf_mv, 1, GL_TRUE, view)
-        glUniform1f(self._u_nf_ps, self.point_scale)
-        glBindVertexArray(self._vao)
-        glDrawArrays(GL_POINTS, 0, self.num_active)
-        glBindVertexArray(0)
-        glUseProgram(0)
 
         # ---- Pass 1: SSFR Depth (FLUID only) ----
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo_depth)
@@ -792,9 +780,7 @@ void main() {
 
         glUniformMatrix4fv(self._u_comp_proj_inv, 1, GL_TRUE, proj_inv)
         glUniform2f(self._u_comp_texel, texel[0], texel[1])
-        glUniform3f(self._u_comp_absorption, *self.ssfr_absorption)
         glUniform1f(self._u_comp_abs_scale, self.ssfr_absorption_scale)
-        glUniform3f(self._u_comp_fluid_color, 0.8, 0.9, 1.0)  # white-blue tint
         glUniform1f(self._u_comp_fresnel_pow, self.ssfr_fresnel_power)
         glUniform1f(self._u_comp_fresnel_bias, self.ssfr_fresnel_bias)
         glUniform1f(self._u_comp_spec_pow, self.ssfr_specular_power)

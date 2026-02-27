@@ -26,11 +26,15 @@ DFSPH_PARAMS_DTYPE = np.dtype(
         ("dens_iters", np.int32),
         ("warm_start", np.float32),
         ("omega", np.float32),
+        ("alpha_limit", np.float32),
+        ("_pad0", np.float32),
+        ("_pad1", np.float32),
+        ("_pad2", np.float32),
     ],
     align=False,
 )
 
-assert DFSPH_PARAMS_DTYPE.itemsize == 16
+assert DFSPH_PARAMS_DTYPE.itemsize == 32
 
 # ---------------------------------------------------------------------------
 # Module compilation
@@ -96,6 +100,20 @@ def upload_materials(materials_data: np.ndarray) -> None:
     cupy.cuda.runtime.memcpy(int(d_ptr), materials_data.ctypes.data, materials_data.nbytes, 1)
 
 
+def upload_granular_params(params: np.ndarray) -> None:
+    """Upload GranularParams to ``__constant__ GranularParams c_granular``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_granular")
+    cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
+
+
+def upload_interactions(interactions_data: np.ndarray) -> None:
+    """Upload Interaction[32][32] to ``__constant__ Interaction c_interactions[32][32]``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_interactions")
+    cupy.cuda.runtime.memcpy(int(d_ptr), interactions_data.ctypes.data, interactions_data.nbytes, 1)
+
+
 def upload_dfsph_params(profile) -> None:
     """Upload DFSPHParams to constant memory from a SolverProfile."""
     params = np.zeros(1, dtype=DFSPH_PARAMS_DTYPE)
@@ -103,6 +121,7 @@ def upload_dfsph_params(profile) -> None:
     params[0]["dens_iters"] = profile.dfsph_dens_iters
     params[0]["warm_start"] = profile.dfsph_warm_start
     params[0]["omega"] = profile.dfsph_omega
+    params[0]["alpha_limit"] = profile.dfsph_alpha_limit
 
     module = _get_module()
     d_ptr = module.get_global("c_dfsph")
@@ -131,6 +150,10 @@ def compute_density_alpha(
     dTdt_out: cupy.ndarray,
     exposure_heat_out: cupy.ndarray,
     exposure_corrode_out: cupy.ndarray,
+    particle_dye_in: "cupy.ndarray | None" = None,
+    dye_rate_out: "cupy.ndarray | None" = None,
+    vorticity_out: "cupy.ndarray | None" = None,
+    normal_out: "cupy.ndarray | None" = None,
 ) -> None:
     n = position.shape[0]
     module = _get_module()
@@ -138,12 +161,18 @@ def compute_density_alpha(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     # density_in can be None on first frame -- pass empty array (null pointer)
+    _null = np.intp(0)
     din = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
+    dye_in = particle_dye_in if particle_dye_in is not None else _null
+    dye_out = dye_rate_out if dye_rate_out is not None else _null
+    vort_out = vorticity_out if vorticity_out is not None else _null
+    norm_out = normal_out if normal_out is not None else _null
     kernel(grid, block, (
         np.uint32(n), position, velocity, mass, din,
         packed_info, temperature, cell_start, cell_end,
         density_out, alpha_out, shear_rate_out,
         dTdt_out, exposure_heat_out, exposure_corrode_out,
+        dye_in, dye_out, vort_out, norm_out,
     ))
 
 
@@ -158,8 +187,13 @@ def compute_non_pressure_forces(
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     velocity_out: cupy.ndarray,
+    vorticity_in: "cupy.ndarray | None" = None,
+    normal_in: "cupy.ndarray | None" = None,
 ) -> None:
     n = position.shape[0]
+    _null = np.intp(0)
+    vort_in = vorticity_in if vorticity_in is not None else _null
+    norm_in = normal_in if normal_in is not None else _null
     module = _get_module()
     kernel = module.get_function("K_DFSPH_NonPressureForces")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -168,6 +202,7 @@ def compute_non_pressure_forces(
         np.uint32(n), position, velocity, density, mass,
         packed_info, shear_rate, temperature,
         cell_start, cell_end, velocity_out,
+        vort_in, norm_in,
     ))
 
 
@@ -399,19 +434,24 @@ def finalize(
     temperature_out: cupy.ndarray,
     kappa_out: cupy.ndarray,
     sorted_particle_dye: "Optional[cupy.ndarray]" = None,
+    sorted_dye_rate: "Optional[cupy.ndarray]" = None,
     particle_dye_out: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
+    vorticity_in: "cupy.ndarray | None" = None,
 ) -> None:
     n = sorted_position.shape[0]
+    _null = np.intp(0)
     if sorted_particle_dye is None:
         sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
     if particle_dye_out is None:
         particle_dye_out = cupy.zeros((n, 4), dtype=cupy.float32)
+    s_dye_rate = sorted_dye_rate if sorted_dye_rate is not None else _null
     if sorted_angular_velocity is None:
         sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
     if angular_velocity_out is None:
         angular_velocity_out = cupy.zeros((n, 4), dtype=cupy.float32)
+    vort_in = vorticity_in if vorticity_in is not None else _null
     module = _get_module()
     kernel = module.get_function("K_DFSPH_Finalize")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -423,6 +463,7 @@ def finalize(
         sorted_sleep_counter, sorted_kappa, sort_indexes, cell_start, cell_end,
         position_out, velocity_out, color_out, packed_info_out,
         sleep_counter_out, temperature_out, kappa_out,
-        sorted_particle_dye, particle_dye_out,
+        sorted_particle_dye, s_dye_rate, particle_dye_out,
         sorted_angular_velocity, angular_velocity_out,
+        vort_in,
     ))

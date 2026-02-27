@@ -47,7 +47,7 @@ REST_DENSITY = 2500.0
 # Helpers
 # ---------------------------------------------------------------------------
 
-def fresh_sim(solver_name: str = "WCSPH (Default)",
+def fresh_sim(solver_name: str = "WCSPH",
               max_particles: int = 100_000) -> Tuple[World, Simulation]:
     """Create a fresh World + Simulation with cleared state and correct profile."""
     profile = PROFILES[solver_name]

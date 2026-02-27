@@ -80,7 +80,7 @@ def diagnose(world, label, sorted_arrays=None):
 def test_pbf_detailed(world, sim):
     """Test PBF with intermediate diagnostics."""
     import pbf_solver
-    profile = PROFILES["PBF (Position Based)"]
+    profile = PROFILES["PBF"]
     print(f"\n{'='*60}")
     print(f"PBF Detailed Test (dt={profile.dt:.6f})")
     print(f"{'='*60}")
@@ -117,7 +117,8 @@ def test_pbf_detailed(world, sim):
         # PBF Predict
         pbf_solver.pbf_predict(
             w.sorted_position[:n], w.sorted_velocity[:n],
-            w.sorted_packed_info[:n], w.sorted_predicted_position,
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
+            w.sorted_predicted_position,
         )
         cp.cuda.Device().synchronize()
         pred = w.sorted_predicted_position[:n].get()
@@ -191,7 +192,7 @@ def test_pbf_detailed(world, sim):
 def test_dfsph_detailed(world, sim):
     """Test DFSPH with intermediate diagnostics."""
     import dfsph_solver
-    profile = PROFILES["DFSPH (Div-Free)"]
+    profile = PROFILES["DFSPH"]
     print(f"\n{'='*60}")
     print(f"DFSPH Detailed Test (dt={profile.dt:.6f})")
     print(f"{'='*60}")
@@ -356,8 +357,8 @@ def main():
     sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
 
     # Quick stability checks (20 substeps each)
-    test_stability(world, sim, "PBF (Position Based)", 20)
-    test_stability(world, sim, "DFSPH (Div-Free)", 20)
+    test_stability(world, sim, "PBF", 20)
+    test_stability(world, sim, "DFSPH", 20)
 
 
 if __name__ == "__main__":

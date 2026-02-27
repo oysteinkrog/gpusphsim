@@ -24,6 +24,7 @@
 
 #define MAT_DEAD       0
 #define MAT_STONE      1
+#define MAT_SAND       2
 #define MAT_WATER      5
 #define MAT_OIL        6
 #define MAT_LAVA       7
@@ -32,6 +33,8 @@
 #define MAT_STEAM     12
 #define MAT_FIRE      14
 #define MAT_GUNPOWDER 15
+#define MAT_WET_SAND  16
+#define MAT_MUD       17
 
 /* ======================================================================
  * Reaction thresholds
@@ -52,6 +55,13 @@
 #define GUNPOWDER_FIRE_LIFETIME 0.3f   // seconds
 
 #define EXPLOSION_SPEED        5.0f    // velocity magnitude for gunpowder burst
+
+/* Sand wetting/drying thresholds */
+#define SAND_WET_THRESHOLD      0.2f   // SAND -> WET_SAND
+#define WETSAND_MUD_THRESHOLD   0.5f   // WET_SAND -> MUD
+#define WETSAND_DRY_THRESHOLD   0.02f  // WET_SAND -> SAND (drying)
+#define MUD_DRY_THRESHOLD       0.1f   // MUD -> WET_SAND (drying)
+#define DRYING_TEMP_ACCEL       0.01f  // temperature acceleration for drying
 
 /* ======================================================================
  * Wang hash RNG for explosion direction
@@ -189,8 +199,28 @@ void K_Reactions(
         return;
     }
 
+    // ---- Sand wetting/drying transitions ----
+    if (mat_id == MAT_SAND && exp_corrode > SAND_WET_THRESHOLD) {
+        packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
+        return;
+    }
+    if (mat_id == MAT_WET_SAND && exp_corrode > WETSAND_MUD_THRESHOLD) {
+        packed_info[i] = MAKE_PACKED(MAT_MUD, FLUID);
+        return;
+    }
+    if (mat_id == MAT_MUD && exp_corrode < MUD_DRY_THRESHOLD
+            / (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
+        packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
+        return;
+    }
+    if (mat_id == MAT_WET_SAND && exp_corrode < WETSAND_DRY_THRESHOLD
+            / (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
+        packed_info[i] = MAKE_PACKED(MAT_SAND, GRANULAR);
+        return;
+    }
+
     // ---- Corrosion: health -= exposure_corrode * dt ----
-    if (exp_corrode > 0.0f) {
+    if (exp_corrode > 0.0f && mat_id != MAT_SAND && mat_id != MAT_WET_SAND && mat_id != MAT_MUD) {
         hlth -= exp_corrode * dt;
         if (hlth <= 0.0f) {
             // Particle dies from corrosion -- add to freelist

@@ -6,7 +6,7 @@ launch functions for the 5 PBF kernels.
 Constant memory (each RawModule has its own address space):
   c_grid, c_sim, c_precalc, c_materials -- shared with other kernels
   c_pbf       -- PBF-specific parameters
-  c_granular  -- mu(I) parameters (for GRANULAR friction in ApplyDelta)
+  c_granular  -- mu(I) parameters (for GRANULAR friction in Finalize)
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ PBF_PARAMS_DTYPE = np.dtype(
         ("s_corr_dq_sq", np.float32),
         ("s_corr_W_dq", np.float32),
         ("xsph_c", np.float32),
-        ("padding", np.float32),
+        ("neg_c_scale", np.float32),
     ],
     align=False,
 )
@@ -102,6 +102,13 @@ def upload_materials(materials_data: np.ndarray) -> None:
     cupy.cuda.runtime.memcpy(int(d_ptr), materials_data.ctypes.data, materials_data.nbytes, 1)
 
 
+def upload_interactions(interactions_data: np.ndarray) -> None:
+    """Upload Interaction[32][32] to ``__constant__ Interaction c_interactions[32][32]``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_interactions")
+    cupy.cuda.runtime.memcpy(int(d_ptr), interactions_data.ctypes.data, interactions_data.nbytes, 1)
+
+
 def upload_granular_params(params: np.ndarray) -> None:
     module = _get_module()
     d_ptr = module.get_global("c_granular")
@@ -127,7 +134,7 @@ def upload_pbf_params(profile) -> None:
     params[0]["s_corr_dq_sq"] = dq_sq
     params[0]["s_corr_W_dq"] = W_dq
     params[0]["xsph_c"] = profile.pbf_xsph_c
-    params[0]["padding"] = 0.0
+    params[0]["neg_c_scale"] = profile.pbf_neg_c_scale
 
     module = _get_module()
     d_ptr = module.get_global("c_pbf")
@@ -145,6 +152,7 @@ def pbf_predict(
     position: cupy.ndarray,
     velocity: cupy.ndarray,
     packed_info: cupy.ndarray,
+    temperature: cupy.ndarray,
     predicted_out: cupy.ndarray,
 ) -> None:
     n = position.shape[0]
@@ -153,7 +161,7 @@ def pbf_predict(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     kernel(grid, block, (
-        np.uint32(n), position, velocity, packed_info, predicted_out,
+        np.uint32(n), position, velocity, packed_info, temperature, predicted_out,
     ))
 
 
@@ -166,10 +174,33 @@ def pbf_compute_lambda(
     density_out: cupy.ndarray,
     lambda_out: cupy.ndarray,
     pressure_normal_out: cupy.ndarray = None,
+    # Optional heat diffusion + exposure (pass on first call only)
+    temperature_in: "cupy.ndarray | None" = None,
+    density_in: "cupy.ndarray | None" = None,
+    dTdt_out: "cupy.ndarray | None" = None,
+    exposure_heat_out: "cupy.ndarray | None" = None,
+    exposure_corrode_out: "cupy.ndarray | None" = None,
+    particle_dye_in: "cupy.ndarray | None" = None,
+    dye_rate_out: "cupy.ndarray | None" = None,
+    velocity_in: "cupy.ndarray | None" = None,
+    vorticity_out: "cupy.ndarray | None" = None,
+    normal_out: "cupy.ndarray | None" = None,
 ) -> None:
     n = predicted_pos.shape[0]
     if pressure_normal_out is None:
         pressure_normal_out = cupy.zeros((n, 4), dtype=cupy.float32)
+    # NULL pointers for optional params
+    _null = np.intp(0)
+    t_in = temperature_in if temperature_in is not None else _null
+    d_in = density_in if density_in is not None else _null
+    dt_out = dTdt_out if dTdt_out is not None else _null
+    eh_out = exposure_heat_out if exposure_heat_out is not None else _null
+    ec_out = exposure_corrode_out if exposure_corrode_out is not None else _null
+    dye_in = particle_dye_in if particle_dye_in is not None else _null
+    dye_out = dye_rate_out if dye_rate_out is not None else _null
+    vel_in = velocity_in if velocity_in is not None else _null
+    vort_out = vorticity_out if vorticity_out is not None else _null
+    norm_out = normal_out if normal_out is not None else _null
     module = _get_module()
     kernel = module.get_function("K_PBF_ComputeLambda")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -178,6 +209,9 @@ def pbf_compute_lambda(
         np.uint32(n), predicted_pos, mass, packed_info,
         cell_start, cell_end, density_out, lambda_out,
         pressure_normal_out,
+        t_in, d_in, dt_out, eh_out, ec_out,
+        dye_in, dye_out,
+        vel_in, vort_out, norm_out,
     ))
 
 
@@ -205,18 +239,14 @@ def pbf_apply_delta(
     predicted_pos: cupy.ndarray,
     delta_pos: cupy.ndarray,
     packed_info: cupy.ndarray,
-    pressure_normal: cupy.ndarray = None,
 ) -> None:
     n = predicted_pos.shape[0]
-    if pressure_normal is None:
-        pressure_normal = cupy.zeros((n, 4), dtype=cupy.float32)
     module = _get_module()
     kernel = module.get_function("K_PBF_ApplyDelta")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     kernel(grid, block, (
         np.uint32(n), predicted_pos, delta_pos, packed_info,
-        pressure_normal,
     ))
 
 
@@ -241,19 +271,28 @@ def pbf_finalize(
     sleep_counter_out: cupy.ndarray,
     temperature_out: cupy.ndarray,
     sorted_particle_dye: "Optional[cupy.ndarray]" = None,
+    sorted_dye_rate: "Optional[cupy.ndarray]" = None,
     particle_dye_out: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
+    vorticity_in: "cupy.ndarray | None" = None,
+    normal_in: "cupy.ndarray | None" = None,
+    pressure_normal_in: "cupy.ndarray | None" = None,
 ) -> None:
     n = predicted_pos.shape[0]
+    _null = np.intp(0)
     if sorted_particle_dye is None:
         sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
     if particle_dye_out is None:
         particle_dye_out = cupy.zeros((n, 4), dtype=cupy.float32)
+    s_dye_rate = sorted_dye_rate if sorted_dye_rate is not None else _null
     if sorted_angular_velocity is None:
         sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
     if angular_velocity_out is None:
         angular_velocity_out = cupy.zeros((n, 4), dtype=cupy.float32)
+    vort_in = vorticity_in if vorticity_in is not None else _null
+    norm_in = normal_in if normal_in is not None else _null
+    pn_in = pressure_normal_in if pressure_normal_in is not None else _null
     module = _get_module()
     kernel = module.get_function("K_PBF_Finalize")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -264,6 +303,7 @@ def pbf_finalize(
         sleep_counter, sort_indexes, cell_start, cell_end,
         position_out, velocity_out, color_out, packed_info_out,
         sleep_counter_out, temperature_out,
-        sorted_particle_dye, particle_dye_out,
+        sorted_particle_dye, s_dye_rate, particle_dye_out,
         sorted_angular_velocity, angular_velocity_out,
+        vort_in, norm_in, pn_in,
     ))
