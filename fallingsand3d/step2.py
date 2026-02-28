@@ -39,10 +39,10 @@ import numpy as np
 # Default physical parameters
 # ---------------------------------------------------------------------------
 
-DEFAULT_MU_S = np.float32(0.36)
-DEFAULT_MU_2 = np.float32(0.70)
+DEFAULT_MU_S = np.float32(0.55)   # tan(~29°), higher for sandcastle-like repose
+DEFAULT_MU_2 = np.float32(0.85)   # dynamic friction (flowing sand)
 DEFAULT_I0 = np.float32(0.3)
-DEFAULT_MU_MAX = np.float32(10000.0)
+DEFAULT_MU_MAX = np.float32(500.0)  # CFL-safe: nu=mu/rho=500/4000=0.125, dt_visc=0.125*h^2/nu=0.016s >> dt=0.001
 DEFAULT_PARTICLE_SPACING = np.float32(0.02)
 DEFAULT_MU0 = np.float32(1.0)
 DEFAULT_XSPH_EPSILON = np.float32(0.8)

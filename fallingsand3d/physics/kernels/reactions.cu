@@ -25,12 +25,17 @@
 #define MAT_DEAD       0
 #define MAT_STONE      1
 #define MAT_SAND       2
+#define MAT_DIRT       3
+#define MAT_GRAVEL     4
 #define MAT_WATER      5
 #define MAT_OIL        6
 #define MAT_LAVA       7
+#define MAT_ACID       8
 #define MAT_WOOD       9
+#define MAT_METAL     10
 #define MAT_ICE       11
 #define MAT_STEAM     12
+#define MAT_SMOKE     13
 #define MAT_FIRE      14
 #define MAT_GUNPOWDER 15
 #define MAT_WET_SAND  16
@@ -41,9 +46,9 @@
  * ====================================================================== */
 
 #define ICE_MELT_TEMP         273.0f   // ICE -> WATER above this
-#define LAVA_SOLIDIFY_TEMP    900.0f   // LAVA -> STONE below this
+// LAVA solidify uses c_materials[MAT_LAVA].temp_melt at runtime
 #define WATER_BOIL_TEMP       373.0f   // WATER -> SPAWN_GAS flag above this
-#define STEAM_CONDENSE_TEMP   373.0f   // STEAM -> WATER below this
+#define STEAM_CONDENSE_TEMP   360.0f   // STEAM -> WATER below this (13K hysteresis below boil)
 
 #define WOOD_IGNITE_EXPOSURE  0.5f     // WOOD -> FIRE above this exposure_heat
 #define OIL_IGNITE_EXPOSURE   0.3f     // OIL  -> FIRE above this exposure_heat
@@ -54,7 +59,7 @@
 #define OIL_FIRE_LIFETIME       1.5f   // seconds
 #define GUNPOWDER_FIRE_LIFETIME 0.3f   // seconds
 
-#define EXPLOSION_SPEED        5.0f    // velocity magnitude for gunpowder burst
+#define EXPLOSION_SPEED       25.0f    // velocity magnitude for gunpowder burst
 
 /* Sand wetting/drying thresholds */
 #define SAND_WET_THRESHOLD      0.2f   // SAND -> WET_SAND
@@ -128,8 +133,24 @@ void K_Reactions(
         return;  // done with this particle
     }
 
-    // LAVA (mat=7, temp < 900K) -> STONE (in-place)
-    if (mat_id == MAT_LAVA && temp < LAVA_SOLIDIFY_TEMP) {
+    // STONE (mat=1, temp > temp_melt=1500K) -> LAVA (melting)
+    if (mat_id == MAT_STONE && temp > c_materials[MAT_STONE].temp_melt) {
+        pi = MAKE_PACKED(MAT_LAVA, FLUID);
+        packed_info[i] = pi;
+        temperature[i] = temp;
+        return;
+    }
+
+    // SAND (mat=2, temp > temp_melt=1700K) -> LAVA (melting)
+    if (mat_id == MAT_SAND && temp > c_materials[MAT_SAND].temp_melt) {
+        pi = MAKE_PACKED(MAT_LAVA, FLUID);
+        packed_info[i] = pi;
+        temperature[i] = temp;
+        return;
+    }
+
+    // LAVA (mat=7, temp < temp_melt) -> STONE (in-place)
+    if (mat_id == MAT_LAVA && temp < c_materials[MAT_LAVA].temp_melt) {
         pi = MAKE_PACKED(MAT_STONE, STATIC);
         packed_info[i] = pi;
         temperature[i] = temp;
@@ -209,21 +230,40 @@ void K_Reactions(
         return;
     }
     if (mat_id == MAT_MUD && exp_corrode < MUD_DRY_THRESHOLD
-            / (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
+            * (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
         packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
         return;
     }
     if (mat_id == MAT_WET_SAND && exp_corrode < WETSAND_DRY_THRESHOLD
-            / (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
+            * (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
         packed_info[i] = MAKE_PACKED(MAT_SAND, GRANULAR);
         return;
     }
 
     // ---- Corrosion: health -= exposure_corrode * dt ----
-    if (exp_corrode > 0.0f && mat_id != MAT_SAND && mat_id != MAT_WET_SAND && mat_id != MAT_MUD) {
-        hlth -= exp_corrode * dt;
+    // Whitelist: only these materials can be corroded by acid
+    if (exp_corrode > 0.0f && (mat_id == MAT_STONE || mat_id == MAT_METAL ||
+        mat_id == MAT_WOOD || mat_id == MAT_DIRT || mat_id == MAT_GRAVEL ||
+        mat_id == MAT_ICE || mat_id == MAT_OIL || mat_id == MAT_GUNPOWDER)) {
+        float damage = exp_corrode * dt;
+        hlth -= damage;
         if (hlth <= 0.0f) {
             // Particle dies from corrosion -- add to freelist
+            packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+            health[i] = 0.0f;
+            if (dead_indices != 0 && dead_count != 0) {
+                uint idx = atomicAdd(dead_count, 1u);
+                dead_indices[idx] = i;
+            }
+            return;
+        }
+        health[i] = hlth;
+    }
+
+    // ---- Acid consumption: acid loses health when corroding ----
+    if (mat_id == MAT_ACID && exp_corrode > 0.0f) {
+        hlth -= exp_corrode * dt * 0.5f;
+        if (hlth <= 0.0f) {
             packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
             health[i] = 0.0f;
             if (dead_indices != 0 && dead_count != 0) {
@@ -240,13 +280,20 @@ void K_Reactions(
     if (behavior == GAS && lt > 0.0f) {
         lt -= dt;
         if (lt <= 0.0f) {
-            // Gas particle expired -- add to freelist
-            packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
-            lifetime[i] = 0.0f;
-            health[i] = 0.0f;
-            if (dead_indices != 0 && dead_count != 0) {
-                uint idx = atomicAdd(dead_count, 1u);
-                dead_indices[idx] = i;
+            if (mat_id == MAT_FIRE) {
+                // Fire expires -> becomes SMOKE with new lifetime
+                packed_info[i] = MAKE_PACKED(MAT_SMOKE, GAS);
+                lifetime[i] = 3.0f;
+                temperature[i] = fminf(temp, 500.0f);  // cool down
+            } else {
+                // Other gas expired -- add to freelist
+                packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+                lifetime[i] = 0.0f;
+                health[i] = 0.0f;
+                if (dead_indices != 0 && dead_count != 0) {
+                    uint idx = atomicAdd(dead_count, 1u);
+                    dead_indices[idx] = i;
+                }
             }
             return;
         }

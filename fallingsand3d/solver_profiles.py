@@ -25,7 +25,7 @@ class SolverProfile:
     accuracy: float = 0.4          # CFL number (WCSPH only)
     # WCSPH params
     force_scale: float = 0.02
-    xsph_epsilon: float = 0.8
+    xsph_epsilon: float = 0.1
     mu0: float = 1.0
     # PBF params
     pbf_iterations: int = 4
@@ -53,7 +53,7 @@ PROFILES = {
         name="WCSPH",
         solver_type=SolverType.WCSPH,
         dt=0.001, max_substeps=40, accuracy=0.2,
-        force_scale=0.02, xsph_epsilon=0.8,
+        force_scale=0.02, xsph_epsilon=0.1,
     ),
     "PBF": SolverProfile(
         name="PBF",
@@ -73,6 +73,7 @@ PROFILES = {
         name="WCSPH (Fast)",
         solver_type=SolverType.WCSPH,
         dt=0.001, max_substeps=40, accuracy=0.4,
+        xsph_epsilon=0.05,
     ),
     "PBF (Fast)": SolverProfile(
         name="PBF (Fast)",

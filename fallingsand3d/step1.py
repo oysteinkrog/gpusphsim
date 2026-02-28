@@ -66,6 +66,7 @@ SIM_PARAMS_DTYPE = np.dtype(
         ("world_min", np.float32, (3,)),
         ("world_max", np.float32, (3,)),
         ("velocity_damping", np.float32),
+        ("velocity_limit", np.float32),
     ],
     align=False,
 )
@@ -94,13 +95,14 @@ def build_sim_params(
     smoothing_length: float = 0.04,
     particle_mass: float = 0.008,
     particle_spacing: float = 0.02,
-    gravity: tuple = (0.0, -9.8, 0.0),
+    gravity: tuple = (0.0, -4.0, 0.0),
     dt: float = 0.001,
     restitution: float = 0.3,
     wall_friction: float = 0.5,
     world_min: tuple = (-1.0, -1.0, -1.0),
     world_max: tuple = (1.0, 1.0, 1.0),
     velocity_damping: float = 0.0,
+    velocity_limit: float = 10.0,
 ) -> np.ndarray:
     """Build a single SimParams struct as a numpy structured array."""
     params = np.zeros(1, dtype=SIM_PARAMS_DTYPE)
@@ -115,6 +117,7 @@ def build_sim_params(
     params[0]["world_min"] = world_min
     params[0]["world_max"] = world_max
     params[0]["velocity_damping"] = velocity_damping
+    params[0]["velocity_limit"] = velocity_limit
     return params
 
 

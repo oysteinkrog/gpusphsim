@@ -243,6 +243,25 @@ void K_DFSPH_ComputeDensityAlpha(
     // Density
     float rho = c_precalc.poly6_coeff * sum_density;
     rho = fmaxf(rho, 1.0f);
+
+    // H1 fix: STATIC particles use rest_density to prevent gaps at boundaries
+    if (behavior_i == STATIC) {
+        density_out[i] = c_materials[mat_id_i].rest_density;
+        alpha_out[i] = 0.0f;
+        shear_rate_out[i] = 0.0f;
+        // Still write heat/exposure outputs (computed above)
+        float cp_i_s = c_materials[mat_id_i].heat_capacity;
+        dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(c_materials[mat_id_i].rest_density * cp_i_s, 1.0f);
+        exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
+        exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+        if (dye_rate_out != 0) {
+            dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
+        }
+        if (vorticity_out != 0) vorticity_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (normal_out != 0) normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, neighbor_count);
+        return;
+    }
+
     density_out[i] = rho;
 
     // Alpha = 1 / denom (inverse diagonal of pressure Poisson system)
@@ -264,8 +283,9 @@ void K_DFSPH_ComputeDensityAlpha(
     } else {
         alpha_out[i] = (denom > alpha_threshold) ? fminf(1.0f / denom, alpha_cap) : 0.0f;
     }
-    // Heat diffusion
-    dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt;
+    // Heat diffusion: dTdt = kappa / (rho * cp) * viscosity_lap_coeff * sum_dTdt
+    float cp_i = c_materials[mat_id_i].heat_capacity;
+    dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, 1.0f);
 
     // Exposure
     exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
@@ -798,7 +818,7 @@ void K_DFSPH_PredictPosition(
  * Recomputes density at predicted positions using the ORIGINAL grid (stale
  * neighborhood). Superseded by the velocity-based Jacobi density solver
  * (ComputePressureAccel + DensitySolverUpdate + ApplyPressureVelocity) which
- * avoids stale-grid artifacts. Kept for reference only — not called from
+ * avoids stale-grid artifacts. Kept for reference only -- not called from
  * dfsph_solver.py.
  *
  * WARNING: Uses original cell lookup for predicted positions, which can miss
@@ -910,13 +930,13 @@ void K_DFSPH_ComputeKappa(
 /* ======================================================================
  * K_DFSPH_ComputeKappaFromVelocity -- LEGACY / UNUSED
  *
- * Density prediction + kappa using drho/dt = Σ m_j (v_i - v_j) · ∇W_ij.
- * Superseded by the Jacobi p/ρ² solver (ComputePressureAccel +
- * DensitySolverUpdate + ApplyPressureVelocity). Kept for reference only —
+ * Density prediction + kappa using drho/dt = SUM m_j (v_i - v_j) dot gradW_ij.
+ * Superseded by the Jacobi p/rho^2 solver (ComputePressureAccel +
+ * DensitySolverUpdate + ApplyPressureVelocity). Kept for reference only --
  * not called from dfsph_solver.py.
  *
  * NOTE: Uses m_j (not m_j/rho_j volume-weighted) unlike the active Jacobi
- * solver, so magnitudes differ by ~ρ. Do not mix with Jacobi pipeline.
+ * solver, so magnitudes differ by ~rho. Do not mix with Jacobi pipeline.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -1015,7 +1035,7 @@ void K_DFSPH_ComputeKappaFromVelocity(
  * K_DFSPH_CorrectVelocityDens -- LEGACY / UNUSED
  *
  * Applies density correction using kappa from ComputeKappaFromVelocity.
- * Superseded by the Jacobi p/ρ² solver. Kept for reference only —
+ * Superseded by the Jacobi p/rho^2 solver. Kept for reference only --
  * not called from dfsph_solver.py.
  * ====================================================================== */
 
@@ -1517,6 +1537,14 @@ void K_DFSPH_Finalize(
         pos.x + dt * vel_advect.x,
         pos.y + dt * vel_advect.y,
         pos.z + dt * vel_advect.z
+    );
+
+    // STATIC particle boundary repulsion
+    static_particle_boundary(
+        pos_new, vel,
+        cell_start, cell_end,
+        sorted_packed_info, sorted_position,
+        i, c_sim.restitution
     );
 
     // Boundary

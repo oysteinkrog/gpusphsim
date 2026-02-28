@@ -93,6 +93,7 @@ class Simulation:
         self._time_accumulator = 0.0  # fractional time carried between frames
         self.sim_time = 0.0
         self._frame_counter = 0
+        self._substep_counter = 0  # unique per-substep counter for GPU RNG seeding
         self.compact_interval = compact_interval
         self.compact_threshold = compact_threshold
         # --- CUDA graph capture state ---
@@ -225,6 +226,9 @@ class Simulation:
         if self._sim_params is None:
             return
         self._sim_params[0]["dt"] = np.float32(new_dt)
+        # Recalculate CFL velocity limit for new dt
+        vel_limit = 0.9 * self._h / max(new_dt, 1e-8)
+        self._sim_params[0]["velocity_limit"] = np.float32(vel_limit)
         self.dt = new_dt
         # Upload to all WCSPH modules that read c_sim.dt
         step1.upload_sim_params(self._sim_params)
@@ -296,16 +300,19 @@ class Simulation:
             self._cs_histogram = cupy.zeros(table_size, dtype=cupy.uint32)
             self._cs_write_offset = cupy.zeros(table_size, dtype=cupy.uint32)
 
+        # CFL velocity limit: v_max = 0.9 * h / dt
+        vel_limit = 0.9 * self._h / max(self.dt, 1e-8)
         sim_params = step1.build_sim_params(
             smoothing_length=self._h,
             particle_mass=0.02,
             particle_spacing=0.02,
-            gravity=(0.0, -9.8, 0.0),
+            gravity=(0.0, -4.0, 0.0),
             dt=self.dt,
             restitution=0.3,
             wall_friction=0.5,
             world_min=wmin,
             world_max=wmax,
+            velocity_limit=vel_limit,
         )
         self._sim_params = sim_params
         precalc_params = step1.build_precalc_params(
@@ -694,6 +701,8 @@ class Simulation:
             particle_dye_out=w.particle_dye,
             angular_velocity_out=w.angular_velocity,
             max_displacement=w.max_displacement,
+            cell_start=self._cell_start,
+            cell_end=self._cell_end,
         )
 
         # Wake propagation (memset + 2 kernels)
@@ -934,8 +943,8 @@ class Simulation:
         """
         w = self.world
 
-        # Update device frame counter (value changes, pointer stays stable)
-        self._frame_counter_d.fill(self._frame_counter)
+        # Update device substep counter for RNG seeding (unique per substep)
+        self._frame_counter_d.fill(self._substep_counter)
 
         # Mark density as initialized (needed for step1 prev_density path)
         w._density_initialized = True
@@ -981,7 +990,7 @@ class Simulation:
         self._run_foam_step(n)
 
         self.sim_time += self.dt
-        self._frame_counter += 1
+        self._substep_counter += 1
 
     def _run_foam_step(self, n: int) -> None:
         """Run foam generate + physics + compaction (outside CUDA graph).
@@ -1050,7 +1059,7 @@ class Simulation:
 
         mark("start")
 
-        self._frame_counter_d.fill(self._frame_counter)
+        self._frame_counter_d.fill(self._substep_counter)
         w._density_initialized = True
 
         # 1-4. Grid setup (counting sort or gather-only if skipping)
@@ -1170,7 +1179,7 @@ class Simulation:
                 self._timing_ema[k] = v
 
         self.sim_time += self.dt
-        self._frame_counter += 1
+        self._substep_counter += 1
 
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
@@ -1212,6 +1221,10 @@ class Simulation:
         step_fn = self._sim_step_timed if self.timing_enabled else self._sim_step
         for _ in range(sim_steps):
             step_fn(n)
+
+        # Increment frame counter once per render frame (I4 fix)
+        if sim_steps > 0:
+            self._frame_counter += 1
 
         # --- Grid reuse decision for next frame ---
         # max_displacement accumulates since the last full sort (atomicMax across all

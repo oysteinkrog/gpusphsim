@@ -45,9 +45,12 @@
 #define GAS_BUOYANCY_G     9.81f
 #define GAS_DRAG_COEFF     2.0f
 
-/* Velocity limits */
-#define VELOCITY_LIMIT     10.0f
-#define VELOCITY_LIMIT_SQ  (VELOCITY_LIMIT * VELOCITY_LIMIT)
+/* Velocity limits -- now uses c_sim.velocity_limit (CFL-derived per solver) */
+#define VELOCITY_LIMIT     (c_sim.velocity_limit)
+#define VELOCITY_LIMIT_SQ  (c_sim.velocity_limit * c_sim.velocity_limit)
+
+/* Boundary margin: prevent particles from sitting exactly at wall positions */
+#define BOUNDARY_MARGIN    1e-4f
 
 /* ======================================================================
  * GranularParams -- mu(I) rheology and shared solver parameters.
@@ -170,9 +173,9 @@ __device__ inline int3 get_cell(float3 pos) { return calcGridCell(pos); }
 
 /* Simple axis-aligned clamp to world bounds */
 __device__ inline void clamp_boundary(float3& pos) {
-    pos.x = fmaxf(c_sim.world_min.x, fminf(pos.x, c_sim.world_max.x));
-    pos.y = fmaxf(c_sim.world_min.y, fminf(pos.y, c_sim.world_max.y));
-    pos.z = fmaxf(c_sim.world_min.z, fminf(pos.z, c_sim.world_max.z));
+    pos.x = fmaxf(c_sim.world_min.x + BOUNDARY_MARGIN, fminf(pos.x, c_sim.world_max.x - BOUNDARY_MARGIN));
+    pos.y = fmaxf(c_sim.world_min.y + BOUNDARY_MARGIN, fminf(pos.y, c_sim.world_max.y - BOUNDARY_MARGIN));
+    pos.z = fmaxf(c_sim.world_min.z + BOUNDARY_MARGIN, fminf(pos.z, c_sim.world_max.z - BOUNDARY_MARGIN));
 }
 
 /* ======================================================================
@@ -189,9 +192,13 @@ __device__ inline void sdf_box_boundary(
     float3 world_min, float3 world_max,
     float restitution, float mu_wall
 ) {
+    // I5 fix: use BOUNDARY_MARGIN to prevent particles sitting exactly at walls
+    float3 wmin = make_float3(world_min.x + BOUNDARY_MARGIN, world_min.y + BOUNDARY_MARGIN, world_min.z + BOUNDARY_MARGIN);
+    float3 wmax = make_float3(world_max.x - BOUNDARY_MARGIN, world_max.y - BOUNDARY_MARGIN, world_max.z - BOUNDARY_MARGIN);
+
     // X-axis
-    if (pos.x < world_min.x) {
-        pos.x = world_min.x;
+    if (pos.x < wmin.x) {
+        pos.x = wmin.x;
         if (vel.x < 0.0f) {
             float vn = vel.x;
             vel.x = -restitution * vn;
@@ -203,8 +210,8 @@ __device__ inline void sdf_box_boundary(
             }
         }
     }
-    if (pos.x > world_max.x) {
-        pos.x = world_max.x;
+    if (pos.x > wmax.x) {
+        pos.x = wmax.x;
         if (vel.x > 0.0f) {
             float vn = vel.x;
             vel.x = -restitution * vn;
@@ -217,8 +224,8 @@ __device__ inline void sdf_box_boundary(
         }
     }
     // Y-axis
-    if (pos.y < world_min.y) {
-        pos.y = world_min.y;
+    if (pos.y < wmin.y) {
+        pos.y = wmin.y;
         if (vel.y < 0.0f) {
             float vn = vel.y;
             vel.y = -restitution * vn;
@@ -230,8 +237,8 @@ __device__ inline void sdf_box_boundary(
             }
         }
     }
-    if (pos.y > world_max.y) {
-        pos.y = world_max.y;
+    if (pos.y > wmax.y) {
+        pos.y = wmax.y;
         if (vel.y > 0.0f) {
             float vn = vel.y;
             vel.y = -restitution * vn;
@@ -244,8 +251,8 @@ __device__ inline void sdf_box_boundary(
         }
     }
     // Z-axis
-    if (pos.z < world_min.z) {
-        pos.z = world_min.z;
+    if (pos.z < wmin.z) {
+        pos.z = wmin.z;
         if (vel.z < 0.0f) {
             float vn = vel.z;
             vel.z = -restitution * vn;
@@ -257,8 +264,8 @@ __device__ inline void sdf_box_boundary(
             }
         }
     }
-    if (pos.z > world_max.z) {
-        pos.z = world_max.z;
+    if (pos.z > wmax.z) {
+        pos.z = wmax.z;
         if (vel.z > 0.0f) {
             float vn = vel.z;
             vel.z = -restitution * vn;
@@ -267,6 +274,84 @@ __device__ inline void sdf_box_boundary(
                 float red = fminf(mu_wall * fabsf(vn) / ts, 1.0f);
                 vel.x *= (1.0f - red);
                 vel.y *= (1.0f - red);
+            }
+        }
+    }
+}
+
+/* ======================================================================
+ * STATIC particle boundary repulsion.
+ *
+ * After position integration, scan for nearby STATIC particles and push
+ * the fluid/granular particle away to prevent leaking through solid
+ * boundaries. Applies velocity reflection with restitution.
+ *
+ * Requires: cell_start, cell_end, packed_info, position arrays in sorted
+ * order (same grid as the current step).
+ * ====================================================================== */
+
+__device__ inline void static_particle_boundary(
+    float3& pos, float3& vel,
+    const uint* __restrict__ cell_start,
+    const uint* __restrict__ cell_end,
+    const uint* __restrict__ packed_info,
+    const float4* __restrict__ position,  // sorted positions of all particles
+    uint self_idx,                        // sorted index of current particle
+    float restitution
+) {
+    float h = c_sim.smoothing_length;
+    float min_dist = 0.8f * h;
+    float min_dist_sq = min_dist * min_dist;
+
+    int3 cell = calcGridCell(pos);
+    float3 push = make_float3(0.0f, 0.0f, 0.0f);
+    float push_count = 0.0f;
+
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                uint hash = spatialHash(cell.x+dx, cell.y+dy, cell.z+dz);
+                uint start = cell_start[hash];
+                if (start == 0xFFFFFFFFu) continue;
+                uint end = cell_end[hash];
+                for (uint j = start; j < end; j++) {
+                    if (j == self_idx) continue;
+                    uint pi_j = __ldg(&packed_info[j]);
+                    if (GET_BEHAVIOR(pi_j) != STATIC) continue;
+                    float4 pos4_j = __ldg(&position[j]);
+                    float3 r = make_float3(
+                        pos.x - pos4_j.x,
+                        pos.y - pos4_j.y,
+                        pos.z - pos4_j.z
+                    );
+                    float r_sq = r.x*r.x + r.y*r.y + r.z*r.z;
+                    if (r_sq < min_dist_sq && r_sq > 1e-12f) {
+                        float rlen = sqrtf(r_sq);
+                        float deficit = min_dist - rlen;
+                        float weight = deficit / min_dist;
+                        float inv_r = 1.0f / rlen;
+                        push.x += deficit * (1.0f + weight) * r.x * inv_r;
+                        push.y += deficit * (1.0f + weight) * r.y * inv_r;
+                        push.z += deficit * (1.0f + weight) * r.z * inv_r;
+                        push_count += 1.0f;
+                    }
+                }
+            }
+        }
+    }
+
+    if (push_count > 0.0f) {
+        pos.x += push.x;
+        pos.y += push.y;
+        pos.z += push.z;
+        float push_len = sqrtf(push.x*push.x + push.y*push.y + push.z*push.z);
+        if (push_len > 1e-8f) {
+            float3 n = make_float3(push.x/push_len, push.y/push_len, push.z/push_len);
+            float v_dot_n = vel.x*n.x + vel.y*n.y + vel.z*n.z;
+            if (v_dot_n < 0.0f) {
+                vel.x -= (1.0f + restitution) * v_dot_n * n.x;
+                vel.y -= (1.0f + restitution) * v_dot_n * n.y;
+                vel.z -= (1.0f + restitution) * v_dot_n * n.z;
             }
         }
     }

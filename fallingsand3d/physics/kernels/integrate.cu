@@ -29,7 +29,7 @@
  * Constants (integrate-specific, not in sph_shared.cuh)
  * ====================================================================== */
 
-#define ACCEL_MAX_FLUID    30.0f
+#define ACCEL_MAX_FLUID    200.0f
 #define ACCEL_MAX_GRANULAR 200.0f
 
 /* Micropolar SPH coupling parameter */
@@ -71,6 +71,9 @@ void K_Integrate(
     const float4*   __restrict__ sorted_vorticity,      // sorted vorticity (curl_v) from Step1
     const float4*   __restrict__ sorted_angular_velocity, // sorted micropolar angular velocity
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
+    // --- Grid arrays for STATIC boundary repulsion ---
+    const uint*     __restrict__ cell_start,            // grid cell start indices
+    const uint*     __restrict__ cell_end,              // grid cell end indices
     // --- Unsorted outputs (write via sort_indexes) ---
     float4*         __restrict__ position_out,          // unsorted position
     float4*         __restrict__ velocity_out,          // unsorted velocity
@@ -269,6 +272,16 @@ void K_Integrate(
         pos.y + dt * advect_vel.y,
         pos.z + dt * advect_vel.z
     );
+
+    // --- STATIC particle boundary repulsion ---
+    if (cell_start != 0) {
+        static_particle_boundary(
+            pos_new, vel_new,
+            cell_start, cell_end,
+            sorted_packed_info, sorted_position,
+            i, c_sim.restitution
+        );
+    }
 
     // --- Impulse-style SDF boundary ---
     // FLUID: zero wall friction to prevent sticking to domain walls

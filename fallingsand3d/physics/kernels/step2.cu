@@ -105,8 +105,12 @@ void K_Step2(
     if (is_granular_i) {
         gamma_dot_i = __ldg(&shear_rate_in[index_i]);
 
-        // mu(I) rheology computation for particle i
-        float p_eff_i = fmaxf(p_i, 1.0f);
+        // mu(I) rheology computation for particle i.
+        // Pressure floor: rho0 * |g| * spacing gives a lithostatic-scale minimum
+        // so that densely packed sand at rho < rho0 still gets meaningful friction.
+        float rho0_i = c_materials[mat_id_i].rest_density;
+        float p_floor = rho0_i * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
+        float p_eff_i = fmaxf(p_i, p_floor);
         eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
     }
 
@@ -193,28 +197,28 @@ void K_Step2(
 
                     if (is_granular_i && behavior_j == GRANULAR) {
                         // mu(I) viscosity for GRANULAR-GRANULAR pairs
-                        float dvx = vel_i.x - vel_j.x;
-                        float dvy = vel_i.y - vel_j.y;
-                        float dvz = vel_i.z - vel_j.z;
-                        float gamma_dot_j = sqrtf(dvx * dvx + dvy * dvy + dvz * dvz)
-                                          / fmaxf(rlen, 1e-8f);
+                        // Use tensor-based shear_rate from Step1 (less noisy than |dv|/r)
+                        float gamma_dot_j = __ldg(&shear_rate_in[index_j]);
 
-                        float p_eff_j = fmaxf(p_j, 1.0f);
+                        float rho0_j = c_materials[mat_id_j].rest_density;
+                        float p_floor_j = rho0_j * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
+                        float p_eff_j = fmaxf(p_j, p_floor_j);
                         float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j);
 
                         // Harmonic mean viscosity
                         float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);
 
                         // Full viscosity force with coefficient baked in
+                        // Includes 1/rho_i for dimensional correctness (G2 fix)
                         float visc_lap_const = c_precalc.viscosity_lap_coeff;  // = 45/(pi*h^6)
-                        float visc_factor = eta_ij * visc_lap_const * m_j * lap_v / rho_j;
+                        float visc_factor = eta_ij * visc_lap_const * m_j * lap_v / (rho_j * rho_i);
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
                     } else if (is_granular_i) {
                         // GRANULAR-nonGRANULAR pair: use constant mu0 with
-                        // full coefficient baked in (same scale as granular path)
-                        float visc_factor = c_precalc.viscosity_precalc * m_j * lap_v / rho_j;
+                        // full coefficient baked in (includes 1/rho_i for G2 fix)
+                        float visc_factor = c_precalc.viscosity_precalc * m_j * lap_v / (rho_j * rho_i);
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
@@ -229,8 +233,8 @@ void K_Step2(
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
                     }
 
-                    // ---- XSPH correction (FLUID only) ----
-                    if (is_fluid_i) {
+                    // ---- XSPH correction (FLUID + GRANULAR) ----
+                    if (is_fluid_i || is_granular_i) {
                         float w = W_poly6(rlen_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
                         float xsph_factor = (m_j / rho_avg) * w;
@@ -274,9 +278,11 @@ void K_Step2(
                             float mj_v = __ldg(&mass[jv]);
                             float rj_v = pj_v.w;  // density from position.w (OPT-4.1)
                             float wt = mj_v / fmaxf(rj_v, 1.0f);
-                            eta.x += wt * omega_j * gs * rv.x;
-                            eta.y += wt * omega_j * gs * rv.y;
-                            eta.z += wt * omega_j * gs * rv.z;
+                            // G3 fix: use gradient of |omega|, not |omega| itself
+                            float omega_diff = omega_j - omega_mag_i;
+                            eta.x += wt * omega_diff * gs * rv.x;
+                            eta.y += wt * omega_diff * gs * rv.y;
+                            eta.z += wt * omega_diff * gs * rv.z;
                         }
                     }
                 }
@@ -339,9 +345,11 @@ void K_Step2(
     float fs = is_granular_i ? 1.0f : c_granular.force_scale;
     sph_force_out[index_i] = make_float4(total_force.x * fs, total_force.y * fs, total_force.z * fs, 0.0f);
 
-    // XSPH-corrected veleval (FLUID only; others keep original velocity)
-    if (is_fluid_i) {
+    // XSPH-corrected veleval (FLUID + GRANULAR; GAS/STATIC keep original velocity)
+    if (is_fluid_i || is_granular_i) {
         float eps = c_granular.xsph_epsilon;
+        // GRANULAR uses stronger XSPH for cohesive binding (like artificial viscosity)
+        if (is_granular_i) eps = fminf(eps * 3.0f, 0.5f);
         veleval_out[index_i] = make_float4(
             vel_i.x + eps * xsph_sum.x,
             vel_i.y + eps * xsph_sum.y,

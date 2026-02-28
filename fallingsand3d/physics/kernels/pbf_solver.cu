@@ -61,7 +61,9 @@ void K_PBF_Predict(
     float4 pos4 = position[i];
     float3 pos = make_float3(pos4.x, pos4.y, pos4.z);
 
-    if (behavior == STATIC || IS_SLEEPING(pi)) {
+    // STATIC skips prediction entirely. Sleeping particles still predict
+    // (gravity integration) so PBF corrections can wake them via density changes.
+    if (behavior == STATIC) {
         predicted_out[i] = pos4;
         return;
     }
@@ -244,9 +246,13 @@ void K_PBF_ComputeLambda(
                         continue;
                     }
 
-                    // Density (Poly6, self-included)
+                    // Density (Poly6, self-included).
+                    // STATIC boundary boost: multiply contribution by 2x so solid
+                    // boundaries create stronger density inflation, preventing fluid
+                    // from leaking through coarse STATIC particle layers.
                     float diff = h_sq - r_sq;
-                    sum_density += m_j * diff * diff * diff;
+                    float boundary_scale = (behavior_j == STATIC && j != i) ? 2.0f : 1.0f;
+                    sum_density += boundary_scale * m_j * diff * diff * diff;
 
                     // Gradient + heat + exposure (skip self)
                     if (j != i && r_sq > 1e-12f) {
@@ -254,7 +260,8 @@ void K_PBF_ComputeLambda(
                         float3 gW = grad_spiky(r, rlen, h);
                         // grad_pj C_i = (1/rho0) * m_j * grad_W(x*_i - x*_j)
                         // But for denominator: |grad_pj C_i|^2 = (m_j/rho0)^2 * |gradW|^2
-                        float scale = m_j / rho0;
+                        // Apply same boundary_scale to gradients for consistency
+                        float scale = boundary_scale * m_j / rho0;
                         float gx = scale * gW.x;
                         float gy = scale * gW.y;
                         float gz = scale * gW.z;
@@ -325,7 +332,8 @@ void K_PBF_ComputeLambda(
 
     // Heat diffusion + exposure + dye output
     if (do_heat) {
-        dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt;
+        float cp_i = c_materials[mat_id_i].heat_capacity;
+        dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, 1.0f);
         exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
         exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
         dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
@@ -418,7 +426,9 @@ void K_PBF_ComputeDelta(
 
     // GAS skips PBF constraints (compressible phase, not position-corrected).
     // STATIC and sleeping particles also skip.
-    if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) {
+    // GAS skips PBF constraints (compressible phase). STATIC skips too.
+    // Sleeping particles still participate so density corrections can wake them.
+    if (behavior_i == STATIC || behavior_i == GAS) {
         delta_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
@@ -474,7 +484,7 @@ void K_PBF_ComputeDelta(
                     // NOTE: Exponent is hardcoded n=4 for performance (avoids powf).
                     // c_pbf.s_corr_n exists but is not used here. At h=0.04, s_corr
                     // is typically disabled (k=0) because Spiky gradients are already
-                    // large enough for stability. See PHYSICS.md §10.6.
+                    // large enough for stability. See PHYSICS.md section 10.6.
                     float W_ij = W_poly6(r_sq, h_sq);
                     float s_corr = 0.0f;
                     if (W_dq > 1e-12f) {
@@ -485,8 +495,17 @@ void K_PBF_ComputeDelta(
                     }
 
                     float3 gW = grad_spiky(r, rlen, h);
+
+                    // STATIC boundary: stronger one-way repulsion.
+                    // Mirror lambda_i (Akinci-style) so boundary pushes fluid out
+                    // with strength proportional to the fluid's own compression.
+                    float lambda_eff_j = lambda_j;
+                    if (bj_delta == STATIC) {
+                        lambda_eff_j = lambda_i;  // mirror fluid's own lambda
+                    }
+
                     // Mass-weighted: dp = (m_j/rho0) * (l_i+l_j+s) * gradW
-                    float coeff = m_j * (lambda_i + lambda_j + s_corr) / rho0;
+                    float coeff = m_j * (lambda_i + lambda_eff_j + s_corr) / rho0;
                     delta.x += coeff * gW.x;
                     delta.y += coeff * gW.y;
                     delta.z += coeff * gW.z;
@@ -527,7 +546,7 @@ void K_PBF_ApplyDelta(
     if (i >= numParticles) return;
 
     uint pi = packed_info[i];
-    if (GET_BEHAVIOR(pi) == STATIC || IS_SLEEPING(pi)) return;
+    if (GET_BEHAVIOR(pi) == STATIC) return;
 
     float4 pos4 = predicted_pos[i];
     float4 d4 = delta_pos[i];
@@ -654,43 +673,61 @@ void K_PBF_Finalize(
     // Adding buoyancy here would double-count it since it's already in predicted positions.
 
     // GRANULAR: Velocity-space Drucker-Prager friction (applied once, iteration-independent).
+    // H3 fix: Apply friction to velocity CORRECTION only (vel_new - v_predicted),
+    // making friction frame-independent (operates on constraint corrections only).
     // Uses pressure_normal (density gradient) from ComputeLambda for normal/tangential decomposition.
-    // Drucker-Prager criterion: |v_t| <= tan(phi_f) * |v_n| + cohesion / dt
+    // Drucker-Prager criterion: |v_t_corr| <= tan(phi_f) * |v_n_corr| + cohesion / dt
     if (behavior == GRANULAR && pressure_normal_in != 0) {
+        // v_predicted = v_old + dt * gravity (from K_PBF_Predict)
+        float4 v_old4 = original_vel[i];
+        float3 v_pred = make_float3(
+            v_old4.x + dt * c_sim.gravity.x,
+            v_old4.y + dt * c_sim.gravity.y,
+            v_old4.z + dt * c_sim.gravity.z
+        );
+        // v_corr = vel_new - v_predicted (PBF constraint correction only)
+        float3 v_corr = make_float3(
+            vel_new.x - v_pred.x,
+            vel_new.y - v_pred.y,
+            vel_new.z - v_pred.z
+        );
+
         float4 pn4 = __ldg(&pressure_normal_in[i]);
         float3 n = make_float3(pn4.x, pn4.y, pn4.z);
         float n_len_sq = n.x*n.x + n.y*n.y + n.z*n.z;
 
         if (n_len_sq > 0.5f) {  // valid unit normal
-            // n points into pile (direction of increasing density).
-            // v_dot_n > 0 means compressing into pile -> friction applies.
-            // v_dot_n <= 0 means separating (tension) -> no friction.
-            float v_dot_n = vel_new.x*n.x + vel_new.y*n.y + vel_new.z*n.z;
+            // Decompose correction velocity along pressure normal
+            float vc_dot_n = v_corr.x*n.x + v_corr.y*n.y + v_corr.z*n.z;
 
-            if (v_dot_n > 0.0f) {
-                float3 v_n = make_float3(v_dot_n*n.x, v_dot_n*n.y, v_dot_n*n.z);
-                float3 v_t = make_float3(vel_new.x - v_n.x, vel_new.y - v_n.y, vel_new.z - v_n.z);
+            if (vc_dot_n > 0.0f) {
+                float3 vc_n = make_float3(vc_dot_n*n.x, vc_dot_n*n.y, vc_dot_n*n.z);
+                float3 vc_t = make_float3(v_corr.x - vc_n.x, v_corr.y - vc_n.y, v_corr.z - vc_n.z);
 
-                float tang_sq = v_t.x*v_t.x + v_t.y*v_t.y + v_t.z*v_t.z;
+                float tang_sq = vc_t.x*vc_t.x + vc_t.y*vc_t.y + vc_t.z*vc_t.z;
 
                 // Static friction dead zone: below minimum normal velocity, zero tangential
-                float max_tang = (v_dot_n < 5e-4f) ? 0.0f
-                               : c_granular.tan_phi_f * v_dot_n + c_granular.cohesion * inv_dt;
+                float max_tang = (vc_dot_n < 5e-4f) ? 0.0f
+                               : c_granular.tan_phi_f * vc_dot_n + c_granular.cohesion * inv_dt;
 
                 if (tang_sq > max_tang * max_tang) {
                     if (max_tang > 0.0f && tang_sq > 1e-12f) {
                         float scale = max_tang / sqrtf(tang_sq);
-                        v_t.x *= scale;
-                        v_t.y *= scale;
-                        v_t.z *= scale;
+                        vc_t.x *= scale;
+                        vc_t.y *= scale;
+                        vc_t.z *= scale;
                     } else {
-                        v_t.x = 0.0f;
-                        v_t.y = 0.0f;
-                        v_t.z = 0.0f;
+                        vc_t.x = 0.0f;
+                        vc_t.y = 0.0f;
+                        vc_t.z = 0.0f;
                     }
-                    vel_new.x = v_n.x + v_t.x;
-                    vel_new.y = v_n.y + v_t.y;
-                    vel_new.z = v_n.z + v_t.z;
+                    // Reconstruct vel_new = v_predicted + corrected v_corr
+                    v_corr.x = vc_n.x + vc_t.x;
+                    v_corr.y = vc_n.y + vc_t.y;
+                    v_corr.z = vc_n.z + vc_t.z;
+                    vel_new.x = v_pred.x + v_corr.x;
+                    vel_new.y = v_pred.y + v_corr.y;
+                    vel_new.z = v_pred.z + v_corr.z;
                 }
             }
         }
@@ -750,9 +787,10 @@ void K_PBF_Finalize(
 
         float c_xsph = c_pbf.xsph_c;
         // Per-material viscosity scaling: OIL 5x, LAVA 10x, etc.
-        c_xsph *= c_materials[mat_id].base_viscosity;
+        // H2 fix: clamp to prevent instability with high-viscosity materials
+        c_xsph = fminf(c_xsph * c_materials[mat_id].base_viscosity, 0.5f);
         // GRANULAR: higher artificial viscosity
-        if (behavior == GRANULAR) c_xsph *= 10.0f;
+        if (behavior == GRANULAR) c_xsph = fminf(c_xsph * 3.0f, 0.15f);
         vel_new.x += c_xsph * xsph.x;
         vel_new.y += c_xsph * xsph.y;
         vel_new.z += c_xsph * xsph.z;
@@ -833,16 +871,24 @@ void K_PBF_Finalize(
         float rho_i_damp = density[i];
         float rho0_damp = c_materials[mat_id].rest_density;
         if (rho_i_damp > 0.7f * rho0_damp) {
-            float granular_damp = 1.0f - 10.0f * dt;
-            granular_damp = fmaxf(granular_damp, 0.3f);
+            float granular_damp = 1.0f - 2.0f * dt;
+            granular_damp = fmaxf(granular_damp, 0.8f);
             vel_new.x *= granular_damp;
             vel_new.y *= granular_damp;
             vel_new.z *= granular_damp;
         }
     }
 
-    // Boundary collision on final position
+    // STATIC particle boundary repulsion (shared function in sph_shared.cuh)
     float3 final_pos = pred;
+    static_particle_boundary(
+        final_pos, vel_new,
+        cell_start, cell_end,
+        packed_info, predicted_pos,
+        i, c_sim.restitution
+    );
+
+    // World box boundary collision
     float friction = (behavior == FLUID) ? 0.0f : c_sim.wall_friction;
     sdf_box_boundary(final_pos, vel_new, c_sim.world_min, c_sim.world_max,
                      c_sim.restitution, friction);
@@ -871,10 +917,10 @@ void K_PBF_Finalize(
     // generate artificial spreading velocity that must be caught here.
     if (behavior == GRANULAR) {
         vel_sq = vel_new.x*vel_new.x + vel_new.y*vel_new.y + vel_new.z*vel_new.z;
-        if (vel_sq < 0.05f * 0.05f) {
+        if (vel_sq < 0.01f * 0.01f) {
             float rho_i = density[i];
             float rho0_i = c_materials[mat_id].rest_density;
-            if (rho_i > 0.90f * rho0_i) {
+            if (rho_i > 0.98f * rho0_i) {
                 vel_new.x = 0.0f;
                 vel_new.y = 0.0f;
                 vel_new.z = 0.0f;

@@ -126,6 +126,8 @@ def integrate(
     particle_dye_out: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
     max_displacement: "Optional[cupy.ndarray]" = None,
+    cell_start: "Optional[cupy.ndarray]" = None,
+    cell_end: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Integrate and return outputs tuple.
 
@@ -231,6 +233,9 @@ def integrate(
 
     # Use null pointer (0) when max_displacement not provided
     max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
+    # Use null pointer when cell_start/cell_end not provided (disables STATIC repulsion)
+    cell_start_ptr = cell_start if cell_start is not None else np.intp(0)
+    cell_end_ptr = cell_end if cell_end is not None else np.intp(0)
 
     kernel(
         grid,
@@ -254,6 +259,8 @@ def integrate(
             sorted_vorticity,
             sorted_angular_velocity,
             sort_indexes,
+            cell_start_ptr,
+            cell_end_ptr,
             position_out,
             velocity_out,
             color_out,

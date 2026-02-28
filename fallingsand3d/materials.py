@@ -181,36 +181,36 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     STONE: MaterialDef(
         id=STONE, name="STONE",
-        rest_density=2600.0, eos_stiffness=50.0, eos_gamma=7.0,
+        rest_density=6500.0, eos_stiffness=1500.0, eos_gamma=7.0,
         base_viscosity=0.0, friction_coeff=0.7, cohesion=0.5,
-        buoyancy_extra=0.0, thermal_conductivity=2.0, heat_capacity=800.0,
+        buoyancy_extra=0.0, thermal_conductivity=200.0, heat_capacity=800.0,
         temp_melt=1500.0, temp_boil=3000.0, temp_ignite=0.0,
         behavior_class=STATIC,
         color_r=0.5, color_g=0.5, color_b=0.5,
     ),
     SAND: MaterialDef(
         id=SAND, name="SAND",
-        rest_density=2500.0, eos_stiffness=5000.0, eos_gamma=7.0,
+        rest_density=4000.0, eos_stiffness=5000.0, eos_gamma=7.0,
         base_viscosity=0.5, friction_coeff=0.6, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=0.3, heat_capacity=830.0,
+        buoyancy_extra=0.0, thermal_conductivity=30.0, heat_capacity=830.0,
         temp_melt=1700.0, temp_boil=2500.0, temp_ignite=0.0,
         behavior_class=GRANULAR,
         color_r=0.76, color_g=0.70, color_b=0.50,
     ),
     DIRT: MaterialDef(
         id=DIRT, name="DIRT",
-        rest_density=2500.0, eos_stiffness=3000.0, eos_gamma=7.0,
+        rest_density=3750.0, eos_stiffness=3000.0, eos_gamma=7.0,
         base_viscosity=0.5, friction_coeff=0.5, cohesion=0.1,
-        buoyancy_extra=0.0, thermal_conductivity=0.25, heat_capacity=900.0,
+        buoyancy_extra=0.0, thermal_conductivity=30.0, heat_capacity=900.0,
         temp_melt=1400.0, temp_boil=2200.0, temp_ignite=0.0,
         behavior_class=GRANULAR,
         color_r=0.55, color_g=0.35, color_b=0.17,
     ),
     GRAVEL: MaterialDef(
         id=GRAVEL, name="GRAVEL",
-        rest_density=2500.0, eos_stiffness=4000.0, eos_gamma=7.0,
+        rest_density=4250.0, eos_stiffness=4000.0, eos_gamma=7.0,
         base_viscosity=0.3, friction_coeff=0.65, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=840.0,
+        buoyancy_extra=0.0, thermal_conductivity=30.0, heat_capacity=840.0,
         temp_melt=1500.0, temp_boil=2800.0, temp_ignite=0.0,
         behavior_class=GRANULAR,
         color_r=0.45, color_g=0.42, color_b=0.40,
@@ -219,7 +219,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         id=WATER, name="WATER",
         rest_density=2500.0, eos_stiffness=500.0, eos_gamma=7.0,
         base_viscosity=1.0, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=0.6, heat_capacity=4186.0,
+        buoyancy_extra=0.0, thermal_conductivity=50.0, heat_capacity=4186.0,
         temp_melt=273.0, temp_boil=373.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=0.2, color_g=0.5, color_b=0.9,
@@ -227,9 +227,9 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     OIL: MaterialDef(
         id=OIL, name="OIL",
-        rest_density=2500.0, eos_stiffness=400.0, eos_gamma=7.0,
+        rest_density=2125.0, eos_stiffness=400.0, eos_gamma=7.0,
         base_viscosity=5.0, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=0.15, heat_capacity=2000.0,
+        buoyancy_extra=0.0, thermal_conductivity=20.0, heat_capacity=2000.0,
         temp_melt=250.0, temp_boil=570.0, temp_ignite=480.0,
         behavior_class=FLUID,
         color_r=0.15, color_g=0.10, color_b=0.05,
@@ -237,9 +237,9 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     LAVA: MaterialDef(
         id=LAVA, name="LAVA",
-        rest_density=2500.0, eos_stiffness=30.0, eos_gamma=7.0,
+        rest_density=6500.0, eos_stiffness=800.0, eos_gamma=7.0,
         base_viscosity=100.0, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=1.5, heat_capacity=1000.0,
+        buoyancy_extra=0.0, thermal_conductivity=500.0, heat_capacity=1000.0,
         temp_melt=1000.0, temp_boil=2500.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=1.0, color_g=0.3, color_b=0.0,
@@ -249,7 +249,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         id=ACID, name="ACID",
         rest_density=2500.0, eos_stiffness=450.0, eos_gamma=7.0,
         base_viscosity=2.0, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=2500.0,
+        buoyancy_extra=0.0, thermal_conductivity=50.0, heat_capacity=2500.0,
         temp_melt=250.0, temp_boil=380.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=0.4, color_g=1.0, color_b=0.1,
@@ -257,27 +257,27 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     WOOD: MaterialDef(
         id=WOOD, name="WOOD",
-        rest_density=600.0, eos_stiffness=15.0, eos_gamma=7.0,
+        rest_density=1500.0, eos_stiffness=300.0, eos_gamma=7.0,
         base_viscosity=0.0, friction_coeff=0.5, cohesion=0.3,
-        buoyancy_extra=0.0, thermal_conductivity=0.15, heat_capacity=1700.0,
+        buoyancy_extra=0.0, thermal_conductivity=5.0, heat_capacity=1700.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=570.0,
         behavior_class=STATIC,
         color_r=0.55, color_g=0.35, color_b=0.12,
     ),
     METAL: MaterialDef(
         id=METAL, name="METAL",
-        rest_density=7800.0, eos_stiffness=100.0, eos_gamma=7.0,
+        rest_density=19500.0, eos_stiffness=2000.0, eos_gamma=7.0,
         base_viscosity=0.0, friction_coeff=0.6, cohesion=1.0,
-        buoyancy_extra=0.0, thermal_conductivity=50.0, heat_capacity=450.0,
+        buoyancy_extra=0.0, thermal_conductivity=2000.0, heat_capacity=450.0,
         temp_melt=1800.0, temp_boil=3300.0, temp_ignite=0.0,
         behavior_class=STATIC,
         color_r=0.7, color_g=0.7, color_b=0.75,
     ),
     ICE: MaterialDef(
         id=ICE, name="ICE",
-        rest_density=917.0, eos_stiffness=15.0, eos_gamma=7.0,
+        rest_density=2300.0, eos_stiffness=500.0, eos_gamma=7.0,
         base_viscosity=0.0, friction_coeff=0.1, cohesion=0.2,
-        buoyancy_extra=0.0, thermal_conductivity=2.2, heat_capacity=2090.0,
+        buoyancy_extra=0.0, thermal_conductivity=100.0, heat_capacity=2090.0,
         temp_melt=273.0, temp_boil=373.0, temp_ignite=0.0,
         behavior_class=STATIC,
         color_r=0.7, color_g=0.9, color_b=1.0,
@@ -286,7 +286,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         id=STEAM, name="STEAM",
         rest_density=0.6, eos_stiffness=3.0, eos_gamma=1.0,
         base_viscosity=0.01, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.01, thermal_conductivity=0.025, heat_capacity=2010.0,
+        buoyancy_extra=0.01, thermal_conductivity=10.0, heat_capacity=2010.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=0.0,
         behavior_class=GAS,
         color_r=0.85, color_g=0.85, color_b=0.90,
@@ -295,7 +295,7 @@ MATERIALS: Dict[int, MaterialDef] = {
         id=SMOKE, name="SMOKE",
         rest_density=0.3, eos_stiffness=2.5, eos_gamma=1.0,
         base_viscosity=0.01, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.005, thermal_conductivity=0.02, heat_capacity=1000.0,
+        buoyancy_extra=0.005, thermal_conductivity=5.0, heat_capacity=1000.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=0.0,
         behavior_class=GAS,
         color_r=0.3, color_g=0.3, color_b=0.3,
@@ -304,34 +304,34 @@ MATERIALS: Dict[int, MaterialDef] = {
         id=FIRE, name="FIRE",
         rest_density=0.2, eos_stiffness=4.0, eos_gamma=1.0,
         base_viscosity=0.01, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.02, thermal_conductivity=0.05, heat_capacity=1000.0,
+        buoyancy_extra=0.02, thermal_conductivity=500.0, heat_capacity=1000.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=0.0,
         behavior_class=GAS,
         color_r=1.0, color_g=0.6, color_b=0.1,
     ),
     GUNPOWDER: MaterialDef(
         id=GUNPOWDER, name="GUNPOWDER",
-        rest_density=2500.0, eos_stiffness=3000.0, eos_gamma=7.0,
+        rest_density=4500.0, eos_stiffness=3000.0, eos_gamma=7.0,
         base_viscosity=0.0, friction_coeff=0.5, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=0.2, heat_capacity=800.0,
+        buoyancy_extra=0.0, thermal_conductivity=30.0, heat_capacity=800.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=480.0,
         behavior_class=GRANULAR,
         color_r=0.2, color_g=0.2, color_b=0.2,
     ),
     WET_SAND: MaterialDef(
         id=WET_SAND, name="WET_SAND",
-        rest_density=2600.0, eos_stiffness=5000.0, eos_gamma=7.0,
+        rest_density=4500.0, eos_stiffness=5000.0, eos_gamma=7.0,
         base_viscosity=2.0, friction_coeff=0.75, cohesion=0.15,
-        buoyancy_extra=0.0, thermal_conductivity=0.5, heat_capacity=1000.0,
+        buoyancy_extra=0.0, thermal_conductivity=35.0, heat_capacity=1000.0,
         temp_melt=1700.0, temp_boil=2500.0, temp_ignite=0.0,
         behavior_class=GRANULAR,
         color_r=0.55, color_g=0.48, color_b=0.30,
     ),
     MUD: MaterialDef(
         id=MUD, name="MUD",
-        rest_density=2500.0, eos_stiffness=200.0, eos_gamma=7.0,
+        rest_density=4500.0, eos_stiffness=300.0, eos_gamma=7.0,
         base_viscosity=50.0, friction_coeff=0.0, cohesion=0.0,
-        buoyancy_extra=0.0, thermal_conductivity=0.4, heat_capacity=1200.0,
+        buoyancy_extra=0.0, thermal_conductivity=40.0, heat_capacity=1200.0,
         temp_melt=1400.0, temp_boil=2200.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=0.35, color_g=0.22, color_b=0.10,
@@ -342,7 +342,7 @@ MATERIALS: Dict[int, MaterialDef] = {
 # corrosion, gas lifetime). When ONLY non-reactive materials are present
 # in a scene, the reactions and spawn kernels can be skipped entirely.
 REACTIVE_MATERIAL_IDS = frozenset({
-    ICE, LAVA, STEAM, FIRE, WOOD, OIL, GUNPOWDER, ACID, SMOKE,
+    WATER, ICE, LAVA, STEAM, FIRE, WOOD, OIL, GUNPOWDER, ACID, SMOKE,
     SAND, WET_SAND, MUD,
 })
 
@@ -411,6 +411,12 @@ _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     (MUD, LAVA, 0.0, 40.0),          # lava dries mud
     (MUD, WATER, 0.3, 3.0),          # mud stays wet near water
     (MUD, ACID, 0.05, 3.0),          # acid corrodes mud
+    # dirt + water wetting
+    (DIRT, WATER, 0.5, 5.0),         # water wets dirt -> mud
+    # lava heats granular materials
+    (LAVA, SAND, 0.0, 25.0),         # lava heats sand (can melt)
+    (LAVA, DIRT, 0.0, 20.0),         # lava heats dirt
+    (LAVA, GRAVEL, 0.0, 20.0),       # lava heats gravel
 ]
 
 

@@ -290,8 +290,10 @@ void K_Step1(
     density_out[index_i] = fmaxf(density, 1.0f);
 
     // --- PostCalc: heat diffusion dTdt ---
-    // dTdt = kappa_i * viscosity_lap_coeff * sum_dTdt
-    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt;
+    // dTdt = kappa_i / (rho_i * cp_i) * viscosity_lap_coeff * sum_dTdt
+    float cp_i = c_materials[mat_id_i].heat_capacity;
+    float rho_i_heat = density_out[index_i];
+    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, 1.0f);
 
     // --- PostCalc: exposure accumulation ---
     // Apply poly6_coeff to get properly normalized exposure values

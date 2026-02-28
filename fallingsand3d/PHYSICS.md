@@ -470,10 +470,15 @@ STATIC particles still conduct heat (but don't move).
 
 ### 9.1 Cross-Material Heat Boost
 
-Standard SPH heat diffusion uses the particle's `thermal_conductivity` (`kappa_i`):
+SPH heat diffusion uses the particle's `thermal_conductivity` (`kappa_i`),
+divided by `rho_i * cp_i` for physically correct thermal diffusivity:
 ```
-dTdt = kappa_i * [45/(pi*h^6)] * SUM_j (m_j/rho_j) * (T_j - T_i) * (h - |r|)
+dTdt = [kappa_i / (rho_i * cp_i)] * [45/(pi*h^6)] * SUM_j (m_j/rho_j) * (T_j - T_i) * (h - |r|)
 ```
+
+Where `cp_i = c_materials[mat_id].heat_capacity` and `rho_i` is the computed SPH density.
+This means `thermal_conductivity` values must be tuned for the `rho*cp` divisor to produce
+visible heat exchange rates (see updated values in materials.py).
 
 For cross-material pairs, a `heat_boost` multiplier from the interaction table
 accelerates heat transfer:
@@ -577,10 +582,10 @@ Changes:
    (m=0.02, dx=0.02, h=0.04), giving rho/rho0≈1.0 and near-zero pressure at rest.
 3. **DT_MAX 0.005 → 0.001**: Respects CFL at compressed densities.
    ~17 substeps/frame at 60 FPS with speed=1.0.
-4. **ACCEL_MAX 200 → 30**: Prevents shockwave-level accelerations.
-5. **VELOCITY_LIMIT 50 → 10**: Prevents particles jumping multiple grid cells.
+4. **ACCEL_MAX 200 → 200 (FLUID+GRANULAR)**: Both use 200 for dramatic dynamics.
+5. **VELOCITY_LIMIT**: CFL-derived per solver (0.9*h/dt), replaces hardcoded 10.
 6. **mu0 0.1 → 1.0**: Higher viscous damping prevents oscillations.
-7. **XSPH epsilon 0.5 → 0.8**: Smoother velocity field for FLUID.
+7. **XSPH epsilon 0.5 → 0.1**: Per-material viscosity now dominates velocity smoothing.
 8. **max_substeps 20 → 40**: Accommodates smaller dt at higher speeds.
 
 **Source**: simulation.py, integrate.cu, step2.py, materials.py
@@ -740,6 +745,52 @@ External algorithmic review by GPT 5.2 Pro identified 9 issues. Fixes applied:
    10.0 to prevent NaN/Inf from extreme density ratios.
 
 **Source**: `sph_shared.cuh`, `pbf_solver.cu`, `dfsph_solver.cu`
+
+### 10.14 FIXED: Physics review fixes (PROBLEMS.md batch)
+
+Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
+
+**Material properties (Phase 1):**
+- B1: Density scaling to force_scale=0.02 convention (OIL=2125, LAVA=6500, etc.)
+- B2: EOS stiffness rebalance for denser materials (LAVA=800, STONE=1500, etc.)
+- C1: XSPH epsilon 0.8→0.1 (stable), 0.05 (fast) to let per-material viscosity dominate
+- C2: ACCEL_MAX_FLUID 30→200 for dramatic splashes/explosions
+- E1: Gravity 9.8→4.0 for miniature-world aesthetic
+
+**Reaction system (Phase 2):**
+- J1: Acid corrosion switched from exclusion to inclusion whitelist
+- J2: Drying math inversion fixed (division→multiplication)
+- J3: WATER added to REACTIVE_MATERIAL_IDS
+- J6: LAVA solidify temp uses c_materials[MAT_LAVA].temp_melt instead of hardcoded 900K
+- D1: Steam condense hysteresis (373→360K, 13K band below boiling)
+- D2: STONE→LAVA and SAND→LAVA melting reactions added
+- D3: Fire→Smoke on lifetime expiry (smoke trails with 3s lifetime)
+- D5: Explosion speed 5→25
+- D6: Missing interaction pairs added (DIRT+WATER, LAVA+SAND/DIRT/GRAVEL)
+- D7: Acid consumption (health -= 0.5 * damage dealt)
+
+**Kernel physics (Phase 3):**
+- G1: Heat diffusion corrected: dTdt = kappa/(rho*cp) * lap(T). thermal_conductivity
+  values retuned for rho*cp divisor.
+- G2: WCSPH mu(I) granular viscosity: added 1/rho_i divisor. mu_max 10000→25000.
+- G3: Vorticity gradient uses (omega_j - omega_i) instead of omega_j
+- H1: DFSPH STATIC density overridden to rest_density (prevents boundary gaps)
+- H2: PBF XSPH coefficient clamped to 0.5 max (prevents instability with LAVA)
+- H3: PBF Drucker-Prager friction applied to velocity correction (not absolute velocity)
+
+**Integration pipeline (Phase 4):**
+- I2: CFL-derived velocity limit (v_max = 0.9*h/dt) replaces hardcoded VELOCITY_LIMIT=10
+- I4: frame_counter incremented per-frame (not per-substep); substep_counter for RNG
+- I5: BOUNDARY_MARGIN=1e-4 prevents particles sitting exactly at wall positions
+
+**Design decisions (Phase 6, intentionally kept):**
+- I1: XSPH pre-integration lag (standard Euler, <0.008s lag)
+- I3: Grid reuse single-step tracking (4-frame safety cap)
+- F1: force_scale=0.02 (co-adapted WCSPH convention)
+- F2: WCSPH viscosity convention (force_scale absorbs 1/rho for FLUID)
+- F3: Tait EOS for mu(I) (lithostatic needs expensive column height)
+- G4: Surface tension is "surface normal cohesion" (not full Akinci model)
+- J10: Sorted array transitions handled by per-particle branching (safe invariant)
 
 ---
 
