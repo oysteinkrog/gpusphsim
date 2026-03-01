@@ -225,6 +225,24 @@ def upload_materials(materials_data: np.ndarray) -> None:
 BLOCK_SIZE = 256
 
 
+def compute_pressure(
+    density: cupy.ndarray,
+    packed_info: cupy.ndarray,
+    pressure_out: cupy.ndarray,
+) -> None:
+    """Launch K_ComputePressure to pre-compute per-particle pressure (PERF-007).
+
+    Must be called after Step1 (density available) and before Step2.
+    WCSPH only -- PBF/DFSPH have their own constraint forces.
+    """
+    n = density.shape[0]
+    module = _get_module()
+    kernel = module.get_function("K_ComputePressure")
+    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    block = (BLOCK_SIZE,)
+    kernel(grid, block, (np.uint32(n), density, packed_info, pressure_out))
+
+
 def compute_step2(
     position: cupy.ndarray,
     velocity: cupy.ndarray,
@@ -238,6 +256,10 @@ def compute_step2(
     sph_force_out: "Optional[cupy.ndarray]" = None,
     veleval_out: "Optional[cupy.ndarray]" = None,
     velocity_h: "Optional[cupy.ndarray]" = None,
+    pressure_in: "Optional[cupy.ndarray]" = None,
+    d_rigid_bodies: "Optional[cupy.ndarray]" = None,
+    d_rigid_forces: "Optional[cupy.ndarray]" = None,
+    d_rigid_torques: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Step2 and return (sph_force, veleval_out).
 
@@ -290,6 +312,16 @@ def compute_step2(
     # velocity_h can be None -- pass null pointer (kernel falls back to float4 reads)
     velocity_h_ptr = velocity_h if velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32)
 
+    # Pressure array (PERF-007): must be pre-computed via compute_pressure()
+    if pressure_in is None:
+        pressure_in = cupy.zeros(n, dtype=cupy.float32)
+
+    # Rigid body pointers: pass null if no bodies
+    _null = cupy.ndarray(0, dtype=cupy.float32)
+    rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null
+    rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null
+    rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null
+
     kernel(
         grid,
         block,
@@ -304,9 +336,13 @@ def compute_step2(
             cell_end,
             vorticity_in,
             normal_in,
+            pressure_in,
             sph_force_out,
             veleval_out,
             velocity_h_ptr,
+            rb_ptr,
+            rf_ptr,
+            rt_ptr,
         ),
     )
 

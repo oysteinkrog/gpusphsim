@@ -29,10 +29,36 @@
 #include "sph_shared.cuh"
 
 /* ======================================================================
+ * K_ComputePressure -- pre-compute per-particle pressure from density.
+ *
+ * Runs once after K_Step1 so that K_Step2 can read pressure from an array
+ * instead of calling compute_pressure() ~50 times per particle (once per
+ * neighbor). WCSPH only.
+ * ====================================================================== */
+
+extern "C" __global__ __launch_bounds__(256)
+void K_ComputePressure(
+    uint            numParticles,
+    const float*    __restrict__ density,       // sorted density from Step1
+    const uint*     __restrict__ packed_info,   // sorted packed_info
+    float*          __restrict__ pressure_out   // output: per-particle pressure
+) {
+    uint i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numParticles) return;
+
+    float rho_i = __ldg(&density[i]);
+    uint pi_i = __ldg(&packed_info[i]);
+    int behavior_i = GET_BEHAVIOR(pi_i);
+    uint mat_id_i = GET_MATERIAL_ID(pi_i);
+
+    pressure_out[i] = compute_pressure(rho_i, behavior_i, mat_id_i);
+}
+
+/* ======================================================================
  * K_Step2 kernel
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 4)
+extern "C" __global__ __launch_bounds__(256, 3)
 void K_Step2(
     uint            numParticles,
     const float4*   __restrict__ position,      // sorted positions (density packed in .w by K_PackDensity)
@@ -44,9 +70,13 @@ void K_Step2(
     const uint*     __restrict__ cell_end,       // grid cell end indices
     const float4*   __restrict__ vorticity_in,   // (omega_x, omega_y, omega_z, |omega|) from Step1
     const float4*   __restrict__ normal_in,      // (n_x, n_y, n_z, neighbor_count) from Step1
+    const float*    __restrict__ pressure_in,    // pre-computed per-particle pressure (PERF-007)
     float4*         __restrict__ sph_force_out,  // output: accumulated SPH force
     float4*         __restrict__ veleval_out,    // output: XSPH-corrected veleval
-    const void*     __restrict__ velocity_h      // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
+    const void*     __restrict__ velocity_h,     // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
+    const RigidBody* __restrict__ d_rigid_bodies, // rigid body state array (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,  // force accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques  // torque accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -78,7 +108,7 @@ void K_Step2(
     float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
 
     float rho_i = pos4_i.w;  // density packed into position.w by K_PackDensity (OPT-4.1)
-    float p_i = compute_pressure(rho_i, behavior_i, mat_id_i);
+    float p_i = __ldg(&pressure_in[index_i]);  // pre-computed (PERF-007)
 
     // Accumulators
     float3 f_pressure  = make_float3(0.0f, 0.0f, 0.0f);
@@ -114,8 +144,19 @@ void K_Step2(
         eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
     }
 
+    // Vorticity eta accumulator (FLUID only, folded into main loop -- PERF-002)
+    bool do_vort_eta = false;
+    float omega_mag_i = 0.0f;
+    float4 vort_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float3 eta_vort = make_float3(0.0f, 0.0f, 0.0f);
+    if (is_fluid_i && c_granular.vorticity_epsilon > 0.0f) {
+        vort_i = __ldg(&vorticity_in[index_i]);
+        omega_mag_i = vort_i.w;
+        do_vort_eta = (omega_mag_i > 1e-6f);
+    }
+
     // ---------------------------------------------------------------
-    // Main neighbor loop: pressure, viscosity, XSPH
+    // Main neighbor loop: pressure, viscosity, XSPH, vorticity eta
     // ---------------------------------------------------------------
     for (int dz = -1; dz <= 1; dz++) {
         for (int dy = -1; dy <= 1; dy++) {
@@ -150,12 +191,26 @@ void K_Step2(
                     float rlen_sq = r.x * r.x + r.y * r.y + r.z * r.z;
                     if (rlen_sq > h_sq || rlen_sq < 1e-12f) continue;
 
+                    float rlen = sqrtf(rlen_sq);
+
+                    // Vorticity eta accumulation (FLUID only, all neighbors -- PERF-002)
+                    if (do_vort_eta) {
+                        float h_rl = h - rlen;
+                        float inv_rl = 1.0f / rlen;
+                        float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
+                        float omega_j = __ldg(&vorticity_in[index_j]).w;
+                        float rho_j_e = pos4_j.w;
+                        float wt = m_j / fmaxf(rho_j_e, 1.0f);
+                        float omega_diff = omega_j - omega_mag_i;
+                        eta_vort.x += wt * omega_diff * gs * r.x;
+                        eta_vort.y += wt * omega_diff * gs * r.y;
+                        eta_vort.z += wt * omega_diff * gs * r.z;
+                    }
+
                     int behavior_j = GET_BEHAVIOR(pi_j);
 
                     // GAS/non-GAS phase separation: no pressure/viscosity across phases
                     if (is_gas_i != (behavior_j == GAS)) continue;
-
-                    float rlen = sqrtf(rlen_sq);
 
                     // density_j packed into position.w by K_PackDensity (OPT-4.1)
                     float3 vel_j = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
@@ -163,26 +218,94 @@ void K_Step2(
 
                     // ---- STATIC boundary: Akinci pressure mirroring + friction ----
                     if (behavior_j == STATIC) {
+                        uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         float3 grad_s = grad_spiky_variable(r, rlen, h);
-                        // Pressure mirroring: boundary pressure = fluid pressure
-                        float press_sym_b = 2.0f * (p_i / (rho_i * rho_i));
-                        f_pressure.x += m_j * press_sym_b * grad_s.x;
-                        f_pressure.y += m_j * press_sym_b * grad_s.y;
-                        f_pressure.z += m_j * press_sym_b * grad_s.z;
-                        // Boundary friction: vel_j=0, drag toward zero
-                        float lap_v_b = lap_visc_variable(rlen, h);
-                        float mu_b = is_granular_i ? c_precalc.viscosity_precalc
-                                   : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-                        float visc_factor_b = mu_b * m_j * lap_v_b / fmaxf(rho_i, 1.0f);
-                        f_viscosity.x += (-vel_i.x) * visc_factor_b;
-                        f_viscosity.y += (-vel_i.y) * visc_factor_b;
-                        f_viscosity.z += (-vel_i.z) * visc_factor_b;
+
+                        if (mat_id_j == MAT_RIGID && d_rigid_bodies != 0) {
+                            // --- MAT_RIGID: Akinci pressure mirroring with two-way coupling ---
+                            // psi_b stored as mass, rho0 from fluid's own material
+                            float psi_b = m_j;
+                            float rho0 = c_materials[mat_id_i].rest_density;
+                            float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0 * rho0));
+                            float3 F_on_fluid = make_float3(
+                                psi_b * press_akinci * grad_s.x,
+                                psi_b * press_akinci * grad_s.y,
+                                psi_b * press_akinci * grad_s.z
+                            );
+                            f_pressure.x += F_on_fluid.x;
+                            f_pressure.y += F_on_fluid.y;
+                            f_pressure.z += F_on_fluid.z;
+
+                            // Viscous coupling: boundary velocity from rigid body
+                            int body_id = GET_BODY_ID(pi_j);
+                            float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
+                            float4 rb_linvel = __ldg(&d_rigid_bodies[body_id].lin_vel);
+                            float4 rb_angvel = __ldg(&d_rigid_bodies[body_id].ang_vel);
+                            float3 r_b = make_float3(
+                                pos4_j.x - rb_pos.x,
+                                pos4_j.y - rb_pos.y,
+                                pos4_j.z - rb_pos.z
+                            );
+                            // v_boundary = v_body + cross(omega, r_b)
+                            float3 vel_boundary = make_float3(
+                                rb_linvel.x + (rb_angvel.y * r_b.z - rb_angvel.z * r_b.y),
+                                rb_linvel.y + (rb_angvel.z * r_b.x - rb_angvel.x * r_b.z),
+                                rb_linvel.z + (rb_angvel.x * r_b.y - rb_angvel.y * r_b.x)
+                            );
+                            float lap_v_b = lap_visc_variable(rlen, h);
+                            float mu_b = is_granular_i ? c_precalc.viscosity_precalc
+                                       : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
+                            float visc_factor_b = mu_b * psi_b * lap_v_b / fmaxf(rho_i, 1.0f);
+                            float3 F_visc = make_float3(
+                                (vel_boundary.x - vel_i.x) * visc_factor_b,
+                                (vel_boundary.y - vel_i.y) * visc_factor_b,
+                                (vel_boundary.z - vel_i.z) * visc_factor_b
+                            );
+                            f_viscosity.x += F_visc.x;
+                            f_viscosity.y += F_visc.y;
+                            f_viscosity.z += F_visc.z;
+
+                            // Two-way coupling: accumulate reaction on rigid body
+                            // Total force on fluid = pressure_precalc * F_pressure_part + F_visc
+                            // We accumulate the pressure part separately; apply pressure_precalc
+                            float pp = c_precalc.pressure_precalc;
+                            float fs = is_granular_i ? 1.0f : c_granular.force_scale;
+                            float3 F_total_on_fluid = make_float3(
+                                (pp * F_on_fluid.x + F_visc.x) * fs,
+                                (pp * F_on_fluid.y + F_visc.y) * fs,
+                                (pp * F_on_fluid.z + F_visc.z) * fs
+                            );
+                            // Newton's 3rd law: reaction on body = -F_on_fluid
+                            float3 F_on_body = make_float3(-F_total_on_fluid.x, -F_total_on_fluid.y, -F_total_on_fluid.z);
+                            // Torque = cross(r_b, F_on_body) where r_b = boundary_pos - COM
+                            float3 tau = make_float3(
+                                r_b.y * F_on_body.z - r_b.z * F_on_body.y,
+                                r_b.z * F_on_body.x - r_b.x * F_on_body.z,
+                                r_b.x * F_on_body.y - r_b.y * F_on_body.x
+                            );
+                            warp_reduce_accumulate(d_rigid_forces, F_on_body, body_id);
+                            warp_reduce_accumulate(d_rigid_torques, tau, body_id);
+                        } else {
+                            // --- Regular STATIC boundary: Akinci pressure mirroring + friction ---
+                            float press_sym_b = 2.0f * (p_i / (rho_i * rho_i));
+                            f_pressure.x += m_j * press_sym_b * grad_s.x;
+                            f_pressure.y += m_j * press_sym_b * grad_s.y;
+                            f_pressure.z += m_j * press_sym_b * grad_s.z;
+                            // Boundary friction: vel_j=0, drag toward zero
+                            float lap_v_b = lap_visc_variable(rlen, h);
+                            float mu_b = is_granular_i ? c_precalc.viscosity_precalc
+                                       : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
+                            float visc_factor_b = mu_b * m_j * lap_v_b / fmaxf(rho_i, 1.0f);
+                            f_viscosity.x += (-vel_i.x) * visc_factor_b;
+                            f_viscosity.y += (-vel_i.y) * visc_factor_b;
+                            f_viscosity.z += (-vel_i.z) * visc_factor_b;
+                        }
                         continue;  // skip XSPH from STATIC
                     }
 
-                    // Neighbor pressure (per-material EOS)
+                    // Neighbor pressure from pre-computed array (PERF-007)
                     uint mat_id_j = GET_MATERIAL_ID(pi_j);
-                    float p_j = compute_pressure(rho_j, behavior_j, mat_id_j);
+                    float p_j = __ldg(&pressure_in[index_j]);
 
                     // ---- Pressure force ----
                     // f_press += pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable
@@ -247,57 +370,17 @@ void K_Step2(
         }
     }  // end 27-cell loop
 
-    // --- Vorticity confinement (FLUID only) ---
-    // Read vorticity of particle i computed in step1
+    // --- Vorticity confinement (FLUID only, eta accumulated in main loop -- PERF-002) ---
     float3 f_vorticity_conf = make_float3(0.0f, 0.0f, 0.0f);
-    if (is_fluid_i && c_granular.vorticity_epsilon > 0.0f) {
-        float4 vort_i = __ldg(&vorticity_in[index_i]);
-        float omega_mag_i = vort_i.w;
-
-        if (omega_mag_i > 1e-6f) {
-            // Compute eta = grad(|omega|) via neighbors
-            float3 eta = make_float3(0.0f, 0.0f, 0.0f);
-            for (int dz2 = -1; dz2 <= 1; dz2++) {
-                for (int dy2 = -1; dy2 <= 1; dy2++) {
-                    for (int dx2 = -1; dx2 <= 1; dx2++) {
-                        uint hash_v = spatialHash(cell_i.x + dx2, cell_i.y + dy2, cell_i.z + dz2);
-                        uint start_v = cell_start[hash_v];
-                        if (start_v == 0xFFFFFFFFu) continue;
-                        uint end_v = cell_end[hash_v];
-                        for (uint jv = start_v; jv < end_v; jv++) {
-                            if (jv == index_i) continue;
-                            float4 pj_v = __ldg(&position[jv]);
-                            float3 rv = make_float3(pos_i.x - pj_v.x, pos_i.y - pj_v.y, pos_i.z - pj_v.z);
-                            float r2v = rv.x*rv.x + rv.y*rv.y + rv.z*rv.z;
-                            if (r2v > h_sq || r2v < 1e-12f) continue;
-                            float rlv = sqrtf(r2v);
-                            float h_rl = h - rlv;
-                            float inv_rl = 1.0f / rlv;
-                            float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
-                            float omega_j = __ldg(&vorticity_in[jv]).w;
-                            float mj_v = __ldg(&mass[jv]);
-                            float rj_v = pj_v.w;  // density from position.w (OPT-4.1)
-                            float wt = mj_v / fmaxf(rj_v, 1.0f);
-                            // G3 fix: use gradient of |omega|, not |omega| itself
-                            float omega_diff = omega_j - omega_mag_i;
-                            eta.x += wt * omega_diff * gs * rv.x;
-                            eta.y += wt * omega_diff * gs * rv.y;
-                            eta.z += wt * omega_diff * gs * rv.z;
-                        }
-                    }
-                }
-            }
-            // N = eta / |eta|
-            float eta_mag = sqrtf(eta.x*eta.x + eta.y*eta.y + eta.z*eta.z);
-            if (eta_mag > 1e-6f) {
-                float inv_eta = 1.0f / eta_mag;
-                float3 N = make_float3(eta.x*inv_eta, eta.y*inv_eta, eta.z*inv_eta);
-                // f_conf = epsilon * (N x omega_i)
-                float eps_v = c_granular.vorticity_epsilon;
-                f_vorticity_conf.x = eps_v * (N.y * vort_i.z - N.z * vort_i.y);
-                f_vorticity_conf.y = eps_v * (N.z * vort_i.x - N.x * vort_i.z);
-                f_vorticity_conf.z = eps_v * (N.x * vort_i.y - N.y * vort_i.x);
-            }
+    if (do_vort_eta) {
+        float eta_mag = sqrtf(eta_vort.x*eta_vort.x + eta_vort.y*eta_vort.y + eta_vort.z*eta_vort.z);
+        if (eta_mag > 1e-6f) {
+            float inv_eta = 1.0f / eta_mag;
+            float3 N = make_float3(eta_vort.x*inv_eta, eta_vort.y*inv_eta, eta_vort.z*inv_eta);
+            float eps_v = c_granular.vorticity_epsilon;
+            f_vorticity_conf.x = eps_v * (N.y * vort_i.z - N.z * vort_i.y);
+            f_vorticity_conf.y = eps_v * (N.z * vort_i.x - N.x * vort_i.z);
+            f_vorticity_conf.z = eps_v * (N.x * vort_i.y - N.y * vort_i.x);
         }
     }
 

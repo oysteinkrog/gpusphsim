@@ -78,6 +78,27 @@ struct GranularParams {
 __constant__ GranularParams c_granular;
 
 /* ======================================================================
+ * Warp-level reduction for rigid body force/torque accumulation.
+ *
+ * Reduces a float3 value across the warp using __shfl_down_sync,
+ * then lane 0 does a single atomicAdd to the target array.
+ * Reduces atomicAdd contention ~32x for boundary particles.
+ * ====================================================================== */
+
+__device__ inline void warp_reduce_accumulate(float* target, float3 val, int body_id) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val.x += __shfl_down_sync(0xffffffff, val.x, offset);
+        val.y += __shfl_down_sync(0xffffffff, val.y, offset);
+        val.z += __shfl_down_sync(0xffffffff, val.z, offset);
+    }
+    if ((threadIdx.x & 31) == 0) {
+        atomicAdd(&target[body_id * 4 + 0], val.x);
+        atomicAdd(&target[body_id * 4 + 1], val.y);
+        atomicAdd(&target[body_id * 4 + 2], val.z);
+    }
+}
+
+/* ======================================================================
  * SPH kernel functions
  * ====================================================================== */
 
@@ -142,6 +163,10 @@ __device__ inline float compute_pressure(float rho_i, int behavior, uint mat_id)
     float p_raw;
     if (gamma == 1.0f) {
         p_raw = k * fmaxf(ratio - 1.0f, 0.0f);
+    } else if (gamma == 7.0f) {
+        float r2 = ratio * ratio;
+        float r4 = r2 * r2;
+        p_raw = k * (r4 * r2 * ratio - 1.0f);
     } else {
         p_raw = k * (powf(ratio, gamma) - 1.0f);
     }
@@ -176,6 +201,218 @@ __device__ inline void clamp_boundary(float3& pos) {
     pos.x = fmaxf(c_sim.world_min.x + BOUNDARY_MARGIN, fminf(pos.x, c_sim.world_max.x - BOUNDARY_MARGIN));
     pos.y = fmaxf(c_sim.world_min.y + BOUNDARY_MARGIN, fminf(pos.y, c_sim.world_max.y - BOUNDARY_MARGIN));
     pos.z = fmaxf(c_sim.world_min.z + BOUNDARY_MARGIN, fminf(pos.z, c_sim.world_max.z - BOUNDARY_MARGIN));
+}
+
+/* ======================================================================
+ * Quaternion rotation helpers.
+ *
+ * Convention: q = (x, y, z, w) where w is the scalar part.
+ * quat_rotate:     rotate v by q
+ * quat_rotate_inv: rotate v by q^{-1} (conjugate, same as inverse for unit q)
+ * ====================================================================== */
+
+__device__ inline float3 quat_rotate(float4 q, float3 v) {
+    float3 u = make_float3(q.x, q.y, q.z);
+    float s = q.w;
+    float d = u.x * v.x + u.y * v.y + u.z * v.z;          // dot(u, v)
+    float uu = u.x * u.x + u.y * u.y + u.z * u.z;         // dot(u, u)
+    float3 crs = make_float3(                                // cross(u, v)
+        u.y * v.z - u.z * v.y,
+        u.z * v.x - u.x * v.z,
+        u.x * v.y - u.y * v.x
+    );
+    float a = s * s - uu;
+    return make_float3(
+        2.0f * d * u.x + a * v.x + 2.0f * s * crs.x,
+        2.0f * d * u.y + a * v.y + 2.0f * s * crs.y,
+        2.0f * d * u.z + a * v.z + 2.0f * s * crs.z
+    );
+}
+
+__device__ inline float3 quat_rotate_inv(float4 q, float3 v) {
+    float4 qc = make_float4(-q.x, -q.y, -q.z, q.w);
+    return quat_rotate(qc, v);
+}
+
+/* ======================================================================
+ * Analytical SDF primitives.
+ *
+ * Each function returns signed distance (negative = inside).
+ * Normal functions return the outward unit normal at the query point.
+ *
+ * Box:      arbitrary orientation via quaternion
+ * Sphere:   position + radius
+ * Cylinder: position + quaternion, local Y axis, capped ends
+ * Plane:    normal stored in size.xyz, position = point on plane
+ * ====================================================================== */
+
+/* --- Box SDF (exact exterior + interior signed distance) --- */
+__device__ inline float sdf_box(float3 local_pos, float3 half_ext) {
+    float3 d = make_float3(
+        fabsf(local_pos.x) - half_ext.x,
+        fabsf(local_pos.y) - half_ext.y,
+        fabsf(local_pos.z) - half_ext.z
+    );
+    // Exterior: length(max(d, 0))
+    float3 d_clamped = make_float3(fmaxf(d.x, 0.0f), fmaxf(d.y, 0.0f), fmaxf(d.z, 0.0f));
+    float exterior = sqrtf(d_clamped.x * d_clamped.x + d_clamped.y * d_clamped.y + d_clamped.z * d_clamped.z);
+    // Interior: min(max(d.x, d.y, d.z), 0)
+    float interior = fminf(fmaxf(d.x, fmaxf(d.y, d.z)), 0.0f);
+    return exterior + interior;
+}
+
+__device__ inline float3 sdf_box_normal(float3 local_pos, float3 half_ext) {
+    float3 d = make_float3(
+        fabsf(local_pos.x) - half_ext.x,
+        fabsf(local_pos.y) - half_ext.y,
+        fabsf(local_pos.z) - half_ext.z
+    );
+    float3 sign = make_float3(
+        local_pos.x >= 0.0f ? 1.0f : -1.0f,
+        local_pos.y >= 0.0f ? 1.0f : -1.0f,
+        local_pos.z >= 0.0f ? 1.0f : -1.0f
+    );
+
+    // Outside: gradient is the clamped vector normalized
+    if (d.x > 0.0f || d.y > 0.0f || d.z > 0.0f) {
+        float3 g = make_float3(
+            fmaxf(d.x, 0.0f) * sign.x,
+            fmaxf(d.y, 0.0f) * sign.y,
+            fmaxf(d.z, 0.0f) * sign.z
+        );
+        float len = sqrtf(g.x * g.x + g.y * g.y + g.z * g.z);
+        if (len > 1e-8f) {
+            float inv = 1.0f / len;
+            return make_float3(g.x * inv, g.y * inv, g.z * inv);
+        }
+    }
+    // Inside: normal points along axis with smallest penetration
+    if (d.x >= d.y && d.x >= d.z) return make_float3(sign.x, 0.0f, 0.0f);
+    if (d.y >= d.x && d.y >= d.z) return make_float3(0.0f, sign.y, 0.0f);
+    return make_float3(0.0f, 0.0f, sign.z);
+}
+
+/* --- Sphere SDF --- */
+__device__ inline float sdf_sphere(float3 rel_pos, float radius) {
+    float len = sqrtf(rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y + rel_pos.z * rel_pos.z);
+    return len - radius;
+}
+
+__device__ inline float3 sdf_sphere_normal(float3 rel_pos) {
+    float len = sqrtf(rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y + rel_pos.z * rel_pos.z);
+    if (len > 1e-8f) {
+        float inv = 1.0f / len;
+        return make_float3(rel_pos.x * inv, rel_pos.y * inv, rel_pos.z * inv);
+    }
+    return make_float3(0.0f, 1.0f, 0.0f);  // degenerate: point at center
+}
+
+/* --- Cylinder SDF (local Y axis, capped) --- */
+__device__ inline float sdf_cylinder(float3 local_pos, float radius, float half_h) {
+    float radial = sqrtf(local_pos.x * local_pos.x + local_pos.z * local_pos.z) - radius;
+    float axial = fabsf(local_pos.y) - half_h;
+    // Same pattern as box SDF but in 2D (radial, axial)
+    float ext_r = fmaxf(radial, 0.0f);
+    float ext_a = fmaxf(axial, 0.0f);
+    float exterior = sqrtf(ext_r * ext_r + ext_a * ext_a);
+    float interior = fminf(fmaxf(radial, axial), 0.0f);
+    return exterior + interior;
+}
+
+__device__ inline float3 sdf_cylinder_normal(float3 local_pos, float radius, float half_h) {
+    float radial_dist = sqrtf(local_pos.x * local_pos.x + local_pos.z * local_pos.z);
+    float radial = radial_dist - radius;
+    float axial = fabsf(local_pos.y) - half_h;
+    float y_sign = local_pos.y >= 0.0f ? 1.0f : -1.0f;
+
+    if (radial > 0.0f || axial > 0.0f) {
+        // Outside: gradient direction
+        float gr = fmaxf(radial, 0.0f);
+        float ga = fmaxf(axial, 0.0f);
+        if (gr > 1e-8f && radial_dist > 1e-8f) {
+            float inv_rd = 1.0f / radial_dist;
+            float3 n = make_float3(gr * local_pos.x * inv_rd, ga * y_sign, gr * local_pos.z * inv_rd);
+            float len = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
+            if (len > 1e-8f) { float inv = 1.0f / len; return make_float3(n.x*inv, n.y*inv, n.z*inv); }
+        }
+        if (ga > 0.0f) return make_float3(0.0f, y_sign, 0.0f);
+    }
+    // Inside: use axis with smallest penetration
+    if (radial >= axial) {
+        if (radial_dist > 1e-8f) {
+            float inv = 1.0f / radial_dist;
+            return make_float3(local_pos.x * inv, 0.0f, local_pos.z * inv);
+        }
+        return make_float3(1.0f, 0.0f, 0.0f);
+    }
+    return make_float3(0.0f, y_sign, 0.0f);
+}
+
+/* --- Plane SDF --- */
+__device__ inline float sdf_plane(float3 pos, float3 normal, float3 point) {
+    return normal.x * (pos.x - point.x) + normal.y * (pos.y - point.y) + normal.z * (pos.z - point.z);
+}
+
+/* --- Unified eval_sdf: dispatch by type --- */
+__device__ inline float eval_sdf(float3 pos, const SDFObject& obj) {
+    int type = __float_as_int(obj.pos_and_type.w);
+    float3 center = make_float3(obj.pos_and_type.x, obj.pos_and_type.y, obj.pos_and_type.z);
+
+    if (type == SDF_PLANE) {
+        float3 normal = make_float3(obj.size_and_r.x, obj.size_and_r.y, obj.size_and_r.z);
+        return sdf_plane(pos, normal, center);
+    }
+
+    float3 rel = make_float3(pos.x - center.x, pos.y - center.y, pos.z - center.z);
+
+    if (type == SDF_SPHERE) {
+        return sdf_sphere(rel, obj.size_and_r.x);
+    }
+
+    // Transform to local space for oriented primitives
+    float3 local_pos = quat_rotate_inv(obj.quat, rel);
+
+    if (type == SDF_BOX) {
+        float3 half_ext = make_float3(obj.size_and_r.x, obj.size_and_r.y, obj.size_and_r.z);
+        return sdf_box(local_pos, half_ext);
+    }
+
+    if (type == SDF_CYLINDER) {
+        return sdf_cylinder(local_pos, obj.size_and_r.x, obj.size_and_r.y);
+    }
+
+    return 1e10f;  // unknown type: no collision
+}
+
+/* --- Unified sdf_normal: analytical outward normal --- */
+__device__ inline float3 sdf_normal(float3 pos, const SDFObject& obj) {
+    int type = __float_as_int(obj.pos_and_type.w);
+    float3 center = make_float3(obj.pos_and_type.x, obj.pos_and_type.y, obj.pos_and_type.z);
+
+    if (type == SDF_PLANE) {
+        return make_float3(obj.size_and_r.x, obj.size_and_r.y, obj.size_and_r.z);
+    }
+
+    float3 rel = make_float3(pos.x - center.x, pos.y - center.y, pos.z - center.z);
+
+    if (type == SDF_SPHERE) {
+        return sdf_sphere_normal(rel);
+    }
+
+    float3 local_pos = quat_rotate_inv(obj.quat, rel);
+    float3 local_normal;
+
+    if (type == SDF_BOX) {
+        float3 half_ext = make_float3(obj.size_and_r.x, obj.size_and_r.y, obj.size_and_r.z);
+        local_normal = sdf_box_normal(local_pos, half_ext);
+    } else if (type == SDF_CYLINDER) {
+        local_normal = sdf_cylinder_normal(local_pos, obj.size_and_r.x, obj.size_and_r.y);
+    } else {
+        return make_float3(0.0f, 1.0f, 0.0f);
+    }
+
+    // Rotate normal back to world space
+    return quat_rotate(obj.quat, local_normal);
 }
 
 /* ======================================================================
@@ -318,6 +555,7 @@ __device__ inline void static_particle_boundary(
                     if (j == self_idx) continue;
                     uint pi_j = __ldg(&packed_info[j]);
                     if (GET_BEHAVIOR(pi_j) != STATIC) continue;
+                    if (GET_MATERIAL_ID(pi_j) == MAT_RIGID) continue; // Akinci handled by pressure coupling
                     float4 pos4_j = __ldg(&position[j]);
                     float3 r = make_float3(
                         pos.x - pos4_j.x,

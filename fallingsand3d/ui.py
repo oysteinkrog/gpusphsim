@@ -28,6 +28,10 @@ from materials import (
 )
 from presets import PRESETS
 from solver_profiles import PROFILES, PROFILE_NAMES
+from rigid_bodies import SDF_BOX, SDF_SPHERE, SDF_CYLINDER, SDF_PLANE
+
+_SDF_TYPE_NAMES = ["Box", "Sphere", "Cylinder", "Plane"]
+_MOTION_TYPE_NAMES = ["rotate_y", "oscillate_x", "oscillate_y", "oscillate_z"]
 
 # Material IDs for the picker (exclude DEAD=0)
 _PICKER_MATERIALS = [
@@ -57,6 +61,38 @@ _MAX_PARTICLES_OPTIONS = [
     (500_000, "500K"),
     (1_000_000, "1M"),
 ]
+
+
+def _euler_to_quat(pitch: float, yaw: float, roll: float) -> tuple:
+    """Convert euler angles (degrees) to quaternion (x,y,z,w)."""
+    p = math.radians(pitch) * 0.5
+    y = math.radians(yaw) * 0.5
+    r = math.radians(roll) * 0.5
+    sp, cp = math.sin(p), math.cos(p)
+    sy, cy = math.sin(y), math.cos(y)
+    sr, cr = math.sin(r), math.cos(r)
+    qx = sp * cy * cr - cp * sy * sr
+    qy = cp * sy * cr + sp * cy * sr
+    qz = cp * cy * sr - sp * sy * cr
+    qw = cp * cy * cr + sp * sy * sr
+    return (qx, qy, qz, qw)
+
+
+def _quat_to_euler(qx: float, qy: float, qz: float, qw: float) -> tuple:
+    """Convert quaternion (x,y,z,w) to euler angles (degrees): pitch, yaw, roll."""
+    # pitch (X)
+    sinp = 2.0 * (qw * qx + qy * qz)
+    cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    pitch = math.atan2(sinp, cosp)
+    # yaw (Y)
+    siny = 2.0 * (qw * qy - qz * qx)
+    siny = max(-1.0, min(1.0, siny))
+    yaw = math.asin(siny)
+    # roll (Z)
+    sinr = 2.0 * (qw * qz + qx * qy)
+    cosr = 1.0 - 2.0 * (qy * qy + qz * qz)
+    roll = math.atan2(sinr, cosr)
+    return (math.degrees(pitch), math.degrees(yaw), math.degrees(roll))
 
 
 def _unproject_mouse_ray(
@@ -112,6 +148,168 @@ def _ray_plane_intersect(
     return (ray_origin + t * ray_dir).astype(np.float32)
 
 
+def _ray_sphere_intersect(
+    origin: np.ndarray, direction: np.ndarray,
+    center: np.ndarray, radius: float,
+) -> float:
+    """Ray-sphere intersection. Returns t >= 0 or inf if no hit."""
+    oc = origin - center
+    b = float(np.dot(oc, direction))
+    c = float(np.dot(oc, oc)) - radius * radius
+    disc = b * b - c
+    if disc < 0:
+        return float('inf')
+    sqrt_disc = math.sqrt(disc)
+    t = -b - sqrt_disc
+    if t < 0:
+        t = -b + sqrt_disc
+    return t if t >= 0 else float('inf')
+
+
+def _ray_box_intersect(
+    origin: np.ndarray, direction: np.ndarray,
+    center: np.ndarray, half_ext: np.ndarray,
+    quat: tuple,
+) -> float:
+    """Ray-oriented box intersection. Returns t >= 0 or inf if no hit."""
+    # Transform ray to box local space
+    rel = origin - center
+    qx, qy, qz, qw = quat
+    # Inverse quaternion rotation (conjugate)
+    local_origin = _quat_rotate_inv(qx, qy, qz, qw, rel)
+    local_dir = _quat_rotate_inv(qx, qy, qz, qw, direction)
+
+    # AABB slab test in local space
+    tmin = -1e30
+    tmax = 1e30
+    for i in range(3):
+        if abs(local_dir[i]) < 1e-8:
+            if abs(local_origin[i]) > half_ext[i]:
+                return float('inf')
+        else:
+            inv_d = 1.0 / local_dir[i]
+            t1 = (-half_ext[i] - local_origin[i]) * inv_d
+            t2 = (half_ext[i] - local_origin[i]) * inv_d
+            if t1 > t2:
+                t1, t2 = t2, t1
+            tmin = max(tmin, t1)
+            tmax = min(tmax, t2)
+            if tmin > tmax:
+                return float('inf')
+    return tmin if tmin >= 0 else (tmax if tmax >= 0 else float('inf'))
+
+
+def _ray_cylinder_intersect(
+    origin: np.ndarray, direction: np.ndarray,
+    center: np.ndarray, radius: float, half_height: float,
+    quat: tuple,
+) -> float:
+    """Ray-oriented cylinder intersection (Y-axis aligned in local space)."""
+    rel = origin - center
+    qx, qy, qz, qw = quat
+    lo = _quat_rotate_inv(qx, qy, qz, qw, rel)
+    ld = _quat_rotate_inv(qx, qy, qz, qw, direction)
+
+    # Infinite cylinder: x^2 + z^2 = r^2
+    a = ld[0] * ld[0] + ld[2] * ld[2]
+    b = 2.0 * (lo[0] * ld[0] + lo[2] * ld[2])
+    c = lo[0] * lo[0] + lo[2] * lo[2] - radius * radius
+
+    best_t = float('inf')
+
+    if abs(a) > 1e-10:
+        disc = b * b - 4.0 * a * c
+        if disc >= 0:
+            sqrt_disc = math.sqrt(disc)
+            for sign in (-1, 1):
+                t = (-b + sign * sqrt_disc) / (2.0 * a)
+                if t >= 0:
+                    y = lo[1] + t * ld[1]
+                    if abs(y) <= half_height:
+                        best_t = min(best_t, t)
+
+    # Cap intersections (y = +/- half_height)
+    if abs(ld[1]) > 1e-8:
+        for cap_y in (-half_height, half_height):
+            t = (cap_y - lo[1]) / ld[1]
+            if t >= 0:
+                hx = lo[0] + t * ld[0]
+                hz = lo[2] + t * ld[2]
+                if hx * hx + hz * hz <= radius * radius:
+                    best_t = min(best_t, t)
+
+    return best_t
+
+
+def _ray_sdf_plane_intersect(
+    origin: np.ndarray, direction: np.ndarray,
+    center: np.ndarray, normal: np.ndarray,
+) -> float:
+    """Ray-plane intersection for SDF planes. Returns t or inf."""
+    denom = float(np.dot(direction, normal))
+    if abs(denom) < 1e-8:
+        return float('inf')
+    t = float(np.dot(center - origin, normal)) / denom
+    return t if t >= 0 else float('inf')
+
+
+def _quat_rotate_inv(qx, qy, qz, qw, v):
+    """Rotate vector v by inverse (conjugate) of quaternion (qx,qy,qz,qw)."""
+    # Conjugate = (-qx, -qy, -qz, qw)
+    # q * v * q_inv, but for inverse rotation we use conjugate * v * q
+    # Using the standard formula: v' = v + 2*q_w*(q_v x v) + 2*(q_v x (q_v x v))
+    # For inverse: negate q_v
+    nqx, nqy, nqz = -qx, -qy, -qz
+    # cross(q_v, v)
+    cx = nqy * v[2] - nqz * v[1]
+    cy = nqz * v[0] - nqx * v[2]
+    cz = nqx * v[1] - nqy * v[0]
+    # cross(q_v, cross_result)
+    cx2 = nqy * cz - nqz * cy
+    cy2 = nqz * cx - nqx * cz
+    cz2 = nqx * cy - nqy * cx
+    return np.array([
+        v[0] + 2.0 * (qw * cx + cx2),
+        v[1] + 2.0 * (qw * cy + cy2),
+        v[2] + 2.0 * (qw * cz + cz2),
+    ], dtype=np.float32)
+
+
+def _raycast_sdf_objects(origin, direction, sdf_manager):
+    """Raycast against all SDF objects. Returns (hit_id, hit_t) or (None, inf)."""
+    objects = sdf_manager.get_sdf_objects()
+    best_id = None
+    best_t = float('inf')
+
+    for obj in objects:
+        center = np.array(obj["position"], dtype=np.float32)
+        rot = tuple(obj["rotation"])
+        sdf_type = obj["type"]
+
+        if sdf_type == SDF_SPHERE:
+            t = _ray_sphere_intersect(origin, direction, center, obj["size"][0])
+        elif sdf_type == SDF_BOX:
+            t = _ray_box_intersect(origin, direction, center,
+                                   np.array(obj["size"], dtype=np.float32), rot)
+        elif sdf_type == SDF_CYLINDER:
+            t = _ray_cylinder_intersect(origin, direction, center,
+                                        obj["size"][0], obj["size"][1], rot)
+        elif sdf_type == SDF_PLANE:
+            normal = np.array(obj["size"], dtype=np.float32)
+            nlen = np.linalg.norm(normal)
+            if nlen > 1e-8:
+                normal /= nlen
+            t = _ray_sdf_plane_intersect(origin, direction, center, normal)
+        else:
+            continue
+
+        if t < best_t:
+            best_t = t
+            best_id = obj["id"]
+
+    return best_id, best_t
+
+
 class UI:
     """ImGui user interface manager.
 
@@ -128,6 +326,16 @@ class UI:
         self._speed_log: float = 0.0  # log10(speed), maps to 0.1-10.0
         self._max_particles_idx: int = 0  # index into _MAX_PARTICLES_OPTIONS
         self._world_half_size: float = 1.0  # current world half-extent
+
+        # SDF object drag state
+        self._selected_sdf_id: Optional[int] = None
+        self._dragging_sdf: bool = False
+        self._drag_plane_origin: Optional[np.ndarray] = None  # point on drag plane
+        self._drag_plane_normal: Optional[np.ndarray] = None  # drag plane normal (camera forward)
+        self._drag_offset: Optional[np.ndarray] = None  # offset from hit point to object center
+        self._sdf_manager_ref = None  # set via set_sdf_drag_refs()
+        self._camera_ref = None  # set via set_sdf_drag_refs()
+        self._drag_shift: bool = False  # shift held = Y-axis constraint
 
         # ImGui context + renderer
         imgui.create_context()
@@ -189,6 +397,16 @@ class UI:
         if self._user_key_cb:
             self._user_key_cb(window, key, scancode, action, mods)
 
+    def set_sdf_drag_refs(self, camera, sdf_manager):
+        """Store references needed for SDF object drag handles."""
+        self._camera_ref = camera
+        self._sdf_manager_ref = sdf_manager
+
+    @property
+    def selected_sdf_id(self) -> Optional[int]:
+        """Currently selected SDF object ID, or None."""
+        return self._selected_sdf_id
+
     def _on_mouse_button(self, window, button, action, mods):
         self._imgui_renderer.mouse_button_callback(window, button, action, mods)
         io = imgui.get_io()
@@ -205,6 +423,54 @@ class UI:
                     self._pending_spawn = (mx, my)
                 return
 
+            # No brush selected: try to pick SDF objects
+            if self._sdf_manager_ref is not None and self._camera_ref is not None:
+                mx, my = glfw.get_cursor_pos(window)
+                cam = self._camera_ref
+                view = cam.view_matrix()
+                proj = cam.projection_matrix()
+                origin, direction = _unproject_mouse_ray(
+                    mx, my, self._viewport_w, self._viewport_h, view, proj,
+                )
+                hit_id, hit_t = _raycast_sdf_objects(origin, direction, self._sdf_manager_ref)
+                if hit_id is not None and hit_t < float('inf'):
+                    self._selected_sdf_id = hit_id
+                    self._dragging_sdf = True
+                    self._drag_shift = bool(mods & glfw.MOD_SHIFT)
+
+                    # Compute drag plane: perpendicular to camera forward, through object center
+                    obj_center = np.array(
+                        self._sdf_manager_ref.get_sdf_objects()[hit_id]["position"],
+                        dtype=np.float32,
+                    )
+                    cam_fwd = cam.target - cam.position
+                    cam_fwd = cam_fwd / np.linalg.norm(cam_fwd)
+                    self._drag_plane_normal = cam_fwd
+                    self._drag_plane_origin = obj_center.copy()
+
+                    # Offset from hit point to object center (so dragging feels natural)
+                    hit_point = origin + hit_t * direction
+                    self._drag_offset = obj_center - hit_point
+                    return
+                else:
+                    self._selected_sdf_id = None
+
+        # Left release: finish drag, upload to GPU
+        if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.RELEASE:
+            if self._dragging_sdf:
+                self._dragging_sdf = False
+                if self._sdf_manager_ref is not None:
+                    self._sdf_manager_ref.upload_if_dirty()
+                # Don't pass to camera
+                return
+
+        # Right click: deselect
+        if button == glfw.MOUSE_BUTTON_RIGHT and action == glfw.PRESS:
+            if self._selected_sdf_id is not None:
+                self._selected_sdf_id = None
+                self._dragging_sdf = False
+                return
+
         # Pass through to user callbacks (camera controls)
         if self._user_mouse_button_cb:
             self._user_mouse_button_cb(window, button, action, mods)
@@ -214,6 +480,31 @@ class UI:
         io = imgui.get_io()
         if io.want_capture_mouse:
             return
+
+        # SDF object dragging
+        if self._dragging_sdf and self._sdf_manager_ref is not None and self._camera_ref is not None:
+            cam = self._camera_ref
+            view = cam.view_matrix()
+            proj = cam.projection_matrix()
+            origin, direction = _unproject_mouse_ray(
+                xpos, ypos, self._viewport_w, self._viewport_h, view, proj,
+            )
+
+            # Intersect ray with drag plane
+            denom = float(np.dot(direction, self._drag_plane_normal))
+            if abs(denom) > 1e-8:
+                t = float(np.dot(self._drag_plane_origin - origin, self._drag_plane_normal)) / denom
+                if t >= 0:
+                    hit = origin + t * direction + self._drag_offset
+                    if self._drag_shift:
+                        # Shift: constrain to Y axis only
+                        old_pos = self._sdf_manager_ref.get_sdf_objects()[self._selected_sdf_id]["position"]
+                        new_pos = [old_pos[0], float(hit[1]), old_pos[2]]
+                    else:
+                        new_pos = [float(hit[0]), float(hit[1]), float(hit[2])]
+                    self._sdf_manager_ref.update_sdf_object(self._selected_sdf_id, position=new_pos)
+            return
+
         if self._user_cursor_pos_cb:
             self._user_cursor_pos_cb(window, xpos, ypos)
 
@@ -585,6 +876,120 @@ class UI:
                     if changed:
                         sim.ist_iterations = val
                         sim.update_ist_params()
+
+            imgui.end()
+
+        # --- SDF Objects Panel ---
+        if renderer is not None and hasattr(sim, 'sdf_manager'):
+            sdf_mgr = sim.sdf_manager
+            imgui.set_next_window_pos(imgui.ImVec2(240, 10), imgui.Cond_.first_use_ever)
+            imgui.set_next_window_size(imgui.ImVec2(260, 0), imgui.Cond_.first_use_ever)
+
+            if imgui.begin("Objects", None, imgui.WindowFlags_.always_auto_resize)[0]:
+                # Show/hide toggle
+                changed, vis = imgui.checkbox("Show Objects", renderer.sdf_objects_visible)
+                if changed:
+                    renderer.sdf_objects_visible = vis
+
+                imgui.text(f"Objects: {sdf_mgr.count}/16")
+
+                # Add object combo
+                if sdf_mgr.count < 16:
+                    if imgui.button("+ Add Object"):
+                        imgui.open_popup("add_sdf_popup")
+                    if imgui.begin_popup("add_sdf_popup"):
+                        for type_idx, type_name in enumerate(_SDF_TYPE_NAMES):
+                            if imgui.selectable(type_name)[0]:
+                                default_size = (0.2, 0.2, 0.2) if type_idx != SDF_SPHERE else (0.2, 0, 0)
+                                sdf_mgr.add_sdf_object(sdf_type=type_idx, position=(0, 0, 0), size=default_size)
+                        imgui.end_popup()
+
+                imgui.separator()
+
+                # Per-object controls
+                objects = sdf_mgr.get_sdf_objects()
+                to_remove = None
+                for obj in objects:
+                    oid = obj["id"]
+                    type_name = _SDF_TYPE_NAMES[obj["type"]] if obj["type"] < len(_SDF_TYPE_NAMES) else "?"
+                    expanded, _ = imgui.collapsing_header(f"{type_name} #{oid}")
+                    if expanded:
+                        # Delete button
+                        imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.7, 0.1, 0.1, 1))
+                        if imgui.button(f"Delete##{oid}"):
+                            to_remove = oid
+                        imgui.pop_style_color()
+
+                        # Position
+                        pos = obj["position"]
+                        ch, vals = imgui.slider_float3(f"Pos##{oid}", [pos[0], pos[1], pos[2]], -3.0, 3.0, "%.2f")
+                        if ch:
+                            sdf_mgr.update_sdf_object(oid, position=list(vals))
+
+                        # Size
+                        sz = obj["size"]
+                        if obj["type"] == SDF_SPHERE:
+                            ch, val = imgui.slider_float(f"Radius##{oid}", sz[0], 0.01, 1.0, "%.2f")
+                            if ch:
+                                sdf_mgr.update_sdf_object(oid, size=[val, 0, 0])
+                        else:
+                            ch, vals = imgui.slider_float3(f"Size##{oid}", [sz[0], sz[1], sz[2]], 0.01, 1.0, "%.2f")
+                            if ch:
+                                sdf_mgr.update_sdf_object(oid, size=list(vals))
+
+                        # Rotation (euler angles)
+                        rot = obj["rotation"]
+                        euler = _quat_to_euler(rot[0], rot[1], rot[2], rot[3])
+                        ch, vals = imgui.slider_float3(f"Rot##{oid}", [euler[0], euler[1], euler[2]], -180.0, 180.0, "%.0f")
+                        if ch:
+                            q = _euler_to_quat(vals[0], vals[1], vals[2])
+                            sdf_mgr.update_sdf_object(oid, rotation=list(q))
+
+                        # Restitution & friction
+                        ch, val = imgui.slider_float(f"Bounce##{oid}", obj["restitution"], 0.0, 1.0, "%.2f")
+                        if ch:
+                            sdf_mgr.update_sdf_object(oid, restitution=val)
+                        ch, val = imgui.slider_float(f"Friction##{oid}", obj["friction"], 0.0, 1.0, "%.2f")
+                        if ch:
+                            sdf_mgr.update_sdf_object(oid, friction=val)
+
+                        # Kinematic motion
+                        has_motion = oid in sdf_mgr._motions
+                        ch, kin = imgui.checkbox(f"Kinematic##{oid}", has_motion)
+                        if ch:
+                            if kin:
+                                sdf_mgr.add_kinematic_motion(oid, "rotate_y", {"speed": 1.0})
+                            else:
+                                sdf_mgr.remove_kinematic_motion(oid)
+
+                        if oid in sdf_mgr._motions:
+                            motion = sdf_mgr._motions[oid]
+                            mtype = motion["type"]
+                            cur_idx = _MOTION_TYPE_NAMES.index(mtype) if mtype in _MOTION_TYPE_NAMES else 0
+                            ch, new_idx = imgui.combo(f"Motion##{oid}", cur_idx, _MOTION_TYPE_NAMES)
+                            if ch and new_idx != cur_idx:
+                                new_type = _MOTION_TYPE_NAMES[new_idx]
+                                if new_type == "rotate_y":
+                                    sdf_mgr.add_kinematic_motion(oid, new_type, {"speed": 1.0})
+                                else:
+                                    sdf_mgr.add_kinematic_motion(oid, new_type, {"amplitude": 0.3, "frequency": 0.5})
+
+                            p = motion["params"]
+                            if mtype == "rotate_y":
+                                ch, val = imgui.slider_float(f"Speed##{oid}", p.get("speed", 1.0), 0.1, 10.0, "%.1f rad/s")
+                                if ch:
+                                    p["speed"] = val
+                            else:
+                                ch, val = imgui.slider_float(f"Amp##{oid}", p.get("amplitude", 0.3), 0.01, 2.0, "%.2f m")
+                                if ch:
+                                    p["amplitude"] = val
+                                ch, val = imgui.slider_float(f"Freq##{oid}", p.get("frequency", 0.5), 0.1, 5.0, "%.1f Hz")
+                                if ch:
+                                    p["frequency"] = val
+
+                if to_remove is not None:
+                    sdf_mgr.remove_kinematic_motion(to_remove)
+                    sdf_mgr.remove_sdf_object(to_remove)
 
             imgui.end()
 

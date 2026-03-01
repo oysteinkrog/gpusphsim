@@ -72,6 +72,11 @@ def _get_module() -> "object":
     return _module
 
 
+def get_module() -> "object":
+    """Return the compiled CuPy RawModule (public accessor)."""
+    return _get_module()
+
+
 # ---------------------------------------------------------------------------
 # Constant memory uploads
 # ---------------------------------------------------------------------------
@@ -189,11 +194,18 @@ def compute_non_pressure_forces(
     velocity_out: cupy.ndarray,
     vorticity_in: "cupy.ndarray | None" = None,
     normal_in: "cupy.ndarray | None" = None,
+    d_rigid_bodies: "cupy.ndarray | None" = None,
+    d_rigid_forces: "cupy.ndarray | None" = None,
+    d_rigid_torques: "cupy.ndarray | None" = None,
 ) -> None:
     n = position.shape[0]
     _null = np.intp(0)
+    _null_f = cupy.ndarray(0, dtype=cupy.float32)
     vort_in = vorticity_in if vorticity_in is not None else _null
     norm_in = normal_in if normal_in is not None else _null
+    rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
+    rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null_f
+    rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null_f
     module = _get_module()
     kernel = module.get_function("K_DFSPH_NonPressureForces")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -203,6 +215,7 @@ def compute_non_pressure_forces(
         packed_info, shear_rate, temperature,
         cell_start, cell_end, velocity_out,
         vort_in, norm_in,
+        rb_ptr, rf_ptr, rt_ptr,
     ))
 
 
@@ -439,9 +452,16 @@ def finalize(
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
     vorticity_in: "cupy.ndarray | None" = None,
+    sorted_kappa_v: "cupy.ndarray | None" = None,
+    kappa_v_out: "cupy.ndarray | None" = None,
+    d_rigid_bodies: "cupy.ndarray | None" = None,
+    d_rigid_forces: "cupy.ndarray | None" = None,
+    d_rigid_torques: "cupy.ndarray | None" = None,
+    max_displacement: "cupy.ndarray | None" = None,
 ) -> None:
     n = sorted_position.shape[0]
     _null = np.intp(0)
+    _null_f = cupy.ndarray(0, dtype=cupy.float32)
     if sorted_particle_dye is None:
         sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
     if particle_dye_out is None:
@@ -452,6 +472,12 @@ def finalize(
     if angular_velocity_out is None:
         angular_velocity_out = cupy.zeros((n, 4), dtype=cupy.float32)
     vort_in = vorticity_in if vorticity_in is not None else _null
+    skv_ptr = sorted_kappa_v if sorted_kappa_v is not None else _null
+    kv_out_ptr = kappa_v_out if kappa_v_out is not None else np.intp(0)
+    rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
+    rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null_f
+    rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null_f
+    max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
     module = _get_module()
     kernel = module.get_function("K_DFSPH_Finalize")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -466,4 +492,7 @@ def finalize(
         sorted_particle_dye, s_dye_rate, particle_dye_out,
         sorted_angular_velocity, angular_velocity_out,
         vort_in,
+        skv_ptr, kv_out_ptr,
+        rb_ptr, rf_ptr, rt_ptr,
+        max_disp_ptr,
     ))

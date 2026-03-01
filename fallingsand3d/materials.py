@@ -65,7 +65,7 @@ assert INTERACTION_DTYPE.itemsize == 8, (
 )
 
 MAX_MATERIALS = 32  # slots in constant memory (IDs 0-31)
-NUM_DEFINED = 18  # IDs 0-17 are defined; 18-31 reserved (zeroed)
+NUM_DEFINED = 19  # IDs 0-18 are defined; 19-31 reserved (zeroed)
 
 # ---------------------------------------------------------------------------
 # BehaviorClass enum (mirrors common.cuh)
@@ -157,6 +157,7 @@ FIRE = 14
 GUNPOWDER = 15
 WET_SAND = 16
 MUD = 17
+MAT_RIGID = 18
 
 # ---------------------------------------------------------------------------
 # Material definitions (18 entries, IDs 0-17)
@@ -335,6 +336,15 @@ MATERIALS: Dict[int, MaterialDef] = {
         temp_melt=1400.0, temp_boil=2200.0, temp_ignite=0.0,
         behavior_class=FLUID,
         color_r=0.35, color_g=0.22, color_b=0.10,
+    ),
+    MAT_RIGID: MaterialDef(
+        id=MAT_RIGID, name="RIGID",
+        rest_density=2500.0, eos_stiffness=0.0, eos_gamma=0.0,
+        base_viscosity=0.0, friction_coeff=0.5, cohesion=0.0,
+        buoyancy_extra=0.0, thermal_conductivity=200.0, heat_capacity=800.0,
+        temp_melt=0.0, temp_boil=0.0, temp_ignite=0.0,
+        behavior_class=STATIC,
+        color_r=0.6, color_g=0.6, color_b=0.65,
     ),
 }
 

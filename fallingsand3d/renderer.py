@@ -51,8 +51,92 @@ from OpenGL.GL import (
 from OpenGL.GL import shaders as _gl_shaders  # noqa: F401
 
 from gl_cuda_interop import CudaGLBuffer
+import math as _math
 
 _FLOAT4_BYTES = 4 * 4
+
+
+# ---------------------------------------------------------------------------
+# SDF Object mesh generation (unit primitives with normals)
+# ---------------------------------------------------------------------------
+
+def _generate_box_mesh() -> np.ndarray:
+    """Unit box (+-0.5), 36 verts with normals. Returns (36, 6) float32."""
+    faces = [
+        ((0.5,-0.5,-0.5),(0.5,0.5,-0.5),(0.5,0.5,0.5),(0.5,-0.5,-0.5),(0.5,0.5,0.5),(0.5,-0.5,0.5),(1,0,0)),
+        ((-0.5,-0.5,0.5),(-0.5,0.5,0.5),(-0.5,0.5,-0.5),(-0.5,-0.5,0.5),(-0.5,0.5,-0.5),(-0.5,-0.5,-0.5),(-1,0,0)),
+        ((-0.5,0.5,-0.5),(0.5,0.5,-0.5),(0.5,0.5,0.5),(-0.5,0.5,-0.5),(0.5,0.5,0.5),(-0.5,0.5,0.5),(0,1,0)),
+        ((-0.5,-0.5,0.5),(-0.5,-0.5,-0.5),(0.5,-0.5,-0.5),(-0.5,-0.5,0.5),(0.5,-0.5,-0.5),(0.5,-0.5,0.5),(0,-1,0)),
+        ((-0.5,-0.5,0.5),(0.5,-0.5,0.5),(0.5,0.5,0.5),(-0.5,-0.5,0.5),(0.5,0.5,0.5),(-0.5,0.5,0.5),(0,0,1)),
+        ((0.5,-0.5,-0.5),(-0.5,-0.5,-0.5),(-0.5,0.5,-0.5),(0.5,-0.5,-0.5),(-0.5,0.5,-0.5),(0.5,0.5,-0.5),(0,0,-1)),
+    ]
+    verts = []
+    for face in faces:
+        *tri_verts, normal = face
+        for v in tri_verts:
+            verts.append((*v, *normal))
+    return np.array(verts, dtype=np.float32)
+
+
+def _generate_sphere_mesh(stacks: int = 16, slices: int = 16) -> np.ndarray:
+    """Unit sphere triangle mesh with normals. Returns (N, 6) float32."""
+    verts = []
+    for i in range(stacks):
+        t0 = _math.pi * i / stacks
+        t1 = _math.pi * (i + 1) / stacks
+        for j in range(slices):
+            p0 = 2 * _math.pi * j / slices
+            p1 = 2 * _math.pi * (j + 1) / slices
+            v00 = (_math.sin(t0)*_math.cos(p0), _math.cos(t0), _math.sin(t0)*_math.sin(p0))
+            v10 = (_math.sin(t1)*_math.cos(p0), _math.cos(t1), _math.sin(t1)*_math.sin(p0))
+            v01 = (_math.sin(t0)*_math.cos(p1), _math.cos(t0), _math.sin(t0)*_math.sin(p1))
+            v11 = (_math.sin(t1)*_math.cos(p1), _math.cos(t1), _math.sin(t1)*_math.sin(p1))
+            for tri in [(v00,v10,v11),(v00,v11,v01)]:
+                for v in tri:
+                    verts.append((*v, *v))
+    return np.array(verts, dtype=np.float32)
+
+
+def _generate_cylinder_mesh(segments: int = 16) -> np.ndarray:
+    """Unit cylinder (r=0.5, h=1) with normals. Returns (N, 6) float32."""
+    verts = []
+    r, h = 0.5, 0.5
+    for i in range(segments):
+        a0 = 2*_math.pi*i/segments; a1 = 2*_math.pi*(i+1)/segments
+        c0, s0, c1, s1 = _math.cos(a0), _math.sin(a0), _math.cos(a1), _math.sin(a1)
+        # Side
+        for v in [(r*c0,-h,r*s0,c0,0,s0),(r*c0,h,r*s0,c0,0,s0),(r*c1,h,r*s1,c1,0,s1),
+                   (r*c0,-h,r*s0,c0,0,s0),(r*c1,h,r*s1,c1,0,s1),(r*c1,-h,r*s1,c1,0,s1)]:
+            verts.append(v)
+        # Top cap
+        for v in [(0,h,0,0,1,0),(r*c0,h,r*s0,0,1,0),(r*c1,h,r*s1,0,1,0)]:
+            verts.append(v)
+        # Bottom cap
+        for v in [(0,-h,0,0,-1,0),(r*c1,-h,r*s1,0,-1,0),(r*c0,-h,r*s0,0,-1,0)]:
+            verts.append(v)
+    return np.array(verts, dtype=np.float32)
+
+
+def _generate_plane_mesh(size: float = 10.0) -> np.ndarray:
+    """Large XZ quad (normal +Y). Returns (6, 6) float32."""
+    s = size * 0.5
+    return np.array([
+        (-s,0,-s,0,1,0),(s,0,-s,0,1,0),(s,0,s,0,1,0),
+        (-s,0,-s,0,1,0),(s,0,s,0,1,0),(-s,0,s,0,1,0),
+    ], dtype=np.float32)
+
+
+def _quat_to_mat4(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    """Quaternion (x,y,z,w) to 4x4 rotation matrix (row-major)."""
+    x2, y2, z2 = qx+qx, qy+qy, qz+qz
+    xx, xy, xz = qx*x2, qx*y2, qx*z2
+    yy, yz, zz = qy*y2, qy*z2, qz*z2
+    wx, wy, wz = qw*x2, qw*y2, qw*z2
+    m = np.eye(4, dtype=np.float32)
+    m[0,0]=1-(yy+zz); m[0,1]=xy-wz;     m[0,2]=xz+wy
+    m[1,0]=xy+wz;     m[1,1]=1-(xx+zz);  m[1,2]=yz-wx
+    m[2,0]=xz-wy;     m[2,1]=yz+wx;      m[2,2]=1-(xx+yy)
+    return m
 
 
 def _read_shader_source(filename: str) -> str:
@@ -325,6 +409,45 @@ void main() {
         self.cursor_center = np.zeros(3, dtype=np.float32)
         self.cursor_radius = 0.1
 
+        # --- SDF Object rendering ---
+        _SDF_VERT = """
+#version 410 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+void main() {
+    gl_Position = uMVP * uModel * vec4(aPos, 1.0);
+}
+"""
+        _SDF_FRAG = """
+#version 410 core
+out vec4 fragColor;
+uniform vec4 uColor;
+void main() {
+    fragColor = uColor;
+}
+"""
+        vs_sdf = _compile_shader(_SDF_VERT, GL_VERTEX_SHADER)
+        fs_sdf = _compile_shader(_SDF_FRAG, GL_FRAGMENT_SHADER)
+        self._prog_sdf = _link_program(vs_sdf, fs_sdf)
+        glDeleteShader(vs_sdf)
+        glDeleteShader(fs_sdf)
+        self._u_sdf_mvp = glGetUniformLocation(self._prog_sdf, "uMVP")
+        self._u_sdf_model = glGetUniformLocation(self._prog_sdf, "uModel")
+        self._u_sdf_color = glGetUniformLocation(self._prog_sdf, "uColor")
+
+        # Generate mesh data for each SDF primitive type
+        self._sdf_meshes = {}  # type -> (vao, vbo, num_verts)
+        self._sdf_meshes[0] = self._create_box_mesh()      # SDF_BOX
+        self._sdf_meshes[1] = self._create_sphere_mesh()    # SDF_SPHERE
+        self._sdf_meshes[2] = self._create_cylinder_mesh()  # SDF_CYLINDER
+        self._sdf_meshes[3] = self._create_plane_mesh()     # SDF_PLANE
+
+        # SDF object visibility
+        self.sdf_objects_visible = True
+        self.sdf_manager = None  # set externally by main loop
+        self.selected_sdf_id = None  # set by UI for highlight
+
         # --- Skybox ---
         self._prog_skybox = _build_program("skybox.vert", "skybox.frag")
         self._u_sky_viewrot = glGetUniformLocation(self._prog_skybox, "uViewRot")
@@ -529,6 +652,8 @@ void main() {
             self._draw_ssfr(view, proj)
         else:
             self._draw_points(view, proj)
+        # Draw SDF objects as semi-transparent meshes (after particles, before foam)
+        self._draw_sdf_objects(view, proj)
         # Draw foam on top with additive blending
         if self.foam_enabled and self.num_foam > 0:
             self._draw_foam(view, proj)
@@ -802,6 +927,175 @@ void main() {
         glBindTexture(GL_TEXTURE_2D, 0)
 
     # -----------------------------------------------------------------
+    # SDF object mesh generation and rendering
+    # -----------------------------------------------------------------
+
+    def _upload_mesh(self, verts: np.ndarray) -> tuple:
+        """Upload vertex data to a VBO+VAO, return (vao, vbo, num_verts)."""
+        vbo = int(glGenBuffers(1))
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, verts.nbytes, verts, GL_STATIC_DRAW)
+        vao = int(glGenVertexArrays(1))
+        glBindVertexArray(vao)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, None)
+        glBindVertexArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        return (vao, vbo, len(verts) // 3)
+
+    def _create_box_mesh(self) -> tuple:
+        """Unit cube [-1,1]^3 as 12 triangles (36 verts)."""
+        # Same as skybox vertices but that's a unit cube too
+        verts = np.array([
+            -1,-1,-1,  1,-1,-1,  1,1,-1,   1,1,-1, -1,1,-1, -1,-1,-1,
+            -1,-1,1,   1,1,1,    1,-1,1,   -1,-1,1, -1,1,1,   1,1,1,
+            -1,-1,-1, -1,1,1,   -1,-1,1,   -1,-1,-1,-1,1,-1, -1,1,1,
+             1,-1,-1,  1,-1,1,   1,1,1,     1,1,1,   1,1,-1,  1,-1,-1,
+            -1,-1,-1,  1,-1,1,   1,-1,-1,  -1,-1,-1,-1,-1,1,  1,-1,1,
+            -1,1,-1,   1,1,-1,   1,1,1,     1,1,1,  -1,1,1,  -1,1,-1,
+        ], dtype=np.float32)
+        return self._upload_mesh(verts)
+
+    def _create_sphere_mesh(self, stacks: int = 16, slices: int = 16) -> tuple:
+        """Unit sphere as triangle mesh."""
+        verts = []
+        for i in range(stacks):
+            t0 = i / stacks
+            t1 = (i + 1) / stacks
+            phi0 = np.pi * t0
+            phi1 = np.pi * t1
+            for j in range(slices):
+                s0 = j / slices
+                s1 = (j + 1) / slices
+                theta0 = 2.0 * np.pi * s0
+                theta1 = 2.0 * np.pi * s1
+
+                def sv(phi, theta):
+                    return [np.sin(phi)*np.cos(theta), np.cos(phi), np.sin(phi)*np.sin(theta)]
+
+                p00 = sv(phi0, theta0)
+                p10 = sv(phi1, theta0)
+                p01 = sv(phi0, theta1)
+                p11 = sv(phi1, theta1)
+                verts.extend(p00 + p10 + p11)
+                verts.extend(p00 + p11 + p01)
+        return self._upload_mesh(np.array(verts, dtype=np.float32))
+
+    def _create_cylinder_mesh(self, segments: int = 16) -> tuple:
+        """Unit cylinder (radius=1, height=2, centered at origin) as triangle mesh."""
+        verts = []
+        for i in range(segments):
+            a0 = 2.0 * np.pi * i / segments
+            a1 = 2.0 * np.pi * (i + 1) / segments
+            c0, s0 = np.cos(a0), np.sin(a0)
+            c1, s1 = np.cos(a1), np.sin(a1)
+            # Side wall
+            verts.extend([c0,1,s0, c0,-1,s0, c1,-1,s1])
+            verts.extend([c0,1,s0, c1,-1,s1, c1,1,s1])
+            # Top cap
+            verts.extend([0,1,0, c0,1,s0, c1,1,s1])
+            # Bottom cap
+            verts.extend([0,-1,0, c1,-1,s1, c0,-1,s0])
+        return self._upload_mesh(np.array(verts, dtype=np.float32))
+
+    def _create_plane_mesh(self) -> tuple:
+        """Large quad [-1,1]x[-1,1] in XZ plane (scaled to 10m at draw time)."""
+        verts = np.array([
+            -1,0,-1,  1,0,-1,  1,0,1,
+            -1,0,-1,  1,0,1,  -1,0,1,
+        ], dtype=np.float32)
+        return self._upload_mesh(verts)
+
+    def _draw_sdf_objects(self, view: np.ndarray, proj: np.ndarray) -> None:
+        """Render SDF collision objects as semi-transparent meshes."""
+        if not self.sdf_objects_visible or self.sdf_manager is None:
+            return
+        objects = self.sdf_manager.get_sdf_objects()
+        if not objects:
+            return
+
+        mvp = proj @ view
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+
+        glUseProgram(self._prog_sdf)
+        glUniformMatrix4fv(self._u_sdf_mvp, 1, GL_TRUE, mvp)
+
+        for obj in objects:
+            sdf_type = obj["type"]
+            if sdf_type not in self._sdf_meshes:
+                continue
+            vao, _, num_verts = self._sdf_meshes[sdf_type]
+
+            # Build model matrix: translate * rotate * scale
+            pos = obj["position"]
+            rot = obj["rotation"]  # quaternion (x,y,z,w)
+            size = obj["size"]
+
+            model = self._build_sdf_model_matrix(sdf_type, pos, rot, size)
+            glUniformMatrix4fv(self._u_sdf_model, 1, GL_TRUE, model)
+
+            # Color: selected = bright yellow, kinematic = blue, static = gray
+            is_selected = (obj["id"] == self.selected_sdf_id)
+            has_motion = obj["id"] in self.sdf_manager._motions
+            if is_selected:
+                glUniform4f(self._u_sdf_color, 1.0, 0.9, 0.3, 0.5)
+            elif has_motion:
+                glUniform4f(self._u_sdf_color, 0.3, 0.4, 0.8, 0.3)
+            else:
+                glUniform4f(self._u_sdf_color, 0.5, 0.5, 0.5, 0.3)
+
+            glBindVertexArray(vao)
+            glDrawArrays(GL_TRIANGLES, 0, num_verts)
+
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glDisable(GL_BLEND)
+        glDepthMask(GL_TRUE)
+
+    @staticmethod
+    def _build_sdf_model_matrix(sdf_type: int, pos: list, rot: list, size: list) -> np.ndarray:
+        """Build 4x4 model matrix from position, quaternion rotation, and size."""
+        # Translation
+        T = np.eye(4, dtype=np.float32)
+        T[0, 3] = pos[0]
+        T[1, 3] = pos[1]
+        T[2, 3] = pos[2]
+
+        # Rotation from quaternion (x,y,z,w)
+        qx, qy, qz, qw = rot
+        R = np.eye(4, dtype=np.float32)
+        R[0,0] = 1 - 2*(qy*qy + qz*qz)
+        R[0,1] = 2*(qx*qy - qw*qz)
+        R[0,2] = 2*(qx*qz + qw*qy)
+        R[1,0] = 2*(qx*qy + qw*qz)
+        R[1,1] = 1 - 2*(qx*qx + qz*qz)
+        R[1,2] = 2*(qy*qz - qw*qx)
+        R[2,0] = 2*(qx*qz - qw*qy)
+        R[2,1] = 2*(qy*qz + qw*qx)
+        R[2,2] = 1 - 2*(qx*qx + qy*qy)
+
+        # Scale based on SDF type
+        S = np.eye(4, dtype=np.float32)
+        if sdf_type == 0:  # BOX: half_extents map to unit cube [-1,1]
+            S[0,0] = size[0]
+            S[1,1] = size[1]
+            S[2,2] = size[2]
+        elif sdf_type == 1:  # SPHERE: radius (uniform scale)
+            S[0,0] = S[1,1] = S[2,2] = size[0]
+        elif sdf_type == 2:  # CYLINDER: radius for XZ, half_height for Y
+            S[0,0] = size[0]  # radius
+            S[1,1] = size[2]  # half_height (stored in size.z)
+            S[2,2] = size[0]  # radius
+        elif sdf_type == 3:  # PLANE: large flat quad
+            S[0,0] = S[2,2] = 5.0  # 10m across
+
+        return T @ R @ S
+
+    # -----------------------------------------------------------------
     # Cleanup
     # -----------------------------------------------------------------
 
@@ -820,10 +1114,16 @@ void main() {
         glDeleteVertexArrays(1, [self._vao_skybox])
         if self._tex_skybox:
             glDeleteTextures(1, [self._tex_skybox])
+        # Clean up SDF mesh resources
+        for vao, vbo, _ in self._sdf_meshes.values():
+            glDeleteVertexArrays(1, [vao])
+            glDeleteBuffers(1, [vbo])
+        self._sdf_meshes.clear()
+
         for prog in (self._prog_points, self._prog_nonfluid, self._prog_depth,
                       self._prog_thick, self._prog_blur, self._prog_normal,
                       self._prog_composite, self._prog_foam, self._prog_cursor,
-                      self._prog_skybox):
+                      self._prog_skybox, self._prog_sdf):
             if prog:
                 glDeleteProgram(prog)
         self._destroy_ssfr_fbos()

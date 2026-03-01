@@ -109,10 +109,12 @@ def main():
 
     # Create simulation orchestrator (adaptive timestep, accuracy=0.4 CFL)
     sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
+    renderer.sdf_manager = sim.sdf_manager
     print("Simulation initialized -- kernels compiled and constants uploaded")
 
     # Create ImGui UI
     ui = UI(window)
+    ui.set_sdf_drag_refs(camera, sim.sdf_manager)
 
     # Copy initial state to VBOs
     with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
@@ -265,6 +267,9 @@ def main():
         else:
             renderer.cursor_visible = False
 
+        # --- Update SDF selection highlight ---
+        renderer.selected_sdf_id = ui.selected_sdf_id
+
         # --- Render 3D scene ---
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
@@ -285,6 +290,8 @@ def main():
             world.packed_info[:] = 0
             world._high_water = 0
             world.foam_count.fill(0)  # reset foam pool
+            sim.rigid_body_manager.reset()
+            sim._rigid_boundary_initialized = False
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.set_solver_profile(profile)
@@ -301,7 +308,11 @@ def main():
             from presets import PRESETS
             load_fn = PRESETS[preset_name]
             print(f"Loading preset: {preset_name}")
+            sim.sdf_manager.clear()  # reset SDF objects before preset
+            sim.rigid_body_manager.reset()  # reset rigid bodies before preset
+            sim._rigid_boundary_initialized = False
             n_spawned, spawner_cfg = load_fn(world)
+            sim.sdf_manager.upload_if_dirty()  # upload any SDF objects preset added
             world.foam_count.fill(0)  # reset foam pool on preset load
             active_spawner = spawner_cfg
             spawner_frame_counter = 0
@@ -323,6 +334,8 @@ def main():
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
+            renderer.sdf_manager = sim.sdf_manager
+            ui.set_sdf_drag_refs(camera, sim.sdf_manager)
             active_spawner = None
             spawner_frame_counter = 0
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:

@@ -105,6 +105,13 @@ class World:
         # Warm-start pressure (DFSPH uses this; always allocated for reorder kernel)
         self.kappa = cp.zeros(n, dtype=cp.float32)
         self.sorted_kappa = cp.zeros(n, dtype=cp.float32)
+        # Warm-start divergence (DFSPH) and lambda (PBF) -- PERF-008
+        self.kappa_v = cp.zeros(n, dtype=cp.float32)
+        self.sorted_kappa_v = cp.zeros(n, dtype=cp.float32)
+        self.lambda_pbf = cp.zeros(n, dtype=cp.float32)
+        self.sorted_lambda_pbf = cp.zeros(n, dtype=cp.float32)
+        # Pre-computed pressure (WCSPH PERF-007: eliminates compute_pressure per neighbor)
+        self.sorted_pressure = cp.zeros(n, dtype=cp.float32)
         # Vorticity (float4: omega_x, omega_y, omega_z, |omega|) -- computed in step1
         self.sorted_vorticity = cp.zeros((n, 4), dtype=cp.float32)
         # Surface normal (float4: n_x, n_y, n_z, neighbor_count_as_float) -- computed in step1
@@ -122,6 +129,9 @@ class World:
         # Written during sort (counting_sort), read by step1/step2 neighbor loops.
         # 8 bytes per particle (half4) vs 16 bytes (float4) = 50% bandwidth savings on velocity reads.
         self.sorted_velocity_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
+        # FP16 temperature + dye copies for neighbor loop bandwidth (PERF-011)
+        self.sorted_temperature_h = cp.zeros(n, dtype=cp.float16)  # half = 2 bytes per particle
+        self.sorted_dye_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
         # Sort index arrays (hash + sorted versions)
         self.hashes = cp.zeros(n, dtype=cp.uint32)
         self.sorted_hashes = cp.zeros(n, dtype=cp.uint32)
@@ -148,10 +158,8 @@ class World:
         if not hasattr(self, 'predicted_position'):
             self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
-        # PBF-specific arrays -- check independently
-        if not hasattr(self, 'lambda_pbf'):
-            self.lambda_pbf = cp.zeros(n, dtype=cp.float32)
-            self.sorted_lambda_pbf = cp.zeros(n, dtype=cp.float32)
+        # PBF-specific arrays -- lambda_pbf now in _allocate (PERF-008)
+        if not hasattr(self, 'delta_position'):
             self.delta_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_delta_position = cp.zeros((n, 4), dtype=cp.float32)
         # Pressure normal for Drucker-Prager friction (only used within PBF iterations)
@@ -165,11 +173,10 @@ class World:
         if not hasattr(self, 'predicted_position'):
             self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
+        # kappa_v now in _allocate (PERF-008); alpha still lazy
         if not hasattr(self, 'alpha_dfsph'):
             self.alpha_dfsph = cp.zeros(n, dtype=cp.float32)
             self.sorted_alpha_dfsph = cp.zeros(n, dtype=cp.float32)
-            self.kappa_v = cp.zeros(n, dtype=cp.float32)
-            self.sorted_kappa_v = cp.zeros(n, dtype=cp.float32)
 
     def resize(self, new_max: int) -> None:
         """Reallocate all arrays for a new max_particles. Kills all particles."""
@@ -239,10 +246,12 @@ class World:
         self.sorted_packed_info[:num_alive] = self.packed_info[:n][alive_idx]
         # uint8 arrays
         self.sorted_sleep_counter[:num_alive] = self.sleep_counter[:n][alive_idx]
-        # Persistent per-particle state (kappa, dye, angular_velocity)
+        # Persistent per-particle state (kappa, dye, angular_velocity, kappa_v, lambda_pbf)
         self.sorted_kappa[:num_alive] = self.kappa[:n][alive_idx]
         self.sorted_particle_dye[:num_alive] = self.particle_dye[:n][alive_idx]
         self.sorted_angular_velocity[:num_alive] = self.angular_velocity[:n][alive_idx]
+        self.sorted_kappa_v[:num_alive] = self.kappa_v[:n][alive_idx]
+        self.sorted_lambda_pbf[:num_alive] = self.lambda_pbf[:n][alive_idx]
 
         # Copy back from scratch to primary arrays
         self.position[:num_alive] = self.sorted_position[:num_alive]
@@ -263,6 +272,8 @@ class World:
         self.kappa[:num_alive] = self.sorted_kappa[:num_alive]
         self.particle_dye[:num_alive] = self.sorted_particle_dye[:num_alive]
         self.angular_velocity[:num_alive] = self.sorted_angular_velocity[:num_alive]
+        self.kappa_v[:num_alive] = self.sorted_kappa_v[:num_alive]
+        self.lambda_pbf[:num_alive] = self.sorted_lambda_pbf[:num_alive]
 
         # Zero out the dead tail to prevent stale data
         if num_alive < n:

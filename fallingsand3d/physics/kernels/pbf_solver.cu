@@ -108,6 +108,20 @@ void K_PBF_Predict(
     );
 
     clamp_boundary(pred);
+
+    // SDF object collision: clamp predicted position outside SDF surfaces
+    for (int s = 0; s < c_num_sdf_objects; s++) {
+        SDFObject obj = c_sdf_objects[s];
+        float dist = eval_sdf(pred, obj);
+        if (dist < BOUNDARY_MARGIN) {
+            float3 n = sdf_normal(pred, obj);
+            float push = BOUNDARY_MARGIN - dist;
+            pred.x += push * n.x;
+            pred.y += push * n.y;
+            pred.z += push * n.z;
+        }
+    }
+
     predicted_out[i] = make_float4(pred.x, pred.y, pred.z, 1.0f);
 }
 
@@ -118,7 +132,7 @@ void K_PBF_Predict(
  *   lambda_i = -C_i / (SUM_j |grad_pj C_i|^2 + epsilon)
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 4)
+extern "C" __global__ __launch_bounds__(256, 3)
 void K_PBF_ComputeLambda(
     uint            numParticles,
     const float4*   __restrict__ predicted_pos,
@@ -185,10 +199,11 @@ void K_PBF_ComputeLambda(
     float T_i = 0.0f;
     float kappa_i = 0.0f;
     float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    bool dye_on = (c_sim.dye_enabled != 0);
     if (do_heat) {
         T_i = __ldg(&temperature_in[i]);
         kappa_i = c_materials[mat_id_i].thermal_conductivity;
-        dye_i = __ldg(&particle_dye_in[i]);
+        if (dye_on) dye_i = __ldg(&particle_dye_in[i]);
     }
 
     // Vorticity accumulator (FLUID only)
@@ -271,25 +286,21 @@ void K_PBF_ComputeLambda(
                         grad_ci.y += gy;
                         grad_ci.z += gz;
 
-                        // Heat diffusion + exposure (only on first call)
-                        if (do_heat) {
+                        // Heat diffusion + exposure (skip MAT_RIGID neighbors)
+                        uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                        if (do_heat && mat_id_j != MAT_RIGID) {
                             float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
                             float T_j = __ldg(&temperature_in[j]);
 
-                            // Heat: dTdt += kappa_i * lap_coeff * (m_j/rho_j) * (T_j-T_i) * (h-r) * boost
                             float lap_var = h - rlen;
-                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
                             sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var * heat_boost;
 
-                            // Exposure
                             float w_poly6_var = diff * diff * diff;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
 
-                            // Dye diffusion: dC/dt += D * (m_j/rho_j) * lap_coeff * (h-r) * (C_j-C_i)
-                            // Skip STATIC neighbors to avoid color bleeding from stone
-                            if (behavior_j != STATIC) {
+                            if (dye_on && behavior_j != STATIC) {
                                 float vol_j = m_j / fmaxf(rho_j, 1.0f);
                                 float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
                                 float4 dye_j = __ldg(&particle_dye_in[j]);
@@ -299,8 +310,8 @@ void K_PBF_ComputeLambda(
                             }
                         }
 
-                        // Vorticity + surface normal (FLUID only, share rho_j load)
-                        if (do_vort || do_normal) {
+                        // Vorticity + surface normal (FLUID only, skip MAT_RIGID)
+                        if ((do_vort || do_normal) && mat_id_j != MAT_RIGID) {
                             float rho_j_v = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
                             float vol_jv = m_j / fmaxf(rho_j_v, 1.0f);
                             if (do_vort) {
@@ -336,7 +347,7 @@ void K_PBF_ComputeLambda(
         dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, 1.0f);
         exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
         exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
-        dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
+        if (dye_on) dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
     }
 
     // Vorticity output
@@ -591,7 +602,13 @@ void K_PBF_Finalize(
     float4*         __restrict__ angular_velocity_out,
     const float4*   __restrict__ vorticity_in,     // (omega_x,y,z, |omega|) from ComputeLambda, or NULL
     const float4*   __restrict__ normal_in,         // (n_x,n_y,n_z, neighbor_count) from ComputeLambda, or NULL
-    const float4*   __restrict__ pressure_normal_in // density gradient normal for GRANULAR friction, or NULL
+    const float4*   __restrict__ pressure_normal_in, // density gradient normal for GRANULAR friction, or NULL
+    const float*    __restrict__ sorted_lambda_pbf,  // converged lambda for warm-start writeback
+    float*          __restrict__ lambda_pbf_out,     // unsorted lambda output (warm-start next frame)
+    const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,     // force accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques,    // torque accumulator (NULL if no bodies)
+    uint*           __restrict__ max_displacement_out // [1] atomicMax of displacement^2 (float-as-uint), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -617,6 +634,7 @@ void K_PBF_Finalize(
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sleep_counter_in[i];
         temperature_out[orig_idx] = temp;
+        if (lambda_pbf_out) lambda_pbf_out[orig_idx] = 0.0f;
         particle_dye_out[orig_idx] = sorted_particle_dye[i];
         angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
         return;
@@ -651,6 +669,7 @@ void K_PBF_Finalize(
             packed_info_out[orig_idx] = pi;
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
+            if (lambda_pbf_out) lambda_pbf_out[orig_idx] = sorted_lambda_pbf[i];
             particle_dye_out[orig_idx] = sorted_particle_dye[i];
             angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
             return;
@@ -733,12 +752,28 @@ void K_PBF_Finalize(
         }
     }
 
-    // XSPH viscosity: v += c * SUM_j (m_j/rho_j)(v_j - v_i) W(r)
-    if (behavior == FLUID || behavior == GRANULAR) {
+    // XSPH viscosity + vorticity eta (folded -- PERF-002)
+    // Vorticity eta setup
+    bool do_vort_eta = (behavior == FLUID && vorticity_in != 0 && c_granular.vorticity_epsilon > 0.0f);
+    float4 vort_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float omega_mag_i = 0.0f;
+    float3 eta_vort = make_float3(0.0f, 0.0f, 0.0f);
+    if (do_vort_eta) {
+        vort_i = __ldg(&vorticity_in[i]);
+        omega_mag_i = vort_i.w;
+        do_vort_eta = (omega_mag_i > 1e-6f);
+    }
+
+    if (behavior == FLUID || behavior == GRANULAR || do_vort_eta) {
         float h = c_sim.smoothing_length;
         float h_sq = c_sim.smoothing_length_sq;
         float rho_i = density[i];
         float3 xsph = make_float3(0.0f, 0.0f, 0.0f);
+        bool do_xsph = (behavior == FLUID || behavior == GRANULAR);
+
+        // Akinci pressure mirroring for rigid body force accumulation
+        float p_i = compute_pressure(rho_i, behavior, mat_id);
+        float rho0_i = c_materials[mat_id].rest_density;
 
         int3 cell_i = get_cell(pred);
         for (int dz = -1; dz <= 1; dz++) {
@@ -753,10 +788,6 @@ void K_PBF_Finalize(
                     for (uint j = start; j < end_idx; j++) {
                         if (j == i) continue;
 
-                        uint pi_j = __ldg(&packed_info[j]);
-                        int bj = GET_BEHAVIOR(pi_j);
-                        if (bj == GAS) continue;  // no XSPH across phases
-
                         float4 pred4_j = __ldg(&predicted_pos[j]);
                         float3 r = make_float3(
                             pred.x - pred4_j.x,
@@ -764,7 +795,61 @@ void K_PBF_Finalize(
                             pred.z - pred4_j.z
                         );
                         float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
-                        if (r_sq > h_sq) continue;
+                        if (r_sq > h_sq || r_sq < 1e-12f) continue;
+
+                        // Vorticity eta (all neighbors -- PERF-002)
+                        if (do_vort_eta) {
+                            float rlv = sqrtf(r_sq);
+                            float h_rl = h - rlv;
+                            float inv_rl = 1.0f / rlv;
+                            float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
+                            float omega_j = __ldg(&vorticity_in[j]).w;
+                            float mj_v = __ldg(&mass[j]);
+                            float rj_v = __ldg(&density[j]);
+                            float wt = mj_v / fmaxf(rj_v, 1.0f);
+                            eta_vort.x += wt * omega_j * gs * r.x;
+                            eta_vort.y += wt * omega_j * gs * r.y;
+                            eta_vort.z += wt * omega_j * gs * r.z;
+                        }
+
+                        if (!do_xsph) continue;
+
+                        uint pi_j = __ldg(&packed_info[j]);
+                        int bj = GET_BEHAVIOR(pi_j);
+                        if (bj == GAS) continue;  // no XSPH across phases
+
+                        float m_j = __ldg(&mass[j]);
+
+                        // Akinci pressure force on rigid body (two-way coupling)
+                        if (bj == STATIC && d_rigid_bodies != 0) {
+                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                            if (mat_id_j == MAT_RIGID) {
+                                float rlen = sqrtf(r_sq);
+                                float3 gW = grad_spiky(r, rlen, h);
+                                float psi_b = m_j;
+                                float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
+                                float m_i_val = c_sim.particle_mass;
+                                float3 F_on_fluid = make_float3(
+                                    m_i_val * psi_b * press_akinci * gW.x,
+                                    m_i_val * psi_b * press_akinci * gW.y,
+                                    m_i_val * psi_b * press_akinci * gW.z
+                                );
+                                int body_id = GET_BODY_ID(pi_j);
+                                float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
+                                float3 r_b = make_float3(
+                                    pred4_j.x - rb_pos.x, pred4_j.y - rb_pos.y, pred4_j.z - rb_pos.z
+                                );
+                                float3 F_on_body = make_float3(-F_on_fluid.x, -F_on_fluid.y, -F_on_fluid.z);
+                                float3 tau = make_float3(
+                                    r_b.y * F_on_body.z - r_b.z * F_on_body.y,
+                                    r_b.z * F_on_body.x - r_b.x * F_on_body.z,
+                                    r_b.x * F_on_body.y - r_b.y * F_on_body.x
+                                );
+                                warp_reduce_accumulate(d_rigid_forces, F_on_body, body_id);
+                                warp_reduce_accumulate(d_rigid_torques, tau, body_id);
+                                continue;  // skip XSPH for boundary particles
+                            }
+                        }
 
                         float4 orig4_j = __ldg(&original_pos[j]);
                         float3 vel_j = make_float3(
@@ -772,7 +857,6 @@ void K_PBF_Finalize(
                             (pred4_j.y - orig4_j.y) * inv_dt,
                             (pred4_j.z - orig4_j.z) * inv_dt
                         );
-                        float m_j = __ldg(&mass[j]);
                         float rho_j = __ldg(&density[j]);
                         float w = W_poly6(r_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
@@ -785,67 +869,26 @@ void K_PBF_Finalize(
             }
         }
 
-        float c_xsph = c_pbf.xsph_c;
-        // Per-material viscosity scaling: OIL 5x, LAVA 10x, etc.
-        // H2 fix: clamp to prevent instability with high-viscosity materials
-        c_xsph = fminf(c_xsph * c_materials[mat_id].base_viscosity, 0.5f);
-        // GRANULAR: higher artificial viscosity
-        if (behavior == GRANULAR) c_xsph = fminf(c_xsph * 3.0f, 0.15f);
-        vel_new.x += c_xsph * xsph.x;
-        vel_new.y += c_xsph * xsph.y;
-        vel_new.z += c_xsph * xsph.z;
+        if (do_xsph) {
+            float c_xsph = c_pbf.xsph_c;
+            c_xsph = fminf(c_xsph * c_materials[mat_id].base_viscosity, 0.5f);
+            if (behavior == GRANULAR) c_xsph = fminf(c_xsph * 3.0f, 0.15f);
+            vel_new.x += c_xsph * xsph.x;
+            vel_new.y += c_xsph * xsph.y;
+            vel_new.z += c_xsph * xsph.z;
+        }
     }
 
-    // Vorticity confinement (FLUID only): vel += dt * epsilon * (N x omega)
-    if (behavior == FLUID && vorticity_in != 0 && c_granular.vorticity_epsilon > 0.0f) {
-        float4 vort_i = __ldg(&vorticity_in[i]);
-        float omega_mag_i = vort_i.w;
-
-        if (omega_mag_i > 1e-6f) {
-            float h = c_sim.smoothing_length;
-            float h_sq = c_sim.smoothing_length_sq;
-            int3 cell_iv = get_cell(pred);
-
-            // Compute eta = grad(|omega|) via neighbor loop
-            float3 eta = make_float3(0.0f, 0.0f, 0.0f);
-            for (int dz2 = -1; dz2 <= 1; dz2++) {
-                for (int dy2 = -1; dy2 <= 1; dy2++) {
-                    for (int dx2 = -1; dx2 <= 1; dx2++) {
-                        uint hash_v = spatialHash(cell_iv.x + dx2, cell_iv.y + dy2, cell_iv.z + dz2);
-                        uint start_v = cell_start[hash_v];
-                        if (start_v == 0xFFFFFFFFu) continue;
-                        uint end_v = cell_end[hash_v];
-                        for (uint jv = start_v; jv < end_v; jv++) {
-                            if (jv == i) continue;
-                            float4 pj_v = __ldg(&predicted_pos[jv]);
-                            float3 rv = make_float3(pred.x - pj_v.x, pred.y - pj_v.y, pred.z - pj_v.z);
-                            float r2v = rv.x*rv.x + rv.y*rv.y + rv.z*rv.z;
-                            if (r2v > h_sq || r2v < 1e-12f) continue;
-                            float rlv = sqrtf(r2v);
-                            float h_rl = h - rlv;
-                            float inv_rl = 1.0f / rlv;
-                            float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
-                            float omega_j = __ldg(&vorticity_in[jv]).w;
-                            float mj_v = __ldg(&mass[jv]);
-                            float rj_v = __ldg(&density[jv]);
-                            float wt = mj_v / fmaxf(rj_v, 1.0f);
-                            eta.x += wt * omega_j * gs * rv.x;
-                            eta.y += wt * omega_j * gs * rv.y;
-                            eta.z += wt * omega_j * gs * rv.z;
-                        }
-                    }
-                }
-            }
-            // N = eta / |eta|, vel += dt * epsilon * (N x omega)
-            float eta_mag = sqrtf(eta.x*eta.x + eta.y*eta.y + eta.z*eta.z);
-            if (eta_mag > 1e-6f) {
-                float inv_eta = 1.0f / eta_mag;
-                float3 N = make_float3(eta.x*inv_eta, eta.y*inv_eta, eta.z*inv_eta);
-                float eps_v = c_granular.vorticity_epsilon;
-                vel_new.x += dt * eps_v * (N.y * vort_i.z - N.z * vort_i.y);
-                vel_new.y += dt * eps_v * (N.z * vort_i.x - N.x * vort_i.z);
-                vel_new.z += dt * eps_v * (N.x * vort_i.y - N.y * vort_i.x);
-            }
+    // Vorticity confinement force application (FLUID only, eta from main loop -- PERF-002)
+    if (do_vort_eta) {
+        float eta_mag = sqrtf(eta_vort.x*eta_vort.x + eta_vort.y*eta_vort.y + eta_vort.z*eta_vort.z);
+        if (eta_mag > 1e-6f) {
+            float inv_eta = 1.0f / eta_mag;
+            float3 N = make_float3(eta_vort.x*inv_eta, eta_vort.y*inv_eta, eta_vort.z*inv_eta);
+            float eps_v = c_granular.vorticity_epsilon;
+            vel_new.x += dt * eps_v * (N.y * vort_i.z - N.z * vort_i.y);
+            vel_new.y += dt * eps_v * (N.z * vort_i.x - N.x * vort_i.z);
+            vel_new.z += dt * eps_v * (N.x * vort_i.y - N.y * vort_i.x);
         }
     }
 
@@ -892,6 +935,50 @@ void K_PBF_Finalize(
     float friction = (behavior == FLUID) ? 0.0f : c_sim.wall_friction;
     sdf_box_boundary(final_pos, vel_new, c_sim.world_min, c_sim.world_max,
                      c_sim.restitution, friction);
+
+    // SDF object collision with velocity reflection
+    for (int s = 0; s < c_num_sdf_objects; s++) {
+        SDFObject obj = c_sdf_objects[s];
+        float sdf_dist = eval_sdf(final_pos, obj);
+        if (sdf_dist < BOUNDARY_MARGIN) {
+            float3 n = sdf_normal(final_pos, obj);
+            float push = BOUNDARY_MARGIN - sdf_dist;
+            final_pos.x += push * n.x;
+            final_pos.y += push * n.y;
+            final_pos.z += push * n.z;
+
+            // Object velocity at contact point
+            float3 obj_vel = make_float3(obj.velocity.x, obj.velocity.y, obj.velocity.z);
+            float ang_speed = obj.velocity.w;
+            if (fabsf(ang_speed) > 1e-8f) {
+                float3 axis = make_float3(obj.angular_axis.x, obj.angular_axis.y, obj.angular_axis.z);
+                float3 center = make_float3(obj.pos_and_type.x, obj.pos_and_type.y, obj.pos_and_type.z);
+                float3 r = make_float3(final_pos.x - center.x, final_pos.y - center.y, final_pos.z - center.z);
+                float3 omega = make_float3(axis.x * ang_speed, axis.y * ang_speed, axis.z * ang_speed);
+                obj_vel.x += omega.y * r.z - omega.z * r.y;
+                obj_vel.y += omega.z * r.x - omega.x * r.z;
+                obj_vel.z += omega.x * r.y - omega.y * r.x;
+            }
+
+            float3 v_rel = make_float3(vel_new.x - obj_vel.x, vel_new.y - obj_vel.y, vel_new.z - obj_vel.z);
+            float v_dot_n = v_rel.x * n.x + v_rel.y * n.y + v_rel.z * n.z;
+            if (v_dot_n < 0.0f) {
+                float obj_restitution = obj.size_and_r.w;
+                float obj_friction = obj.angular_axis.w;
+                vel_new.x -= (1.0f + obj_restitution) * v_dot_n * n.x;
+                vel_new.y -= (1.0f + obj_restitution) * v_dot_n * n.y;
+                vel_new.z -= (1.0f + obj_restitution) * v_dot_n * n.z;
+                float3 v_tan = make_float3(v_rel.x - v_dot_n*n.x, v_rel.y - v_dot_n*n.y, v_rel.z - v_dot_n*n.z);
+                float v_tan_len = sqrtf(v_tan.x*v_tan.x + v_tan.y*v_tan.y + v_tan.z*v_tan.z);
+                if (v_tan_len > 1e-8f) {
+                    float red = fminf(obj_friction * fabsf(v_dot_n) / v_tan_len, 1.0f);
+                    vel_new.x -= red * v_tan.x;
+                    vel_new.y -= red * v_tan.y;
+                    vel_new.z -= red * v_tan.z;
+                }
+            }
+        }
+    }
 
     // Velocity clamp
     float vel_sq = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
@@ -962,6 +1049,16 @@ void K_PBF_Finalize(
         dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt));
     }
 
+    // Track max displacement for grid reuse (Phase 9.2 / PERF-009)
+    // displacement^2 = |final_pos - orig_pos|^2
+    if (max_displacement_out) {
+        float dx_d = final_pos.x - orig.x;
+        float dy_d = final_pos.y - orig.y;
+        float dz_d = final_pos.z - orig.z;
+        float disp_sq = dx_d * dx_d + dy_d * dy_d + dz_d * dz_d;
+        atomicMax(max_displacement_out, __float_as_uint(disp_sq));
+    }
+
     // Writeback (unsorted)
     position_out[orig_idx] = make_float4(final_pos.x, final_pos.y, final_pos.z, 1.0f);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);
@@ -969,6 +1066,7 @@ void K_PBF_Finalize(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
+    if (lambda_pbf_out) lambda_pbf_out[orig_idx] = sorted_lambda_pbf[i];
     particle_dye_out[orig_idx] = dye;
     // Micropolar angular velocity: relax toward 0.5 * curl_v (FLUID only)
     float4 ang_vel = sorted_angular_velocity[i];

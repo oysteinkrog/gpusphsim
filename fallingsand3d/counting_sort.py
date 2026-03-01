@@ -134,6 +134,8 @@ def counting_sort_full(
     kappa: cupy.ndarray,
     particle_dye: cupy.ndarray,
     angular_velocity: cupy.ndarray,
+    kappa_v: cupy.ndarray,
+    lambda_pbf: cupy.ndarray,
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
@@ -146,8 +148,13 @@ def counting_sort_full(
     sorted_kappa: cupy.ndarray,
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
+    sorted_kappa_v: cupy.ndarray,
+    sorted_lambda_pbf: cupy.ndarray,
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
+    # FP16 temperature + dye outputs (PERF-011)
+    sorted_temperature_h: "Optional[cupy.ndarray]" = None,
+    sorted_dye_h: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Run the full counting sort pipeline (hash + histogram + prefix_sum + scatter + cell_end).
 
@@ -198,6 +205,8 @@ def counting_sort_full(
     # Zero cell_end
     cell_end.data.memset_async(0x00, cell_end.nbytes)
 
+    _null = cupy.ndarray(0, dtype=cupy.uint32)
+
     k_scatter = module.get_function("K_ScatterReorder")
     k_scatter(grid_p, block_p, (
         np.uint32(num_particles),
@@ -218,6 +227,8 @@ def counting_sort_full(
         kappa,
         particle_dye,
         angular_velocity,
+        kappa_v,
+        lambda_pbf,
         # Sorted outputs
         sorted_hashes,
         sorted_position,
@@ -231,8 +242,13 @@ def counting_sort_full(
         sorted_kappa,
         sorted_particle_dye,
         sorted_angular_velocity,
+        sorted_kappa_v,
+        sorted_lambda_pbf,
         # FP16 velocity output (OPT-4.3)
-        sorted_velocity_h if sorted_velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32),
+        sorted_velocity_h if sorted_velocity_h is not None else _null,
+        # FP16 temperature + dye (PERF-011)
+        sorted_temperature_h if sorted_temperature_h is not None else _null,
+        sorted_dye_h if sorted_dye_h is not None else _null,
     ))
 
     # --- Phase 5: Build cell_end ---
@@ -260,6 +276,8 @@ def gather_reorder(
     kappa: cupy.ndarray,
     particle_dye: cupy.ndarray,
     angular_velocity: cupy.ndarray,
+    kappa_v: cupy.ndarray,
+    lambda_pbf: cupy.ndarray,
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
@@ -272,8 +290,13 @@ def gather_reorder(
     sorted_kappa: cupy.ndarray,
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
+    sorted_kappa_v: cupy.ndarray,
+    sorted_lambda_pbf: cupy.ndarray,
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
+    # FP16 temperature + dye outputs (PERF-011)
+    sorted_temperature_h: "Optional[cupy.ndarray]" = None,
+    sorted_dye_h: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Re-scatter unsorted data to sorted order using existing sort_perm.
 
@@ -288,6 +311,8 @@ def gather_reorder(
 
     grid = ((num_particles + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
+
+    _null = cupy.ndarray(0, dtype=cupy.uint32)
 
     k_gather = module.get_function("K_GatherReorder")
     k_gather(grid, block, (
@@ -305,6 +330,8 @@ def gather_reorder(
         kappa,
         particle_dye,
         angular_velocity,
+        kappa_v,
+        lambda_pbf,
         # Sorted outputs
         sorted_position,
         sorted_velocity,
@@ -317,6 +344,11 @@ def gather_reorder(
         sorted_kappa,
         sorted_particle_dye,
         sorted_angular_velocity,
+        sorted_kappa_v,
+        sorted_lambda_pbf,
         # FP16 velocity output (OPT-4.3)
-        sorted_velocity_h if sorted_velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32),
+        sorted_velocity_h if sorted_velocity_h is not None else _null,
+        # FP16 temperature + dye (PERF-011)
+        sorted_temperature_h if sorted_temperature_h is not None else _null,
+        sorted_dye_h if sorted_dye_h is not None else _null,
     ))

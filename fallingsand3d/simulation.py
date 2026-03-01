@@ -131,9 +131,12 @@ class Simulation:
         self._sort_skip_next = False
         # Threshold: (0.25 * h)^2 -- max displacement since last sort
         self._sort_skip_threshold_sq = (0.25 * 0.04) ** 2  # 0.0001
+        # PBF/DFSPH: tighter threshold (0.15*h) and lower max skip count
+        self._sort_skip_threshold_sq_tight = (0.15 * 0.04) ** 2  # 0.000036
         self._sort_skipped_count = 0  # stats for UI
         self._sort_skip_consecutive = 0  # consecutive frames with sort skipped
-        self._MAX_SORT_SKIP_FRAMES = 4  # force sort after this many frames
+        self._MAX_SORT_SKIP_FRAMES = 4  # force sort after this many frames (WCSPH)
+        self._MAX_SORT_SKIP_FRAMES_TIGHT = 2  # force sort after this many frames (PBF/DFSPH)
 
         # Grid cell tables — allocated in _upload_constants based on world size
         self._cell_start = None
@@ -160,6 +163,15 @@ class Simulation:
         # Spawn velocity damping: smooth PBF/DFSPH initial transient
         self._spawn_substep = 0
         self._damping_duration = 30  # substeps
+
+        # SDF object manager (Phase A rigid body collision)
+        from rigid_bodies import SDFManager, RigidBodyManager
+        self.sdf_manager = SDFManager()
+        world.sdf_manager = self.sdf_manager
+
+        # Rigid body manager (Akinci two-way coupling)
+        self.rigid_body_manager = RigidBodyManager()
+        world.rigid_body_manager = self.rigid_body_manager
 
         # Compile all kernel modules and upload constant memory
         self._upload_constants()
@@ -449,6 +461,8 @@ class Simulation:
         self._sort_skip_consecutive = 0
         # Reset spawn damping for new solver
         self._spawn_substep = 0
+        # Reset rigid boundary injection flag
+        self._rigid_boundary_initialized = False
 
     def _upload_solver_constants(self, solver_module) -> None:
         """Upload all shared constants (grid, sim, precalc, materials, interactions) to a solver module."""
@@ -465,6 +479,45 @@ class Simulation:
         solver_module.upload_precalc_params(precalc_params)
         solver_module.upload_materials(materials_data)
         solver_module.upload_interactions(interactions_data)
+
+        # Re-upload SDF objects to new solver module's constant memory
+        if hasattr(self, 'sdf_manager'):
+            self.sdf_manager.force_upload()
+
+    def _update_rigid_boundary(self, n_fluid: int) -> int:
+        """Update rigid body boundary particles in unsorted arrays.
+
+        On first call (before any integration), uses inject_boundary_particles
+        to set up initial positions. On subsequent calls, uses
+        K_UpdateBoundaryParticles GPU kernel for fast position/velocity update.
+
+        Returns n_total = n_fluid + n_boundary.
+        """
+        rbm = self.rigid_body_manager
+        w = self.world
+        n_boundary = rbm.num_boundary_particles
+        n_total = n_fluid + n_boundary
+
+        if n_total > w.max_particles:
+            return n_fluid  # not enough room
+
+        if not hasattr(self, '_rigid_boundary_initialized'):
+            # First substep: inject via Python (sets up packed_info, color, etc.)
+            rbm.inject_boundary_particles(w)
+            self._rigid_boundary_initialized = True
+        else:
+            # Subsequent substeps: GPU kernel updates positions + velocities
+            integrate.update_boundary_particles(
+                rbm.boundary_data,
+                rbm.d_rigid_bodies,
+                w.position,
+                w.velocity,
+                w.mass,
+                offset=n_fluid,
+                num_boundary=n_boundary,
+            )
+
+        return n_total
 
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
@@ -493,6 +546,8 @@ class Simulation:
                 kappa=w.kappa,
                 particle_dye=w.particle_dye,
                 angular_velocity=w.angular_velocity,
+                kappa_v=w.kappa_v,
+                lambda_pbf=w.lambda_pbf,
                 sorted_position=w.sorted_position,
                 sorted_velocity=w.sorted_velocity,
                 sorted_mass=w.sorted_mass,
@@ -504,7 +559,11 @@ class Simulation:
                 sorted_kappa=w.sorted_kappa,
                 sorted_particle_dye=w.sorted_particle_dye,
                 sorted_angular_velocity=w.sorted_angular_velocity,
+                sorted_kappa_v=w.sorted_kappa_v,
+                sorted_lambda_pbf=w.sorted_lambda_pbf,
                 sorted_velocity_h=w.sorted_velocity_h,
+                sorted_temperature_h=w.sorted_temperature_h,
+                sorted_dye_h=w.sorted_dye_h,
             )
             return
 
@@ -536,6 +595,8 @@ class Simulation:
             kappa=w.kappa,
             particle_dye=w.particle_dye,
             angular_velocity=w.angular_velocity,
+            kappa_v=w.kappa_v,
+            lambda_pbf=w.lambda_pbf,
             # Sorted particle arrays
             sorted_position=w.sorted_position,
             sorted_velocity=w.sorted_velocity,
@@ -548,7 +609,11 @@ class Simulation:
             sorted_kappa=w.sorted_kappa,
             sorted_particle_dye=w.sorted_particle_dye,
             sorted_angular_velocity=w.sorted_angular_velocity,
+            sorted_kappa_v=w.sorted_kappa_v,
+            sorted_lambda_pbf=w.sorted_lambda_pbf,
             sorted_velocity_h=w.sorted_velocity_h,
+            sorted_temperature_h=w.sorted_temperature_h,
+            sorted_dye_h=w.sorted_dye_h,
         )
 
     def _run_reactions_spawn(self, n: int) -> None:
@@ -630,16 +695,20 @@ class Simulation:
             particle_dye_in=w.sorted_particle_dye[:n],
             dye_rate_out=w.sorted_dye_rate,
             velocity_h=w.sorted_velocity_h,
+            pressure_out=w.sorted_pressure,
+            temperature_h=w.sorted_temperature_h,
+            dye_h=w.sorted_dye_h,
         )
 
-        # Pack density into position.w for Step2 (OPT-4.1)
-        step1.pack_density(w.sorted_position, w.sorted_density, n)
+        # Pack density into position.w now done inside K_Step1 (PERF-004)
+        # Pressure pre-computed inside K_Step1 (PERF-007)
 
         # Reactions + Spawn
         self._run_reactions_spawn(n)
 
         # Step2: pressure + viscosity + XSPH + vorticity confinement + surface tension
         # (density read from position.w, packed by K_PackDensity above)
+        rbm = self.rigid_body_manager
         step2.compute_step2(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -653,6 +722,10 @@ class Simulation:
             sph_force_out=w.sorted_sph_force,
             veleval_out=w.sorted_veleval,
             velocity_h=w.sorted_velocity_h,
+            pressure_in=w.sorted_pressure,
+            d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
+            d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
+            d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
         )
 
         # Implicit surface tension (WCSPH only, quality mode for < 100K particles)
@@ -776,6 +849,7 @@ class Simulation:
             )
 
         # 5. Finalize: velocity update, XSPH, friction, color, sleep, writeback
+        rbm = self.rigid_body_manager
         pbf_solver.pbf_finalize(
             w.sorted_predicted_position[:n], w.sorted_position[:n],
             w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
@@ -792,6 +866,12 @@ class Simulation:
             vorticity_in=w.sorted_vorticity[:n],
             normal_in=w.sorted_normal[:n],
             pressure_normal_in=w.sorted_pressure_normal[:n],
+            sorted_lambda_pbf=w.sorted_lambda_pbf[:n],
+            lambda_pbf_out=w.lambda_pbf,
+            d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
+            d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
+            d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            max_displacement=w.max_displacement,
         )
 
     def _run_dfsph_body(self, n: int) -> None:
@@ -822,6 +902,7 @@ class Simulation:
         self._run_reactions_spawn(n)
 
         # 3. Non-pressure forces (viscosity, gravity, mu(I), vorticity confinement, surface tension)
+        rbm = self.rigid_body_manager
         dfsph_solver.compute_non_pressure_forces(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_density[:n], w.sorted_mass[:n],
@@ -831,9 +912,21 @@ class Simulation:
             w.sorted_velocity,  # velocity updated in-place
             vorticity_in=w.sorted_vorticity[:n],
             normal_in=w.sorted_normal[:n],
+            d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
+            d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
+            d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
         )
 
-        # 4. Divergence solver (fixed iterations)
+        # 4. Divergence solver (warm-started kappa_v -- PERF-008)
+        # Apply warm-started kappa_v from previous substep (scaled during sort reorder writeback)
+        if self._profile.dfsph_div_warm_start > 0.0:
+            w.sorted_kappa_v[:n] *= self._profile.dfsph_div_warm_start
+            dfsph_solver.correct_velocity_div(
+                w.sorted_velocity, w.sorted_density[:n],
+                w.sorted_mass[:n], w.sorted_kappa_v[:n],
+                w.sorted_packed_info[:n], w.sorted_position[:n],
+                self._cell_start, self._cell_end,
+            )
         for _ in range(self._profile.dfsph_div_iters):
             dfsph_solver.compute_kappa_v(
                 w.sorted_velocity[:n], w.sorted_density[:n],
@@ -848,6 +941,8 @@ class Simulation:
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
             )
+
+        # kappa_v writeback now done in K_DFSPH_Finalize (PERF-008)
 
         # 5. Density solver (SPlisHSPlasH-style Jacobi iteration on pressure)
         # Key insight: iterate on PRESSURE variable p/rho^2, not velocity.
@@ -910,6 +1005,12 @@ class Simulation:
             sorted_angular_velocity=w.sorted_angular_velocity[:n],
             angular_velocity_out=w.angular_velocity,
             vorticity_in=w.sorted_vorticity[:n],
+            sorted_kappa_v=w.sorted_kappa_v[:n],
+            kappa_v_out=w.kappa_v,
+            d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
+            d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
+            d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            max_displacement=w.max_displacement,
         )
 
     def _capture_graph(self, n: int) -> None:
@@ -967,6 +1068,26 @@ class Simulation:
                 self._sim_params[0]["velocity_damping"] = np.float32(damping)
                 self._upload_sim_params_all()
 
+        # --- Rigid body: update boundary particles in unsorted arrays ---
+        rbm = self.rigid_body_manager
+        if rbm.num_bodies > 0 and rbm.num_boundary_particles > 0:
+            n = self._update_rigid_boundary(n)
+            if self._graph_n != n:
+                self._cuda_graph = None
+
+        # Zero rigid body force/torque accumulators before solver
+        if rbm.num_bodies > 0:
+            rbm.rigid_forces.fill(0)
+            rbm.rigid_torques.fill(0)
+            # Disable CUDA graph when rigid bodies are active
+            self._cuda_graph = None
+            self._graph_n = 0
+
+        # --- Update kinematic SDF objects ---
+        if self.sdf_manager._motions:
+            self.sdf_manager.update_kinematics(self.sim_time, self.dt)
+            self.sdf_manager.upload_if_dirty()
+
         # When sort is being skipped, bypass CUDA graph (different kernel sequence)
         if self._sort_skip_next:
             self._cuda_graph = None
@@ -985,6 +1106,20 @@ class Simulation:
         else:
             # n stable, graph exists — fast replay
             self._cuda_graph.launch()
+
+        # Rigid body integration (outside graph -- forces vary per substep)
+        rbm = self.rigid_body_manager
+        if rbm.num_bodies > 0:
+            integrate.integrate_rigid_bodies(
+                rbm.d_rigid_bodies,
+                rbm.rigid_forces,
+                rbm.rigid_torques,
+                rbm.num_bodies,
+                self.dt,
+                gravity=tuple(float(x) for x in self._sim_params[0]["gravity"]),
+            )
+            # US-020: Rigid body collision push-apart (body-vs-SDF and body-vs-body)
+            integrate.rigid_body_collisions(rbm.d_rigid_bodies, rbm.num_bodies)
 
         # Foam generation + physics (outside graph -- uses atomicAdd with variable count)
         self._run_foam_step(n)
@@ -1062,6 +1197,11 @@ class Simulation:
         self._frame_counter_d.fill(self._substep_counter)
         w._density_initialized = True
 
+        # Update rigid body boundary particles
+        rbm = self.rigid_body_manager
+        if rbm.num_bodies > 0 and rbm.num_boundary_particles > 0:
+            n = self._update_rigid_boundary(n)
+
         # 1-4. Grid setup (counting sort or gather-only if skipping)
         # max_displacement reset happens inside _run_grid_setup on full sort
         self._run_grid_setup(n)
@@ -1084,6 +1224,9 @@ class Simulation:
             particle_dye_in=w.sorted_particle_dye[:n],
             dye_rate_out=w.sorted_dye_rate,
             velocity_h=w.sorted_velocity_h,
+            pressure_out=w.sorted_pressure,
+            temperature_h=w.sorted_temperature_h,
+            dye_h=w.sorted_dye_h,
         )
         mark("step1")
 
@@ -1111,8 +1254,8 @@ class Simulation:
         )
         mark("spawn")
 
-        # 8. Pack density + Step2
-        step1.pack_density(w.sorted_position, w.sorted_density, n)
+        # 8. Step2 (density packed into position.w by K_Step1 -- PERF-004, pressure from Step1 -- PERF-007)
+        rbm = self.rigid_body_manager
         step2.compute_step2(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_mass[:n],
@@ -1124,6 +1267,10 @@ class Simulation:
             sph_force_out=w.sorted_sph_force,
             veleval_out=w.sorted_veleval,
             velocity_h=w.sorted_velocity_h,
+            pressure_in=w.sorted_pressure,
+            d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
+            d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
+            d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
         )
         mark("step2")
 
@@ -1158,6 +1305,18 @@ class Simulation:
             w.sleep_counter[:n], self._cell_wake_flags, num_particles=n,
         )
         mark("wake")
+
+        # 10b. Rigid body integration + collision
+        if rbm.num_bodies > 0:
+            integrate.integrate_rigid_bodies(
+                rbm.d_rigid_bodies,
+                rbm.rigid_forces,
+                rbm.rigid_torques,
+                rbm.num_bodies,
+                self.dt,
+                gravity=tuple(float(x) for x in self._sim_params[0]["gravity"]),
+            )
+            integrate.rigid_body_collisions(rbm.d_rigid_bodies, rbm.num_bodies)
 
         # 11. Foam (secondary particles)
         self._run_foam_step(n)
@@ -1230,25 +1389,31 @@ class Simulation:
         # max_displacement accumulates since the last full sort (atomicMax across all
         # substeps). Read once at the frame boundary (same sync as foam_count).
         # Skip sort if: displacement below threshold AND consecutive skip limit not hit.
-        if sim_steps > 0 and self._profile.solver_type == SolverType.WCSPH:
+        # WCSPH: threshold = (0.25*h)^2, max 4 consecutive skips
+        # PBF/DFSPH: threshold = (0.15*h)^2, max 2 consecutive skips (tighter
+        #   because stale neighbors degrade constraint convergence)
+        if sim_steps > 0:
             import struct
             max_disp_sq_uint = int(self.world.max_displacement[0])
             if max_disp_sq_uint > 0:
                 max_disp_sq = struct.unpack('f', struct.pack('I', max_disp_sq_uint))[0]
             else:
                 max_disp_sq = 0.0
-            can_skip = (max_disp_sq < self._sort_skip_threshold_sq
-                        and self._sort_skip_consecutive < self._MAX_SORT_SKIP_FRAMES)
+            if self._profile.solver_type == SolverType.WCSPH:
+                threshold = self._sort_skip_threshold_sq
+                max_consec = self._MAX_SORT_SKIP_FRAMES
+            else:
+                threshold = self._sort_skip_threshold_sq_tight
+                max_consec = self._MAX_SORT_SKIP_FRAMES_TIGHT
+            can_skip = (max_disp_sq < threshold
+                        and self._sort_skip_consecutive < max_consec)
             if can_skip:
                 self._sort_skip_next = True
                 self._sort_skip_consecutive += 1
             else:
                 self._sort_skip_next = False
                 self._sort_skip_consecutive = 0
-        elif self._profile.solver_type != SolverType.WCSPH:
-            self._sort_skip_next = False
-            self._sort_skip_consecutive = 0
-        # else: sim_steps==0 for WCSPH — keep previous _sort_skip_next
+        # else: sim_steps==0 — keep previous _sort_skip_next
 
         # Periodic compaction: remove dead particles from the active range
         if sim_steps > 0:

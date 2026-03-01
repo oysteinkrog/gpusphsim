@@ -276,3 +276,141 @@ def integrate(
     return (position_out, velocity_out, color_out, packed_info_out,
             sleep_counter_out, temperature_out, particle_dye_out,
             angular_velocity_out)
+
+
+# ---------------------------------------------------------------------------
+# Rigid body integration (US-017)
+# ---------------------------------------------------------------------------
+
+def integrate_rigid_bodies(
+    d_rigid_bodies: cupy.ndarray,
+    d_rigid_forces: cupy.ndarray,
+    d_rigid_torques: cupy.ndarray,
+    num_bodies: int,
+    dt: float,
+    gravity: tuple = (0.0, -9.81, 0.0),
+) -> None:
+    """Launch K_IntegrateRigidBodies: one thread per body.
+
+    Integrates linear/angular velocity from accumulated forces/torques,
+    updates quaternion, zeroes accumulators. All in global memory.
+    No GPU-CPU sync needed.
+
+    Parameters
+    ----------
+    d_rigid_bodies : cupy.ndarray
+        GPU array of RigidBody structs (global memory, read-write).
+    d_rigid_forces : cupy.ndarray, (MAX_RIGID_BODIES, 4) float32
+        Accumulated forces from fluid coupling.
+    d_rigid_torques : cupy.ndarray, (MAX_RIGID_BODIES, 4) float32
+        Accumulated torques from fluid coupling.
+    num_bodies : int
+        Number of active rigid bodies.
+    dt : float
+        Simulation timestep.
+    gravity : tuple
+        Gravity vector (x, y, z).
+    """
+    if num_bodies <= 0:
+        return
+
+    module = _get_module()
+    kernel = module.get_function("K_IntegrateRigidBodies")
+
+    grav = np.array([gravity[0], gravity[1], gravity[2]], dtype=np.float32)
+
+    # Single block, one thread per body (max 8 bodies)
+    kernel(
+        (1,), (num_bodies,),
+        (
+            d_rigid_bodies,
+            d_rigid_forces,
+            d_rigid_torques,
+            np.int32(num_bodies),
+            np.float32(dt),
+            grav[0], grav[1], grav[2],
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rigid body collisions (US-020)
+# ---------------------------------------------------------------------------
+
+def rigid_body_collisions(
+    d_rigid_bodies: cupy.ndarray,
+    num_bodies: int,
+) -> None:
+    """Launch K_RigidBodyCollisions: push-apart for body-SDF and body-body.
+
+    Runs after K_IntegrateRigidBodies, before K_UpdateBoundaryParticles.
+    One thread per body, checks bounding sphere vs SDF objects and other bodies.
+    """
+    if num_bodies <= 0:
+        return
+
+    module = _get_module()
+    kernel = module.get_function("K_RigidBodyCollisions")
+
+    kernel(
+        (1,), (num_bodies,),
+        (d_rigid_bodies, np.int32(num_bodies)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Boundary particle state sync (US-018)
+# ---------------------------------------------------------------------------
+
+def update_boundary_particles(
+    boundary_data: cupy.ndarray,
+    d_rigid_bodies: cupy.ndarray,
+    position_out: cupy.ndarray,
+    velocity_out: cupy.ndarray,
+    mass_out: cupy.ndarray,
+    offset: int,
+    num_boundary: int,
+) -> None:
+    """Launch K_UpdateBoundaryParticles: transform local -> world positions.
+
+    Runs after K_IntegrateRigidBodies, before hash/sort for next substep.
+    Sets boundary particle positions and velocities from rigid body state.
+
+    Parameters
+    ----------
+    boundary_data : cupy.ndarray, (N, 8) float32
+        Combined boundary data: (x_local, y_local, z_local, psi, body_id, nx, ny, nz).
+    d_rigid_bodies : cupy.ndarray
+        GPU array of RigidBody structs.
+    position_out : cupy.ndarray, (M, 4) float32
+        Main unsorted position array (written at offset..offset+N).
+    velocity_out : cupy.ndarray, (M, 4) float32
+        Main unsorted velocity array.
+    mass_out : cupy.ndarray, (M,) float32
+        Main unsorted mass array.
+    offset : int
+        Start index in main arrays for boundary particles.
+    num_boundary : int
+        Number of boundary particles.
+    """
+    if num_boundary <= 0:
+        return
+
+    module = _get_module()
+    kernel = module.get_function("K_UpdateBoundaryParticles")
+
+    block = 256
+    grid = (num_boundary + block - 1) // block
+
+    kernel(
+        (grid,), (block,),
+        (
+            boundary_data,
+            d_rigid_bodies,
+            position_out,
+            velocity_out,
+            mass_out,
+            np.int32(offset),
+            np.int32(num_boundary),
+        ),
+    )

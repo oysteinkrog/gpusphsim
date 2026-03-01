@@ -37,10 +37,12 @@ class SolverProfile:
     pbf_friction_ratio: float = 0.50  # velocity-space tan(phi_f) for PBF granular DP yield
     pbf_friction_cohesion: float = 0.0  # position-space cohesion for PBF granular (meters)
     pbf_neg_c_scale: float = 0.05  # scale factor for negative constraint (surface cohesion)
+    pbf_warm_start: float = 0.5    # warm start factor for lambda (0.5 = carry 50% from prev frame)
     # DFSPH params
     dfsph_div_iters: int = 2       # divergence solver iterations
     dfsph_dens_iters: int = 8      # density solver iterations (Jacobi on pressure)
     dfsph_warm_start: float = 0.5  # warm start factor for kappa (0.5 optimal, >0.8 unstable)
+    dfsph_div_warm_start: float = 0.5  # warm start factor for kappa_v (divergence solver)
     dfsph_omega: float = 1.0       # relaxation for Jacobi density update
     dfsph_alpha_limit: float = 1.0  # max alpha = alpha_limit * dt^2 (higher = faster convergence)
     # Micropolar params

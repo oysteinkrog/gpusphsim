@@ -143,6 +143,7 @@ struct SimParams {
     float3 world_max;            // simulation domain max
     float  velocity_damping;     // spawn stabilization: 0.0=none, 0.8=heavy
     float  velocity_limit;       // CFL-derived max velocity (replaces VELOCITY_LIMIT define)
+    int    dye_enabled;          // 1 when any particle has dye, 0 to skip dye diffusion (PERF-005)
 };
 
 __constant__ SimParams c_sim;
@@ -175,7 +176,8 @@ __constant__ PrecalcParams c_precalc;
  *   Bit  [10]    is_sleeping    (1 = asleep, skip force computation)
  *   Bit  [11]    spawn_flag     (1 = just spawned, needs initialization)
  *   Bit  [12]    just_woke      (1 = woke this frame, needs velocity reset)
- *   Bits [31:13] reserved
+ *   Bits [20:13] body_id        (rigid body index, 0-255; only valid when MAT_RIGID)
+ *   Bits [31:21] reserved
  * ====================================================================== */
 
 #define GET_MATERIAL_ID(p)  ((p) & 0xFF)
@@ -190,6 +192,11 @@ __constant__ PrecalcParams c_precalc;
 #define SET_JUST_WOKE(p)    ((p) | 0x1000)
 #define CLEAR_JUST_WOKE(p)  ((p) & ~0x1000)
 #define MAKE_PACKED(mat, beh) (((mat) & 0xFF) | (((beh) & 0x3) << 8))
+#define GET_BODY_ID(p)        (((p) >> 13) & 0xFF)
+#define SET_BODY_ID(p, bid)   (((p) & ~(0xFF << 13)) | (((bid) & 0xFF) << 13))
+
+/* MAT_RIGID material ID -- Akinci boundary particles (must match materials.py) */
+#define MAT_RIGID 18
 
 /* ======================================================================
  * Array type conventions (documented per acceptance criteria)
@@ -210,6 +217,57 @@ __constant__ PrecalcParams c_precalc;
  * uint8 arrays:
  *   sleep_counter
  * ====================================================================== */
+
+/* ======================================================================
+ * RigidBody -- dynamic rigid body for Akinci two-way coupling.
+ *
+ * 6 float4s = 96 bytes per body, no padding.
+ * Stored in GLOBAL memory (not __constant__) because kernels write to it
+ * during rigid body integration. Reads via __ldg() for L1 cache.
+ *
+ * Max 8 rigid bodies.
+ * ====================================================================== */
+
+struct RigidBody {
+    float4 position;      // xyz=COM, w=inv_mass
+    float4 rotation;      // quaternion (x,y,z,w) — w is scalar part
+    float4 lin_vel;       // xyz=velocity, w=restitution
+    float4 ang_vel;       // xyz=angular velocity, w=friction
+    float4 half_extents;  // xyz=size, w=__int_as_float(sdf_type) (0=box, 1=sphere)
+    float4 inertia_inv;   // xyz=1/I_diagonal, w=__int_as_float(is_kinematic) (0 or 1)
+};
+
+#define MAX_RIGID_BODIES 8
+
+__constant__ int c_num_rigid_bodies;
+
+/* ======================================================================
+ * SDFObject -- analytical SDF primitive for collision detection.
+ *
+ * 5 float4s = 80 bytes per object, no padding.
+ * Type is encoded in pos_and_type.w via __int_as_float/__float_as_int
+ * to avoid int/float4 alignment issues.
+ *
+ * Type values: 0=box, 1=sphere, 2=cylinder, 3=plane
+ * ====================================================================== */
+
+struct SDFObject {
+    float4 pos_and_type;   // xyz=center, w=__int_as_float(type)
+    float4 size_and_r;     // xyz=half_extents/radius/height, w=restitution
+    float4 quat;           // orientation quaternion (x,y,z,w) — w is scalar part
+    float4 velocity;       // xyz=linear velocity, w=angular_speed (for kinematic)
+    float4 angular_axis;   // xyz=rotation axis (for kinematic), w=friction
+};
+
+#define SDF_BOX      0
+#define SDF_SPHERE   1
+#define SDF_CYLINDER 2
+#define SDF_PLANE    3
+
+#define MAX_SDF_OBJECTS 16
+
+__constant__ SDFObject c_sdf_objects[MAX_SDF_OBJECTS];
+__constant__ int c_num_sdf_objects;
 
 /* ======================================================================
  * FP16 helpers -- load/store half4 as float4 via __half2.
@@ -237,6 +295,17 @@ __device__ inline void store_half4(void* ptr, float4 v) {
     raw.x = *reinterpret_cast<const uint*>(&xy);
     raw.y = *reinterpret_cast<const uint*>(&zw);
     *reinterpret_cast<uint2*>(ptr) = raw;
+}
+
+/* --- FP16 scalar: load/store half as float (2 bytes) --- */
+
+__device__ inline float load_half1(const void* ptr) {
+    __half h = __ldg((const __half*)ptr);
+    return __half2float(h);
+}
+
+__device__ inline void store_half1(void* ptr, float v) {
+    *(__half*)ptr = __float2half(v);
 }
 
 #endif /* FALLINGSAND3D_COMMON_CUH */

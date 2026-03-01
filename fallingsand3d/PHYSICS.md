@@ -378,6 +378,12 @@ f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
 | boundary_dampening | N/A | 256 | Only in parent |
 | restitution | 0.3 | N/A | Only in fallingsand3d |
 | wall_friction | 0.5 | N/A | Only in fallingsand3d |
+| MAX_RIGID_BODIES | 8 | N/A | Dynamic Akinci bodies (global memory) |
+| MAX_SDF_OBJECTS | 16 | N/A | Analytical SDF collision primitives (constant memory) |
+| rigid lin_damp | 1 - 0.01*dt | N/A | Linear velocity damping |
+| rigid ang_damp | 1 - 0.05*dt | N/A | Angular velocity damping |
+| rigid omega_max | 20 rad/s | N/A | Angular velocity clamp |
+| rigid F_max | 1000*mass | N/A | Force magnitude clamp |
 
 ---
 
@@ -785,12 +791,20 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 
 **Design decisions (Phase 6, intentionally kept):**
 - I1: XSPH pre-integration lag (standard Euler, <0.008s lag)
-- I3: Grid reuse single-step tracking (4-frame safety cap)
+- I3: Grid reuse: WCSPH (0.25*h threshold, 4-frame cap), PBF/DFSPH (0.15*h threshold, 2-frame cap)
 - F1: force_scale=0.02 (co-adapted WCSPH convention)
 - F2: WCSPH viscosity convention (force_scale absorbs 1/rho for FLUID)
 - F3: Tait EOS for mu(I) (lithostatic needs expensive column height)
 - G4: Surface tension is "surface normal cohesion" (not full Akinci model)
 - J10: Sorted array transitions handled by per-particle branching (safe invariant)
+
+### 10.15 Rigid Body System Limitations
+
+- **Bounding sphere collisions only**: Body-body and body-SDF collision uses bounding sphere (max of half_extents), not true shape. Elongated bodies leave gaps at corners.
+- **No rigid-rigid stacking**: Single push-apart pass per substep; deep piles of bodies may interpenetrate.
+- **Max 8 dynamic bodies, 16 SDF objects**: Hardcoded limits in constant memory (`MAX_RIGID_BODIES`, `MAX_SDF_OBJECTS`).
+- **CUDA graph disabled**: Rigid body forces vary per substep, so the CUDA graph pipeline is disabled when any rigid body is present.
+- **No body-frame friction/rolling**: Only linear velocity is reflected in collision; angular velocity is not affected by rigid-rigid contacts.
 
 ---
 
@@ -918,6 +932,12 @@ v_new = (x* - x_old) / dt
 Standard PBF velocity derivation from the corrected position. No artificial
 damping is needed when the mass factor is correct — the constraint solver
 produces appropriately-scaled corrections that don't inject excess energy.
+
+**Lambda persistence:** Converged lambda values are written back to unsorted
+buffer in K_PBF_Finalize and carried through the sort-reorder pipeline for
+warm-starting. Scaled by `pbf_warm_start` (default 0.5). Since PBF lambda is
+computed analytically (not iteratively), warm-starting serves as infrastructure
+for future iterative PBF variants.
 
 ### 12.5 XSPH Viscosity (PBF)
 
@@ -1093,7 +1113,8 @@ Per substep:
   2. Compute density rho_i + precompute alpha_i factor
   3. Compute non-pressure forces: f_visc, f_gravity
   4. Predict velocity: v* = v + dt * a_nonpressure   (gravity + viscosity/rho_i)
-  5. Divergence-free solver (N_div iterations):
+  5. Divergence-free solver (warm-started kappa_v from prev frame, scaled by 0.5):
+     Apply warm-started kappa_v correction, then N_div iterations:
      kappa_v_i = -div(v*_i) * alpha_i / dt
      v*_i -= dt * SUM_j m_j * (kappa_v_i/rho_i + kappa_v_j/rho_j) * grad_W_ij
   6. Density solver (Jacobi iteration on pressure, N_dens iterations):
@@ -1105,7 +1126,7 @@ Per substep:
        Recompute a_press from updated p_rho2
      Apply final: v* += dt * a_press
   7. Final position: x_final = x + dt * v*_final
-  8. Boundary handling, color, writeback (kappa written back for warm-start)
+  8. Boundary handling, color, writeback (kappa + kappa_v written back for warm-start)
 ```
 
 ### 13.2 Alpha Factor (Diagonal Preconditioner)
@@ -1149,6 +1170,12 @@ produces negative kappa, which drives an inward velocity correction.
 
 Default: 2 iterations. Each iteration requires two neighbor passes (compute kappa_v,
 then correct velocity).
+
+**Warm-starting:** kappa_v values are persisted across substeps through the sort-reorder
+pipeline (kappa_v → sorted_kappa_v). At the start of each divergence solve, the
+warm-started values are scaled by `dfsph_div_warm_start` (default 0.5) and an initial
+velocity correction is applied before the iteration loop. Written back to unsorted
+buffer in K_DFSPH_Finalize.
 
 **Source**: `dfsph_solver.cu:K_DFSPH_ComputeKappaV`, `K_DFSPH_CorrectVelocityDiv`
 
@@ -1602,6 +1629,47 @@ Applied to: `step1.cu` (K_Step1), `step2.cu` (K_Step2 + vorticity loop),
 ComputeKappaFromVelocity, ComputePressureAccel, DensitySolverUpdate,
 CorrectVelocityDens)
 
+### 20.3 Pre-computed Pressure Array (PERF-007)
+
+WCSPH Step2 no longer calls `compute_pressure()` per neighbor (~50 calls/particle).
+Instead, `K_ComputePressure` runs once after Step1 to write per-particle pressure
+to `sorted_pressure[]`. Step2 reads `p_i` and `p_j` via `__ldg(&pressure_in[i])`.
+
+This eliminates the per-neighbor `powf()` call (Tait EOS) from the Step2 inner loop.
+
+Pipeline: Step1 → K_ComputePressure → Step2
+
+**Source**: `step2.cu:K_ComputePressure`, `step2.py:compute_pressure()`,
+`simulation.py:_run_wcsph_body`
+
+### 20.4 Warm-start kappa_v and lambda_pbf (PERF-008)
+
+DFSPH divergence solver kappa_v and PBF lambda are now carried through the
+counting sort pipeline (K_ScatterReorder, K_GatherReorder), persisted via
+finalize kernel writeback, and warm-started at the beginning of each substep.
+
+- **DFSPH kappa_v**: Scaled by `dfsph_div_warm_start` (default 0.5), then applied
+  as an initial velocity correction before the divergence solver iterations.
+- **PBF lambda**: Written back through K_PBF_Finalize for future use.
+
+**Source**: `counting_sort.cu` (kappa_v_in/out, lambda_pbf_in/out),
+`dfsph_solver.cu:K_DFSPH_Finalize`, `pbf_solver.cu:K_PBF_Finalize`,
+`simulation.py:_run_dfsph_body` (warm-start application)
+
+### 20.5 Grid Reuse for PBF/DFSPH (PERF-009)
+
+Extended the WCSPH grid-reuse optimization to PBF and DFSPH. Both finalize
+kernels now track max_displacement via atomicMax. Sort-skip decision uses
+solver-specific thresholds:
+
+- **WCSPH**: (0.25*h)² threshold, max 4 consecutive skips
+- **PBF/DFSPH**: (0.15*h)² threshold, max 2 consecutive skips (tighter for
+  constraint solver convergence quality)
+
+**Source**: `pbf_solver.cu:K_PBF_Finalize` (max_displacement_out),
+`dfsph_solver.cu:K_DFSPH_Finalize` (max_displacement_out),
+`simulation.py:step_frame` (solver-specific threshold logic)
+
 ## 10.13 Micropolar SPH (Phase 8, item 5.2)
 
 Per-particle angular velocity tracks local rotational flow. Coupled to vorticity
@@ -1696,3 +1764,180 @@ No kernel code changes needed — existing per-material property lookups handle 
 - **DFSPH**: MUD transitions to FLUID → incompressibility corrections + high viscosity.
 
 **Source**: `materials.py`, `reactions.cu`
+
+---
+
+## 22. Rigid Body System
+
+The rigid body system provides solid-fluid interaction via two mechanisms:
+- **SDF collision** (Phase A): Analytical signed distance fields for particle-object collision
+- **Akinci boundary coupling** (Phase B): Boundary particles for two-way hydrodynamic forces
+
+### 22.1 SDF Primitive Distance Functions
+
+All primitives return signed distance (negative = inside):
+
+**Box** (half-extents h):
+```
+d_box(p, h) = length(max(|p| - h, 0)) - min(max(|p.x|-h.x, |p.y|-h.y, |p.z|-h.z), 0)
+```
+
+**Sphere** (radius r):
+```
+d_sphere(p, r) = length(p) - r
+```
+
+**Cylinder** (radius r, half-height h, Y-axis aligned):
+```
+d_cylinder(p, r, h) = min(max(sqrt(p.x² + p.z²) - r, |p.y| - h), 0) + length(max(d2, 0))
+where d2 = (sqrt(p.x² + p.z²) - r, |p.y| - h)
+```
+
+**Plane** (normal n, point p0):
+```
+d_plane(p, n, p0) = dot(p - p0, n)
+```
+
+Oriented primitives (box, cylinder) transform to local space via inverse quaternion rotation before evaluation.
+
+**Source**: `sph_shared.cuh:sdf_box()`, `sdf_sphere()`, `sdf_cylinder()`, `sdf_plane()`
+
+### 22.2 SDF Collision Response
+
+Applied in `K_Integrate` for FLUID/GRANULAR/GAS particles:
+
+```
+if d(pos, obj) < 0:
+    pos += normal * |d|                          // push-out
+    v_n = dot(vel, normal)
+    if v_n < 0:
+        vel -= (1 + e) * v_n * normal            // reflect normal component
+        v_t = vel - dot(vel, normal) * normal     // tangential component
+        vel -= min(mu * |v_n| * (1+e), |v_t|) * normalize(v_t)  // Coulomb friction
+```
+
+Parameters per SDF object: restitution (e), friction (mu).
+
+**Source**: `sph_shared.cuh:sdf_object_boundary()`, `integrate.cu:K_Integrate`
+
+### 22.3 Akinci Boundary Particle Sampling
+
+Dynamic rigid bodies use boundary particles for hydrodynamic coupling (Akinci et al. 2012).
+
+**Volume precomputation** (psi_b): Each boundary particle's contribution volume is:
+```
+psi_b = rho_0 / SUM_k W(r_b - r_k, h)
+```
+where the sum is over neighboring boundary particles of the same body. In practice, `psi_b` is stored directly as the particle's mass field.
+
+**Material**: Boundary particles use `MAT_RIGID = 18` with `behavior_class = STATIC`.
+
+**Source**: `rigid_bodies.py:_compute_psi()`, `common.cuh:MAT_RIGID`
+
+### 22.4 Akinci Density Contribution
+
+In Step1, boundary particles contribute to fluid density like regular particles:
+```
+rho_i += SUM_b psi_b * W(r_i - r_b, h)
+```
+No special code needed — boundary particles have mass = psi_b and participate in the standard density summation. MAT_RIGID particles skip their own density computation (early return).
+
+**Source**: `step1.cu:K_Step1`
+
+### 22.5 Akinci Pressure Force (Two-Way Coupling)
+
+For a fluid particle i near a MAT_RIGID boundary particle b:
+
+```
+F_pressure = -m_i * (p_i/rho_i² + p_i/rho_0²) * psi_b * grad_W(r_i - r_b)
+```
+
+The second term uses rest density rho_0 (not rho_b) because boundary particles have no meaningful density of their own. This mirrors the fluid's own pressure onto the boundary.
+
+**Viscous coupling**: Boundary velocity computed from rigid body state:
+```
+v_b = v_body + omega × (r_b - COM)
+F_visc = mu * (v_b - v_i) / rho_avg * lap_W
+```
+
+**Reaction forces** (Newton's 3rd law):
+```
+F_on_body = -F_on_fluid
+tau_on_body = (r_b - COM) × F_on_body
+```
+
+Forces accumulated via `warp_reduce_accumulate()` then `atomicAdd` to per-body accumulators.
+
+**Source**: `step2.cu:K_Step2` (WCSPH), `dfsph_solver.cu:K_DFSPH_NonPressureForces` (DFSPH)
+
+### 22.6 Force Accumulation with Warp-Level Reduction
+
+To reduce atomic contention (~32x), forces are summed within each warp before a single atomic write:
+
+```c
+// Warp-level reduction (butterfly)
+for (int offset = 16; offset > 0; offset >>= 1) {
+    fx += __shfl_down_sync(0xFFFFFFFF, fx, offset);
+    // ... fy, fz, tx, ty, tz
+}
+if (lane_id == 0) atomicAdd(&d_rigid_forces[body_id*4 + k], f_k);
+```
+
+**Source**: `sph_shared.cuh:warp_reduce_accumulate()`
+
+### 22.7 Rigid Body Integration
+
+Symplectic Euler with world-frame inertia tensor:
+
+```
+// Linear
+v += (F/m + g) * dt
+x += v * dt
+
+// Angular (world-frame inertia)
+I_world_inv = R * diag(I_body_inv) * R^T
+alpha = I_world_inv * tau
+omega += alpha * dt
+
+// Quaternion update
+q += 0.5 * dt * (0, omega) * q
+q = normalize(q)
+```
+
+Velocity damping: linear 1-0.01*dt, angular 1-0.05*dt. Angular velocity clamped to 20 rad/s. Force clamped to 1000*mass.
+
+**Source**: `integrate.cu:K_IntegrateRigidBodies`
+
+### 22.8 Rigid-Rigid and Rigid-SDF Collision
+
+After integration, `K_RigidBodyCollisions` performs simple push-apart:
+
+**Body vs SDF objects**: Uses bounding sphere radius = |half_extents|. If SDF distance < radius, push out along SDF normal and reflect velocity with restitution/friction.
+
+**Body vs body**: Bounding sphere overlap test. Push apart weighted by inverse mass. Velocity reflection along contact normal.
+
+**Source**: `integrate.cu:K_RigidBodyCollisions`
+
+### 22.9 Boundary Particle State Sync
+
+After rigid body integration, boundary particles must be updated to match the new body state:
+
+```
+r_world = COM + R * r_local          // position
+v_world = v_body + omega × r_world   // velocity
+```
+
+Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
+
+**Source**: `integrate.cu:K_UpdateBoundaryParticles`
+
+### 22.10 Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Body state storage | Global memory (RigidBody struct) | Max 8 bodies; constant memory reserved for SDF objects |
+| psi_b storage | mass field directly | Avoids extra buffer; density sum naturally includes psi_b |
+| Force accumulation | Warp reduction + atomicAdd | 32x less contention than per-thread atomics |
+| SDF vs boundary | Both coexist | SDF for collision, boundary particles for pressure/viscosity |
+| Quaternion convention | (x,y,z,w) where w=scalar | Matches CUDA float4 layout |
+| CUDA graph | Disabled when bodies present | Rigid body forces vary per substep (not capturable) |

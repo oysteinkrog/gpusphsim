@@ -98,6 +98,8 @@ void K_ScatterReorder(
     const float*  __restrict__ kappa_in,
     const float4* __restrict__ particle_dye_in,
     const float4* __restrict__ angular_velocity_in,
+    const float*  __restrict__ kappa_v_in,          // DFSPH div warm-start (PERF-008)
+    const float*  __restrict__ lambda_pbf_in,       // PBF lambda warm-start (PERF-008)
     // Sorted outputs (write)
     uint*         __restrict__ sorted_hashes_out,
     float4*       __restrict__ position_out,
@@ -111,8 +113,13 @@ void K_ScatterReorder(
     float*        __restrict__ kappa_out,
     float4*       __restrict__ particle_dye_out,
     float4*       __restrict__ angular_velocity_out,
+    float*        __restrict__ kappa_v_out,         // DFSPH div warm-start (PERF-008)
+    float*        __restrict__ lambda_pbf_out,      // PBF lambda warm-start (PERF-008)
     // FP16 velocity output (OPT-4.3: half bandwidth in neighbor loops)
-    void*         __restrict__ velocity_h_out       // half4, stored as 8 bytes per particle
+    void*         __restrict__ velocity_h_out,      // half4, stored as 8 bytes per particle
+    // FP16 temperature + dye outputs (PERF-011)
+    void*         __restrict__ temperature_h_out,   // half, 2 bytes per particle (NULL = skip)
+    void*         __restrict__ dye_h_out            // half4, 8 bytes per particle (NULL = skip)
 ) {
     const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numParticles) return;
@@ -135,16 +142,24 @@ void K_ScatterReorder(
     velocity_out[sorted_idx]      = vel;
     mass_out[sorted_idx]          = __ldg(&mass_in[idx]);
     packed_info_out[sorted_idx]   = __ldg(&packed_info_in[idx]);
-    temperature_out[sorted_idx]   = __ldg(&temperature_in[idx]);
+    float temp = __ldg(&temperature_in[idx]);
+    temperature_out[sorted_idx]   = temp;
     health_out[sorted_idx]        = __ldg(&health_in[idx]);
     lifetime_out[sorted_idx]      = __ldg(&lifetime_in[idx]);
     sleep_counter_out[sorted_idx] = __ldg(&sleep_counter_in[idx]);
     kappa_out[sorted_idx]         = __ldg(&kappa_in[idx]);
-    particle_dye_out[sorted_idx]  = __ldg(&particle_dye_in[idx]);
+    float4 dye = __ldg(&particle_dye_in[idx]);
+    particle_dye_out[sorted_idx]  = dye;
     angular_velocity_out[sorted_idx] = __ldg(&angular_velocity_in[idx]);
+    kappa_v_out[sorted_idx]     = __ldg(&kappa_v_in[idx]);
+    lambda_pbf_out[sorted_idx]  = __ldg(&lambda_pbf_in[idx]);
 
     // Also write FP16 velocity copy for neighbor loop bandwidth reduction (OPT-4.3)
     store_half4((uint2*)velocity_h_out + sorted_idx, vel);
+
+    // FP16 temperature + dye copies for neighbor loop bandwidth (PERF-011)
+    if (temperature_h_out) store_half1((__half*)temperature_h_out + sorted_idx, temp);
+    if (dye_h_out) store_half4((uint2*)dye_h_out + sorted_idx, dye);
 }
 
 /* ======================================================================
@@ -172,6 +187,8 @@ void K_GatherReorder(
     const float*  __restrict__ kappa_in,
     const float4* __restrict__ particle_dye_in,
     const float4* __restrict__ angular_velocity_in,
+    const float*  __restrict__ kappa_v_in,           // DFSPH div warm-start (PERF-008)
+    const float*  __restrict__ lambda_pbf_in,        // PBF lambda warm-start (PERF-008)
     // Sorted outputs (write)
     float4*       __restrict__ position_out,
     float4*       __restrict__ velocity_out,
@@ -184,8 +201,13 @@ void K_GatherReorder(
     float*        __restrict__ kappa_out,
     float4*       __restrict__ particle_dye_out,
     float4*       __restrict__ angular_velocity_out,
+    float*        __restrict__ kappa_v_out,          // DFSPH div warm-start (PERF-008)
+    float*        __restrict__ lambda_pbf_out,       // PBF lambda warm-start (PERF-008)
     // FP16 velocity output (OPT-4.3)
-    void*         __restrict__ velocity_h_out
+    void*         __restrict__ velocity_h_out,
+    // FP16 temperature + dye outputs (PERF-011)
+    void*         __restrict__ temperature_h_out,   // half, 2 bytes per particle (NULL = skip)
+    void*         __restrict__ dye_h_out            // half4, 8 bytes per particle (NULL = skip)
 ) {
     const uint sorted_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (sorted_idx >= numParticles) return;
@@ -198,16 +220,24 @@ void K_GatherReorder(
     velocity_out[sorted_idx]      = vel;
     mass_out[sorted_idx]          = __ldg(&mass_in[orig_idx]);
     packed_info_out[sorted_idx]   = __ldg(&packed_info_in[orig_idx]);
-    temperature_out[sorted_idx]   = __ldg(&temperature_in[orig_idx]);
+    float temp = __ldg(&temperature_in[orig_idx]);
+    temperature_out[sorted_idx]   = temp;
     health_out[sorted_idx]        = __ldg(&health_in[orig_idx]);
     lifetime_out[sorted_idx]      = __ldg(&lifetime_in[orig_idx]);
     sleep_counter_out[sorted_idx] = __ldg(&sleep_counter_in[orig_idx]);
     kappa_out[sorted_idx]         = __ldg(&kappa_in[orig_idx]);
-    particle_dye_out[sorted_idx]  = __ldg(&particle_dye_in[orig_idx]);
+    float4 dye = __ldg(&particle_dye_in[orig_idx]);
+    particle_dye_out[sorted_idx]  = dye;
     angular_velocity_out[sorted_idx] = __ldg(&angular_velocity_in[orig_idx]);
+    kappa_v_out[sorted_idx]       = __ldg(&kappa_v_in[orig_idx]);
+    lambda_pbf_out[sorted_idx]    = __ldg(&lambda_pbf_in[orig_idx]);
 
     // FP16 velocity copy (OPT-4.3)
     store_half4((uint2*)velocity_h_out + sorted_idx, vel);
+
+    // FP16 temperature + dye copies (PERF-011)
+    if (temperature_h_out) store_half1((__half*)temperature_h_out + sorted_idx, temp);
+    if (dye_h_out) store_half4((uint2*)dye_h_out + sorted_idx, dye);
 }
 
 /* ======================================================================
