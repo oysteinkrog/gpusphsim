@@ -291,7 +291,8 @@ def main():
             world._high_water = 0
             world.foam_count.fill(0)  # reset foam pool
             sim.rigid_body_manager.reset()
-            sim._rigid_boundary_initialized = False
+            if hasattr(sim, '_rigid_boundary_initialized'):
+                del sim._rigid_boundary_initialized
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.set_solver_profile(profile)
@@ -310,7 +311,8 @@ def main():
             print(f"Loading preset: {preset_name}")
             sim.sdf_manager.clear()  # reset SDF objects before preset
             sim.rigid_body_manager.reset()  # reset rigid bodies before preset
-            sim._rigid_boundary_initialized = False
+            if hasattr(sim, '_rigid_boundary_initialized'):
+                del sim._rigid_boundary_initialized
             n_spawned, spawner_cfg = load_fn(world)
             sim.rigid_body_manager.finalize_boundary_data()  # wire up rigid body pipeline
             sim.sdf_manager.upload_if_dirty()  # upload any SDF objects preset added

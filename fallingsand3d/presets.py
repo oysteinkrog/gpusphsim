@@ -923,7 +923,7 @@ def load_pillar_dam_break(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         mgr.add_sdf_object(
             sdf_type=SDF_CYLINDER,
             position=(0.0, 0.0, z_pos),
-            size=(0.06, 0.06, 0.9),  # radius=0.06, half_height=0.9
+            size=(0.06, 0.9, 0.9),  # radius=0.06, half_height=0.9 (duped for renderer)
             restitution=0.3,
             friction=0.5,
         )
@@ -959,14 +959,14 @@ def load_debris_flow(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # 5 SDF box buildings spread more evenly along the flow path
+    # 5 SDF box buildings in the mud drop zone, grounded on floor
     mgr = world.sdf_manager
     buildings = [
-        ((-0.1, -0.2, -0.25), (0.06, 0.15, 0.06)),
-        ((0.15, -0.2, 0.2), (0.07, 0.15, 0.07)),
-        ((0.35, -0.2, -0.1), (0.06, 0.15, 0.06)),
-        ((0.55, -0.2, 0.15), (0.08, 0.15, 0.08)),
-        ((0.0, -0.2, 0.0), (0.05, 0.15, 0.09)),
+        ((-0.7, -0.75, -0.2), (0.06, 0.15, 0.06)),
+        ((-0.5, -0.75, 0.15), (0.07, 0.15, 0.07)),
+        ((-0.3, -0.75, -0.1), (0.06, 0.15, 0.06)),
+        ((-0.6, -0.75, 0.3), (0.08, 0.15, 0.08)),
+        ((-0.4, -0.75, 0.0), (0.05, 0.15, 0.09)),
     ]
     for pos, size in buildings:
         mgr.add_sdf_object(
@@ -1009,22 +1009,22 @@ def load_sdf_hourglass(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     mgr = world.sdf_manager
 
-    # Left funnel wall (tilted inward 18 degrees for tighter gap)
+    # Left funnel wall (tilted outward so top opens wide, bottom narrows)
     mgr.add_sdf_object(
         sdf_type=SDF_BOX,
         position=(-0.25, 0.0, 0.0),
         size=(0.15, 0.45, 0.45),
-        rotation=_euler_to_quat_preset(0, 0, -18),
+        rotation=_euler_to_quat_preset(0, 0, 18),
         restitution=0.2,
         friction=0.7,
     )
 
-    # Right funnel wall (tilted inward 18 degrees)
+    # Right funnel wall (tilted outward, forming \/ funnel)
     mgr.add_sdf_object(
         sdf_type=SDF_BOX,
         position=(0.25, 0.0, 0.0),
         size=(0.15, 0.45, 0.45),
-        rotation=_euler_to_quat_preset(0, 0, 18),
+        rotation=_euler_to_quat_preset(0, 0, -18),
         restitution=0.2,
         friction=0.7,
     )
@@ -1047,10 +1047,10 @@ def load_sdf_hourglass(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         friction=0.7,
     )
 
-    # Sand in upper chamber (narrowed to x=[-0.08, 0.08] to avoid wall overlap)
+    # Sand in upper chamber (capped at y=0.42 to stay below wall tops at y=0.45)
     n = world.spawn_cube(
         min_corner=(-0.08, 0.15, -0.4),
-        max_corner=(0.08, 0.85, 0.4),
+        max_corner=(0.08, 0.42, 0.4),
         material_id=SAND,
         spacing=0.02,
     )
@@ -1058,8 +1058,8 @@ def load_sdf_hourglass(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Gravel mixed in (visual variety vs particle Hourglass)
     n = world.spawn_cube(
-        min_corner=(-0.06, 0.45, -0.3),
-        max_corner=(0.06, 0.80, 0.3),
+        min_corner=(-0.06, 0.25, -0.3),
+        max_corner=(0.06, 0.40, 0.3),
         material_id=GRAVEL,
         spacing=0.025,
     )
@@ -1127,21 +1127,30 @@ def load_water_mill(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     _clear_world(world)
     total = 0
 
-    # Initial water filling both sides (cylinder partially submerged)
+    # Water on left side (avoid overlap with cylinder at x=0, r=0.15)
     n = world.spawn_cube(
         min_corner=(-0.8, -0.9, -0.5),
+        max_corner=(-0.2, -0.3, 0.5),
+        material_id=WATER,
+        spacing=0.02,
+    )
+    total += n
+
+    # Water on right side
+    n = world.spawn_cube(
+        min_corner=(0.2, -0.9, -0.5),
         max_corner=(0.8, -0.3, 0.5),
         material_id=WATER,
         spacing=0.02,
     )
     total += n
 
-    # Kinematic SDF cylinder at center, lowered to be partially submerged
+    # Kinematic SDF cylinder at center, partially submerged
     mgr = world.sdf_manager
     oid = mgr.add_sdf_object(
         sdf_type=SDF_CYLINDER,
         position=(0.0, -0.4, 0.0),
-        size=(0.15, 0.15, 0.3),  # radius=0.15, half_height=0.3
+        size=(0.15, 0.3, 0.3),  # radius=0.15, half_height=0.3 (duped for renderer)
         restitution=0.3,
         friction=0.5,
     )
@@ -1149,13 +1158,13 @@ def load_water_mill(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     print(f"  Water Mill: {total:,} particles, 1 kinematic cylinder")
 
-    # Spawner: continuous water from upper-left (corrected spacing)
+    # Spawner: continuous water from above the cylinder
     spawner = {
         "type": "continuous_source",
         "material_id": WATER,
-        "min_corner": (-0.8, 0.5, -0.2),
-        "max_corner": (-0.5, 0.7, 0.2),
-        "spacing": 0.025,
+        "min_corner": (-0.2, 0.5, -0.2),
+        "max_corner": (0.2, 0.7, 0.2),
+        "spacing": 0.02,
         "interval_frames": 15,
     }
     return total, spawner
@@ -1173,17 +1182,19 @@ def load_wrecking_ball(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     mgr = world.sdf_manager
 
     # Kinematic wrecking ball (sphere, oscillating in X)
-    # Starts at x=-0.4, amplitude 0.5 → range [-0.9, 0.1] (stays in domain)
+    # center=-0.15, amp=0.55 → range [-0.70, 0.40]
+    # With r=0.12: surface reaches x=0.52 (hits wall at 0.35) and x=-0.82 (in domain)
+    # Ball at y=-0.4 intersects gravel (y=-0.9 to 0.0) and stone wall (y=-0.9 to 0.1)
     oid = mgr.add_sdf_object(
         sdf_type=SDF_SPHERE,
-        position=(-0.4, 0.3, 0.0),
+        position=(-0.15, -0.4, 0.0),
         size=(0.12, 0, 0),  # radius=0.12
         restitution=0.5,
         friction=0.3,
     )
-    mgr.add_kinematic_motion(oid, "oscillate_x", {"amplitude": 0.5, "frequency": 0.3})
+    mgr.add_kinematic_motion(oid, "oscillate_x", {"amplitude": 0.55, "frequency": 0.3})
 
-    # Stone particle wall behind the gravel (visible structure to smash)
+    # Stone particle wall behind the gravel
     n = world.spawn_cube(
         min_corner=(0.35, -0.9, -0.3),
         max_corner=(0.45, 0.1, 0.3),
@@ -1195,7 +1206,7 @@ def load_wrecking_ball(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Gravel pile in front of the wall
     n = world.spawn_cube(
         min_corner=(0.05, -0.9, -0.35),
-        max_corner=(0.35, -0.1, 0.35),
+        max_corner=(0.35, 0.0, 0.35),
         material_id=GRAVEL,
         spacing=0.022,
     )
@@ -1219,15 +1230,15 @@ def load_sdf_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     mgr.add_sdf_object(
         sdf_type=SDF_CYLINDER,
         position=(0.0, 0.0, 0.0),
-        size=(0.2, 0.2, 0.9),  # radius=0.2, half_height=0.9
+        size=(0.2, 0.9, 0.9),  # radius=0.2, half_height=0.9 (duped for renderer)
         restitution=0.3,
         friction=0.2,
     )
 
-    # Water in the middle section (fits inside cylinder r=0.2)
+    # Water in the middle (r/sqrt2 = 0.141, use 0.13 for margin)
     n = world.spawn_cube(
-        min_corner=(-0.16, -0.3, -0.16),
-        max_corner=(0.16, 0.4, 0.16),
+        min_corner=(-0.13, -0.3, -0.13),
+        max_corner=(0.13, 0.4, 0.13),
         material_id=WATER,
         spacing=0.022,
     )
@@ -1235,8 +1246,8 @@ def load_sdf_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Oil layer on top (lighter, floats)
     n = world.spawn_cube(
-        min_corner=(-0.16, 0.4, -0.16),
-        max_corner=(0.16, 0.7, 0.16),
+        min_corner=(-0.13, 0.4, -0.13),
+        max_corner=(0.13, 0.7, 0.13),
         material_id=OIL,
         spacing=0.022,
     )
@@ -1244,8 +1255,8 @@ def load_sdf_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Lava blobs at the bottom (hot, rises through convection)
     n = world.spawn_cube(
-        min_corner=(-0.14, -0.8, -0.14),
-        max_corner=(0.14, -0.3, 0.14),
+        min_corner=(-0.12, -0.8, -0.12),
+        max_corner=(0.12, -0.3, 0.12),
         material_id=LAVA,
         spacing=0.025,
     )
