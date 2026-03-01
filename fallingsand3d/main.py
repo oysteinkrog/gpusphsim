@@ -312,6 +312,7 @@ def main():
             sim.rigid_body_manager.reset()  # reset rigid bodies before preset
             sim._rigid_boundary_initialized = False
             n_spawned, spawner_cfg = load_fn(world)
+            sim.rigid_body_manager.finalize_boundary_data()  # wire up rigid body pipeline
             sim.sdf_manager.upload_if_dirty()  # upload any SDF objects preset added
             world.foam_count.fill(0)  # reset foam pool on preset load
             active_spawner = spawner_cfg

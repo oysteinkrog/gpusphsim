@@ -893,16 +893,25 @@ def load_sandbox(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 def load_pillar_dam_break(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Pillar Dam Break: water column breaks against SDF cylinder pillars.
 
-    ~50K water particles released from the left. 3 SDF cylinders in the
-    middle create vortices and splashes as the water flows around them.
+    ~60K water particles released from the left, with a shallow pool on the
+    right for splash interaction. 3 SDF cylinders create vortices.
     """
     _clear_world(world)
     total = 0
 
-    # Water column (left side, sized for ~50K at spacing=0.02)
+    # Water column (left side, taller for more dramatic splash)
     n = world.spawn_cube(
         min_corner=(-0.9, -0.9, -0.5),
-        max_corner=(-0.2, 0.4, 0.5),
+        max_corner=(-0.2, 0.5, 0.5),
+        material_id=WATER,
+        spacing=0.02,
+    )
+    total += n
+
+    # Small pool on the right side to splash into
+    n = world.spawn_cube(
+        min_corner=(0.2, -0.9, -0.5),
+        max_corner=(0.9, -0.6, 0.5),
         material_id=WATER,
         spacing=0.02,
     )
@@ -926,29 +935,38 @@ def load_pillar_dam_break(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 def load_debris_flow(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Debris Flow: granular material flowing around SDF box buildings.
 
-    ~40K MUD particles released from upper-left, flowing through a field
-    of box-shaped obstacles arranged like buildings.
+    ~50K MUD + GRAVEL particles released from upper-left, flowing through
+    buildings spread along the flow path.
     """
     _clear_world(world)
     total = 0
 
-    # MUD/DIRT mass in upper portion
+    # MUD mass (larger volume for better visual coverage)
     n = world.spawn_cube(
-        min_corner=(-0.9, 0.3, -0.5),
-        max_corner=(-0.3, 0.9, 0.5),
+        min_corner=(-0.9, 0.2, -0.5),
+        max_corner=(-0.2, 0.9, 0.5),
         material_id=MUD,
         spacing=0.022,
     )
     total += n
 
-    # 5 SDF box obstacles (buildings)
+    # Mixed GRAVEL debris in the flow
+    n = world.spawn_cube(
+        min_corner=(-0.85, 0.5, -0.3),
+        max_corner=(-0.4, 0.85, 0.3),
+        material_id=GRAVEL,
+        spacing=0.025,
+    )
+    total += n
+
+    # 5 SDF box buildings spread more evenly along the flow path
     mgr = world.sdf_manager
     buildings = [
-        ((-0.1, -0.2, -0.3), (0.06, 0.15, 0.06)),
-        ((0.2, -0.2, 0.1), (0.08, 0.15, 0.08)),
-        ((0.0, -0.2, 0.2), (0.05, 0.15, 0.05)),
-        ((0.3, -0.2, -0.2), (0.07, 0.15, 0.07)),
-        ((-0.2, -0.2, 0.0), (0.06, 0.15, 0.09)),
+        ((-0.1, -0.2, -0.25), (0.06, 0.15, 0.06)),
+        ((0.15, -0.2, 0.2), (0.07, 0.15, 0.07)),
+        ((0.35, -0.2, -0.1), (0.06, 0.15, 0.06)),
+        ((0.55, -0.2, 0.15), (0.08, 0.15, 0.08)),
+        ((0.0, -0.2, 0.0), (0.05, 0.15, 0.09)),
     ]
     for pos, size in buildings:
         mgr.add_sdf_object(
@@ -980,32 +998,33 @@ def _euler_to_quat_preset(pitch_deg: float, yaw_deg: float, roll_deg: float) -> 
 
 
 def load_sdf_hourglass(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """SDF Hourglass: sand flows through a funnel gap between SDF box walls.
+    """SDF Hourglass: sand+gravel flows through a tight funnel between SDF walls.
 
-    4 SDF boxes form a funnel with a narrow gap (~0.06m). ~50K SAND
-    particles in the upper chamber flow through to form a pile below.
+    4 SDF boxes form a funnel with a narrow gap (~0.04m). Mixed SAND and
+    GRAVEL in the upper chamber flow through. Tighter gap and mixed
+    materials differentiate this from the particle Hourglass preset.
     """
     _clear_world(world)
     total = 0
 
     mgr = world.sdf_manager
 
-    # Left funnel wall (tilted inward 15 degrees)
+    # Left funnel wall (tilted inward 18 degrees for tighter gap)
     mgr.add_sdf_object(
         sdf_type=SDF_BOX,
         position=(-0.25, 0.0, 0.0),
         size=(0.15, 0.45, 0.45),
-        rotation=_euler_to_quat_preset(0, 0, -15),
+        rotation=_euler_to_quat_preset(0, 0, -18),
         restitution=0.2,
         friction=0.7,
     )
 
-    # Right funnel wall (tilted inward 15 degrees)
+    # Right funnel wall (tilted inward 18 degrees)
     mgr.add_sdf_object(
         sdf_type=SDF_BOX,
         position=(0.25, 0.0, 0.0),
         size=(0.15, 0.45, 0.45),
-        rotation=_euler_to_quat_preset(0, 0, 15),
+        rotation=_euler_to_quat_preset(0, 0, 18),
         restitution=0.2,
         friction=0.7,
     )
@@ -1028,12 +1047,21 @@ def load_sdf_hourglass(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         friction=0.7,
     )
 
-    # Sand in upper chamber
+    # Sand in upper chamber (narrowed to x=[-0.08, 0.08] to avoid wall overlap)
     n = world.spawn_cube(
-        min_corner=(-0.15, 0.15, -0.4),
-        max_corner=(0.15, 0.85, 0.4),
+        min_corner=(-0.08, 0.15, -0.4),
+        max_corner=(0.08, 0.85, 0.4),
         material_id=SAND,
         spacing=0.02,
+    )
+    total += n
+
+    # Gravel mixed in (visual variety vs particle Hourglass)
+    n = world.spawn_cube(
+        min_corner=(-0.06, 0.45, -0.3),
+        max_corner=(0.06, 0.80, 0.3),
+        material_id=GRAVEL,
+        spacing=0.025,
     )
     total += n
 
@@ -1042,21 +1070,22 @@ def load_sdf_hourglass(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
 
 def load_sdf_waterfall(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """SDF Waterfall: water cascading down SDF box ledges.
+    """SDF Waterfall: water cascading down 4 SDF box ledges.
 
-    3 SDF box ledges at descending heights. Water starts on the top ledge
-    and cascades down, creating splashes at each level. Pool at bottom.
+    4 SDF box ledges at descending heights (vs 3 stone steps in particle
+    Waterfall). Larger water volume and a catch pool at the bottom.
     """
     _clear_world(world)
     total = 0
 
     mgr = world.sdf_manager
 
-    # 3 staircase ledges (thick enough to prevent tunneling: half_extent y=0.06)
+    # 4 staircase ledges (one more than particle Waterfall)
     ledges = [
-        ((-0.4, 0.5, 0.0), (0.3, 0.06, 0.4)),
-        ((0.0, 0.1, 0.0), (0.3, 0.06, 0.4)),
-        ((0.4, -0.3, 0.0), (0.3, 0.06, 0.4)),
+        ((-0.5, 0.6, 0.0), (0.25, 0.06, 0.4)),
+        ((-0.15, 0.3, 0.0), (0.25, 0.06, 0.4)),
+        ((0.2, 0.0, 0.0), (0.25, 0.06, 0.4)),
+        ((0.55, -0.3, 0.0), (0.25, 0.06, 0.4)),
     ]
     for pos, size in ledges:
         mgr.add_sdf_object(
@@ -1067,10 +1096,19 @@ def load_sdf_waterfall(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
             friction=0.4,
         )
 
-    # Water on top ledge
+    # Water on top ledge (nudged up to y=0.68 to avoid interpenetration)
     n = world.spawn_cube(
-        min_corner=(-0.65, 0.56, -0.35),
-        max_corner=(-0.15, 0.9, 0.35),
+        min_corner=(-0.7, 0.68, -0.35),
+        max_corner=(-0.25, 0.9, 0.35),
+        material_id=WATER,
+        spacing=0.02,
+    )
+    total += n
+
+    # Small catch pool at the bottom
+    n = world.spawn_cube(
+        min_corner=(0.3, -0.9, -0.35),
+        max_corner=(0.8, -0.6, 0.35),
         material_id=WATER,
         spacing=0.02,
     )
@@ -1083,26 +1121,26 @@ def load_sdf_waterfall(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 def load_water_mill(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Water Mill: kinematic rotating cylinder in flowing water.
 
-    A rotating SDF cylinder pushes water, creating waves. Continuous
-    water spawn from top-left refills the scene.
+    A rotating SDF cylinder partially submerged in water, creating waves.
+    Continuous water spawn from upper-left refills the scene.
     """
     _clear_world(world)
     total = 0
 
-    # Initial water in left half at medium height
+    # Initial water filling both sides (cylinder partially submerged)
     n = world.spawn_cube(
         min_corner=(-0.8, -0.9, -0.5),
-        max_corner=(0.0, -0.1, 0.5),
+        max_corner=(0.8, -0.3, 0.5),
         material_id=WATER,
         spacing=0.02,
     )
     total += n
 
-    # Kinematic SDF cylinder at center, rotating around Y axis
+    # Kinematic SDF cylinder at center, lowered to be partially submerged
     mgr = world.sdf_manager
     oid = mgr.add_sdf_object(
         sdf_type=SDF_CYLINDER,
-        position=(0.0, -0.3, 0.0),
+        position=(0.0, -0.4, 0.0),
         size=(0.15, 0.15, 0.3),  # radius=0.15, half_height=0.3
         restitution=0.3,
         friction=0.5,
@@ -1111,23 +1149,23 @@ def load_water_mill(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     print(f"  Water Mill: {total:,} particles, 1 kinematic cylinder")
 
-    # Spawner: continuous water from upper-left
+    # Spawner: continuous water from upper-left (corrected spacing)
     spawner = {
-        "type": "water_mill_source",
+        "type": "continuous_source",
         "material_id": WATER,
         "min_corner": (-0.8, 0.5, -0.2),
         "max_corner": (-0.5, 0.7, 0.2),
-        "spacing": 0.04,
+        "spacing": 0.025,
         "interval_frames": 15,
     }
     return total, spawner
 
 
 def load_wrecking_ball(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """Wrecking Ball: swinging sphere smashes through gravel-filled wall.
+    """Wrecking Ball: swinging sphere scatters gravel and stone particles.
 
-    A kinematic SDF sphere oscillates back and forth, slamming into a wall
-    of static SDF boxes with gravel packed between them.
+    A kinematic SDF sphere oscillates back and forth, smashing through a
+    gravel pile backed by a stone particle wall.
     """
     _clear_world(world)
     total = 0
@@ -1135,74 +1173,79 @@ def load_wrecking_ball(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     mgr = world.sdf_manager
 
     # Kinematic wrecking ball (sphere, oscillating in X)
+    # Starts at x=-0.4, amplitude 0.5 → range [-0.9, 0.1] (stays in domain)
     oid = mgr.add_sdf_object(
         sdf_type=SDF_SPHERE,
-        position=(-0.6, 0.3, 0.0),
+        position=(-0.4, 0.3, 0.0),
         size=(0.12, 0, 0),  # radius=0.12
         restitution=0.5,
         friction=0.3,
     )
-    mgr.add_kinematic_motion(oid, "oscillate_x", {"amplitude": 0.7, "frequency": 0.3})
+    mgr.add_kinematic_motion(oid, "oscillate_x", {"amplitude": 0.5, "frequency": 0.3})
 
-    # Wall of static SDF boxes (3 wide x 4 tall)
-    for row in range(4):
-        for col in range(3):
-            x = 0.3
-            y = -0.7 + row * 0.12
-            z = -0.15 + col * 0.15
-            mgr.add_sdf_object(
-                sdf_type=SDF_BOX,
-                position=(x, y, z),
-                size=(0.05, 0.05, 0.06),
-                restitution=0.2,
-                friction=0.6,
-            )
-
-    # Gravel packed around the wall
+    # Stone particle wall behind the gravel (visible structure to smash)
     n = world.spawn_cube(
-        min_corner=(0.15, -0.9, -0.35),
-        max_corner=(0.5, -0.2, 0.35),
+        min_corner=(0.35, -0.9, -0.3),
+        max_corner=(0.45, 0.1, 0.3),
+        material_id=STONE,
+        spacing=0.025,
+    )
+    total += n
+
+    # Gravel pile in front of the wall
+    n = world.spawn_cube(
+        min_corner=(0.05, -0.9, -0.35),
+        max_corner=(0.35, -0.1, 0.35),
         material_id=GRAVEL,
         spacing=0.022,
     )
     total += n
 
-    print(f"  Wrecking Ball: {total:,} particles, 13 SDF objects")
+    print(f"  Wrecking Ball: {total:,} particles, 1 kinematic sphere")
     return total, None
 
 
 def load_sdf_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """SDF Lava Lamp: lava blobs rising in water inside a SDF cylinder.
+    """SDF Lava Lamp: tall narrow cylinder with 3-fluid convection.
 
-    A transparent SDF cylinder container holds water with lava at the
-    bottom. Heat exchange creates convection currents.
+    A tall, narrow SDF cylinder (vs the wide box of particle Lava Lamp).
+    Water, oil, and lava create a 3-fluid convection effect.
     """
     _clear_world(world)
     total = 0
 
-    # SDF cylinder container
+    # Tall narrow SDF cylinder container
     mgr = world.sdf_manager
     mgr.add_sdf_object(
         sdf_type=SDF_CYLINDER,
         position=(0.0, 0.0, 0.0),
-        size=(0.35, 0.35, 0.8),  # radius=0.35, half_height=0.8
+        size=(0.2, 0.2, 0.9),  # radius=0.2, half_height=0.9
         restitution=0.3,
         friction=0.2,
     )
 
-    # Water filling most of the cylinder
+    # Water in the middle section (fits inside cylinder r=0.2)
     n = world.spawn_cube(
-        min_corner=(-0.3, -0.7, -0.3),
-        max_corner=(0.3, 0.5, 0.3),
+        min_corner=(-0.16, -0.3, -0.16),
+        max_corner=(0.16, 0.4, 0.16),
         material_id=WATER,
         spacing=0.022,
     )
     total += n
 
-    # Lava blobs at the bottom (spawns hot at 1500K by default)
+    # Oil layer on top (lighter, floats)
     n = world.spawn_cube(
-        min_corner=(-0.2, -0.65, -0.2),
-        max_corner=(0.2, -0.35, 0.2),
+        min_corner=(-0.16, 0.4, -0.16),
+        max_corner=(0.16, 0.7, 0.16),
+        material_id=OIL,
+        spacing=0.022,
+    )
+    total += n
+
+    # Lava blobs at the bottom (hot, rises through convection)
+    n = world.spawn_cube(
+        min_corner=(-0.14, -0.8, -0.14),
+        max_corner=(0.14, -0.3, 0.14),
         material_id=LAVA,
         spacing=0.025,
     )
@@ -1215,17 +1258,17 @@ def load_sdf_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 def load_archimedes_pool(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Archimedes Pool: rigid bodies of different densities in water.
 
-    Deep water pool with 3 dynamic rigid bodies dropped from above:
+    Wide water pool with 3 dynamic rigid bodies dropped from above:
     light (floats), medium (neutral buoyancy), heavy (sinks).
     Requires Akinci two-way coupling.
     """
     _clear_world(world)
     total = 0
 
-    # Water pool filling bottom of domain (~80K, adjust spacing to fit)
+    # Wider water pool for better visual (shallower but wider)
     n = world.spawn_cube(
-        min_corner=(-0.8, -0.9, -0.4),
-        max_corner=(0.8, 0.0, 0.4),
+        min_corner=(-0.9, -0.9, -0.6),
+        max_corner=(0.9, -0.2, 0.6),
         material_id=WATER,
         spacing=0.02,
     )
@@ -1237,7 +1280,7 @@ def load_archimedes_pool(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     rbm = world.rigid_body_manager
     # Light body (floats) - left
     rbm.add_rigid_body_with_particles(
-        position=(-0.3, 0.4, 0.0),
+        position=(-0.3, 0.3, 0.0),
         half_extents=(0.06, 0.06, 0.06),
         mass=2.0,
         restitution=0.3,
@@ -1245,7 +1288,7 @@ def load_archimedes_pool(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     # Medium body (neutral buoyancy) - center
     rbm.add_rigid_body_with_particles(
-        position=(0.0, 0.4, 0.0),
+        position=(0.0, 0.3, 0.0),
         half_extents=(0.06, 0.06, 0.06),
         mass=4.3,
         restitution=0.3,
@@ -1253,7 +1296,7 @@ def load_archimedes_pool(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     # Heavy body (sinks) - right
     rbm.add_rigid_body_with_particles(
-        position=(0.3, 0.4, 0.0),
+        position=(0.3, 0.3, 0.0),
         half_extents=(0.06, 0.06, 0.06),
         mass=12.0,
         restitution=0.3,
@@ -1265,10 +1308,10 @@ def load_archimedes_pool(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
 
 def load_submarine(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """Submarine: rigid body box plunging through water.
+    """Submarine: torpedo-shaped rigid body plunging through water.
 
-    A slightly negatively buoyant rigid body box drops into water with
-    forward velocity, creating a splash and wake turbulence.
+    A slightly negatively buoyant rigid body drops from height into water
+    with moderate forward velocity, creating a splash and wake.
     """
     _clear_world(world)
     total = 0
@@ -1282,17 +1325,17 @@ def load_submarine(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Dynamic rigid body "submarine" with initial forward velocity
-    # Volume = 0.24 * 0.08 * 0.12 = 0.002304 m^3
-    # Neutral mass at rho0=2500: 5.76, slightly heavy: 6.5
+    # Dynamic rigid body "submarine" — torpedo shape, higher start, moderate velocity
+    # Volume = 0.30 * 0.08 * 0.12 = 0.00288 m^3
+    # Neutral mass at rho0=2500: 7.2, slightly heavy: 8.0
     rbm = world.rigid_body_manager
     rbm.add_rigid_body_with_particles(
-        position=(-0.5, 0.3, 0.0),
-        half_extents=(0.12, 0.04, 0.06),
-        mass=6.5,
+        position=(-0.5, 0.5, 0.0),
+        half_extents=(0.15, 0.04, 0.06),  # longer torpedo shape
+        mass=8.0,
         restitution=0.3,
         friction=0.3,
-        velocity=(2.0, 0.0, 0.0),
+        velocity=(1.0, 0.0, 0.0),  # moderate velocity
     )
 
     print(f"  Submarine: {total:,} particles, 1 rigid body")
