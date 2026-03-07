@@ -197,7 +197,7 @@ void K_Step1(
                                 float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
                                 float lap_var = h - rlen;
                                 float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-                                sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var * heat_boost;
+                                sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
 
                                 // --- Exposure accumulation ---
                                 float w_poly6_var = diff * diff * diff;
@@ -214,7 +214,7 @@ void K_Step1(
                                     float gWy = grad_scalar * r.y;
                                     float gWz = grad_scalar * r.z;
 
-                                    float vol_j = m_j / fmaxf(rho_j, 1.0f);
+                                    float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
 
                                     if (is_fluid) {
                                         float4 vel4_j_v = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
@@ -248,7 +248,7 @@ void K_Step1(
                                         float dvx = vel_i.x - vel4_j.x;
                                         float dvy = vel_i.y - vel4_j.y;
                                         float dvz = vel_i.z - vel4_j.z;
-                                        float weight = m_j / fmaxf(rho_j, 1.0f);
+                                        float weight = m_j / fmaxf(rho_j, RHO_EPSILON);
                                         Dxx += weight * dvx * gWx;
                                         Dyy += weight * dvy * gWy;
                                         Dzz += weight * dvz * gWz;
@@ -266,8 +266,11 @@ void K_Step1(
     }
 
     // --- PostCalc: density ---
+    // Behavior-aware floor: GAS has rho0 ~ 0.2-0.6, so floor at 0.01 to allow
+    // expansion. FLUID/GRANULAR have rho0 ~ 2500, floor at 1.0 is a safety net.
     float density = c_precalc.poly6_coeff * sum_density;
-    density_out[index_i] = fmaxf(density, 1.0f);
+    float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
+    density_out[index_i] = fmaxf(density, rho_floor);
 
     // --- PostCalc: pressure (PERF-007) ---
     pressure_out[index_i] = compute_pressure(density_out[index_i], behavior_i, mat_id_i);
@@ -276,7 +279,7 @@ void K_Step1(
     // dTdt = kappa_i / (rho_i * cp_i) * viscosity_lap_coeff * sum_dTdt
     float cp_i = c_materials[mat_id_i].heat_capacity;
     float rho_i_heat = density_out[index_i];
-    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, 1.0f);
+    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
 
     // --- PostCalc: exposure accumulation ---
     // Apply poly6_coeff to get properly normalized exposure values

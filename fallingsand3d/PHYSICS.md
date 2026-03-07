@@ -153,18 +153,32 @@ Sign: pressure_precalc is positive (+45/...), absorbing the double negative from
 
 ### 3.3 Viscosity Force
 
-For FLUID/GAS particles, per-material viscosity with harmonic mean:
+**IMPORTANT: FLUID vs GRANULAR use different viscosity formulations (design choice).**
+
+**FLUID/GAS: Kinematic viscosity form (divides by rho_j only)**
 ```
 mu_ij = 2 * mu_i * mu_j / (mu_i + mu_j)     [harmonic mean of base_viscosity]
-f_viscosity += mu_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
+a_visc += mu_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
 ```
 
-This uses each material's `base_viscosity` (WATER=1.0, OIL=5.0, LAVA=100.0, ACID=2.0)
-so viscous fluids are properly differentiated across all three solvers.
+This is NOT the standard SPH dynamic-viscosity form (which would divide by `rho_i * rho_j`).
+The `base_viscosity` values (WATER=1.0, OIL=5.0, LAVA=100.0, ACID=2.0) are tuned as
+kinematic-like coefficients, not physical dynamic viscosities in Pa*s.
 
-For GRANULAR-GRANULAR pairs: uses mu(I) effective viscosity (see Section 5).
+This choice is coupled with `force_scale=0.02` which globally scales all FLUID SPH
+forces. Changing to the dynamic form `/ (rho_i * rho_j)` requires simultaneously
+retuning `force_scale` and all per-material `base_viscosity` values.
 
-**Source**: `step2.cu:219-225` (FLUID), `step2.cu:192-211` (GRANULAR), `dfsph_solver.cu:419-425`
+**GRANULAR-GRANULAR: Dynamic viscosity form (divides by rho_i * rho_j)**
+```
+eta_ij = 2 * eta_i * eta_j / (eta_i + eta_j)     [harmonic mean of mu(I) viscosity]
+a_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / (rho_j * rho_i) * (h - |r|)
+```
+
+GRANULAR uses the standard dynamic form because `eta_i` from mu(I) rheology (see Section 5)
+has true Pa*s units and `force_scale=1.0` (no global scaling).
+
+**Source**: `step2.cu:348-357` (FLUID), `step2.cu:321-340` (GRANULAR), `dfsph_solver.cu:419-425`
 
 ### 3.4 XSPH Velocity Correction (FLUID only)
 
@@ -798,7 +812,59 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 - G4: Surface tension is "surface normal cohesion" (not full Akinci model)
 - J10: Sorted array transitions handled by per-particle branching (safe invariant)
 
-### 10.15 Rigid Body System Limitations
+### 10.15 FIXED: Rigid body force/acceleration unit mismatch
+
+Step2 accumulates **acceleration** (not force) into `d_rigid_forces[]` because the
+step2 output is acceleration for integrate.cu. But `K_IntegrateRigidBodies` applies
+`F * inv_mass`, giving jerk (m/s³) instead of acceleration.
+
+**Fix**: Before accumulating into `d_rigid_forces`, multiply by `m_i` (fluid particle
+mass) to convert acceleration to force:
+```
+a_on_fluid = (pressure + viscous) * force_scale
+F_on_body = -m_i * a_on_fluid          // Newton's 3rd law, in force units
+```
+This ensures the rigid body integrator correctly computes `a = F/M_body`.
+
+**Source**: `step2.cu:K_Step2` (rigid body force accumulation block)
+
+### 10.16 FIXED: Surface tension sign inversion (repulsion instead of cohesion)
+
+The curvature-based surface tension force had a sign error:
+```
+f_st = -gamma * n_i     [WRONG: pushes outward, repels surface particles]
+f_st = +gamma * n_i     [CORRECT: pushes inward, cohesion]
+```
+
+Sign chain analysis: `spiky_grad_coeff` is **negative** (-45/π/h⁶), so the
+accumulated surface normal `n_i = SUM (m_j/rho_j) * grad_W` points **into the
+bulk** (toward higher density). Multiplying by `+gamma` gives inward force
+(cohesion). The previous `-gamma` reversed this to outward repulsion.
+
+**Source**: `step2.cu` (surface tension block)
+
+### 10.17 FIXED: GAS density floor clamped above rest density
+
+The density output floor `fmaxf(density, 1.0f)` was applied uniformly to all
+behaviors. GAS materials have `rest_density` 0.2–0.6, so this floor prevented
+GAS from ever reaching its natural rest density, keeping it permanently
+"compressed" with artificially high pressure.
+
+**Fix**: Behavior-aware density floor:
+```
+float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
+density_out[i] = fmaxf(density, rho_floor);
+```
+GAS uses `RHO_EPSILON` (0.01) as a minimal safety floor while allowing natural
+density values. FLUID/GRANULAR keep the 1.0 floor (rest densities 500–2500).
+
+Additionally, all denominator guards `fmaxf(rho_j, 1.0f)` across all solvers
+were changed to `fmaxf(rho_j, RHO_EPSILON)` for consistency with GAS densities.
+
+**Source**: `sph_shared.cuh` (RHO_EPSILON), `step1.cu`, `step2.cu`,
+`dfsph_solver.cu`, `pbf_solver.cu`, `implicit_st.cu`
+
+### 10.18 Rigid Body System Limitations
 
 - **Bounding sphere collisions only**: Body-body and body-SDF collision uses bounding sphere (max of half_extents), not true shape. Elongated bodies leave gaps at corners.
 - **No rigid-rigid stacking**: Single push-apart pass per substep; deep piles of bodies may interpenetrate.
@@ -1413,16 +1479,17 @@ are near the free surface and receive surface tension forces.
 
 ### 17.3 Curvature-Based Surface Tension (Step2)
 
-For surface particles (neighbor_count < 25), the Akinci cohesion/curvature model:
+For surface particles (neighbor_count < 25), the Akinci curvature model:
 ```
-f_st = -gamma * (n_i - n_j)     [curvature force, summed over neighbors]
+f_st = +gamma * n_i     [cohesion force toward bulk]
 ```
 
 Where `gamma = c_granular.surface_tension_gamma` (default 1.0).
 
-The curvature force drives particles toward minimizing surface area by aligning
-surface normals. The negative sign ensures convex surfaces (normals pointing outward)
-produce inward forces (cohesion).
+**Sign convention**: The surface normal `n_i = SUM (m_j/rho_j) * grad_W_spiky`
+points **into the bulk** (toward higher density) because `spiky_grad_coeff` is
+negative (-45/π/h⁶). Multiplying by `+gamma` gives an inward (cohesive) force
+that drives surface particles toward the fluid interior, minimizing surface area.
 
 **Note**: The full Akinci model also includes a cohesion kernel C(r) for particle-pair
 attraction. Currently only the curvature term is implemented — it provides the dominant
@@ -1861,10 +1928,15 @@ F_visc = mu * (v_b - v_i) / rho_avg * lap_W
 ```
 
 **Reaction forces** (Newton's 3rd law):
+
+Step2 computes acceleration `a_on_fluid` (pressure + viscosity, scaled by force_scale).
+To get proper force for rigid body integration, multiply by the fluid particle's mass:
 ```
-F_on_body = -F_on_fluid
+F_on_body = -m_i * a_on_fluid     // convert acceleration → force, flip sign
 tau_on_body = (r_b - COM) × F_on_body
 ```
+
+This ensures `K_IntegrateRigidBodies` correctly computes `a_body = F_total / M_body`.
 
 Forces accumulated via `warp_reduce_accumulate()` then `atomicAdd` to per-body accumulators.
 

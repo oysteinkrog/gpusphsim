@@ -26,6 +26,11 @@ enum BehaviorClass {
     STATIC  = 3
 };
 
+/* Minimum density for denominator guards (safe for GAS with rho0 ~ 0.2-0.6) */
+#ifndef RHO_EPSILON
+#define RHO_EPSILON 0.01f
+#endif
+
 /* ======================================================================
  * MaterialProps -- per-material constants uploaded to constant memory.
  * 18 fields x 4 bytes = 72 bytes (includes 1 pad field).

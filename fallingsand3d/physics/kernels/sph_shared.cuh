@@ -52,6 +52,8 @@
 /* Boundary margin: prevent particles from sitting exactly at wall positions */
 #define BOUNDARY_MARGIN    1e-4f
 
+/* RHO_EPSILON now defined in common.cuh (available to all kernels) */
+
 /* ======================================================================
  * GranularParams -- mu(I) rheology and shared solver parameters.
  *

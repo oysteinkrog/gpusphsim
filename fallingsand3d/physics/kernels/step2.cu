@@ -200,7 +200,7 @@ void K_Step2(
                         float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
                         float omega_j = __ldg(&vorticity_in[index_j]).w;
                         float rho_j_e = pos4_j.w;
-                        float wt = m_j / fmaxf(rho_j_e, 1.0f);
+                        float wt = m_j / fmaxf(rho_j_e, RHO_EPSILON);
                         float omega_diff = omega_j - omega_mag_i;
                         eta_vort.x += wt * omega_diff * gs * r.x;
                         eta_vort.y += wt * omega_diff * gs * r.y;
@@ -255,7 +255,7 @@ void K_Step2(
                             float lap_v_b = lap_visc_variable(rlen, h);
                             float mu_b = is_granular_i ? c_precalc.viscosity_precalc
                                        : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-                            float visc_factor_b = mu_b * psi_b * lap_v_b / fmaxf(rho_i, 1.0f);
+                            float visc_factor_b = mu_b * psi_b * lap_v_b / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_visc = make_float3(
                                 (vel_boundary.x - vel_i.x) * visc_factor_b,
                                 (vel_boundary.y - vel_i.y) * visc_factor_b,
@@ -265,18 +265,20 @@ void K_Step2(
                             f_viscosity.y += F_visc.y;
                             f_viscosity.z += F_visc.z;
 
-                            // Two-way coupling: accumulate reaction on rigid body
-                            // Total force on fluid = pressure_precalc * F_pressure_part + F_visc
-                            // We accumulate the pressure part separately; apply pressure_precalc
+                            // Two-way coupling: accumulate reaction FORCE on rigid body.
+                            // step2 outputs acceleration (force/mass) for fluid particles,
+                            // but K_IntegrateRigidBodies expects actual force (F = m * a).
+                            // Must multiply by fluid particle mass to convert accel -> force.
                             float pp = c_precalc.pressure_precalc;
                             float fs = is_granular_i ? 1.0f : c_granular.force_scale;
-                            float3 F_total_on_fluid = make_float3(
+                            float m_i = __ldg(&mass[index_i]);
+                            float3 a_on_fluid = make_float3(
                                 (pp * F_on_fluid.x + F_visc.x) * fs,
                                 (pp * F_on_fluid.y + F_visc.y) * fs,
                                 (pp * F_on_fluid.z + F_visc.z) * fs
                             );
-                            // Newton's 3rd law: reaction on body = -F_on_fluid
-                            float3 F_on_body = make_float3(-F_total_on_fluid.x, -F_total_on_fluid.y, -F_total_on_fluid.z);
+                            // Newton's 3rd law: reaction force on body = -m_i * a_on_fluid
+                            float3 F_on_body = make_float3(-m_i * a_on_fluid.x, -m_i * a_on_fluid.y, -m_i * a_on_fluid.z);
                             // Torque = cross(r_b, F_on_body) where r_b = boundary_pos - COM
                             float3 tau = make_float3(
                                 r_b.y * F_on_body.z - r_b.z * F_on_body.y,
@@ -295,7 +297,7 @@ void K_Step2(
                             float lap_v_b = lap_visc_variable(rlen, h);
                             float mu_b = is_granular_i ? c_precalc.viscosity_precalc
                                        : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-                            float visc_factor_b = mu_b * m_j * lap_v_b / fmaxf(rho_i, 1.0f);
+                            float visc_factor_b = mu_b * m_j * lap_v_b / fmaxf(rho_i, RHO_EPSILON);
                             f_viscosity.x += (-vel_i.x) * visc_factor_b;
                             f_viscosity.y += (-vel_i.y) * visc_factor_b;
                             f_viscosity.z += (-vel_i.z) * visc_factor_b;
@@ -346,7 +348,16 @@ void K_Step2(
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
                     } else {
-                        // FLUID/GAS: per-material viscosity via harmonic mean
+                        // FLUID/GAS: per-material viscosity via harmonic mean.
+                        //
+                        // NOTE (design choice): This uses kinematic-viscosity form (/ rho_j only),
+                        // NOT the standard dynamic-viscosity SPH form (/ (rho_i * rho_j)).
+                        // GRANULAR uses the dynamic form because mu(I) eta has Pa*s units.
+                        // FLUID uses kinematic form — base_viscosity acts as a tuned coefficient,
+                        // not a physical dynamic viscosity. This is coupled with force_scale=0.02
+                        // which globally scales all FLUID SPH forces (pressure + viscosity).
+                        // Changing to / (rho_i * rho_j) requires retuning both force_scale and
+                        // all per-material base_viscosity values.
                         float mu_i = c_materials[mat_id_i].base_viscosity;
                         float mu_j = c_materials[mat_id_j].base_viscosity;
                         float mu_ij = 2.0f * mu_i * mu_j / (mu_i + mu_j + 1e-8f);
@@ -393,12 +404,15 @@ void K_Step2(
         // Surface particles have fewer neighbors than interior particles
         if (nc_i < 25.0f) {
             float gamma = c_granular.surface_tension_gamma;
-            // Curvature force: -gamma * n_i (pulls surface inward)
+            // Surface tension: +gamma * n_i (pulls surface inward).
+            // Normal n_i points INTO the bulk (toward neighbors) because
+            // spiky_grad_coeff is negative and r = pos_i - pos_j points away
+            // from neighbors. So +gamma * n pushes toward bulk = cohesion.
             float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
             if (n_mag > 0.01f) {
-                f_surface_tension.x = -gamma * norm_i.x;
-                f_surface_tension.y = -gamma * norm_i.y;
-                f_surface_tension.z = -gamma * norm_i.z;
+                f_surface_tension.x = gamma * norm_i.x;
+                f_surface_tension.y = gamma * norm_i.y;
+                f_surface_tension.z = gamma * norm_i.z;
             }
         }
     }

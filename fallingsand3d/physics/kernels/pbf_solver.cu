@@ -294,14 +294,14 @@ void K_PBF_ComputeLambda(
 
                             float lap_var = h - rlen;
                             float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-                            sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var * heat_boost;
+                            sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
 
                             float w_poly6_var = diff * diff * diff;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
 
                             if (dye_on && behavior_j != STATIC) {
-                                float vol_j = m_j / fmaxf(rho_j, 1.0f);
+                                float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                                 float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
                                 float4 dye_j = __ldg(&particle_dye_in[j]);
                                 dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
@@ -338,13 +338,13 @@ void K_PBF_ComputeLambda(
     }
 
     float rho = c_precalc.poly6_coeff * sum_density;
-    rho = fmaxf(rho, 1.0f);
+    rho = fmaxf(rho, is_gas_i ? RHO_EPSILON : 1.0f);
     density_out[i] = rho;
 
     // Heat diffusion + exposure + dye output
     if (do_heat) {
         float cp_i = c_materials[mat_id_i].heat_capacity;
-        dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, 1.0f);
+        dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, RHO_EPSILON);
         exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
         exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
         if (dye_on) dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);

@@ -133,7 +133,7 @@ void K_IST_Iterate(
                     float rho_j = __ldg(&density[j]);
 
                     float w = W_poly6_ist(r_sq, h_sq);
-                    float factor = (m_j / fmaxf(rho_j, 1.0f)) * w;
+                    float factor = (m_j / fmaxf(rho_j, RHO_EPSILON)) * w;
 
                     dv.x += (vel4_j.x - vel_i.x) * factor;
                     dv.y += (vel4_j.y - vel_i.y) * factor;

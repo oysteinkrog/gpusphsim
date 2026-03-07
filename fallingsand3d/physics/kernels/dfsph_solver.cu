@@ -189,7 +189,7 @@ void K_DFSPH_ComputeDensityAlpha(
                             float T_j = __ldg(&temperature_in[j]);
                             float lap_var = h - rlen;
                             float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-                            sum_dTdt += m_j / fmaxf(rho_j, 1.0f) * (T_j - T_i) * lap_var * heat_boost;
+                            sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
 
                             // Exposure
                             float w_poly6_var = diff * diff * diff;
@@ -197,7 +197,7 @@ void K_DFSPH_ComputeDensityAlpha(
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
 
                             if (dye_on && behavior_j != STATIC) {
-                                float vol_j = m_j / fmaxf(rho_j, 1.0f);
+                                float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                                 float lap_var2 = h - rlen;
                                 float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var2;
                                 float4 dye_j = __ldg(&particle_dye_in[j]);
@@ -209,7 +209,7 @@ void K_DFSPH_ComputeDensityAlpha(
 
                         // Alpha factor (using Spiky gradient)
                         float3 gW = grad_spiky(r, rlen, h);
-                        float w_j = m_j / fmaxf(rho_j, 1.0f);
+                        float w_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                         grad_sum.x += w_j * gW.x;
                         grad_sum.y += w_j * gW.y;
                         grad_sum.z += w_j * gW.z;
@@ -235,7 +235,7 @@ void K_DFSPH_ComputeDensityAlpha(
                                     float gWx = grad_scalar * r.x;
                                     float gWy = grad_scalar * r.y;
                                     float gWz = grad_scalar * r.z;
-                                    float weight = m_j / fmaxf(rho_j, 1.0f);
+                                    float weight = m_j / fmaxf(rho_j, RHO_EPSILON);
                                     Dxx += weight * dvx * gWx;
                                     Dyy += weight * dvy * gWy;
                                     Dzz += weight * dvz * gWz;
@@ -245,7 +245,7 @@ void K_DFSPH_ComputeDensityAlpha(
                                 }
 
                                 if (is_fluid) {
-                                    float vol_j = m_j / fmaxf(rho_j, 1.0f);
+                                    float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                                     omega.x += vol_j * (gW.y * dvz - gW.z * dvy);
                                     omega.y += vol_j * (gW.z * dvx - gW.x * dvz);
                                     omega.z += vol_j * (gW.x * dvy - gW.y * dvx);
@@ -258,9 +258,9 @@ void K_DFSPH_ComputeDensityAlpha(
         }
     }
 
-    // Density
+    // Density (behavior-aware floor: GAS rho0 ~ 0.2-0.6)
     float rho = c_precalc.poly6_coeff * sum_density;
-    rho = fmaxf(rho, 1.0f);
+    rho = fmaxf(rho, is_gas_i ? RHO_EPSILON : 1.0f);
 
     // H1 fix: STATIC particles use rest_density to prevent gaps at boundaries
     if (behavior_i == STATIC) {
@@ -303,7 +303,7 @@ void K_DFSPH_ComputeDensityAlpha(
     }
     // Heat diffusion: dTdt = kappa / (rho * cp) * viscosity_lap_coeff * sum_dTdt
     float cp_i = c_materials[mat_id_i].heat_capacity;
-    dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, 1.0f);
+    dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, RHO_EPSILON);
 
     // Exposure
     exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
@@ -445,7 +445,7 @@ void K_DFSPH_NonPressureForces(
                         float inv_rl = 1.0f / rlen;
                         float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
                         float omega_j = __ldg(&vorticity_in[j]).w;
-                        float wt = m_j / fmaxf(rho_j, 1.0f);
+                        float wt = m_j / fmaxf(rho_j, RHO_EPSILON);
                         eta_vort.x += wt * omega_j * gs * r.x;
                         eta_vort.y += wt * omega_j * gs * r.y;
                         eta_vort.z += wt * omega_j * gs * r.z;
@@ -474,7 +474,7 @@ void K_DFSPH_NonPressureForces(
                                 rb_linvel.y + (rb_angvel.z * r_b.x - rb_angvel.x * r_b.z),
                                 rb_linvel.z + (rb_angvel.x * r_b.y - rb_angvel.y * r_b.x)
                             );
-                            float visc_factor = mu_b * m_j * lap_v / fmaxf(rho_i, 1.0f);
+                            float visc_factor = mu_b * m_j * lap_v / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_visc = make_float3(
                                 (vel_boundary.x - vel_i.x) * visc_factor,
                                 (vel_boundary.y - vel_i.y) * visc_factor,
@@ -484,7 +484,7 @@ void K_DFSPH_NonPressureForces(
                             f_visc.y += F_visc.y;
                             f_visc.z += F_visc.z;
                             // Two-way: accumulate reaction on rigid body
-                            float inv_rho = 1.0f / fmaxf(rho_i, 1.0f);
+                            float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_on_body = make_float3(
                                 -(F_visc.x * inv_rho) * m_j,
                                 -(F_visc.y * inv_rho) * m_j,
@@ -499,7 +499,7 @@ void K_DFSPH_NonPressureForces(
                             warp_reduce_accumulate(d_rigid_torques, tau, body_id);
                         } else {
                             // Regular STATIC: friction drag toward zero
-                            float visc_factor = mu_b * m_j * lap_v / fmaxf(rho_i, 1.0f);
+                            float visc_factor = mu_b * m_j * lap_v / fmaxf(rho_i, RHO_EPSILON);
                             f_visc.x += (-vel_i.x) * visc_factor;
                             f_visc.y += (-vel_i.y) * visc_factor;
                             f_visc.z += (-vel_i.z) * visc_factor;
@@ -527,13 +527,13 @@ void K_DFSPH_NonPressureForces(
                         float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);
 
                         // Full viscosity with coefficient baked in
-                        float visc_factor = eta_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v / fmaxf(rho_j, 1.0f);
+                        float visc_factor = eta_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v / fmaxf(rho_j, RHO_EPSILON);
                         f_visc.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_visc.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_visc.z += (vel_j.z - vel_i.z) * visc_factor;
                     } else if (is_granular_i) {
                         // GRANULAR-nonGRANULAR: base viscosity with full coefficient
-                        float visc_factor = c_precalc.viscosity_precalc * m_j * lap_v / fmaxf(rho_j, 1.0f);
+                        float visc_factor = c_precalc.viscosity_precalc * m_j * lap_v / fmaxf(rho_j, RHO_EPSILON);
                         f_visc.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_visc.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_visc.z += (vel_j.z - vel_i.z) * visc_factor;
@@ -543,7 +543,7 @@ void K_DFSPH_NonPressureForces(
                         float mu_i = c_materials[mat_id_i].base_viscosity;
                         float mu_j = c_materials[mat_id_j].base_viscosity;
                         float mu_ij = 2.0f * mu_i * mu_j / (mu_i + mu_j + 1e-8f);
-                        float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v / fmaxf(rho_j, 1.0f);
+                        float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v / fmaxf(rho_j, RHO_EPSILON);
                         f_visc.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_visc.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_visc.z += (vel_j.z - vel_i.z) * visc_factor;
@@ -557,11 +557,11 @@ void K_DFSPH_NonPressureForces(
     float3 a_visc;
     if (is_granular_i) {
         // GRANULAR: viscosity already baked in per-pair, just divide by rho_i
-        float inv_rho = 1.0f / fmaxf(rho_i, 1.0f);
+        float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
         a_visc = make_float3(f_visc.x * inv_rho, f_visc.y * inv_rho, f_visc.z * inv_rho);
     } else {
         // FLUID/GAS: per-material viscosity already baked in per-pair, divide by rho_i
-        float inv_rho = 1.0f / fmaxf(rho_i, 1.0f);
+        float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
         a_visc = make_float3(f_visc.x * inv_rho, f_visc.y * inv_rho, f_visc.z * inv_rho);
     }
     float3 accel = make_float3(
@@ -728,7 +728,7 @@ void K_DFSPH_ComputeKappaV(
                     float dv_dot_gW = (vel_i.x - vel4_j.x) * gW.x
                                     + (vel_i.y - vel4_j.y) * gW.y
                                     + (vel_i.z - vel4_j.z) * gW.z;
-                    div_v += (m_j / fmaxf(rho_j, 1.0f)) * dv_dot_gW;
+                    div_v += (m_j / fmaxf(rho_j, RHO_EPSILON)) * dv_dot_gW;
                 }
             }
         }
@@ -812,7 +812,7 @@ void K_DFSPH_CorrectVelocityDiv(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = m_j / fmaxf(rho_j, 1.0f);
+                    float V_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                     float coeff = V_j * (kv_i + kv_j);
                     dv.x += coeff * gW.x;
                     dv.y += coeff * gW.y;
@@ -968,7 +968,7 @@ void K_DFSPH_ComputeDensityAdv(
     }
 
     float rho = c_precalc.poly6_coeff * sum_density;
-    density_out[i] = fmaxf(rho, 1.0f);
+    density_out[i] = fmaxf(rho, is_gas_i ? RHO_EPSILON : 1.0f);
 }
 
 /* ======================================================================
@@ -1180,7 +1180,7 @@ void K_DFSPH_CorrectVelocityDens(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = m_j / fmaxf(rho_j, 1.0f);
+                    float V_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                     float coeff = V_j * (k_i + k_j);
                     dv.x += coeff * gW.x;
                     dv.y += coeff * gW.y;
@@ -1282,7 +1282,7 @@ void K_DFSPH_ComputePressureAccel(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = m_j / fmaxf(rho_j, 1.0f);
+                    float V_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                     float coeff = -V_j * (p_i + p_j);
                     a.x += coeff * gW.x;
                     a.y += coeff * gW.y;
@@ -1399,7 +1399,7 @@ void K_DFSPH_DensitySolverUpdate(
                     float dv_dot_gW = (vt_i.x - vt_j.x) * gW.x
                                     + (vt_i.y - vt_j.y) * gW.y
                                     + (vt_i.z - vt_j.z) * gW.z;
-                    drho += (m_j / fmaxf(rho_j, 1.0f)) * dv_dot_gW;
+                    drho += (m_j / fmaxf(rho_j, RHO_EPSILON)) * dv_dot_gW;
                 }
             }
         }
