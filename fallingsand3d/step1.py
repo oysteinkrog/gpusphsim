@@ -405,3 +405,103 @@ def pack_density(
     grid = ((n + PACK_BLOCK_SIZE - 1) // PACK_BLOCK_SIZE,)
     block = (PACK_BLOCK_SIZE,)
     kernel(grid, block, (position, density, np.uint32(n)))
+
+
+def compute_step1_build_nl(
+    position: cupy.ndarray,
+    velocity: cupy.ndarray,
+    mass: cupy.ndarray,
+    density_in: Optional[cupy.ndarray],
+    packed_info: cupy.ndarray,
+    temperature_in: cupy.ndarray,
+    cell_start: cupy.ndarray,
+    cell_end: cupy.ndarray,
+    neighbor_indices_out: cupy.ndarray,
+    neighbor_count_out: cupy.ndarray,
+    max_nb: int = 64,
+    density_out: Optional[cupy.ndarray] = None,
+    shear_rate_out: Optional[cupy.ndarray] = None,
+    dTdt_out: Optional[cupy.ndarray] = None,
+    exposure_heat_out: Optional[cupy.ndarray] = None,
+    exposure_corrode_out: Optional[cupy.ndarray] = None,
+    vorticity_out: Optional[cupy.ndarray] = None,
+    normal_out: Optional[cupy.ndarray] = None,
+    particle_dye_in: Optional[cupy.ndarray] = None,
+    dye_rate_out: Optional[cupy.ndarray] = None,
+    velocity_h: Optional[cupy.ndarray] = None,
+    pressure_out: Optional[cupy.ndarray] = None,
+    temperature_h: Optional[cupy.ndarray] = None,
+    dye_h: Optional[cupy.ndarray] = None,
+) -> tuple:
+    """Launch K_Step1_BuildNL: fused Step1 + neighbor list build.
+
+    Same as compute_step1 but also writes compact neighbor indices
+    for use by K_Step2_NL. Eliminates separate build_neighbor_list pass.
+    """
+    n = position.shape[0]
+    if density_out is None:
+        density_out = cupy.empty(n, dtype=cupy.float32)
+    if shear_rate_out is None:
+        shear_rate_out = cupy.empty(n, dtype=cupy.float32)
+    if dTdt_out is None:
+        dTdt_out = cupy.empty(n, dtype=cupy.float32)
+    if exposure_heat_out is None:
+        exposure_heat_out = cupy.empty(n, dtype=cupy.float32)
+    if exposure_corrode_out is None:
+        exposure_corrode_out = cupy.empty(n, dtype=cupy.float32)
+    if vorticity_out is None:
+        vorticity_out = cupy.empty((n, 4), dtype=cupy.float32)
+    if normal_out is None:
+        normal_out = cupy.empty((n, 4), dtype=cupy.float32)
+    if particle_dye_in is None:
+        particle_dye_in = cupy.zeros((n, 4), dtype=cupy.float32)
+    if dye_rate_out is None:
+        dye_rate_out = cupy.empty((n, 4), dtype=cupy.float32)
+    if pressure_out is None:
+        pressure_out = cupy.empty(n, dtype=cupy.float32)
+
+    density_in_ptr = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
+    _null = cupy.ndarray(0, dtype=cupy.uint32)
+    velocity_h_ptr = velocity_h if velocity_h is not None else _null
+    temperature_h_ptr = temperature_h if temperature_h is not None else _null
+    dye_h_ptr = dye_h if dye_h is not None else _null
+
+    module = _get_module()
+    kernel = module.get_function("K_Step1_BuildNL")
+
+    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    block = (BLOCK_SIZE,)
+
+    kernel(
+        grid,
+        block,
+        (
+            np.uint32(n),
+            position,
+            velocity,
+            mass,
+            density_in_ptr,
+            packed_info,
+            temperature_in,
+            cell_start,
+            cell_end,
+            density_out,
+            shear_rate_out,
+            dTdt_out,
+            exposure_heat_out,
+            exposure_corrode_out,
+            vorticity_out,
+            normal_out,
+            particle_dye_in,
+            dye_rate_out,
+            velocity_h_ptr,
+            pressure_out,
+            temperature_h_ptr,
+            dye_h_ptr,
+            neighbor_indices_out,
+            neighbor_count_out,
+            np.uint32(max_nb),
+        ),
+    )
+
+    return density_out, shear_rate_out, dTdt_out, exposure_heat_out, exposure_corrode_out, pressure_out

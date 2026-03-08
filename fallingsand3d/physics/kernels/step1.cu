@@ -333,3 +333,262 @@ void K_PackDensity(
     if (i >= numParticles) return;
     position[i].w = density[i];
 }
+
+
+/* ======================================================================
+ * K_Step1_BuildNL -- Step1 fused with neighbor list build.
+ *
+ * Identical to K_Step1 but also writes compact neighbor indices
+ * as it scans the 27-cell grid. The neighbor list is then used
+ * by K_Step2_NL, avoiding a second grid scan.
+ *
+ * Extra parameters vs K_Step1:
+ *   neighbor_indices_out[N * max_nb] -- output neighbor indices
+ *   neighbor_count_out[N]            -- output neighbor count per particle
+ *   max_nb                           -- max neighbors per particle
+ * ====================================================================== */
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_Step1_BuildNL(
+    uint            numParticles,
+    float4*         __restrict__ position,
+    const float4*   __restrict__ velocity,
+    const float*    __restrict__ mass,
+    const float*    __restrict__ density_in,
+    const uint*     __restrict__ packed_info,
+    const float*    __restrict__ temperature_in,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float*          __restrict__ density_out,
+    float*          __restrict__ shear_rate_out,
+    float*          __restrict__ dTdt_out,
+    float*          __restrict__ exposure_heat_out,
+    float*          __restrict__ exposure_corrode_out,
+    float4*         __restrict__ vorticity_out,
+    float4*         __restrict__ normal_out,
+    const float4*   __restrict__ particle_dye_in,
+    float4*         __restrict__ dye_rate_out,
+    const void*     __restrict__ velocity_h,
+    float*          __restrict__ pressure_out,
+    const void*     __restrict__ temperature_h,
+    const void*     __restrict__ dye_h,
+    // Neighbor list outputs
+    uint*           __restrict__ neighbor_indices_out,
+    uint*           __restrict__ neighbor_count_out,
+    uint            max_nb
+) {
+    uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index_i >= numParticles) return;
+
+    const float4* __restrict__ position_ro = position;
+
+    float4 pos4_i = position[index_i];
+    float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
+
+    float h    = c_sim.smoothing_length;
+    float h_sq = c_sim.smoothing_length_sq;
+
+    uint pi_i = __ldg(&packed_info[index_i]);
+    int behavior_i = GET_BEHAVIOR(pi_i);
+    uint mat_id_i = GET_MATERIAL_ID(pi_i);
+    bool is_granular = (behavior_i == GRANULAR);
+    bool is_gas_i = (behavior_i == GAS);
+    bool is_fluid = (behavior_i == FLUID);
+    bool is_rigid_i = (mat_id_i == MAT_RIGID);
+
+    // Neighbor list write position
+    uint nl_base = index_i * max_nb;
+    uint nl_count = 0;
+
+    if (is_rigid_i) {
+        density_out[index_i] = 2500.0f;
+        pressure_out[index_i] = 0.0f;
+        shear_rate_out[index_i] = 0.0f;
+        dTdt_out[index_i] = 0.0f;
+        exposure_heat_out[index_i] = 0.0f;
+        exposure_corrode_out[index_i] = 0.0f;
+        vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        dye_rate_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        neighbor_count_out[index_i] = 0;
+        return;
+    }
+
+    float4 vel4_i = velocity[index_i];
+    float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
+
+    bool dye_on = (c_sim.dye_enabled != 0);
+    float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (dye_on) dye_i = __ldg(&particle_dye_in[index_i]);
+
+    float T_i = __ldg(&temperature_in[index_i]);
+    float kappa_i = c_materials[mat_id_i].thermal_conductivity;
+
+    float sum_density = 0.0f;
+    float sum_dTdt = 0.0f;
+    float sum_exposure_heat = 0.0f;
+    float sum_exposure_corrode = 0.0f;
+    float Dxx = 0.0f, Dyy = 0.0f, Dzz = 0.0f;
+    float Dxy = 0.0f, Dxz = 0.0f, Dyz = 0.0f;
+    float3 omega = make_float3(0.0f, 0.0f, 0.0f);
+    float3 normal = make_float3(0.0f, 0.0f, 0.0f);
+    float neighbor_count = 0.0f;
+    float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
+
+    int3 cell_i = calcGridCell(make_float3(pos_i.x, pos_i.y, pos_i.z));
+
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+
+                uint hash = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
+                uint start = cell_start[hash];
+                if (start == 0xFFFFFFFFu) continue;
+                uint end_idx = cell_end[hash];
+
+                for (uint index_j = start; index_j < end_idx; index_j++) {
+                    float4 pos4_j = __ldg(&position_ro[index_j]);
+                    float m_j = __ldg(&mass[index_j]);
+                    uint pi_j = __ldg(&packed_info[index_j]);
+                    float T_j = temperature_h ? load_half1((const __half*)temperature_h + index_j)
+                                              : __ldg(&temperature_in[index_j]);
+
+                    float3 r = make_float3(
+                        pos_i.x - pos4_j.x,
+                        pos_i.y - pos4_j.y,
+                        pos_i.z - pos4_j.z
+                    );
+                    float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+
+                    if (r_sq <= h_sq) {
+                        float diff = h_sq - r_sq;
+                        int behavior_j = GET_BEHAVIOR(pi_j);
+                        bool is_gas_j = (behavior_j == GAS);
+
+                        if (is_gas_i != is_gas_j && index_j != index_i) {
+                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                            float w_poly6_var = diff * diff * diff;
+                            sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                            sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                            // Still record as neighbor for step2
+                            if (nl_count < max_nb && index_j != index_i) {
+                                neighbor_indices_out[nl_base + nl_count] = index_j;
+                                nl_count++;
+                            }
+                            continue;
+                        }
+
+                        sum_density += m_j * diff * diff * diff;
+
+                        if (index_j != index_i) {
+                            // Record neighbor for step2
+                            if (nl_count < max_nb) {
+                                neighbor_indices_out[nl_base + nl_count] = index_j;
+                                nl_count++;
+                            }
+
+                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                            float rlen = sqrtf(r_sq);
+
+                            if (mat_id_j != MAT_RIGID) {
+                                float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
+                                float lap_var = h - rlen;
+                                float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
+                                sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
+
+                                float w_poly6_var = diff * diff * diff;
+                                sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                                sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+
+                                if (r_sq > 1e-12f) {
+                                    float inv_rlen = 1.0f / rlen;
+                                    float h_rlen = h - rlen;
+                                    float grad_scalar = c_precalc.spiky_grad_coeff * h_rlen * h_rlen * inv_rlen;
+                                    float gWx = grad_scalar * r.x;
+                                    float gWy = grad_scalar * r.y;
+                                    float gWz = grad_scalar * r.z;
+                                    float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
+
+                                    if (is_fluid) {
+                                        float4 vel4_j_v = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
+                                                                     : __ldg(&velocity[index_j]);
+                                        float dvx_v = vel4_j_v.x - vel_i.x;
+                                        float dvy_v = vel4_j_v.y - vel_i.y;
+                                        float dvz_v = vel4_j_v.z - vel_i.z;
+                                        omega.x += vol_j * (dvy_v * gWz - dvz_v * gWy);
+                                        omega.y += vol_j * (dvz_v * gWx - dvx_v * gWz);
+                                        omega.z += vol_j * (dvx_v * gWy - dvy_v * gWx);
+
+                                        normal.x += vol_j * gWx;
+                                        normal.y += vol_j * gWy;
+                                        normal.z += vol_j * gWz;
+                                    }
+
+                                    neighbor_count += 1.0f;
+
+                                    if (dye_on && behavior_j != STATIC) {
+                                        float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
+                                        float4 dye_j = dye_h ? load_half4((const uint2*)dye_h + index_j)
+                                                       : __ldg(&particle_dye_in[index_j]);
+                                        dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
+                                        dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
+                                        dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
+                                    }
+
+                                    if (is_granular) {
+                                        float4 vel4_j = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
+                                                                   : __ldg(&velocity[index_j]);
+                                        float dvx = vel_i.x - vel4_j.x;
+                                        float dvy = vel_i.y - vel4_j.y;
+                                        float dvz = vel_i.z - vel4_j.z;
+                                        float weight = m_j / fmaxf(rho_j, RHO_EPSILON);
+                                        Dxx += weight * dvx * gWx;
+                                        Dyy += weight * dvy * gWy;
+                                        Dzz += weight * dvz * gWz;
+                                        Dxy += 0.5f * weight * (dvx * gWy + dvy * gWx);
+                                        Dxz += 0.5f * weight * (dvx * gWz + dvz * gWx);
+                                        Dyz += 0.5f * weight * (dvy * gWz + dvz * gWy);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Write neighbor count
+    neighbor_count_out[index_i] = nl_count;
+
+    // PostCalc (identical to K_Step1)
+    float density = c_precalc.poly6_coeff * sum_density;
+    float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
+    density_out[index_i] = fmaxf(density, rho_floor);
+    pressure_out[index_i] = compute_pressure(density_out[index_i], behavior_i, mat_id_i);
+
+    float cp_i = c_materials[mat_id_i].heat_capacity;
+    float rho_i_heat = density_out[index_i];
+    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
+
+    exposure_heat_out[index_i] = c_precalc.poly6_coeff * sum_exposure_heat;
+    exposure_corrode_out[index_i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+
+    float omega_mag = sqrtf(omega.x * omega.x + omega.y * omega.y + omega.z * omega.z);
+    vorticity_out[index_i] = make_float4(omega.x, omega.y, omega.z, omega_mag);
+    normal_out[index_i] = make_float4(normal.x, normal.y, normal.z, neighbor_count);
+
+    if (dye_on) {
+        dye_rate_out[index_i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
+    }
+
+    if (is_granular) {
+        float D_sq = Dxx * Dxx + Dyy * Dyy + Dzz * Dzz
+                   + 2.0f * (Dxy * Dxy + Dxz * Dxz + Dyz * Dyz);
+        shear_rate_out[index_i] = sqrtf(fmaxf(2.0f * D_sq, 0.0f));
+    } else {
+        shear_rate_out[index_i] = 0.0f;
+    }
+
+    position[index_i].w = density_out[index_i];
+}

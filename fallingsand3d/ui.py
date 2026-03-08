@@ -326,6 +326,7 @@ class UI:
         self._speed_log: float = 0.0  # log10(speed), maps to 0.1-10.0
         self._max_particles_idx: int = 0  # index into _MAX_PARTICLES_OPTIONS
         self._world_half_size: float = 1.0  # current world half-extent
+        self._vsync_enabled: bool = True  # matches main.py swap_interval(1)
 
         # SDF object drag state
         self._selected_sdf_id: Optional[int] = None
@@ -781,6 +782,14 @@ class UI:
             if changed:
                 sim.timing_enabled = new_timing
 
+            imgui.same_line()
+
+            # Vsync toggle
+            changed, new_vsync = imgui.checkbox("Vsync", self._vsync_enabled)
+            if changed:
+                self._vsync_enabled = new_vsync
+                glfw.swap_interval(1 if new_vsync else 0)
+
             # Solver dropdown
             imgui.separator()
             preview = PROFILE_NAMES[self._solver_idx]
@@ -912,7 +921,7 @@ class UI:
                 for obj in objects:
                     oid = obj["id"]
                     type_name = _SDF_TYPE_NAMES[obj["type"]] if obj["type"] < len(_SDF_TYPE_NAMES) else "?"
-                    expanded, _ = imgui.collapsing_header(f"{type_name} #{oid}")
+                    expanded = imgui.collapsing_header(f"{type_name} #{oid}")
                     if expanded:
                         # Delete button
                         imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.7, 0.1, 0.1, 1))

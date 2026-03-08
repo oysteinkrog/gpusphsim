@@ -99,8 +99,26 @@ class Simulation:
         # --- CUDA graph capture state ---
         self._sort_perm = cupy.empty(world.max_particles, dtype=cupy.uint32)
         self._frame_counter_d = cupy.zeros(1, dtype=cupy.uint32)
-        self._cuda_graph = None   # cupy.cuda.Graph or None
-        self._graph_n = 0         # exact n used when graph was captured
+        # Two-graph system: separate graphs for full-sort and gather-only paths
+        # so sort-skip decisions don't invalidate the graph.
+        self._graph_full_sort = None      # cupy.cuda.Graph for full-sort path
+        self._graph_gather_only = None    # cupy.cuda.Graph for gather-only path
+        self._graph_full_sort_n = 0       # n when full-sort graph was captured
+        self._graph_gather_only_n = 0     # n when gather-only graph was captured
+
+        # --- Async readback (1-frame-deferred, avoids GPU→CPU sync stalls) ---
+        import ctypes as _ctypes
+        self._readback_stream = cupy.cuda.Stream(non_blocking=True)
+        self._readback_event = cupy.cuda.Event()  # for cross-stream sync
+        # Pinned host buffers for async D2H copy
+        self._pinned_displacement = cupy.cuda.alloc_pinned_memory(4)
+        self._pinned_foam_count = cupy.cuda.alloc_pinned_memory(4)
+        # Zero-init pinned buffers
+        _ctypes.memset(self._pinned_displacement.ptr, 0, 4)
+        _ctypes.memset(self._pinned_foam_count.ptr, 0, 4)
+        # Previous frame values (used for decisions while async copy is in-flight)
+        self._last_max_disp_uint = 0
+        self._last_foam_count = 0
 
         # --- Counting sort scratch buffers (allocated in _upload_constants) ---
         self._cs_histogram = None
@@ -285,9 +303,8 @@ class Simulation:
         """Change the world half-extent and re-upload all constants."""
         self._world_half_size = half_size
         self._upload_constants()
-        # Invalidate CUDA graph (grid changed) and reset sort skip
-        self._cuda_graph = None
-        self._graph_n = 0
+        # Invalidate CUDA graphs (grid changed) and reset sort skip
+        self._invalidate_graphs()
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
 
@@ -297,9 +314,10 @@ class Simulation:
         wmin = (-hs, -hs, -hs)
         wmax = (hs, hs, hs)
 
-        # Build shared param structs
+        # Build shared param structs -- auto-size hash table for particle count
         grid_params, table_size = hash_sort.build_grid_params_for_world(
             wmin, wmax, self._h,
+            num_particles=self.world._high_water,
         )
 
         # Reallocate cell arrays if table size changed
@@ -454,9 +472,8 @@ class Simulation:
                 xsph_epsilon=0.1,
             ))
 
-        # Invalidate CUDA graph and reset grid reuse
-        self._cuda_graph = None
-        self._graph_n = 0
+        # Invalidate CUDA graphs and reset grid reuse
+        self._invalidate_graphs()
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
         # Reset spawn damping for new solver
@@ -518,6 +535,28 @@ class Simulation:
             )
 
         return n_total
+
+    def _ensure_table_size(self, n: int) -> None:
+        """Resize hash table if particle count outgrew it (load factor > 1)."""
+        needed = hash_sort.compute_table_size(n)
+        if needed != self._table_size:
+            self._table_size = needed
+            self._cell_start = cupy.empty(needed, dtype=cupy.uint32)
+            self._cell_end = cupy.empty(needed, dtype=cupy.uint32)
+            self._cell_wake_flags = wake.allocate_cell_wake_flags(needed)
+            self._cs_histogram = cupy.zeros(needed, dtype=cupy.uint32)
+            self._cs_write_offset = cupy.zeros(needed, dtype=cupy.uint32)
+            # Re-upload c_grid to all modules with new table_size
+            hs = self._world_half_size
+            wmin, wmax = (-hs, -hs, -hs), (hs, hs, hs)
+            grid_params, _ = hash_sort.build_grid_params_for_world(
+                wmin, wmax, self._h, num_particles=n,
+            )
+            for mod in [hash_sort, fused_sort_reorder_build, counting_sort,
+                        step1, step2, wake, implicit_st]:
+                mod.upload_grid_params(grid_params)
+            # Invalidate CUDA graphs (grid params changed)
+            self._invalidate_graphs()
 
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
@@ -1013,34 +1052,42 @@ class Simulation:
             max_displacement=w.max_displacement,
         )
 
-    def _capture_graph(self, n: int) -> None:
+    def _invalidate_graphs(self) -> None:
+        """Invalidate both CUDA graphs (call when constants/solver/grid changes)."""
+        self._graph_full_sort = None
+        self._graph_gather_only = None
+        self._graph_full_sort_n = 0
+        self._graph_gather_only_n = 0
+
+    def _capture_graph(self, n: int, gather_only: bool) -> cupy.cuda.Graph:
         """Capture the graph-body into a CUDA graph for replay.
 
-        Creates a non-default capture stream, records all ops 3-14, and
-        stores the resulting Graph object for repeated launch().
+        Creates a non-default capture stream, records all ops, and returns
+        the resulting Graph object for repeated launch().
         """
         s = cupy.cuda.Stream(non_blocking=True)
         with s:
             s.begin_capture()
             self._run_graph_body(n)
-            self._cuda_graph = s.end_capture()
-        self._graph_n = n
+            graph = s.end_capture()
+        if gather_only:
+            self._graph_gather_only = graph
+            self._graph_gather_only_n = n
+        else:
+            self._graph_full_sort = graph
+            self._graph_full_sort_n = n
+        return graph
 
     def _sim_step(self, n: int) -> None:
         """Run one simulation substep on n particles.
 
-        Pipeline (fully graph-capturable when sort is not skipped):
-          1. Counting sort: hash + histogram + prefix_sum + scatter + cell_end
+        Pipeline (fully graph-capturable):
+          1. Counting sort (or gather-only if sort skipped)
           2. Step1/Step2/Integrate/Wake (solver-specific)
 
-        All operations are inside the CUDA graph — no Thrust sync needed.
-        Graph strategy: when n changes (brush painting, compaction), fall back
-        to direct kernel launches — no graph capture overhead. When n is stable
-        across substeps, capture a graph and replay it for subsequent calls.
-
-        Grid reuse: when _sort_skip_next is True, counting sort is replaced by
-        a cheaper gather_reorder. This path bypasses CUDA graph capture since
-        the graph topology changes.
+        Two-graph strategy: separate graphs for full-sort and gather-only paths
+        so sort-skip decisions don't invalidate graphs. When n changes, fall back
+        to direct kernel launches (no graph capture overhead).
         """
         w = self.world
 
@@ -1055,9 +1102,8 @@ class Simulation:
             t = self._spawn_substep / self._damping_duration
             damping = 0.8 * (1.0 - t)  # linear ramp 0.8 -> 0.0
             self._spawn_substep += 1
-            # Invalidate CUDA graph during damping (constant changes each step)
-            self._cuda_graph = None
-            self._graph_n = 0
+            # Invalidate CUDA graphs during damping (constant changes each step)
+            self._invalidate_graphs()
         else:
             damping = 0.0
         # Upload damping to c_sim.velocity_damping (reuse _upload_dt which
@@ -1072,40 +1118,48 @@ class Simulation:
         rbm = self.rigid_body_manager
         if rbm.num_bodies > 0 and rbm.num_boundary_particles > 0:
             n = self._update_rigid_boundary(n)
-            if self._graph_n != n:
-                self._cuda_graph = None
 
         # Zero rigid body force/torque accumulators before solver
+        graphs_disabled = False
         if rbm.num_bodies > 0:
             rbm.rigid_forces.fill(0)
             rbm.rigid_torques.fill(0)
             # Disable CUDA graph when rigid bodies are active
-            self._cuda_graph = None
-            self._graph_n = 0
+            graphs_disabled = True
 
         # --- Update kinematic SDF objects ---
         if self.sdf_manager._motions:
             self.sdf_manager.update_kinematics(self.sim_time, self.dt)
             self.sdf_manager.upload_if_dirty()
 
-        # When sort is being skipped, bypass CUDA graph (different kernel sequence)
-        if self._sort_skip_next:
-            self._cuda_graph = None
-            self._graph_n = 0
+        # Select graph based on sort-skip state
+        is_gather = self._sort_skip_next
+        if is_gather:
+            graph = self._graph_gather_only
+            graph_n = self._graph_gather_only_n
+        else:
+            graph = self._graph_full_sort
+            graph_n = self._graph_full_sort_n
+
+        if graphs_disabled:
+            # Rigid bodies active — always run directly, no graph
             self._run_graph_body(n)
-        elif self._graph_n != n:
-            # n changed — invalidate graph, run directly (no capture overhead)
-            self._cuda_graph = None
-            self._graph_n = n
+        elif graph_n != n:
+            # n changed — invalidate this path's graph, run directly
+            if is_gather:
+                self._graph_gather_only = None
+                self._graph_gather_only_n = n
+            else:
+                self._graph_full_sort = None
+                self._graph_full_sort_n = n
             self._run_graph_body(n)
-        elif self._cuda_graph is None:
+        elif graph is None:
             # n stable but no graph yet — capture then launch
-            # (capture records but does NOT execute)
-            self._capture_graph(n)
-            self._cuda_graph.launch()
+            g = self._capture_graph(n, gather_only=is_gather)
+            g.launch()
         else:
             # n stable, graph exists — fast replay
-            self._cuda_graph.launch()
+            graph.launch()
 
         # Rigid body integration (outside graph -- forces vary per substep)
         rbm = self.rigid_body_manager
@@ -1385,16 +1439,15 @@ class Simulation:
         if sim_steps > 0:
             self._frame_counter += 1
 
-        # --- Grid reuse decision for next frame ---
+        # --- Grid reuse decision for next frame (uses 1-frame-old async readback) ---
         # max_displacement accumulates since the last full sort (atomicMax across all
-        # substeps). Read once at the frame boundary (same sync as foam_count).
-        # Skip sort if: displacement below threshold AND consecutive skip limit not hit.
-        # WCSPH: threshold = (0.25*h)^2, max 4 consecutive skips
-        # PBF/DFSPH: threshold = (0.15*h)^2, max 2 consecutive skips (tighter
-        #   because stale neighbors degrade constraint convergence)
+        # substeps). We use last frame's async readback value — safe because the
+        # 0.25h threshold is conservative and 1-frame lag is negligible.
         if sim_steps > 0:
             import struct
-            max_disp_sq_uint = int(self.world.max_displacement[0])
+            import ctypes as _ctypes
+            # Read last frame's async readback result (no sync needed)
+            max_disp_sq_uint = self._last_max_disp_uint
             if max_disp_sq_uint > 0:
                 max_disp_sq = struct.unpack('f', struct.pack('I', max_disp_sq_uint))[0]
             else:
@@ -1413,6 +1466,30 @@ class Simulation:
             else:
                 self._sort_skip_next = False
                 self._sort_skip_consecutive = 0
+
+            # Latch the pinned values from the PREVIOUS frame's async copy
+            # (by now that copy has completed — a full frame of GPU work elapsed)
+            self._last_max_disp_uint = _ctypes.c_uint32.from_address(
+                self._pinned_displacement.ptr).value
+            self._last_foam_count = _ctypes.c_uint32.from_address(
+                self._pinned_foam_count.ptr).value
+
+            # Record event on default stream so readback stream waits for kernels
+            self._readback_event.record()
+            self._readback_stream.wait_event(self._readback_event)
+            # Launch async D2H copy of THIS frame's data for NEXT frame's decision
+            cupy.cuda.runtime.memcpyAsync(
+                self._pinned_displacement.ptr,
+                self.world.max_displacement.data.ptr,
+                4, cupy.cuda.runtime.memcpyDeviceToHost,
+                self._readback_stream.ptr,
+            )
+            cupy.cuda.runtime.memcpyAsync(
+                self._pinned_foam_count.ptr,
+                self.world.foam_count.data.ptr,
+                4, cupy.cuda.runtime.memcpyDeviceToHost,
+                self._readback_stream.ptr,
+            )
         # else: sim_steps==0 — keep previous _sort_skip_next
 
         # Periodic compaction: remove dead particles from the active range
@@ -1475,14 +1552,14 @@ class Simulation:
     def copy_foam_to_vbo(self, cuda_foam_pos) -> int:
         """Copy foam positions to a mapped GL VBO.
 
-        Returns the number of active foam particles (requires GPU->CPU sync,
-        but this happens once per frame at the rendering boundary, not per substep).
+        Returns the number of active foam particles. Uses 1-frame-deferred
+        async readback (no GPU->CPU sync stall).
         """
         w = self.world
         if not w.foam_enabled:
             return 0
 
-        foam_n = int(w.foam_count[0])  # single int32 readback at frame boundary
+        foam_n = self._last_foam_count  # from async readback (1 frame old)
         if foam_n <= 0:
             return 0
 

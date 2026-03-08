@@ -269,7 +269,7 @@ class Renderer:
 
         # SSFR state
         self.ssfr_enabled = False
-        self.ssfr_blur_radius = 15.0
+        self.ssfr_blur_radius = 10.0
         self.ssfr_depth_range = 0.15
         self.ssfr_absorption_scale = 5.0
         self.ssfr_fresnel_power = 5.0

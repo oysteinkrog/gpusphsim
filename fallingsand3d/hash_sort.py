@@ -28,15 +28,34 @@ import numpy as np
 
 CELL_SIZE = np.float32(0.04)
 
-# Fixed hash table size -- works for any world size.
-# 2^18 = 262144 buckets.  At ~30 particles/cell with 500K particles,
-# ~17K active cells → ~6.5% load factor.  Collisions are rare and harmless
-# (just extra distance checks in neighbor loops).
+# Default hash table size for small particle counts.
+# Dynamically scaled up via compute_table_size() for large N.
 TABLE_SIZE = 262144
 TABLE_MASK = TABLE_SIZE - 1
 
 # Backward-compat alias for old test files
 NUM_CELLS = TABLE_SIZE
+
+
+def compute_table_size(num_particles: int) -> int:
+    """Compute hash table size for given particle count.
+
+    Sized so the *occupied cell count* has good load factor.
+    At spacing=0.02 / cell_size=0.04: ~8 particles per cell,
+    so num_cells ≈ N/8.  We want table ≈ 4x num_cells = N/2.
+    Minimum: 262144 (2^18).  Maximum: 1048576 (2^20) to limit
+    memset/histogram overhead.
+    """
+    target = max(num_particles // 2, 262144)
+    target = min(target, 1048576)  # cap at 1M entries
+    # Round up to next power of 2
+    target -= 1
+    target |= target >> 1
+    target |= target >> 2
+    target |= target >> 4
+    target |= target >> 8
+    target |= target >> 16
+    return target + 1
 
 # ---------------------------------------------------------------------------
 # Numpy dtype matching ``struct GridParams`` in common.cuh
@@ -83,26 +102,36 @@ def build_grid_params_for_world(
     grid_min,
     grid_max,
     cell_size: float = 0.04,
+    num_particles: int = 0,
 ) -> Tuple[np.ndarray, int]:
     """Build a GridParams struct from arbitrary world bounds and cell size.
+
+    Parameters
+    ----------
+    num_particles : int
+        Active particle count. When > 0, hash table is auto-sized to
+        maintain ~50% load factor. When 0, uses default TABLE_SIZE.
 
     Returns
     -------
     params : np.ndarray
         A single GridParams structured array element.
     table_size : int
-        Hash table size (fixed, independent of world bounds).
+        Hash table size (dynamically scaled based on particle count).
     """
     gmin = np.array(grid_min, dtype=np.float32)
     inv_cs = 1.0 / cell_size
     grid_delta = np.array([inv_cs, inv_cs, inv_cs], dtype=np.float32)
 
+    ts = compute_table_size(num_particles) if num_particles > 0 else TABLE_SIZE
+    tm = ts - 1
+
     params = np.zeros(1, dtype=GRID_PARAMS_DTYPE)
     params[0]["grid_min"] = gmin
     params[0]["grid_delta"] = grid_delta
-    params[0]["table_size"] = np.uint32(TABLE_SIZE)
-    params[0]["table_mask"] = np.uint32(TABLE_MASK)
-    return params, TABLE_SIZE
+    params[0]["table_size"] = np.uint32(ts)
+    params[0]["table_mask"] = np.uint32(tm)
+    return params, ts
 
 
 # ---------------------------------------------------------------------------

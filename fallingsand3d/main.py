@@ -75,7 +75,7 @@ def main():
         raise RuntimeError("Failed to create GLFW window")
 
     glfw.make_context_current(window)
-    glfw.swap_interval(0)  # no vsync for FPS measurement
+    glfw.swap_interval(1)  # vsync ON by default (stable substep counts)
 
     # Verify OpenGL version
     gl_version = glGetString(GL_VERSION)
