@@ -749,9 +749,12 @@ class UI:
                 if imgui.button("Load", imgui.ImVec2(100, 28)):
                     camera = self._camera_ref
                     if camera is not None and self._load_selected < len(file_list):
-                        n = load_scene(world, sim, camera, file_list[self._load_selected])
-                        self._save_status = f"Loaded: {n:,} particles"
-                        changes['_scene_loaded'] = True
+                        try:
+                            n = load_scene(world, sim, camera, file_list[self._load_selected])
+                            self._save_status = f"Loaded: {n:,} particles"
+                            changes['_scene_loaded'] = True
+                        except Exception as e:
+                            self._save_status = f"Error: {e}"
             else:
                 imgui.text("No saves found")
         imgui.end()

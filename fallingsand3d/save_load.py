@@ -58,6 +58,7 @@ def save_scene(world, sim, camera, filename: str) -> str:
         temperature=world.temperature[:n].get(),
         health=world.health[:n].get(),
         lifetime=world.lifetime[:n].get(),
+        mass=world.mass[:n].get(),
         particle_dye=world.particle_dye[:n].get(),
         density=world.density[:n].get(),
     )
@@ -85,6 +86,13 @@ def load_scene(world, sim, camera, filename: str) -> int:
             f"Increase max_particles to at least {n:,} before loading."
         )
 
+    # Validate all required keys exist before modifying world state
+    required = ["position", "velocity", "packed_info", "temperature",
+                "health", "lifetime", "mass", "particle_dye", "density"]
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ValueError(f"Save file missing arrays: {missing}")
+
     # Reset world
     world.packed_info[:] = 0
     world._high_water = 0
@@ -96,10 +104,15 @@ def load_scene(world, sim, camera, filename: str) -> int:
     world.temperature[:n] = cp.asarray(data["temperature"])
     world.health[:n] = cp.asarray(data["health"])
     world.lifetime[:n] = cp.asarray(data["lifetime"])
+    world.mass[:n] = cp.asarray(data["mass"])
     world.particle_dye[:n] = cp.asarray(data["particle_dye"])
     world.density[:n] = cp.asarray(data["density"])
     world.veleval[:n] = world.velocity[:n]
     world._high_water = n
+
+    # Rebuild _spawned_material_ids from loaded packed_info
+    unique_mats = cp.unique(world.packed_info[:n] & 0xFF).get()
+    world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)
 
     # Restore simulation params
     if "world_half_size" in header:

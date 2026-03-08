@@ -1512,7 +1512,7 @@ def load_avalanche_ramp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Sand layer on top
     n = world.spawn_cube(
         min_corner=(-0.65, 0.9, -0.3),
-        max_corner=(-0.35, 1.2, 0.3),
+        max_corner=(-0.35, 0.95, 0.3),
         material_id=SAND,
         spacing=0.022,
     )

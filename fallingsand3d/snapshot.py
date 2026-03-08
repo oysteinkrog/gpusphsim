@@ -30,6 +30,7 @@ class SnapshotRing:
             "temperature": cp.empty(n, dtype=cp.float32),
             "health": cp.empty(n, dtype=cp.float32),
             "lifetime": cp.empty(n, dtype=cp.float32),
+            "mass": cp.empty(n, dtype=cp.float32),
             "particle_dye": cp.empty((n, 4), dtype=cp.float32),
             "high_water": 0,
         }
@@ -51,6 +52,7 @@ class SnapshotRing:
         cp.copyto(slot["temperature"][:n], world.temperature[:n])
         cp.copyto(slot["health"][:n], world.health[:n])
         cp.copyto(slot["lifetime"][:n], world.lifetime[:n])
+        cp.copyto(slot["mass"][:n], world.mass[:n])
         cp.copyto(slot["particle_dye"][:n], world.particle_dye[:n])
         slot["high_water"] = n
 
@@ -93,9 +95,19 @@ class SnapshotRing:
         cp.copyto(world.temperature[:n], slot["temperature"][:n])
         cp.copyto(world.health[:n], slot["health"][:n])
         cp.copyto(world.lifetime[:n], slot["lifetime"][:n])
+        cp.copyto(world.mass[:n], slot["mass"][:n])
         cp.copyto(world.particle_dye[:n], slot["particle_dye"][:n])
         cp.copyto(world.veleval[:n], world.velocity[:n])
         world._high_water = n
+
+        # Rebuild _spawned_material_ids from restored packed_info
+        # NOTE: .get() is acceptable here — undo is user-initiated, not hot path
+        unique_mats = cp.unique(world.packed_info[:n] & 0xFF).get()
+        world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)
+
+        # Rewind ring buffer so future snapshots don't contain stale "future" state
+        self._write_idx = (self._write_idx - steps_back + 1) % self.max_snapshots
+        self._count = max(0, self._count - steps_back)
 
         return True
 

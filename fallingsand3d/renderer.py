@@ -1122,8 +1122,9 @@ void main() {
             return
         self.cuda_col.close()
         self.cuda_pos.close()
+        self.cuda_vel.close()
         self.cuda_foam.close()
-        glDeleteBuffers(5, [self._vbo_pos, self._vbo_col, self._vbo_foam, self._vbo_cursor, self._vbo_skybox])
+        glDeleteBuffers(6, [self._vbo_pos, self._vbo_col, self._vbo_vel, self._vbo_foam, self._vbo_cursor, self._vbo_skybox])
         glDeleteVertexArrays(1, [self._vao])
         glDeleteVertexArrays(1, [self._vao_foam])
         glDeleteVertexArrays(1, [self._vao_fs])

@@ -145,6 +145,9 @@ def main():
             if snapshots.restore(world):
                 renderer.num_active = world._high_water
                 sim._invalidate_graphs()
+                sim.reset_spawn_damping()
+                active_spawner = None
+                spawner_frame_counter = 0
                 with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                     sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
                 print(f"Undo: restored to {world._high_water:,} particles")
