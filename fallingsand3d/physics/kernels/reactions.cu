@@ -18,6 +18,8 @@
 
 #include "common.cuh"
 
+/* Forward declare grid helpers for blast wave kernel */
+
 /* ======================================================================
  * Material IDs (must match materials.py)
  * ====================================================================== */
@@ -248,13 +250,12 @@ void K_Reactions(
         float damage = exp_corrode * dt;
         hlth -= damage;
         if (hlth <= 0.0f) {
-            // Particle dies from corrosion -- add to freelist
-            packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
-            health[i] = 0.0f;
-            if (dead_indices != 0 && dead_count != 0) {
-                uint idx = atomicAdd(dead_count, 1u);
-                dead_indices[idx] = i;
-            }
+            // Corrosion flash: brief orange spark instead of instant death
+            // Low temp (400K) prevents chain ignition of nearby combustibles
+            packed_info[i] = MAKE_PACKED(MAT_FIRE, GAS);
+            health[i] = 1.0f;
+            temperature[i] = 400.0f;
+            lifetime[i] = 0.08f;  // very short-lived spark
             return;
         }
         health[i] = hlth;
@@ -298,5 +299,78 @@ void K_Reactions(
             return;
         }
         lifetime[i] = lt;
+    }
+}
+
+/* ======================================================================
+ * K_BlastWave -- radial impulse from freshly-exploded gunpowder particles.
+ *
+ * Scans for FIRE particles with lifetime == GUNPOWDER_FIRE_LIFETIME (just
+ * converted this frame). For each blast source, neighbor loop applies
+ * radial impulse to all particles within smoothing_length h.
+ * Uses atomicAdd on velocity for thread safety.
+ * ====================================================================== */
+
+#define BLAST_SPEED 15.0f
+
+extern "C" __global__
+void K_BlastWave(
+    uint            numParticles,
+    const float4*   __restrict__ sorted_position,
+    float4*         __restrict__ velocity,          // read+write (atomicAdd)
+    const uint*     __restrict__ sorted_packed_info,
+    const float*    __restrict__ sorted_lifetime,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float           h                               // smoothing length
+) {
+    uint i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numParticles) return;
+
+    uint pi = sorted_packed_info[i];
+    uint mat_id = GET_MATERIAL_ID(pi);
+
+    // Only process freshly-exploded gunpowder (FIRE with lifetime == GUNPOWDER_FIRE_LIFETIME)
+    if (mat_id != MAT_FIRE) return;
+    float lt = sorted_lifetime[i];
+    // Accept lifetime close to GUNPOWDER_FIRE_LIFETIME (within 1 dt tolerance)
+    if (lt < GUNPOWDER_FIRE_LIFETIME - 0.01f || lt > GUNPOWDER_FIRE_LIFETIME + 0.01f) return;
+
+    float4 pos_i4 = sorted_position[i];
+    float3 pos_i = make_float3(pos_i4.x, pos_i4.y, pos_i4.z);
+    float h_sq = h * h;
+
+    // Neighbor loop (27-cell stencil)
+    int3 cell_i = calcGridCell(pos_i);
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                uint hash = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
+                uint start = cell_start[hash];
+                if (start == 0xFFFFFFFF) continue;
+                uint end = cell_end[hash];
+                for (uint j = start; j < end; j++) {
+                    if (j == i) continue;
+                    float4 pos_j4 = sorted_position[j];
+                    float3 diff = make_float3(
+                        pos_j4.x - pos_i.x,
+                        pos_j4.y - pos_i.y,
+                        pos_j4.z - pos_i.z
+                    );
+                    float dist_sq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+                    if (dist_sq >= h_sq || dist_sq < 1e-10f) continue;
+
+                    float dist = sqrtf(dist_sq);
+                    float inv_dist = 1.0f / dist;
+                    float falloff = 1.0f - dist / h;  // linear falloff
+                    float impulse = BLAST_SPEED * falloff;
+
+                    // Radial direction from blast center to neighbor
+                    atomicAdd(&velocity[j].x, diff.x * inv_dist * impulse);
+                    atomicAdd(&velocity[j].y, diff.y * inv_dist * impulse);
+                    atomicAdd(&velocity[j].z, diff.z * inv_dist * impulse);
+                }
+            }
+        }
     }
 }

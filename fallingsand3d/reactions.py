@@ -96,6 +96,15 @@ def upload_materials(materials_data: np.ndarray) -> None:
     )
 
 
+def upload_grid_params(grid_params: np.ndarray) -> None:
+    """Upload GridParams to ``__constant__ GridParams c_grid``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_grid")  # type: ignore[union-attr]
+    cupy.cuda.runtime.memcpy(
+        int(d_ptr), grid_params.ctypes.data, grid_params.nbytes, 1
+    )
+
+
 # ---------------------------------------------------------------------------
 # Kernel launch
 # ---------------------------------------------------------------------------
@@ -184,5 +193,47 @@ def compute_reactions(
             sorted_exposure_corrode,
             d_dead_indices,
             d_dead_count,
+        ),
+    )
+
+
+BLAST_BLOCK_SIZE = 256
+
+
+def compute_blast_wave(
+    sorted_position: cupy.ndarray,
+    sorted_velocity: cupy.ndarray,
+    sorted_packed_info: cupy.ndarray,
+    sorted_lifetime: cupy.ndarray,
+    cell_start: cupy.ndarray,
+    cell_end: cupy.ndarray,
+    smoothing_length: float = 0.04,
+) -> None:
+    """Launch K_BlastWave kernel for radial impulse from gunpowder explosions.
+
+    Should be called after compute_reactions(), before step2.
+    """
+    n = sorted_packed_info.shape[0]
+    if n == 0:
+        return
+
+    module = _get_module()
+    kernel = module.get_function("K_BlastWave")
+
+    grid = ((n + BLAST_BLOCK_SIZE - 1) // BLAST_BLOCK_SIZE,)
+    block = (BLAST_BLOCK_SIZE,)
+
+    kernel(
+        grid,
+        block,
+        (
+            np.uint32(n),
+            sorted_position,
+            sorted_velocity,
+            sorted_packed_info,
+            sorted_lifetime,
+            cell_start,
+            cell_end,
+            np.float32(smoothing_length),
         ),
     )

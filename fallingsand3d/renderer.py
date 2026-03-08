@@ -262,6 +262,10 @@ class Renderer:
         self._width = width
         self._height = height
 
+        # Motion blur state
+        self.motion_blur_enabled = False
+        self.trail_scale = 1.0
+
         # Foam state
         self.foam_enabled = False
         self.num_foam = 0           # number of active foam particles
@@ -285,6 +289,7 @@ class Renderer:
         self._u_points_mvp = glGetUniformLocation(self._prog_points, "uMVP")
         self._u_points_mv = glGetUniformLocation(self._prog_points, "uMV")
         self._u_points_ps = glGetUniformLocation(self._prog_points, "uPointScale")
+        self._u_points_trail = glGetUniformLocation(self._prog_points, "uTrailScale")
 
         # Non-FLUID point sprite (SSFR on): culls FLUID particles
         self._prog_nonfluid = _build_program("particle_nonfluid.vert", "particle.frag")
@@ -503,6 +508,12 @@ void main() {
         glBindBuffer(GL_ARRAY_BUFFER, self._vbo_col)
         glBufferData(GL_ARRAY_BUFFER, col_nbytes, None, GL_DYNAMIC_DRAW)
 
+        # Velocity VBO for motion blur (same size as position)
+        vel_nbytes = pos_nbytes
+        self._vbo_vel = int(glGenBuffers(1))
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_vel)
+        glBufferData(GL_ARRAY_BUFFER, vel_nbytes, None, GL_DYNAMIC_DRAW)
+
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
         # --- VAO for particle drawing ---
@@ -514,6 +525,9 @@ void main() {
         glBindBuffer(GL_ARRAY_BUFFER, self._vbo_col)
         glEnableVertexAttribArray(1)
         glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_vel)
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
         glBindVertexArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
@@ -538,6 +552,7 @@ void main() {
         # --- CUDA interop ---
         self.cuda_pos = CudaGLBuffer(self._vbo_pos, pos_nbytes)
         self.cuda_col = CudaGLBuffer(self._vbo_col, col_nbytes)
+        self.cuda_vel = CudaGLBuffer(self._vbo_vel, vel_nbytes)
         self.cuda_foam = CudaGLBuffer(self._vbo_foam, foam_nbytes)
 
         # --- SSFR FBOs (created lazily or on resize) ---
@@ -671,6 +686,8 @@ void main() {
         glUniformMatrix4fv(self._u_points_mvp, 1, GL_TRUE, mvp)
         glUniformMatrix4fv(self._u_points_mv, 1, GL_TRUE, view)
         glUniform1f(self._u_points_ps, self.point_scale)
+        ts = self.trail_scale if self.motion_blur_enabled else 0.0
+        glUniform1f(self._u_points_trail, ts)
         glBindVertexArray(self._vao)
         glDrawArrays(GL_POINTS, 0, self.num_active)
         glBindVertexArray(0)

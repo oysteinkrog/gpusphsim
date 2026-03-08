@@ -611,12 +611,32 @@ __device__ inline float4 compute_color(uint mat_id, float temperature, float hea
     float r = c_materials[mat_id].color_r;
     float g = c_materials[mat_id].color_g;
     float b = c_materials[mat_id].color_b;
-    if (temperature > 293.0f) {
+
+    // Material-specific heat glow approaching melt point
+    float temp_melt = c_materials[mat_id].temp_melt;
+    if (temp_melt > 501.0f && temperature > 500.0f) {
+        float heat_frac = fminf((temperature - 500.0f) / (temp_melt - 500.0f), 1.0f);
+        heat_frac = fmaxf(heat_frac, 0.0f);
+        // STONE, METAL, SAND, GRAVEL: glow orange-red
+        r = r + (1.0f - r) * heat_frac * 0.8f;
+        g = g * (1.0f - heat_frac * 0.4f) + 0.3f * heat_frac;  // slight orange
+        b = b * (1.0f - heat_frac * 0.9f);
+    }
+    // ICE: glow blue-white as temperature approaches 273K
+    else if (mat_id == 11 && temperature > 250.0f) {  // MAT_ICE=11
+        float ice_frac = fminf((temperature - 250.0f) / 23.0f, 1.0f);  // 250->273K
+        r = r + (1.0f - r) * ice_frac * 0.3f;
+        g = g + (1.0f - g) * ice_frac * 0.1f;
+        b = fminf(b + ice_frac * 0.1f, 1.0f);
+    }
+    // Generic hot tint for other materials
+    else if (temperature > 293.0f) {
         float t_excess = fminf((temperature - 293.0f) / 1000.0f, 1.0f);
         r = r + (1.0f - r) * t_excess;
         g = g * (1.0f - 0.5f * t_excess);
         b = b * (1.0f - 0.8f * t_excess);
     }
+
     float h = fmaxf(fminf(health, 1.0f), 0.0f);
     return make_float4(r * h, g * h, b * h, behavior_to_alpha(behavior));
 }

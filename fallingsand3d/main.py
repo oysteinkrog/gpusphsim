@@ -116,9 +116,14 @@ def main():
     ui = UI(window)
     ui.set_sdf_drag_refs(camera, sim.sdf_manager)
 
+    # Snapshot ring buffer for undo
+    from snapshot import SnapshotRing
+    snapshots = SnapshotRing(max_snapshots=12, max_particles=MAX_PARTICLES)
+    ui.snapshots = snapshots  # expose to UI for timeline display
+
     # Copy initial state to VBOs
-    with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
-        sim.copy_to_vbos(pos_buf, col_buf)
+    with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+        sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
     import cupy
     cupy.cuda.Device().synchronize()
 
@@ -135,6 +140,15 @@ def main():
             return
         if action != glfw.PRESS:
             return
+        # Ctrl+Z = undo (restore previous snapshot)
+        if key == glfw.KEY_Z and (_mods & glfw.MOD_CONTROL):
+            if snapshots.restore(world):
+                renderer.num_active = world._high_water
+                sim._invalidate_graphs()
+                with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+                    sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+                print(f"Undo: restored to {world._high_water:,} particles")
+            return
         if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(_win, True)
         elif key == glfw.KEY_SPACE:
@@ -150,6 +164,7 @@ def main():
             sim._last_frame_time = None
             active_spawner = None
             spawner_frame_counter = 0
+            snapshots.clear()
         elif key == glfw.KEY_EQUAL or key == glfw.KEY_KP_ADD:
             sim.adjust_speed(0.2)
         elif key == glfw.KEY_MINUS or key == glfw.KEY_KP_SUBTRACT:
@@ -241,9 +256,17 @@ def main():
         # --- Simulation substeps ---
         substeps = sim.step_frame()
 
+        # --- Snapshot tick (auto-capture every N frames) ---
+        snapshots.tick(world)
+
         # --- Copy to VBOs (once per frame) ---
+        vel_ctx = renderer.cuda_vel if renderer.motion_blur_enabled else None
         with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
-            sim.copy_to_vbos(pos_buf, col_buf)
+            if vel_ctx is not None:
+                with vel_ctx as vel_buf:
+                    sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+            else:
+                sim.copy_to_vbos(pos_buf, col_buf)
 
         # Update active count for renderer
         renderer.num_active = world._high_water
@@ -300,8 +323,8 @@ def main():
             sim._last_frame_time = None
             active_spawner = None
             spawner_frame_counter = 0
-            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
-                sim.copy_to_vbos(pos_buf, col_buf)
+            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+                sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
         # --- Handle preset loading ---
         preset_name = ui.pending_preset
@@ -323,8 +346,9 @@ def main():
             sim.sim_time = 0.0
             sim._last_frame_time = None
             sim.reset_spawn_damping()
-            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
-                sim.copy_to_vbos(pos_buf, col_buf)
+            snapshots.clear()
+            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+                sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
         # Handle max_particles change
         if 'new_max' in ui_changes:
@@ -341,8 +365,17 @@ def main():
             ui.set_sdf_drag_refs(camera, sim.sdf_manager)
             active_spawner = None
             spawner_frame_counter = 0
-            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
-                sim.copy_to_vbos(pos_buf, col_buf)
+            snapshots = SnapshotRing(max_snapshots=12, max_particles=new_max)
+            ui.snapshots = snapshots
+            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+                sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+
+        # Handle scene loaded from save file or undo restore
+        if '_scene_loaded' in ui_changes:
+            renderer.num_active = world._high_water
+            sim._invalidate_graphs()
+            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+                sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
         # Handle world size change
         if 'new_world_size' in ui_changes:

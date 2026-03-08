@@ -29,17 +29,16 @@ def _clear_world(world: World) -> None:
 def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Sand Castle: tall sand pile with water around the base.
 
-    ~100K sand as a tall conical pile approximated by stacked cubes,
-    ~30K water around the base.
+    ~200K sand as a tall conical pile approximated by stacked cubes,
+    ~100K water around the base. Total ~300K.
     """
     _clear_world(world)
     total = 0
 
-    # Sand pile: tall structure with wide base, narrowing upward
-    # Main body - wide base (spacing=0.02 for ~100K total sand)
+    # Sand pile: wide base, narrowing upward
     n = world.spawn_cube(
-        min_corner=(-0.5, -0.9, -0.5),
-        max_corner=(0.5, -0.2, 0.5),
+        min_corner=(-0.6, -0.9, -0.6),
+        max_corner=(0.6, -0.1, 0.6),
         material_id=SAND,
         spacing=0.02,
     )
@@ -47,8 +46,8 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Narrower middle section
     n = world.spawn_cube(
-        min_corner=(-0.3, -0.2, -0.3),
-        max_corner=(0.3, 0.3, 0.3),
+        min_corner=(-0.4, -0.1, -0.4),
+        max_corner=(0.4, 0.4, 0.4),
         material_id=SAND,
         spacing=0.02,
     )
@@ -56,45 +55,38 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Tower top
     n = world.spawn_cube(
-        min_corner=(-0.15, 0.3, -0.15),
-        max_corner=(0.15, 0.7, 0.15),
+        min_corner=(-0.2, 0.4, -0.2),
+        max_corner=(0.2, 0.8, 0.2),
         material_id=SAND,
         spacing=0.02,
     )
     total += n
 
     # Water around the base (4 slabs surrounding the pile)
-    # Front
     n = world.spawn_cube(
-        min_corner=(-0.8, -0.9, 0.4),
-        max_corner=(0.8, -0.4, 0.8),
+        min_corner=(-0.9, -0.9, 0.5),
+        max_corner=(0.9, -0.2, 0.9),
         material_id=WATER,
         spacing=0.02,
     )
     total += n
-
-    # Back
     n = world.spawn_cube(
-        min_corner=(-0.8, -0.9, -0.8),
-        max_corner=(0.8, -0.4, -0.4),
+        min_corner=(-0.9, -0.9, -0.9),
+        max_corner=(0.9, -0.2, -0.5),
         material_id=WATER,
         spacing=0.02,
     )
     total += n
-
-    # Left
     n = world.spawn_cube(
-        min_corner=(-0.8, -0.9, -0.4),
-        max_corner=(-0.4, -0.4, 0.4),
+        min_corner=(-0.9, -0.9, -0.5),
+        max_corner=(-0.5, -0.2, 0.5),
         material_id=WATER,
         spacing=0.02,
     )
     total += n
-
-    # Right
     n = world.spawn_cube(
-        min_corner=(0.4, -0.9, -0.4),
-        max_corner=(0.8, -0.4, 0.4),
+        min_corner=(0.5, -0.9, -0.5),
+        max_corner=(0.9, -0.2, 0.5),
         material_id=WATER,
         spacing=0.02,
     )
@@ -107,19 +99,19 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 def load_volcano(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Volcano: stone crater walls with lava pool inside, fire above.
 
-    Stone ring/crater walls, ~50K lava inside, fire particles above.
+    Thicker stone crater, ~150K lava inside, fire above. ~250K total.
     """
     _clear_world(world)
     total = 0
 
     # Stone crater walls - 4 thick walls forming a ring
-    wall_thick = 0.12
-    wall_spacing = 0.03
+    wall_thick = 0.15
+    wall_spacing = 0.025
 
     # Front wall
     n = world.spawn_cube(
-        min_corner=(-0.6, -0.9, 0.4),
-        max_corner=(0.6, 0.1, 0.4 + wall_thick),
+        min_corner=(-0.7, -0.9, 0.45),
+        max_corner=(0.7, 0.2, 0.45 + wall_thick),
         material_id=STONE,
         spacing=wall_spacing,
     )
@@ -127,8 +119,8 @@ def load_volcano(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Back wall
     n = world.spawn_cube(
-        min_corner=(-0.6, -0.9, -0.4 - wall_thick),
-        max_corner=(0.6, 0.1, -0.4),
+        min_corner=(-0.7, -0.9, -0.45 - wall_thick),
+        max_corner=(0.7, 0.2, -0.45),
         material_id=STONE,
         spacing=wall_spacing,
     )
@@ -136,8 +128,8 @@ def load_volcano(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Left wall
     n = world.spawn_cube(
-        min_corner=(-0.6 - wall_thick, -0.9, -0.4 - wall_thick),
-        max_corner=(-0.6, 0.1, 0.4 + wall_thick),
+        min_corner=(-0.7 - wall_thick, -0.9, -0.45 - wall_thick),
+        max_corner=(-0.7, 0.2, 0.45 + wall_thick),
         material_id=STONE,
         spacing=wall_spacing,
     )
@@ -145,28 +137,28 @@ def load_volcano(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Right wall
     n = world.spawn_cube(
-        min_corner=(0.6, -0.9, -0.4 - wall_thick),
-        max_corner=(0.6 + wall_thick, 0.1, 0.4 + wall_thick),
+        min_corner=(0.7, -0.9, -0.45 - wall_thick),
+        max_corner=(0.7 + wall_thick, 0.2, 0.45 + wall_thick),
         material_id=STONE,
         spacing=wall_spacing,
     )
     total += n
 
-    # Lava pool inside the crater (~50K particles)
+    # Lava pool inside the crater (denser, spacing=0.02)
     n = world.spawn_cube(
-        min_corner=(-0.55, -0.9, -0.35),
-        max_corner=(0.55, 0.0, 0.35),
+        min_corner=(-0.65, -0.9, -0.40),
+        max_corner=(0.65, 0.1, 0.40),
         material_id=LAVA,
-        spacing=0.023,
+        spacing=0.02,
     )
     total += n
 
     # Fire particles above the lava
     n = world.spawn_cube(
-        min_corner=(-0.3, -0.1, -0.2),
-        max_corner=(0.3, 0.3, 0.2),
+        min_corner=(-0.4, 0.0, -0.3),
+        max_corner=(0.4, 0.4, 0.3),
         material_id=FIRE,
-        spacing=0.04,
+        spacing=0.035,
     )
     total += n
 
@@ -177,36 +169,37 @@ def load_volcano(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 def load_dam_break(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Dam Break: water behind ice wall, lava heat source on one side.
 
-    ~100K water held behind an ice wall. Lava on the opposite side provides
-    heat to gradually melt the ice, releasing the water.
+    ~200K water held behind an ice wall with lateral push. Lava on the opposite
+    side provides heat to gradually melt the ice, releasing the water. ~280K total.
     """
     _clear_world(world)
     total = 0
 
     # Ice wall (thin, in the middle)
     n = world.spawn_cube(
-        min_corner=(-0.05, -0.9, -0.8),
-        max_corner=(0.05, 0.5, 0.8),
+        min_corner=(-0.05, -0.9, -0.9),
+        max_corner=(0.05, 0.6, 0.9),
         material_id=ICE,
         spacing=0.025,
     )
     total += n
 
-    # Water behind the ice wall (left side, large volume)
+    # Water behind the ice wall (left side, large volume, with lateral push)
     n = world.spawn_cube(
-        min_corner=(-0.9, -0.9, -0.8),
-        max_corner=(-0.05, 0.5, 0.8),
+        min_corner=(-0.9, -0.9, -0.9),
+        max_corner=(-0.05, 0.6, 0.9),
         material_id=WATER,
         spacing=0.02,
+        velocity=(1.0, 0.0, 0.0),
     )
     total += n
 
     # Lava heat source on the right side (close to the ice wall)
     n = world.spawn_cube(
-        min_corner=(0.05, -0.9, -0.3),
-        max_corner=(0.35, -0.3, 0.3),
+        min_corner=(0.05, -0.9, -0.4),
+        max_corner=(0.45, -0.2, 0.4),
         material_id=LAVA,
-        spacing=0.03,
+        spacing=0.025,
     )
     total += n
 
@@ -448,10 +441,20 @@ def load_waterfall(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Water on the top step
+    # Water on the top step (more volume, with downward-right velocity)
     n = world.spawn_cube(
         min_corner=(-0.85, 0.05, -0.6),
-        max_corner=(-0.35, 0.5, 0.6),
+        max_corner=(-0.35, 0.6, 0.6),
+        material_id=WATER,
+        spacing=0.02,
+        velocity=(1.0, -0.5, 0.0),
+    )
+    total += n
+
+    # Additional water pool at bottom
+    n = world.spawn_cube(
+        min_corner=(0.2, -0.9, -0.6),
+        max_corner=(0.85, -0.6, 0.6),
         material_id=WATER,
         spacing=0.02,
     )
@@ -626,12 +629,13 @@ def load_erosion(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Water source above the hilltop
+    # Water source above the hilltop (larger volume, flowing downhill)
     n = world.spawn_cube(
         min_corner=(-0.75, 0.2, -0.5),
-        max_corner=(-0.35, 0.7, 0.5),
+        max_corner=(-0.2, 0.8, 0.5),
         material_id=WATER,
         spacing=0.02,
+        velocity=(1.0, -0.5, 0.0),
     )
     total += n
 
@@ -1404,6 +1408,129 @@ def load_mudslide(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     return total, None
 
 
+def load_canyon(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Canyon: stone walls with gap, water flowing through with initial velocity."""
+    _clear_world(world)
+    total = 0
+
+    # Left canyon wall
+    n = world.spawn_cube(
+        min_corner=(-0.8, -0.9, -0.8),
+        max_corner=(-0.2, 0.3, 0.8),
+        material_id=STONE,
+        spacing=0.03,
+    )
+    total += n
+
+    # Right canyon wall
+    n = world.spawn_cube(
+        min_corner=(0.2, -0.9, -0.8),
+        max_corner=(0.8, 0.3, 0.8),
+        material_id=STONE,
+        spacing=0.03,
+    )
+    total += n
+
+    # Dam wall with gap at bottom
+    n = world.spawn_wall_with_gap(
+        wall_min=(-0.2, -0.9, -0.05),
+        wall_max=(0.2, 0.3, 0.05),
+        gap_y_range=(-0.7, -0.4),
+        material_id=STONE,
+        spacing=0.03,
+    )
+    total += n
+
+    # Water behind the dam (upstream), flowing toward gap
+    n = world.spawn_cube(
+        min_corner=(-0.18, -0.9, -0.75),
+        max_corner=(0.18, 0.2, -0.05),
+        material_id=WATER,
+        spacing=0.02,
+        velocity=(0.0, 0.0, 1.5),
+    )
+    total += n
+
+    print(f"  Canyon: {total:,} particles")
+    return total, None
+
+
+def load_whirlpool(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Whirlpool: stone bowl with water + tangential initial velocity."""
+    _clear_world(world)
+    total = 0
+
+    # Stone bowl
+    n = world.spawn_bowl(
+        center=(0.0, 0.0, 0.0),
+        radius=0.7,
+        thickness=0.08,
+        material_id=STONE,
+        spacing=0.03,
+    )
+    total += n
+
+    # Water filling the bowl with tangential velocity
+    n = world.spawn_cube(
+        min_corner=(-0.5, -0.6, -0.5),
+        max_corner=(0.5, -0.1, 0.5),
+        material_id=WATER,
+        spacing=0.02,
+        velocity=(2.0, 0.0, 0.0),
+    )
+    total += n
+
+    print(f"  Whirlpool: {total:,} particles")
+    return total, None
+
+
+def load_avalanche_ramp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Avalanche Ramp: angled stone ramp with gravel pile at top."""
+    _clear_world(world)
+    total = 0
+
+    # Stone ramp from upper-left to lower-right
+    n = world.spawn_ramp(
+        start_pos=(-0.8, 0.4, 0.0),
+        end_pos=(0.5, -0.5, 0.0),
+        width=1.2,
+        thickness=0.08,
+        material_id=STONE,
+        spacing=0.03,
+    )
+    total += n
+
+    # Gravel pile at the top of the ramp
+    n = world.spawn_cube(
+        min_corner=(-0.75, 0.4, -0.4),
+        max_corner=(-0.3, 0.9, 0.4),
+        material_id=GRAVEL,
+        spacing=0.022,
+    )
+    total += n
+
+    # Sand layer on top
+    n = world.spawn_cube(
+        min_corner=(-0.65, 0.9, -0.3),
+        max_corner=(-0.35, 1.2, 0.3),
+        material_id=SAND,
+        spacing=0.022,
+    )
+    total += n
+
+    # Water pool at the bottom to splash into
+    n = world.spawn_cube(
+        min_corner=(0.3, -0.9, -0.5),
+        max_corner=(0.9, -0.6, 0.5),
+        material_id=WATER,
+        spacing=0.02,
+    )
+    total += n
+
+    print(f"  Avalanche Ramp: {total:,} particles")
+    return total, None
+
+
 # Registry of all presets for UI access
 PRESETS = {
     "Sand Castle": load_sand_castle,
@@ -1435,4 +1562,7 @@ PRESETS = {
     "SDF Lava Lamp": load_sdf_lava_lamp,
     "Archimedes Pool": load_archimedes_pool,
     "Submarine": load_submarine,
+    "Canyon": load_canyon,
+    "Whirlpool": load_whirlpool,
+    "Avalanche Ramp": load_avalanche_ramp,
 }

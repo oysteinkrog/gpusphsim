@@ -288,6 +288,7 @@ class World:
         radius: float,
         material_id: int,
         count: int,
+        velocity: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> int:
         """Spawn particles with random positions inside a sphere.
 
@@ -333,8 +334,15 @@ class World:
         self.position[sl, 2] = sphere_pts[:, 2]
         self.position[sl, 3] = 0.0
 
-        self.velocity[sl] = 0.0
-        self.veleval[sl] = 0.0
+        vx, vy, vz = velocity
+        self.velocity[sl, 0] = vx
+        self.velocity[sl, 1] = vy
+        self.velocity[sl, 2] = vz
+        self.velocity[sl, 3] = 0.0
+        self.veleval[sl, 0] = vx
+        self.veleval[sl, 1] = vy
+        self.veleval[sl, 2] = vz
+        self.veleval[sl, 3] = 0.0
         self.sph_force[sl] = 0.0
 
         self.mass[sl] = PARTICLE_MASS
@@ -374,6 +382,7 @@ class World:
         max_corner: Tuple[float, float, float],
         material_id: int,
         spacing: float = DEFAULT_SPACING,
+        velocity: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> int:
         """Spawn particles on a regular grid within a cube.
 
@@ -420,8 +429,15 @@ class World:
         self.position[sl, 2] = d_positions[:, 2]
         self.position[sl, 3] = 0.0
 
-        self.velocity[sl] = 0.0
-        self.veleval[sl] = 0.0
+        vx, vy, vz = velocity
+        self.velocity[sl, 0] = vx
+        self.velocity[sl, 1] = vy
+        self.velocity[sl, 2] = vz
+        self.velocity[sl, 3] = 0.0
+        self.veleval[sl, 0] = vx
+        self.veleval[sl, 1] = vy
+        self.veleval[sl, 2] = vz
+        self.veleval[sl, 3] = 0.0
         self.sph_force[sl] = 0.0
 
         self.mass[sl] = PARTICLE_MASS
@@ -451,6 +467,268 @@ class World:
         self.density[sl] = mat.rest_density
         self.sleep_counter[sl] = 0
 
+        self._high_water += actual
+        self._spawned_material_ids.add(material_id)
+        return actual
+
+    def spawn_ramp(
+        self,
+        start_pos: Tuple[float, float, float],
+        end_pos: Tuple[float, float, float],
+        width: float,
+        thickness: float,
+        material_id: int,
+        spacing: float = DEFAULT_SPACING,
+    ) -> int:
+        """Spawn a STATIC particle ramp between two 3D points.
+
+        The ramp surface goes from start_pos to end_pos, with the given width
+        perpendicular to the ramp direction (in XZ plane) and thickness below.
+        """
+        sx, sy, sz = start_pos
+        ex, ey, ez = end_pos
+        dx, dy, dz = ex - sx, ey - sy, ez - sz
+        length = (dx*dx + dy*dy + dz*dz) ** 0.5
+        if length < 1e-6:
+            return 0
+
+        # Build ramp in local space then transform
+        n_along = max(1, int(length / spacing))
+        n_width = max(1, int(width / spacing))
+        n_thick = max(1, int(thickness / spacing))
+
+        # Direction vectors
+        forward = np.array([dx, dy, dz], dtype=np.float32) / length
+        # Perpendicular in XZ plane
+        up = np.array([0, 1, 0], dtype=np.float32)
+        right = np.cross(forward, up)
+        right_len = np.linalg.norm(right)
+        if right_len < 1e-6:
+            right = np.array([1, 0, 0], dtype=np.float32)
+        else:
+            right = right / right_len
+        down = np.cross(right, forward)
+
+        positions = []
+        for ia in range(n_along):
+            t = (ia + 0.5) / n_along
+            cx = sx + t * dx
+            cy = sy + t * dy
+            cz = sz + t * dz
+            for iw in range(n_width):
+                w_off = (iw + 0.5 - n_width / 2.0) * spacing
+                for it in range(n_thick):
+                    t_off = -(it + 0.5) * spacing  # below surface
+                    px = cx + w_off * right[0] + t_off * down[0]
+                    py = cy + w_off * right[1] + t_off * down[1]
+                    pz = cz + w_off * right[2] + t_off * down[2]
+                    positions.append([px, py, pz])
+
+        if not positions:
+            return 0
+
+        pos_arr = np.array(positions, dtype=np.float32)
+        available = self.max_particles - self._high_water
+        actual = min(len(pos_arr), available)
+        if actual <= 0:
+            return 0
+
+        mat = MATERIALS[material_id]
+        start = self._high_water
+        sl = slice(start, start + actual)
+        d_positions = cp.asarray(pos_arr[:actual])
+        self.position[sl, 0] = d_positions[:, 0]
+        self.position[sl, 1] = d_positions[:, 1]
+        self.position[sl, 2] = d_positions[:, 2]
+        self.position[sl, 3] = 0.0
+        self.velocity[sl] = 0.0
+        self.veleval[sl] = 0.0
+        self.sph_force[sl] = 0.0
+        self.mass[sl] = PARTICLE_MASS
+        packed = _MAKE_PACKED(material_id, mat.behavior_class)
+        self.packed_info[sl] = cp.uint32(packed)
+        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
+        self.temperature[sl] = temp
+        self.health[sl] = 1.0
+        self.lifetime[sl] = 0.0
+        self.shear_rate[sl] = 0.0
+        self.exposure_heat[sl] = 0.0
+        self.exposure_corrode[sl] = 0.0
+        self.color[sl, 0] = mat.color_r
+        self.color[sl, 1] = mat.color_g
+        self.color[sl, 2] = mat.color_b
+        self.color[sl, 3] = 1.0
+        self.particle_dye[sl, 0] = mat.color_r
+        self.particle_dye[sl, 1] = mat.color_g
+        self.particle_dye[sl, 2] = mat.color_b
+        self.particle_dye[sl, 3] = 0.0
+        self.density[sl] = mat.rest_density
+        self.sleep_counter[sl] = 0
+        self._high_water += actual
+        self._spawned_material_ids.add(material_id)
+        return actual
+
+    def spawn_bowl(
+        self,
+        center: Tuple[float, float, float],
+        radius: float,
+        thickness: float,
+        material_id: int,
+        spacing: float = DEFAULT_SPACING,
+    ) -> int:
+        """Spawn a STATIC particle hemisphere bowl (bottom half of sphere shell)."""
+        cx, cy, cz = center
+        r_inner = radius - thickness
+        positions = []
+        n = int((2 * radius) / spacing) + 1
+        for ix in range(n):
+            px = cx - radius + (ix + 0.5) * spacing
+            for iy in range(n):
+                py = cy - radius + (iy + 0.5) * spacing
+                if py > cy:  # bottom half only
+                    continue
+                for iz in range(n):
+                    pz = cz - radius + (iz + 0.5) * spacing
+                    dist_sq = (px-cx)**2 + (py-cy)**2 + (pz-cz)**2
+                    if r_inner**2 <= dist_sq <= radius**2:
+                        positions.append([px, py, pz])
+
+        if not positions:
+            return 0
+
+        pos_arr = np.array(positions, dtype=np.float32)
+        available = self.max_particles - self._high_water
+        actual = min(len(pos_arr), available)
+        if actual <= 0:
+            return 0
+
+        mat = MATERIALS[material_id]
+        start = self._high_water
+        sl = slice(start, start + actual)
+        d_positions = cp.asarray(pos_arr[:actual])
+        self.position[sl, 0] = d_positions[:, 0]
+        self.position[sl, 1] = d_positions[:, 1]
+        self.position[sl, 2] = d_positions[:, 2]
+        self.position[sl, 3] = 0.0
+        self.velocity[sl] = 0.0
+        self.veleval[sl] = 0.0
+        self.sph_force[sl] = 0.0
+        self.mass[sl] = PARTICLE_MASS
+        packed = _MAKE_PACKED(material_id, mat.behavior_class)
+        self.packed_info[sl] = cp.uint32(packed)
+        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
+        self.temperature[sl] = temp
+        self.health[sl] = 1.0
+        self.lifetime[sl] = 0.0
+        self.shear_rate[sl] = 0.0
+        self.exposure_heat[sl] = 0.0
+        self.exposure_corrode[sl] = 0.0
+        self.color[sl, 0] = mat.color_r
+        self.color[sl, 1] = mat.color_g
+        self.color[sl, 2] = mat.color_b
+        self.color[sl, 3] = 1.0
+        self.particle_dye[sl, 0] = mat.color_r
+        self.particle_dye[sl, 1] = mat.color_g
+        self.particle_dye[sl, 2] = mat.color_b
+        self.particle_dye[sl, 3] = 0.0
+        self.density[sl] = mat.rest_density
+        self.sleep_counter[sl] = 0
+        self._high_water += actual
+        self._spawned_material_ids.add(material_id)
+        return actual
+
+    def spawn_wall_with_gap(
+        self,
+        wall_min: Tuple[float, float, float],
+        wall_max: Tuple[float, float, float],
+        gap_y_range: Tuple[float, float],
+        material_id: int,
+        spacing: float = DEFAULT_SPACING,
+    ) -> int:
+        """Wall with a rectangular gap for fluid to flow through."""
+        gap_lo, gap_hi = gap_y_range
+        # Bottom section
+        n1 = self.spawn_cube(
+            min_corner=wall_min,
+            max_corner=(wall_max[0], gap_lo, wall_max[2]),
+            material_id=material_id,
+            spacing=spacing,
+        )
+        # Top section
+        n2 = self.spawn_cube(
+            min_corner=(wall_min[0], gap_hi, wall_min[2]),
+            max_corner=wall_max,
+            material_id=material_id,
+            spacing=spacing,
+        )
+        return n1 + n2
+
+    def spawn_cylinder_shell(
+        self,
+        center: Tuple[float, float, float],
+        radius: float,
+        height: float,
+        thickness: float,
+        material_id: int,
+        spacing: float = DEFAULT_SPACING,
+    ) -> int:
+        """Hollow cylinder of STATIC particles."""
+        cx, cy, cz = center
+        r_inner = radius - thickness
+        half_h = height / 2.0
+        positions = []
+        n_xz = int((2 * radius) / spacing) + 1
+        n_y = int(height / spacing) + 1
+        for ix in range(n_xz):
+            px = cx - radius + (ix + 0.5) * spacing
+            for iz in range(n_xz):
+                pz = cz - radius + (iz + 0.5) * spacing
+                dist_sq = (px-cx)**2 + (pz-cz)**2
+                if r_inner**2 <= dist_sq <= radius**2:
+                    for iy in range(n_y):
+                        py = cy - half_h + (iy + 0.5) * spacing
+                        positions.append([px, py, pz])
+
+        if not positions:
+            return 0
+
+        pos_arr = np.array(positions, dtype=np.float32)
+        available = self.max_particles - self._high_water
+        actual = min(len(pos_arr), available)
+        if actual <= 0:
+            return 0
+
+        mat = MATERIALS[material_id]
+        start = self._high_water
+        sl = slice(start, start + actual)
+        d_positions = cp.asarray(pos_arr[:actual])
+        self.position[sl, 0] = d_positions[:, 0]
+        self.position[sl, 1] = d_positions[:, 1]
+        self.position[sl, 2] = d_positions[:, 2]
+        self.position[sl, 3] = 0.0
+        self.velocity[sl] = 0.0
+        self.veleval[sl] = 0.0
+        self.sph_force[sl] = 0.0
+        self.mass[sl] = PARTICLE_MASS
+        packed = _MAKE_PACKED(material_id, mat.behavior_class)
+        self.packed_info[sl] = cp.uint32(packed)
+        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
+        self.temperature[sl] = temp
+        self.health[sl] = 1.0
+        self.lifetime[sl] = 0.0
+        self.shear_rate[sl] = 0.0
+        self.exposure_heat[sl] = 0.0
+        self.exposure_corrode[sl] = 0.0
+        self.color[sl, 0] = mat.color_r
+        self.color[sl, 1] = mat.color_g
+        self.color[sl, 2] = mat.color_b
+        self.color[sl, 3] = 1.0
+        self.particle_dye[sl, 0] = mat.color_r
+        self.particle_dye[sl, 1] = mat.color_g
+        self.particle_dye[sl, 2] = mat.color_b
+        self.particle_dye[sl, 3] = 0.0
+        self.density[sl] = mat.rest_density
+        self.sleep_counter[sl] = 0
         self._high_water += actual
         self._spawned_material_ids.add(material_id)
         return actual

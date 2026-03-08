@@ -297,6 +297,21 @@ class Simulation:
         implicit_st.upload_sim_params(self._sim_params)
 
     @property
+    def gravity_y(self) -> float:
+        """Current gravity Y component."""
+        if self._sim_params is not None:
+            return float(self._sim_params[0]["gravity"][1])
+        return -4.0
+
+    def set_gravity(self, gy: float) -> None:
+        """Change gravity Y and re-upload to all CUDA constant memory modules."""
+        if self._sim_params is None:
+            return
+        self._sim_params[0]["gravity"][1] = np.float32(gy)
+        self._upload_sim_params_all()
+        self._invalidate_graphs()
+
+    @property
     def world_half_size(self) -> float:
         return self._world_half_size
 
@@ -382,7 +397,8 @@ class Simulation:
         integrate.upload_sim_params(sim_params)
         integrate.upload_materials(materials_data)
 
-        # --- reactions module: c_sim, c_materials ---
+        # --- reactions module: c_grid, c_sim, c_materials ---
+        reactions.upload_grid_params(grid_params)
         reactions.upload_sim_params(sim_params)
         reactions.upload_materials(materials_data)
 
@@ -676,6 +692,19 @@ class Simulation:
             dead_indices=self._dead_indices,
             dead_count=self._dead_count,
         )
+
+        # Blast wave: radial impulse from freshly-exploded gunpowder
+        from materials import GUNPOWDER
+        if GUNPOWDER in w._spawned_material_ids:
+            reactions.compute_blast_wave(
+                w.sorted_position[:n],
+                w.sorted_velocity[:n],
+                w.sorted_packed_info[:n],
+                w.sorted_lifetime[:n],
+                self._cell_start,
+                self._cell_end,
+                smoothing_length=self._h,
+            )
 
         # Spawn (always included — zero-cost when no SPAWN_GAS flags set)
         spawn.compute_spawn(
@@ -1531,8 +1560,8 @@ class Simulation:
         self._sort_skip_consecutive = 0
         return self.world._high_water
 
-    def copy_to_vbos(self, cuda_pos, cuda_col) -> None:
-        """Copy UNSORTED pos/color arrays into mapped GL VBOs.
+    def copy_to_vbos(self, cuda_pos, cuda_col, cuda_vel=None) -> None:
+        """Copy UNSORTED pos/color/velocity arrays into mapped GL VBOs.
 
         Parameters
         ----------
@@ -1540,6 +1569,8 @@ class Simulation:
             Position VBO wrapper (must be context-managed externally).
         cuda_col : CudaGLBuffer
             Color VBO wrapper (must be context-managed externally).
+        cuda_vel : CudaGLBuffer, optional
+            Velocity VBO wrapper for motion blur.
         """
         n = self.world._high_water
         if n == 0:
@@ -1556,6 +1587,13 @@ class Simulation:
             (cuda_col.nbytes // 16, 4), np.float32,
         )
         col_arr[:n] = self.world.color[:n]
+
+        # Velocity: world velocity (float4) -> VBO vel (float4) for motion blur
+        if cuda_vel is not None:
+            vel_arr = cuda_vel.device_pointer_as_cupy_array(
+                (cuda_vel.nbytes // 16, 4), np.float32,
+            )
+            vel_arr[:n] = self.world.velocity[:n]
 
     def copy_foam_to_vbo(self, cuda_foam_pos) -> int:
         """Copy foam positions to a mapped GL VBO.

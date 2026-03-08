@@ -399,9 +399,9 @@ _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     (ACID, DIRT, 0.1, 1.0),          # acid dissolves dirt
     (ACID, ICE, 0.2, 10.0),          # acid melts ice
     # fire interactions
-    (FIRE, WOOD, 0.6, 20.0),         # fire burns wood
-    (FIRE, OIL, 0.8, 30.0),          # fire burns oil quickly
-    (FIRE, GUNPOWDER, 0.9, 40.0),    # fire detonates gunpowder
+    (FIRE, WOOD, 0.9, 25.0),         # fire burns wood (faster spread)
+    (FIRE, OIL, 1.0, 35.0),          # fire burns oil quickly (instant)
+    (FIRE, GUNPOWDER, 0.9, 60.0),    # fire detonates gunpowder (higher heat)
     (FIRE, ICE, 0.3, 25.0),          # fire melts ice
     (FIRE, SMOKE, 0.0, 5.0),         # fire produces smoke (heat only)
     # oil interactions

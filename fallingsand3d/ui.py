@@ -14,6 +14,7 @@ Uses imgui-bundle (imgui.backends.glfw_opengl3) integrated into the GLFW event l
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Tuple
 
 import numpy as np
@@ -360,6 +361,12 @@ class UI:
         self._pending_solver: Optional[str] = None
         self._solver_idx: int = 0  # current index into PROFILE_NAMES
 
+        # Save/load state
+        self._save_filename: str = "scene"
+        self._save_status: str = ""
+        self._load_files: list = []
+        self._load_selected: int = 0
+
         # Cached viewport size
         w, h = glfw.get_framebuffer_size(window)
         self._viewport_w = w
@@ -704,6 +711,51 @@ class UI:
                     imgui.same_line()
         imgui.end()
 
+        # --- Save/Load Panel ---
+        imgui.set_next_window_pos(imgui.ImVec2(240, 340), imgui.Cond_.first_use_ever)
+        imgui.set_next_window_size(imgui.ImVec2(220, 0), imgui.Cond_.first_use_ever)
+
+        if imgui.begin("Save / Load", None, imgui.WindowFlags_.always_auto_resize)[0]:
+            from save_load import save_scene, load_scene, list_saves
+
+            # Save section
+            changed, self._save_filename = imgui.input_text(
+                "Name", self._save_filename, 64,
+            )
+            if imgui.button("Save", imgui.ImVec2(100, 28)):
+                camera = self._camera_ref
+                if camera is not None:
+                    path = save_scene(world, sim, camera, self._save_filename)
+                    self._save_status = f"Saved: {os.path.basename(path)}"
+                    self._load_files = list_saves()
+                else:
+                    self._save_status = "Error: no camera ref"
+            if self._save_status:
+                imgui.text(self._save_status)
+
+            imgui.separator()
+
+            # Load section
+            if imgui.button("Refresh", imgui.ImVec2(100, 28)):
+                self._load_files = list_saves()
+            if not self._load_files:
+                self._load_files = list_saves()
+            if self._load_files:
+                file_list = self._load_files
+                changed, self._load_selected = imgui.combo(
+                    "File", self._load_selected,
+                    file_list,
+                )
+                if imgui.button("Load", imgui.ImVec2(100, 28)):
+                    camera = self._camera_ref
+                    if camera is not None and self._load_selected < len(file_list):
+                        n = load_scene(world, sim, camera, file_list[self._load_selected])
+                        self._save_status = f"Loaded: {n:,} particles"
+                        changes['_scene_loaded'] = True
+            else:
+                imgui.text("No saves found")
+        imgui.end()
+
         # --- Simulation Controls Panel ---
         imgui.set_next_window_pos(imgui.ImVec2(10, 440), imgui.Cond_.first_use_ever)
         imgui.set_next_window_size(imgui.ImVec2(220, 0), imgui.Cond_.first_use_ever)
@@ -724,6 +776,13 @@ class UI:
             )
             if changed:
                 sim.accuracy = max(0.1, min(1.0, new_acc))
+
+            # Gravity slider
+            changed, new_gy = imgui.slider_float(
+                "Gravity", sim.gravity_y, -20.0, 5.0, "%.1f m/s²",
+            )
+            if changed:
+                sim.set_gravity(new_gy)
 
             # Fixed dt checkbox + value
             changed, new_fixed = imgui.checkbox("Fixed dt", sim.fixed_dt)
@@ -790,6 +849,24 @@ class UI:
                 self._vsync_enabled = new_vsync
                 glfw.swap_interval(1 if new_vsync else 0)
 
+            # Snapshot / Undo info
+            snaps = getattr(self, 'snapshots', None)
+            if snaps is not None:
+                imgui.separator()
+                imgui.text(f"Snapshots: {snaps.num_snapshots}/{snaps.max_snapshots}")
+                imgui.text("Ctrl+Z to undo")
+                if snaps.num_snapshots > 0:
+                    old_steps = getattr(self, '_undo_steps', 1)
+                    changed, new_steps = imgui.slider_int(
+                        "Rewind", old_steps, 1, snaps.num_snapshots,
+                    )
+                    if changed:
+                        self._undo_steps = new_steps
+                    if imgui.button("Restore##undo", imgui.ImVec2(100, 28)):
+                        steps = getattr(self, '_undo_steps', 1)
+                        if snaps.restore(world, steps_back=steps):
+                            changes['_scene_loaded'] = True
+
             # Solver dropdown
             imgui.separator()
             preview = PROFILE_NAMES[self._solver_idx]
@@ -840,6 +917,19 @@ class UI:
                     )
                     if changed:
                         renderer.ssfr_specular_power = val
+
+                imgui.separator()
+
+                # Motion blur controls
+                changed, new_mb = imgui.checkbox("Motion blur", renderer.motion_blur_enabled)
+                if changed:
+                    renderer.motion_blur_enabled = new_mb
+                if renderer.motion_blur_enabled:
+                    changed, new_ts = imgui.slider_float(
+                        "Trail scale", renderer.trail_scale, 0.1, 5.0, "%.1f",
+                    )
+                    if changed:
+                        renderer.trail_scale = new_ts
 
                 imgui.separator()
 
