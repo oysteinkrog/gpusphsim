@@ -603,7 +603,9 @@ Changes:
 3. **DT_MAX 0.005 → 0.001**: Respects CFL at compressed densities.
    ~17 substeps/frame at 60 FPS with speed=1.0.
 4. **ACCEL_MAX 200 → 200 (FLUID+GRANULAR)**: Both use 200 for dramatic dynamics.
-5. **VELOCITY_LIMIT**: CFL-derived per solver (0.9*h/dt), replaces hardcoded 10.
+5. **VELOCITY_LIMIT**: CFL-derived per solver (factor*h/dt), factor=0.9 for WCSPH/PBF,
+   0.4 for DFSPH. Replaces hardcoded 10. DFSPH uses lower limit to prevent Jacobi
+   solver oscillation at boundaries.
 6. **mu0 0.1 → 1.0**: Higher viscous damping prevents oscillations.
 7. **XSPH epsilon 0.5 → 0.1**: Per-material viscosity now dominates velocity smoothing.
 8. **max_substeps 20 → 40**: Accommodates smaller dt at higher speeds.
@@ -799,7 +801,7 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 - H3: PBF Drucker-Prager friction applied to velocity correction (not absolute velocity)
 
 **Integration pipeline (Phase 4):**
-- I2: CFL-derived velocity limit (v_max = 0.9*h/dt) replaces hardcoded VELOCITY_LIMIT=10
+- I2: CFL-derived velocity limit (v_max = factor*h/dt, factor per solver) replaces hardcoded VELOCITY_LIMIT=10
 - I4: frame_counter incremented per-frame (not per-substep); substep_counter for RNG
 - I5: BOUNDARY_MARGIN=1e-4 prevents particles sitting exactly at wall positions
 
@@ -1308,10 +1310,18 @@ Without any cap, k ≈ 90 (explosive overshoot because actual alpha is 100x larg
 | 5.0         | 34.2%     | 33.0%     | 33.0%     | 27.7%     |
 | 10.0        | 32.9%     | 27.9%     | 23.3%     | 22.6%     |
 
-Best: alpha_limit=10.0, omega=1.0 → 22.6% density error (35% improvement over baseline).
+Best density error: alpha_limit=10.0, omega=1.0 → 22.6% (35% improvement over baseline).
+However, omega=1.0 causes persistent velocity oscillation (v_max 7-9 m/s at steady state)
+due to Jacobi overcorrection of boundary/surface particles.
 
-Default stable profile: 12 iterations with alpha_limit=10.0, warm_start=0.5 at dt=1/300.
-Default fast profile: 8 iterations with alpha_limit=5.0.
+**Stability fix (2026-03-08)**: omega reduced to 0.7 (under-relaxation), velocity limit
+lowered to 0.4*h/dt (was 0.9*h/dt), and pressure acceleration clamped to h/dt^2 in
+K_DFSPH_ApplyPressureVelocity. Result: v_max drops from 7-9 to 1.4 at 5s steady state,
+KE matches WCSPH (1.2 vs 1.6). Density error slightly higher (~23→~26%) but visually stable.
+
+Default stable profile: 12 iterations, alpha_limit=10.0, omega=0.7, warm_start=0.5,
+velocity_limit_factor=0.4 at dt=1/300.
+Default fast profile: 8 iterations, alpha_limit=5.0, omega=0.7, velocity_limit_factor=0.4.
 
 **Source**: `dfsph_solver.cu:K_DFSPH_ComputePressureAccel`, `K_DFSPH_DensitySolverUpdate`,
 `K_DFSPH_ApplyPressureVelocity`, `simulation.py:615-655`

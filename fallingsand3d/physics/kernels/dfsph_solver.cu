@@ -1445,6 +1445,17 @@ void K_DFSPH_ApplyPressureVelocity(
     float4 vel = velocity[i];
     float4 ap = accel_press[i];
 
+    // Clamp pressure acceleration: limit velocity change to h/dt per substep
+    // Prevents single-particle oscillation from Jacobi overcorrection
+    float ap_sq = ap.x * ap.x + ap.y * ap.y + ap.z * ap.z;
+    float a_press_max = c_sim.smoothing_length / (dt * dt);  // h/dt^2
+    if (ap_sq > a_press_max * a_press_max) {
+        float scale = a_press_max / sqrtf(ap_sq);
+        ap.x *= scale;
+        ap.y *= scale;
+        ap.z *= scale;
+    }
+
     vel.x += dt * ap.x;
     vel.y += dt * ap.y;
     vel.z += dt * ap.z;
@@ -1670,10 +1681,9 @@ void K_DFSPH_Finalize(
         i, c_sim.restitution
     );
 
-    // Boundary
-    float friction = (behavior == FLUID) ? 0.0f : c_sim.wall_friction;
+    // Box boundary
     sdf_box_boundary(pos_new, vel, c_sim.world_min, c_sim.world_max,
-                     c_sim.restitution, friction);
+                     c_sim.restitution, c_sim.wall_friction);
 
     // SDF object collision with velocity reflection
     for (int s = 0; s < c_num_sdf_objects; s++) {

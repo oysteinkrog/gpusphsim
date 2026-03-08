@@ -257,7 +257,8 @@ class Simulation:
             return
         self._sim_params[0]["dt"] = np.float32(new_dt)
         # Recalculate CFL velocity limit for new dt
-        vel_limit = 0.9 * self._h / max(new_dt, 1e-8)
+        vlf = getattr(self._profile, 'velocity_limit_factor', 0.9)
+        vel_limit = vlf * self._h / max(new_dt, 1e-8)
         self._sim_params[0]["velocity_limit"] = np.float32(vel_limit)
         self.dt = new_dt
         # Upload to all WCSPH modules that read c_sim.dt
@@ -330,8 +331,9 @@ class Simulation:
             self._cs_histogram = cupy.zeros(table_size, dtype=cupy.uint32)
             self._cs_write_offset = cupy.zeros(table_size, dtype=cupy.uint32)
 
-        # CFL velocity limit: v_max = 0.9 * h / dt
-        vel_limit = 0.9 * self._h / max(self.dt, 1e-8)
+        # CFL velocity limit: v_max = factor * h / dt
+        vlf = getattr(self._profile, 'velocity_limit_factor', 0.9)
+        vel_limit = vlf * self._h / max(self.dt, 1e-8)
         sim_params = step1.build_sim_params(
             smoothing_length=self._h,
             particle_mass=0.02,
@@ -922,6 +924,12 @@ class Simulation:
         self._run_grid_setup(n)
 
         # 1. Density + alpha precompute (also computes shear_rate for GRANULAR)
+        # density_in aliasing note: sorted_density is both density_in and density_out.
+        # It's not reordered during sort, but the in-place race means threads may read
+        # either the previous or current frame's density for neighbors — both are
+        # acceptable for the volume weighting used in alpha/heat/dye computation.
+        # Using None (rho_j=1000 fallback) is worse because it underestimates surface
+        # particle volumes, making alpha too large and increasing boundary oscillation.
         dfsph_solver.compute_density_alpha(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_mass[:n],

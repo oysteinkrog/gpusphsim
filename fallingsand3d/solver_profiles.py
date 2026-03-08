@@ -45,6 +45,8 @@ class SolverProfile:
     dfsph_div_warm_start: float = 0.5  # warm start factor for kappa_v (divergence solver)
     dfsph_omega: float = 1.0       # relaxation for Jacobi density update
     dfsph_alpha_limit: float = 1.0  # max alpha = alpha_limit * dt^2 (higher = faster convergence)
+    # Velocity limit
+    velocity_limit_factor: float = 0.9  # v_limit = factor * h / dt (CFL-based velocity clamp)
     # Micropolar params
     micropolar_nu_t: float = 0.1   # micropolar coupling viscosity (angular vel relaxation rate)
 
@@ -67,8 +69,9 @@ PROFILES = {
         name="DFSPH",
         solver_type=SolverType.DFSPH,
         dt=1/300, max_substeps=10, fixed_dt=True,
-        dfsph_div_iters=3, dfsph_dens_iters=12, dfsph_omega=1.0,
+        dfsph_div_iters=3, dfsph_dens_iters=12, dfsph_omega=0.7,
         dfsph_warm_start=0.5, dfsph_alpha_limit=10.0,
+        velocity_limit_factor=0.4,
     ),
     # --- Fast profiles -- fewer iterations, looser CFL ---
     "WCSPH (Fast)": SolverProfile(
@@ -87,8 +90,9 @@ PROFILES = {
         name="DFSPH (Fast)",
         solver_type=SolverType.DFSPH,
         dt=1/300, max_substeps=10, fixed_dt=True,
-        dfsph_div_iters=2, dfsph_dens_iters=8, dfsph_omega=1.0,
+        dfsph_div_iters=2, dfsph_dens_iters=8, dfsph_omega=0.7,
         dfsph_warm_start=0.5, dfsph_alpha_limit=5.0,
+        velocity_limit_factor=0.4,
     ),
 }
 
