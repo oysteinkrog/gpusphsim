@@ -355,26 +355,31 @@ void K_Integrate(
     }
 
     // --- Sleep counter update ---
-    // Check if particle should start sleeping (low velocity AND low shear rate)
-    // GRANULAR also requires equilibrium (no large unbalanced forces)
+    // Only GRANULAR particles can accumulate the sleep counter.
+    // FLUID and GAS particles must remain awake to respond to pressure
+    // gradients; if they sleep, the whole fluid pool freezes (no forces are
+    // computed for sleeping particles, so they can never be woken by
+    // pressure differentials, causing permanent deadlock).
+    // GRANULAR requires: low velocity, low shear rate, AND small SPH force
+    // (|sph_force|^2 < GRANULAR_ACCEL_REST_SQ, excluding gravity).
     float vel_sq_sleep = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
     float sr_sleep = sorted_shear_rate[i];
 
-    if (vel_sq_sleep < V_SLEEP_SQ && sr_sleep < GAMMA_SLEEP) {
-        bool can_sleep = true;
-        if (behavior == GRANULAR) {
+    if (behavior == GRANULAR) {
+        if (vel_sq_sleep < V_SLEEP_SQ && sr_sleep < GAMMA_SLEEP) {
             // Use |sph_force|^2, not |accel|^2 (accel includes gravity which always
             // exceeds GRANULAR_ACCEL_REST for unsupported particles).
             float sph_sq = sph_force.x * sph_force.x + sph_force.y * sph_force.y + sph_force.z * sph_force.z;
-            can_sleep = (sph_sq < GRANULAR_ACCEL_REST_SQ);
-        }
-        if (can_sleep) {
-            if (sc < 255) sc++;
+            if (sph_sq < GRANULAR_ACCEL_REST_SQ) {
+                if (sc < 255) sc++;
+            } else {
+                sc = 0;
+            }
         } else {
             sc = 0;
         }
     } else {
-        // Conditions not met: reset counter
+        // FLUID/GAS: never accumulate sleep counter (reset if it was set externally)
         sc = 0;
     }
 

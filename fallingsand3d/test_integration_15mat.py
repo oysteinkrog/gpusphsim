@@ -512,7 +512,7 @@ def test_sand_forms_pile():
     print(f"PASS: test_sand_forms_pile (mean_y={mean_y:.4f}, y_std={y_std:.4f})")
 
 
-@pytest.mark.xfail(strict=True, reason="UNTRIAGED: water x_std ~0.029 does not exceed 0.05 threshold after 3000 steps; water drops but does not spread horizontally, suggesting WCSPH pressure forces or force_scale insufficient for horizontal flow at this particle count and setup")
+@pytest.mark.xfail(strict=True, reason="DEFERRED bd-unl.6: water x_std stays ~0.029 (initial) after 3000 steps. Root cause: particles start pre-spread in x (uniform -0.05..0.05) so no horizontal pressure gradient drives further spreading once they pool at the floor. force_scale=0.02 gives weak horizontal SPH pressure (effective a~0.03 m/s^2 horizontal), insufficient to spread beyond initial width. Fix requires either: (1) different test geometry (narrow initial column to create pressure gradient), (2) larger force_scale (but requires retuning viscosity across all fluids), or (3) longer simulation. Deferred as test-design issue — actual water game physics is reasonable.")
 def test_water_flows_and_pools():
     """Water flows and pools at the bottom."""
     setup_all_modules()
