@@ -100,6 +100,20 @@ class SnapshotRing:
         cp.copyto(world.veleval[:n], world.velocity[:n])
         world._high_water = n
 
+        # bd-r4-epic-x2j.6: zero warm-start fields so restored particles start fresh
+        # (matches load_scene in save_load.py lines ~272-276).
+        # Guard with hasattr for optional arrays that may not exist in all world configs.
+        if hasattr(world, 'kappa'):
+            world.kappa[:n] = 0
+        if hasattr(world, 'kappa_v'):
+            world.kappa_v[:n] = 0
+        if hasattr(world, 'lambda_pbf'):
+            world.lambda_pbf[:n] = 0
+        if hasattr(world, 'sleep_counter'):
+            world.sleep_counter[:n] = 0
+        if hasattr(world, 'angular_velocity'):
+            world.angular_velocity[:n] = 0
+
         # Rebuild _spawned_material_ids from restored packed_info
         # NOTE: .get() is acceptable here — undo is user-initiated, not hot path
         unique_mats = cp.unique(world.packed_info[:n] & 0xFF).get()
