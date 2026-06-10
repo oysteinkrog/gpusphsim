@@ -133,6 +133,10 @@ class Simulation:
         self._last_timings: dict = {}      # stage_name -> ms (raw last frame)
         self._timing_ema: dict = {}        # stage_name -> ms (exponential moving avg)
         self._timing_ema_alpha = 0.1       # EMA smoothing factor
+        # Deferred timing: hold last substep's events+labels so we can read
+        # them one step later without a per-substep synchronize() stall.
+        self._pending_timing_events: list = []   # cupy.cuda.Event objects
+        self._pending_timing_labels: list = []   # parallel label strings
 
         # Precompute acoustic speed from materials table
         self._c_sound = self._compute_c_sound()
@@ -1413,20 +1417,39 @@ class Simulation:
         self._run_foam_step(n)
         mark("foam")
 
-        # Single sync then read all timings
-        events[-1].synchronize()
-        raw = {}
-        for i in range(1, len(events)):
-            raw[labels[i]] = cupy.cuda.get_elapsed_time(events[i - 1], events[i])
-        self._last_timings = raw
+        # --- Deferred timing read (1-substep latency, no per-substep sync stall) ---
+        # Read timings from the PREVIOUS substep's events; by the time we get here
+        # those GPU kernels are almost certainly already complete (a full substep
+        # of GPU work has elapsed since they were enqueued), so this is effectively
+        # a non-blocking query rather than a stall.  Displayed values lag by one
+        # substep, which is imperceptible to the user.
+        prev_events = self._pending_timing_events
+        prev_labels = self._pending_timing_labels
+        if prev_events and len(prev_events) > 1:
+            try:
+                # Synchronise only on the PREVIOUS substep's last event.
+                # This event was recorded a full substep ago, so the wait is
+                # typically 0 ms (GPU already past it).
+                prev_events[-1].synchronize()
+                raw = {}
+                for i in range(1, len(prev_events)):
+                    raw[prev_labels[i]] = cupy.cuda.get_elapsed_time(
+                        prev_events[i - 1], prev_events[i]
+                    )
+                self._last_timings = raw
+                # Update EMA
+                alpha = self._timing_ema_alpha
+                for k, v in raw.items():
+                    if k in self._timing_ema:
+                        self._timing_ema[k] = alpha * v + (1 - alpha) * self._timing_ema[k]
+                    else:
+                        self._timing_ema[k] = v
+            except Exception:
+                pass  # timing is advisory — never crash the sim loop
 
-        # Update EMA
-        alpha = self._timing_ema_alpha
-        for k, v in raw.items():
-            if k in self._timing_ema:
-                self._timing_ema[k] = alpha * v + (1 - alpha) * self._timing_ema[k]
-            else:
-                self._timing_ema[k] = v
+        # Store this substep's events for reading next substep
+        self._pending_timing_events = events
+        self._pending_timing_labels = labels
 
         self.sim_time += self.dt
         self._substep_counter += 1
