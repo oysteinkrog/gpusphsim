@@ -367,6 +367,11 @@ class RigidBodyManager:
         # Combined boundary particle data (set after all bodies added)
         # Columns: x_local, y_local, z_local, psi, body_id, nx, ny, nz
         self.boundary_data = None  # cupy (N, 8) float32
+        # Guard: inject_boundary_particles must only be called ONCE per preset load.
+        # It contains GPU-CPU syncs (masked-index len() and flatnonzero + int())
+        # which are acceptable as a one-time preset-load cost.  If it were called
+        # per-substep, those syncs would violate CLAUDE.md's no-per-frame-sync rule.
+        self._boundary_particles_injected: bool = False
 
     @property
     def num_bodies(self) -> int:
@@ -528,7 +533,18 @@ class RigidBodyManager:
         each rigid body's current position and rotation, then appends
         them to the world's particle arrays.
 
-        Must be called each substep BEFORE the hash/sort step.
+        IMPORTANT: Must be called exactly ONCE per preset load (not per-substep).
+        This method contains GPU-CPU synchronisation points:
+          - bd[mask, :] masked fancy-indexing (line ~568): requires knowing mask
+            count -> GPU sync
+          - len(psi) (line ~571): len() on a masked CuPy array -> GPU sync
+          - cupy.flatnonzero(mask) + int(indices[0]) (line ~596): flatnonzero is
+            a GPU-to-CPU gather -> GPU sync
+        These are acceptable ONLY because inject_boundary_particles fires once at
+        preset load time, never in the per-substep hot path. Subsequent substeps
+        use update_boundary_particles (a GPU-only kernel) instead.
+
+        See CLAUDE.md: no GPU-CPU sync in per-frame/substep paths.
 
         Parameters
         ----------
@@ -540,6 +556,15 @@ class RigidBodyManager:
         int
             Total particle count (fluid + boundary).
         """
+        # Guard: calling this more than once per preset load would introduce
+        # per-substep GPU-CPU syncs, violating the no-sync-in-hot-path rule.
+        assert not self._boundary_particles_injected, (
+            "inject_boundary_particles() called more than once — this path "
+            "contains GPU-CPU syncs that must not run per-substep. "
+            "Use update_boundary_particles() for subsequent substeps."
+        )
+        self._boundary_particles_injected = True
+
         from materials import MAT_RIGID, STATIC
 
         if self.boundary_data is None or self.num_boundary_particles == 0:
@@ -564,11 +589,13 @@ class RigidBodyManager:
             cx, cy, cz = body["position"][:3]
             qx, qy, qz, qw = body["rotation"]
 
-            # Find particles for this body
+            # Find particles for this body.
+            # One-time sync on preset load — acceptable per CLAUDE.md because
+            # inject_boundary_particles() is called once, not per-substep.
             mask = bd[:, 4] == float(body_idx)
-            local_pos = bd[mask, :3]  # (M, 3)
+            local_pos = bd[mask, :3]  # (M, 3)  -- masked fancy-index: GPU sync here
             psi = bd[mask, 3]
-            M = len(psi)
+            M = len(psi)  # len() on masked CuPy result: GPU sync here
             if M == 0:
                 continue
 
@@ -592,9 +619,10 @@ class RigidBodyManager:
             wy = 2.0 * d * uy + a * vy + 2.0 * s * crsy + cy
             wz = 2.0 * d * uz + a * vz + 2.0 * s * crsz + cz
 
-            # Find the actual indices in the combined boundary array
-            indices = cupy.flatnonzero(mask)
-            start = n_fluid + int(indices[0])
+            # Find the actual indices in the combined boundary array.
+            # One-time sync on preset load — acceptable per CLAUDE.md.
+            indices = cupy.flatnonzero(mask)  # GPU-to-CPU gather
+            start = n_fluid + int(indices[0])  # int() on CuPy scalar: GPU sync here
             end = start + M
 
             sl = slice(start, end)
@@ -639,6 +667,8 @@ class RigidBodyManager:
         self.d_rigid_bodies.fill(0)
         self.rigid_forces.fill(0)
         self.rigid_torques.fill(0)
+        # Reset injection guard so the next preset load can call inject_boundary_particles
+        self._boundary_particles_injected = False
 
 
 # ---------------------------------------------------------------------------
