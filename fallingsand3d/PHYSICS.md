@@ -118,13 +118,13 @@ All FLUID and GRANULAR pressure clamped >= 0 (no tensile pressure).
 | Material | rho_0 | k | gamma | EOS |
 |----------|-------|-----|-------|------|
 | WATER | 2500.0 | 500.0 | 7.0 | Tait |
-| OIL | 2500.0 | 400.0 | 7.0 | Tait |
+| OIL | 2125.0 | 400.0 | 7.0 | Tait |
 | ACID | 2500.0 | 450.0 | 7.0 | Tait |
-| LAVA | 2500.0 | 30.0 | 7.0 | Tait |
-| SAND | 2500.0 | 20.0 | 7.0 | Tait |
-| DIRT | 2500.0 | 18.0 | 7.0 | Tait |
+| LAVA | 6500.0 | 800.0 | 7.0 | Tait |
+| SAND | 4000.0 | 5000.0 | 7.0 | Tait |
+| DIRT | 3750.0 | 3000.0 | 7.0 | Tait |
 
-**Source**: `step2.cu:63-82`
+**Source**: `sph_shared.cuh:compute_pressure`
 
 ### 3.2 Pressure Force (SPH momentum equation)
 
@@ -249,9 +249,9 @@ accel = sph_force + gravity                    [sph_force is acceleration]
 
 For GAS: `accel.y += 0.01 * (T - 293) * 9.81`  (buoyancy)
 
-Clamped: `|accel| <= 30 m/s^2`
+Clamped: `|accel| <= 200 m/s^2`
 
-**Source**: `integrate.cu:316-336`
+**Source**: `integrate.cu:196-206`
 
 ### 4.2 Velocity Update
 
@@ -335,7 +335,7 @@ scalar formula); this was removed as it was redundant and wasted ~40-50% of Step
 I = gamma_dot * d / sqrt(p_eff / rho)
 ```
 
-where `d = particle_spacing = 0.02`, `p_eff = max(p, 1.0)`
+where `d = particle_spacing = 0.02`, `p_eff = max(p, rho0 * |g| * particle_spacing)`
 
 **Note**: `p_eff` uses Tait EOS pressure (from `compute_pressure()`), not the
 lithostatic pressure `p = rho * g * depth` assumed by the original mu(I) model.
@@ -389,7 +389,7 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | gamma (EOS exponent) | 7.0 (all) | 7 | Tait EOS for all materials |
 | mu_0 (viscosity) | 1.0 | 3.5 | Lowered; effective viscosity = mu0 * force_scale |
 | epsilon (XSPH) | 0.8 | 0.5 | Higher for smoother FLUID advection |
-| gravity | -9.8 | -9.8 | Same |
+| gravity | -4.0 | -9.8 | Reduced for miniature-world aesthetic |
 | dt | adaptive | 0.001 (fixed) | CFL: min(acoustic, viscous) ∈ [1e-5, 0.001]; DT_MAX=0.001 |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
@@ -397,7 +397,7 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | position update | FLUID: pos += veleval_xsph * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
 | boundaries | impulse SDF | penalty springs | Fundamentally different |
 | velocity_limit | 10 | 200 | Tight clamp prevents particles escaping grid cells |
-| accel_max | 30 | N/A | Prevents shockwave-level accelerations |
+| accel_max | 200 | N/A | Prevents shockwave-level accelerations (FLUID + GRANULAR) |
 | boundary_stiffness | N/A | 20000 | Only in parent |
 | boundary_dampening | N/A | 256 | Only in parent |
 | restitution | 0.3 | N/A | Only in fallingsand3d |
@@ -797,7 +797,7 @@ External algorithmic review by GPT 5.2 Pro identified 9 issues. Fixes applied:
 
 **Source**: `sph_shared.cuh`, `pbf_solver.cu`, `dfsph_solver.cu`
 
-### 10.14 FIXED: Physics review fixes (PROBLEMS.md batch)
+### 10.14b FIXED: Physics review fixes (PROBLEMS.md batch)
 
 Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 
@@ -1513,12 +1513,18 @@ The magnitude `|omega|` is stored in `.w` for use by the Step2 confinement force
 The vorticity confinement force re-injects energy lost to numerical dissipation:
 
 ```
-eta_i = SUM_j (m_j / rho_j) * |omega_j| * grad_W_spiky(r_ij)
+eta_i = SUM_j (m_j / rho_j) * (omega_j - omega_i) * grad_W_spiky(r_ij)
 N_i = eta_i / |eta_i|                          [normalized vorticity gradient]
 f_conf = epsilon * (N_i × omega_i)              [confinement force]
 ```
 
 Where `epsilon = c_granular.vorticity_epsilon` (default 0.05).
+
+The gradient uses the **difference form** `(omega_j - omega_i)` (not `omega_j`
+alone). This is the SPH approximation of the gradient of a scalar field, which
+vanishes identically when the vorticity field is uniform -- preventing spurious
+confinement forces in solid-body rotation. The difference form is now unified
+across all three solvers (WCSPH, DFSPH, PBF).
 
 The confinement force is perpendicular to the vorticity axis and aligned with the
 gradient of vorticity magnitude, amplifying existing rotational structures without
