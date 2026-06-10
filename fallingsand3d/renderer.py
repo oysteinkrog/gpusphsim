@@ -1012,19 +1012,19 @@ void main() {
         glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE)  # depth only, no color change
+        try:
+            glUseProgram(self._prog_depth_write)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, self._tex_blur2)
+            glUniform1i(self._u_dw_depth_tex, 0)
+            glUniformMatrix4fv(self._u_dw_proj, 1, GL_TRUE, proj)
 
-        glUseProgram(self._prog_depth_write)
-        glActiveTexture(GL_TEXTURE0)
-        glBindTexture(GL_TEXTURE_2D, self._tex_blur2)
-        glUniform1i(self._u_dw_depth_tex, 0)
-        glUniformMatrix4fv(self._u_dw_proj, 1, GL_TRUE, proj)
-
-        glBindVertexArray(self._vao_fs)
-        glDrawArrays(GL_TRIANGLES, 0, 3)
-        glBindVertexArray(0)
-        glUseProgram(0)
-
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)  # restore color writes
+            glBindVertexArray(self._vao_fs)
+            glDrawArrays(GL_TRIANGLES, 0, 3)
+            glBindVertexArray(0)
+            glUseProgram(0)
+        finally:
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)  # restore color writes
 
         # Restore GL state for ImGui
         glEnable(GL_DEPTH_TEST)
