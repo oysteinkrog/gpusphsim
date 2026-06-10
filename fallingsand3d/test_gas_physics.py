@@ -507,7 +507,7 @@ def test_gas_drag_slowdown():
     # With drag active, velocity should eventually decrease as SPH forces weaken
     # The key check: velocities are finite and not exploding
     assert not np.any(np.isnan(vel_after_200)), "NaN in velocities"
-    assert mean_speed_200 < 50.0, \
+    assert mean_speed_200 < 30.0, \
         f"Mean speed {mean_speed_200:.4f} too high -- drag may not be working"
 
     # Verify drag is applied: run a single-particle test
