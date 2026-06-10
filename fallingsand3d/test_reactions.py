@@ -32,7 +32,8 @@ from step1 import (
 )
 from materials import (
     FLUID, GRANULAR, GAS, STATIC,
-    DEAD, STONE, SAND, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER,
+    DEAD, STONE, SAND, DIRT, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER,
+    MUD, WET_SAND,
     build_material_array,
 )
 from reactions import (
@@ -527,6 +528,49 @@ def test_500k_stress():
     print("PASS: test_500k_stress")
 
 
+def test_dirt_water_becomes_mud():
+    """bd-mzc.27 regression: DIRT with WATER corrode exposure transitions to MUD,
+    not to a corrosion (crumble/FIRE spark) state.
+
+    The DIRT wetting check fires before the corrosion whitelist, so DIRT with
+    exp_corrode > SAND_WET_THRESHOLD (0.2) becomes MAKE_PACKED(MAT_MUD, FLUID).
+    """
+    setup_params()
+    # DIRT particles with enough water-corrode exposure to trigger the wetting transition
+    d = make_particles(100, DIRT, GRANULAR, exposure_corrode=0.5)
+    compute_reactions(**d)
+
+    pi = d["sorted_packed_info"].get()
+    hlth = d["sorted_health"].get()
+    for i in range(100):
+        mat = GET_MATERIAL_ID(int(pi[i]))
+        assert mat == MUD, (
+            f"Particle {i}: DIRT+WATER should become MUD (mat={MUD}), "
+            f"got mat_id={mat}. Old code produced corrosion spark."
+        )
+        assert GET_BEHAVIOR(int(pi[i])) == FLUID, (
+            f"Particle {i}: MUD should be FLUID, got behavior={GET_BEHAVIOR(int(pi[i]))}"
+        )
+        # Health should be unmodified (wetting path does not damage health)
+        assert abs(hlth[i] - 1.0) < 1e-6, (
+            f"Particle {i}: health={hlth[i]}, expected 1.0 after wetting (not corrosion)"
+        )
+    print("PASS: test_dirt_water_becomes_mud")
+
+
+def test_dirt_no_corrode_below_threshold():
+    """DIRT with exp_corrode below the wetting threshold stays as DIRT."""
+    setup_params()
+    d = make_particles(100, DIRT, GRANULAR, exposure_corrode=0.1)
+    compute_reactions(**d)
+
+    pi = d["sorted_packed_info"].get()
+    for i in range(100):
+        mat = GET_MATERIAL_ID(int(pi[i]))
+        assert mat == DIRT, f"Particle {i}: DIRT should stay DIRT below threshold, got mat_id={mat}"
+    print("PASS: test_dirt_no_corrode_below_threshold")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -555,6 +599,8 @@ if __name__ == "__main__":
         test_ice_lava_together,
         test_acid_metal_corrosion,
         test_500k_stress,
+        test_dirt_water_becomes_mud,
+        test_dirt_no_corrode_below_threshold,
     ]
 
     passed = 0
