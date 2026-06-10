@@ -1497,6 +1497,121 @@ def test_accel_clamp_exact_threshold():
     print("PASS: test_accel_clamp_exact_threshold")
 
 
+def test_body_body_restitution_halved():
+    """Body-body restitution applies *0.5f — each body receives half the impulse.
+
+    bd-mzc.35: The *0.5f in K_RigidBodyCollisions line ~730 is intentional for
+    symmetric collisions where both bodies independently apply the impulse.
+    Effective coefficient of restitution for body-body is restitution * 0.5.
+    Body-SDF does NOT halve because only the particle receives the impulse.
+    """
+    from integrate import rigid_body_collisions
+    from rigid_bodies import RIGID_BODY_DTYPE, MAX_RIGID_BODIES
+    import numpy as np
+
+    # Two equal-mass bodies approaching each other along X axis.
+    # Body A at x=-0.5, vx=+1.0; Body B at x=+0.5, vx=-1.0.
+    # Restitution = 1.0 on both.  Bounding sphere radius = 0.35 (< 0.5 gap -> no
+    # penetration yet), so we push them close enough to trigger the collision.
+    # We'll place them so their bounding spheres overlap.
+
+    bodies = np.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+
+    radius = 0.3
+    # Body A
+    bodies[0]["position"] = [0.0, 0.0, 0.0, 1.0]       # inv_mass=1
+    bodies[0]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+    bodies[0]["lin_vel"]  = [1.0, 0.0, 0.0, 1.0]       # vx=+1, restitution=1
+    bodies[0]["half_extents"] = [radius, radius, radius, 0.0]  # sphere-like box, r=sqrt(3)*radius
+    bodies[0]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]   # not kinematic
+
+    # Body B: directly adjacent so bounding spheres overlap
+    sep = 2.0 * (radius * 1.732) - 0.01  # just overlapping (r_A + r_B - epsilon)
+    bodies[1]["position"] = [sep, 0.0, 0.0, 1.0]       # inv_mass=1
+    bodies[1]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+    bodies[1]["lin_vel"]  = [-1.0, 0.0, 0.0, 1.0]      # vx=-1, restitution=1
+    bodies[1]["half_extents"] = [radius, radius, radius, 0.0]
+    bodies[1]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]   # not kinematic
+
+    # CuPy does not support cupy.asarray() for structured dtypes directly.
+    # Upload via raw memcpy into a CuPy array allocated with the same dtype.
+    d_bodies = cupy.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+    cupy.cuda.runtime.memcpy(
+        int(d_bodies.data.ptr),
+        bodies.ctypes.data,
+        bodies.nbytes,
+        1,  # host-to-device
+    )
+    rigid_body_collisions(d_bodies, 2)
+    cupy.cuda.Device().synchronize()
+
+    result = d_bodies.get()
+    vx_a = float(result[0]["lin_vel"][0])
+    vx_b = float(result[1]["lin_vel"][0])
+
+    # Relative velocity before: rel_vn = (1 - (-1)) = 2 (approaching, >0 in normal direction)
+    # Actually rel_vel = v_A - v_B along +X normal = 1 - (-1) = 2; rel_vn = dot with normal(+X) = 2
+    # Wait: normal points from B->A, i.e. A is at smaller X, sep points A->B (+X).
+    # sep = pos_A - pos_B = negative; normal = sep/|sep| = -X.
+    # rel_vel = vel_A - vel_B = (1,0,0) - (-1,0,0) = (2,0,0)
+    # rel_vn = rel_vel . normal = 2 * (-1) = -2  (approaching)
+    # e = min(1, 1) * 0.5 = 0.5
+    # impulse = -(1 + 0.5) * (-2) * (1 / (1 + 1)) = 1.5 * 2 * 0.5 = 1.5 (per body)
+    # vel_A_x += 1.5 * normal.x = 1.5 * (-1) = -1.5 -> new vx_A = 1.0 - 1.5 = -0.5
+    # Body B is NOT updated by this kernel (each thread handles its own body only)
+    # So only body A (thread 0) is changed here.
+
+    # Body A should have bounced: vx < 0 (reversed) but magnitude reduced by *0.5 restitution
+    assert vx_a < 0.0, (
+        f"Body A should reverse velocity after body-body collision; got vx_a={vx_a}"
+    )
+    # The *0.5f means effective e=0.5 for this path (restitution=1 * 0.5 = 0.5)
+    # vx_a should be approximately -0.5 (not -1.0 which would be e=1 without *0.5f)
+    assert abs(vx_a) < 0.9, (
+        f"Body-body restitution should be halved (*0.5f), got |vx_a|={abs(vx_a):.4f} "
+        f"(expected ~0.5 for restitution=1; full restitution would give 1.0)"
+    )
+    print(f"PASS: test_body_body_restitution_halved (vx_a={vx_a:.4f})")
+
+
+def test_fallback_alloc_no_gpu_cpu_sync():
+    """integrate() fallback alloc path uses max_idx=n, not int(sort_indexes.max()).
+
+    bd-mzc.41: The fallback allocation block must not call int() / .max() / .get()
+    on any CuPy array.  We verify this by monkey-patching cupy.ndarray.max to raise
+    on any call, then triggering the fallback path (all output arrays = None).
+    """
+    setup_params()
+    n = 4
+    d = make_simple_particles(n, WATER, FLUID)
+
+    # Remove all pre-allocated outputs to force the fallback alloc path
+    for key in ("position_out", "velocity_out", "color_out", "packed_info_out",
+                "sleep_counter_out", "temperature_out"):
+        d.pop(key, None)
+
+    # Patch cupy.ndarray.max to detect any GPU->CPU sync in the alloc path
+    _original_max = cupy.ndarray.max
+    sync_calls = []
+
+    def _patched_max(self, *args, **kwargs):
+        sync_calls.append(1)
+        return _original_max(self, *args, **kwargs)
+
+    cupy.ndarray.max = _patched_max
+    try:
+        integrate(**d)
+        cupy.cuda.Device().synchronize()
+    finally:
+        cupy.ndarray.max = _original_max
+
+    assert len(sync_calls) == 0, (
+        f"integrate() fallback alloc called .max() {len(sync_calls)} time(s) — "
+        "GPU->CPU sync detected; should use max_idx=n instead"
+    )
+    print("PASS: test_fallback_alloc_no_gpu_cpu_sync")
+
+
 def test_500k_stress():
     """500K particles run through integrate without errors."""
     setup_params()
