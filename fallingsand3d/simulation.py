@@ -1239,7 +1239,8 @@ class Simulation:
 
         # 1. Physics for existing foam (before generate, so new particles
         #    get physics next step). Kernel reads count from device pointer.
-        foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count, max_foam)
+        foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count, max_foam,
+                          last_foam_count=self._last_foam_count)
 
         # 2. Generate new foam from FLUID particles
         foam.foam_generate(
