@@ -330,6 +330,8 @@ def main():
             sim._last_frame_time = None
             active_spawner = None
             spawner_frame_counter = 0
+            # bd-r4-epic-x2j.5: clear snapshots on solver switch (stale GPU state is invalid after solver reset)
+            snapshots.clear()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
@@ -384,6 +386,11 @@ def main():
             renderer.num_active = world._high_water
             sim._invalidate_graphs()
             sim.reset_spawn_damping()  # clear damping ramp to avoid velocity glitch on first post-load frames
+            # bd-r4-epic-x2j.5: reset spawner/foam state on scene load (match preset-load path)
+            active_spawner = None
+            spawner_frame_counter = 0
+            world.foam_count.fill(0)
+            snapshots.clear()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
