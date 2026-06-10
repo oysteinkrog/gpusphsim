@@ -1147,13 +1147,16 @@ class Simulation:
             self._invalidate_graphs()
         else:
             damping = 0.0
-        # Upload damping to c_sim.velocity_damping (reuse _upload_dt which
-        # re-uploads full sim_params to all modules without changing self.dt)
+        # Upload damping to c_sim.velocity_damping only when it actually changed.
+        # This guards against the post-ramp steady state (damping == 0) triggering
+        # repeated redundant uploads each substep.  During the active ramp, damping
+        # decrements each substep so the upload fires once per substep — necessary
+        # because constant memory must match what the GPU kernels will use.
         if self._sim_params is not None:
             old_damping = float(self._sim_params[0]["velocity_damping"])
             if abs(damping - old_damping) > 1e-8:
                 self._sim_params[0]["velocity_damping"] = np.float32(damping)
-                self._upload_sim_params_all()
+                self._upload_sim_params_all()  # only uploads when value changed
 
         # --- Rigid body: update boundary particles in unsorted arrays ---
         rbm = self.rigid_body_manager
