@@ -787,8 +787,20 @@ void main() {
         glDepthMask(GL_TRUE)
 
         # Draw skybox into scene FBO (background for refraction)
-        # All particles (including non-FLUID) go through SSFR depth/thickness passes
         self._draw_skybox(view, proj)
+
+        # Draw non-fluid particles (sand, rock, rigid boundary) into scene FBO.
+        # _prog_nonfluid culls FLUID by clipping to NDC > 1, so only
+        # non-FLUID particles are rasterized here.
+        glEnable(GL_PROGRAM_POINT_SIZE)
+        glUseProgram(self._prog_nonfluid)
+        glUniformMatrix4fv(self._u_nf_mvp, 1, GL_TRUE, mvp)
+        glUniformMatrix4fv(self._u_nf_mv, 1, GL_TRUE, view)
+        glUniform1f(self._u_nf_ps, self.point_scale)
+        glBindVertexArray(self._vao)
+        glDrawArrays(GL_POINTS, 0, self.num_active)
+        glBindVertexArray(0)
+        glUseProgram(0)
 
         # ---- Pass 1: SSFR Depth (FLUID only) ----
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo_depth)
