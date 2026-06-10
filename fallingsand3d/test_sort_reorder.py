@@ -46,8 +46,8 @@ def test_sort_produces_sorted_hashes() -> None:
     pos_np[:, :3] = rng.uniform(-0.9, 0.9, size=(n, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
     cupy.cuda.Device().synchronize()
 
     h_sorted = cupy.asnumpy(sorted_hashes)
@@ -78,8 +78,8 @@ def test_sorted_index_maps_correctly() -> None:
     pos_np[:, :3] = rng.uniform(-0.8, 0.8, size=(n, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
     cupy.cuda.Device().synchronize()
 
     h_hashes = cupy.asnumpy(hashes)
@@ -110,14 +110,14 @@ def test_sort_with_preallocated_buffers() -> None:
     pos_np[:, :3] = rng.uniform(-0.5, 0.5, size=(n, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
+    hashes = calc_hash(pos_gpu)
 
     # Pre-allocate
     sorted_hashes_buf = cupy.empty(n, dtype=cupy.uint32)
     sorted_indices_buf = cupy.empty(n, dtype=cupy.uint32)
 
     sorted_hashes, sorted_indices = sort_by_hash(
-        hashes, indices,
+        hashes,
         sorted_hashes_out=sorted_hashes_buf,
         sorted_indices_out=sorted_indices_buf,
     )
@@ -160,39 +160,33 @@ def test_data_integrity_mass_sum() -> None:
     mass_gpu = cupy.asarray(mass_np)
 
     vel_gpu = cupy.asarray(rng.uniform(-1.0, 1.0, (n, 4)).astype(np.float32))
-    veleval_gpu = cupy.asarray(rng.uniform(-0.5, 0.5, (n, 4)).astype(np.float32))
     packed_gpu = cupy.asarray(rng.integers(1, 256, size=n, dtype=np.uint32).astype(np.uint32))
     temp_gpu = cupy.asarray(rng.uniform(200, 1500, size=n).astype(np.float32))
     health_gpu = cupy.asarray(rng.uniform(0.0, 1.0, size=n).astype(np.float32))
     lifetime_gpu = cupy.asarray(rng.uniform(0.0, 5.0, size=n).astype(np.float32))
-    color_gpu = cupy.asarray(rng.uniform(0.0, 1.0, (n, 4)).astype(np.float32))
     sleep_gpu = cupy.asarray(rng.integers(0, 10, size=n, dtype=np.uint8).astype(np.uint8))
-    shear_gpu = cupy.asarray(rng.uniform(0.0, 100.0, size=n).astype(np.float32))
 
     # Hash and sort
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
-    # Pre-allocate sorted buffers
+    # Pre-allocate sorted buffers (8 arrays: pos, vel, mass, packed, temp, health, lifetime, sleep)
     s_pos = cupy.zeros((n, 4), dtype=cupy.float32)
     s_vel = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_veleval = cupy.zeros((n, 4), dtype=cupy.float32)
     s_mass = cupy.zeros(n, dtype=cupy.float32)
     s_packed = cupy.zeros(n, dtype=cupy.uint32)
     s_temp = cupy.zeros(n, dtype=cupy.float32)
     s_health = cupy.zeros(n, dtype=cupy.float32)
     s_lifetime = cupy.zeros(n, dtype=cupy.float32)
-    s_color = cupy.zeros((n, 4), dtype=cupy.float32)
     s_sleep = cupy.zeros(n, dtype=cupy.uint8)
-    s_shear = cupy.zeros(n, dtype=cupy.float32)
 
-    # Fused reorder
+    # Fused reorder (8-array API: veleval/color/shear_rate intentionally excluded)
     fused_reorder(
         n, sorted_indices,
-        pos_gpu, vel_gpu, veleval_gpu, mass_gpu, packed_gpu,
-        temp_gpu, health_gpu, lifetime_gpu, color_gpu, sleep_gpu, shear_gpu,
-        s_pos, s_vel, s_veleval, s_mass, s_packed,
-        s_temp, s_health, s_lifetime, s_color, s_sleep, s_shear,
+        pos_gpu, vel_gpu, mass_gpu, packed_gpu,
+        temp_gpu, health_gpu, lifetime_gpu, sleep_gpu,
+        s_pos, s_vel, s_mass, s_packed,
+        s_temp, s_health, s_lifetime, s_sleep,
     )
     cupy.cuda.Device().synchronize()
 
@@ -238,37 +232,31 @@ def test_reorder_position_correctness() -> None:
 
     # Dummy arrays for the rest (we only check position)
     vel_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
-    veleval_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
     mass_gpu = cupy.ones(n, dtype=cupy.float32)
     packed_gpu = cupy.ones(n, dtype=cupy.uint32)
     temp_gpu = cupy.zeros(n, dtype=cupy.float32)
     health_gpu = cupy.ones(n, dtype=cupy.float32)
     lifetime_gpu = cupy.zeros(n, dtype=cupy.float32)
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
     sleep_gpu = cupy.zeros(n, dtype=cupy.uint8)
-    shear_gpu = cupy.zeros(n, dtype=cupy.float32)
 
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
     s_pos = cupy.zeros((n, 4), dtype=cupy.float32)
     s_vel = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_veleval = cupy.zeros((n, 4), dtype=cupy.float32)
     s_mass = cupy.zeros(n, dtype=cupy.float32)
     s_packed = cupy.zeros(n, dtype=cupy.uint32)
     s_temp = cupy.zeros(n, dtype=cupy.float32)
     s_health = cupy.zeros(n, dtype=cupy.float32)
     s_lifetime = cupy.zeros(n, dtype=cupy.float32)
-    s_color = cupy.zeros((n, 4), dtype=cupy.float32)
     s_sleep = cupy.zeros(n, dtype=cupy.uint8)
-    s_shear = cupy.zeros(n, dtype=cupy.float32)
 
     fused_reorder(
         n, sorted_indices,
-        pos_gpu, vel_gpu, veleval_gpu, mass_gpu, packed_gpu,
-        temp_gpu, health_gpu, lifetime_gpu, color_gpu, sleep_gpu, shear_gpu,
-        s_pos, s_vel, s_veleval, s_mass, s_packed,
-        s_temp, s_health, s_lifetime, s_color, s_sleep, s_shear,
+        pos_gpu, vel_gpu, mass_gpu, packed_gpu,
+        temp_gpu, health_gpu, lifetime_gpu, sleep_gpu,
+        s_pos, s_vel, s_mass, s_packed,
+        s_temp, s_health, s_lifetime, s_sleep,
     )
     cupy.cuda.Device().synchronize()
 
@@ -311,13 +299,11 @@ def test_world_sorted_buffers_preallocated() -> None:
     assert world.sorted_sleep_counter.dtype == cupy.uint8
     print("[OK] sorted_* buffer dtypes correct")
 
-    # Check hash/index buffers
+    # Check hash/sort buffers (indices was identity, now implicit in sort_by_hash)
     assert world.hashes.shape == (1000,)
-    assert world.indices.shape == (1000,)
     assert world.sorted_hashes.shape == (1000,)
-    assert world.sorted_indices.shape == (1000,)
     assert world.hashes.dtype == cupy.uint32
-    print("[OK] Hash/index buffers pre-allocated")
+    print("[OK] Hash buffers pre-allocated")
 
     # After resize, buffers should be re-allocated
     world.resize(2000)
@@ -340,28 +326,27 @@ def test_end_to_end_world_sort_reorder() -> None:
     print(f"  Spawned {n} water particles")
 
     # Hash
-    hashes, indices = calc_hash(world.position[:n])
+    hashes = calc_hash(world.position[:n])
 
-    # Sort into pre-allocated buffers
+    # Sort -- use a dedicated sorted_indices buffer (not aliased to any reorder dst)
+    sorted_indices_buf = cupy.empty(n, dtype=cupy.uint32)
     sorted_hashes, sorted_indices = sort_by_hash(
-        hashes, indices,
+        hashes,
         sorted_hashes_out=world.sorted_hashes[:n],
-        sorted_indices_out=world.sorted_indices[:n],
+        sorted_indices_out=sorted_indices_buf,
     )
 
-    # Fused reorder into pre-allocated sorted buffers
+    # Fused reorder into pre-allocated sorted buffers (8-array API)
     fused_reorder(
-        n, world.sorted_indices[:n],
-        world.position[:n], world.velocity[:n], world.veleval[:n],
+        n, sorted_indices,
+        world.position[:n], world.velocity[:n],
         world.mass[:n], world.packed_info[:n],
         world.temperature[:n], world.health[:n], world.lifetime[:n],
-        world.color[:n], world.sleep_counter[:n], world.shear_rate[:n],
+        world.sleep_counter[:n],
         world.sorted_position[:n], world.sorted_velocity[:n],
-        world.sorted_veleval[:n], world.sorted_mass[:n],
-        world.sorted_packed_info[:n], world.sorted_temperature[:n],
-        world.sorted_health[:n], world.sorted_lifetime[:n],
-        world.sorted_color[:n], world.sorted_sleep_counter[:n],
-        world.sorted_shear_rate[:n],
+        world.sorted_mass[:n], world.sorted_packed_info[:n],
+        world.sorted_temperature[:n], world.sorted_health[:n],
+        world.sorted_lifetime[:n], world.sorted_sleep_counter[:n],
     )
     cupy.cuda.Device().synchronize()
 
@@ -378,7 +363,7 @@ def test_end_to_end_world_sort_reorder() -> None:
     print(f"[OK] Mass sum preserved: {mass_before:.6f} -> {mass_after:.6f}")
 
     # Verify sorted_indices is valid permutation
-    h_idx = cupy.asnumpy(world.sorted_indices[:n])
+    h_idx = cupy.asnumpy(sorted_indices)
     assert len(set(h_idx.tolist())) == n, "sorted_indices has duplicates"
     assert h_idx.min() >= 0 and h_idx.max() < n
     print(f"[OK] sorted_indices is valid permutation of [0, {n})")
@@ -400,43 +385,35 @@ def test_500k_sort_reorder_no_errors() -> None:
 
     mass_gpu = cupy.full(n, 0.008, dtype=cupy.float32)
     vel_gpu = cupy.asarray(rng.uniform(-1, 1, (n, 4)).astype(np.float32))
-    veleval_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
     packed_gpu = cupy.full(n, 0x0005, dtype=cupy.uint32)  # water, FLUID
     temp_gpu = cupy.full(n, 293.0, dtype=cupy.float32)
     health_gpu = cupy.ones(n, dtype=cupy.float32)
     lifetime_gpu = cupy.zeros(n, dtype=cupy.float32)
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
-    color_gpu[:, 2] = 1.0  # blue
-    color_gpu[:, 3] = 1.0
     sleep_gpu = cupy.zeros(n, dtype=cupy.uint8)
-    shear_gpu = cupy.zeros(n, dtype=cupy.float32)
 
-    # Pre-allocate sorted buffers
+    # Pre-allocate sorted buffers (8-array API)
     s_pos = cupy.zeros((n, 4), dtype=cupy.float32)
     s_vel = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_veleval = cupy.zeros((n, 4), dtype=cupy.float32)
     s_mass = cupy.zeros(n, dtype=cupy.float32)
     s_packed = cupy.zeros(n, dtype=cupy.uint32)
     s_temp = cupy.zeros(n, dtype=cupy.float32)
     s_health = cupy.zeros(n, dtype=cupy.float32)
     s_lifetime = cupy.zeros(n, dtype=cupy.float32)
-    s_color = cupy.zeros((n, 4), dtype=cupy.float32)
     s_sleep = cupy.zeros(n, dtype=cupy.uint8)
-    s_shear = cupy.zeros(n, dtype=cupy.float32)
 
     # Hash
-    hashes, indices = calc_hash(pos_gpu)
+    hashes = calc_hash(pos_gpu)
 
     # Sort
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
     # Reorder
     fused_reorder(
         n, sorted_indices,
-        pos_gpu, vel_gpu, veleval_gpu, mass_gpu, packed_gpu,
-        temp_gpu, health_gpu, lifetime_gpu, color_gpu, sleep_gpu, shear_gpu,
-        s_pos, s_vel, s_veleval, s_mass, s_packed,
-        s_temp, s_health, s_lifetime, s_color, s_sleep, s_shear,
+        pos_gpu, vel_gpu, mass_gpu, packed_gpu,
+        temp_gpu, health_gpu, lifetime_gpu, sleep_gpu,
+        s_pos, s_vel, s_mass, s_packed,
+        s_temp, s_health, s_lifetime, s_sleep,
     )
     cupy.cuda.Device().synchronize()
 
@@ -477,40 +454,32 @@ def test_zero_particles() -> None:
 
     upload_grid_params()
 
-    pos_gpu = cupy.zeros((0, 4), dtype=cupy.float32)
     hashes = cupy.zeros(0, dtype=cupy.uint32)
-    indices = cupy.zeros(0, dtype=cupy.uint32)
 
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
     assert sorted_hashes.shape[0] == 0
     assert sorted_indices.shape[0] == 0
     print("[OK] sort_by_hash handles 0 particles")
 
-    # fused_reorder with num_particles=0 should be a no-op
+    # fused_reorder with num_particles=0 should be a no-op (8-array API)
     fused_reorder(
         0, cupy.zeros(0, dtype=cupy.uint32),
         cupy.zeros((0, 4), dtype=cupy.float32),
         cupy.zeros((0, 4), dtype=cupy.float32),
+        cupy.zeros(0, dtype=cupy.float32),
+        cupy.zeros(0, dtype=cupy.uint32),
+        cupy.zeros(0, dtype=cupy.float32),
+        cupy.zeros(0, dtype=cupy.float32),
+        cupy.zeros(0, dtype=cupy.float32),
+        cupy.zeros(0, dtype=cupy.uint8),
+        cupy.zeros((0, 4), dtype=cupy.float32),
         cupy.zeros((0, 4), dtype=cupy.float32),
         cupy.zeros(0, dtype=cupy.float32),
         cupy.zeros(0, dtype=cupy.uint32),
         cupy.zeros(0, dtype=cupy.float32),
         cupy.zeros(0, dtype=cupy.float32),
         cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
         cupy.zeros(0, dtype=cupy.uint8),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.uint32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.uint8),
-        cupy.zeros(0, dtype=cupy.float32),
     )
     print("[OK] fused_reorder handles 0 particles")
 
