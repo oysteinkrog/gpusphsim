@@ -1029,8 +1029,24 @@ void main() {
         # Restore GL state for ImGui
         glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
+
+        # Unbind all texture units used in the composite pass (0-4) to avoid
+        # leaking bindings into ImGui or the next frame.
+        # Unit 4 was bound as CUBE_MAP; units 0-3 were TEXTURE_2D.
+        glActiveTexture(GL_TEXTURE4)
+        glBindTexture(GL_TEXTURE_CUBE_MAP, 0)
+        glActiveTexture(GL_TEXTURE3)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glActiveTexture(GL_TEXTURE2)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D, 0)
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, 0)
+
+        # Restore clear color to the default background (undone by the 0,0,0,0
+        # transparent clears set during SSFR depth and thickness passes).
+        glClearColor(0.15, 0.15, 0.15, 1.0)
 
     # -----------------------------------------------------------------
     # SDF object mesh generation and rendering
