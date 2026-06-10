@@ -558,28 +558,6 @@ class Simulation:
 
         return n_total
 
-    def _ensure_table_size(self, n: int) -> None:
-        """Resize hash table if particle count outgrew it (load factor > 1)."""
-        needed = hash_sort.compute_table_size(n)
-        if needed != self._table_size:
-            self._table_size = needed
-            self._cell_start = cupy.empty(needed, dtype=cupy.uint32)
-            self._cell_end = cupy.empty(needed, dtype=cupy.uint32)
-            self._cell_wake_flags = wake.allocate_cell_wake_flags(needed)
-            self._cs_histogram = cupy.zeros(needed, dtype=cupy.uint32)
-            self._cs_write_offset = cupy.zeros(needed, dtype=cupy.uint32)
-            # Re-upload c_grid to all modules with new table_size
-            hs = self._world_half_size
-            wmin, wmax = (-hs, -hs, -hs), (hs, hs, hs)
-            grid_params, _ = hash_sort.build_grid_params_for_world(
-                wmin, wmax, self._h, num_particles=n,
-            )
-            for mod in [hash_sort, fused_sort_reorder_build, counting_sort,
-                        step1, step2, wake, implicit_st]:
-                mod.upload_grid_params(grid_params)
-            # Invalidate CUDA graphs (grid params changed)
-            self._invalidate_graphs()
-
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
 
@@ -1093,6 +1071,32 @@ class Simulation:
             max_displacement=w.max_displacement,
         )
 
+    def _apply_damping_ramp(self) -> None:
+        """Apply spawn velocity-damping ramp (shared by _sim_step and _sim_step_timed).
+
+        Increments _spawn_substep, updates velocity_damping in c_sim, and
+        invalidates CUDA graphs while the ramp is active.  Must be called once
+        per substep before any kernel launches that read c_sim.velocity_damping.
+        """
+        if self._spawn_substep < self._damping_duration:
+            t = self._spawn_substep / self._damping_duration
+            damping = 0.8 * (1.0 - t)  # linear ramp 0.8 -> 0.0
+            self._spawn_substep += 1
+            # Invalidate CUDA graphs during damping (constant changes each step)
+            self._invalidate_graphs()
+        else:
+            damping = 0.0
+        # Upload damping to c_sim.velocity_damping only when it actually changed.
+        # This guards against the post-ramp steady state (damping == 0) triggering
+        # repeated redundant uploads each substep.  During the active ramp, damping
+        # decrements each substep so the upload fires once per substep — necessary
+        # because constant memory must match what the GPU kernels will use.
+        if self._sim_params is not None:
+            old_damping = float(self._sim_params[0]["velocity_damping"])
+            if abs(damping - old_damping) > 1e-8:
+                self._sim_params[0]["velocity_damping"] = np.float32(damping)
+                self._upload_sim_params_all()  # only uploads when value changed
+
     def _invalidate_graphs(self) -> None:
         """Invalidate both CUDA graphs (call when constants/solver/grid changes)."""
         self._graph_full_sort = None
@@ -1139,24 +1143,7 @@ class Simulation:
         w._density_initialized = True
 
         # --- Spawn velocity damping ramp ---
-        if self._spawn_substep < self._damping_duration:
-            t = self._spawn_substep / self._damping_duration
-            damping = 0.8 * (1.0 - t)  # linear ramp 0.8 -> 0.0
-            self._spawn_substep += 1
-            # Invalidate CUDA graphs during damping (constant changes each step)
-            self._invalidate_graphs()
-        else:
-            damping = 0.0
-        # Upload damping to c_sim.velocity_damping only when it actually changed.
-        # This guards against the post-ramp steady state (damping == 0) triggering
-        # repeated redundant uploads each substep.  During the active ramp, damping
-        # decrements each substep so the upload fires once per substep — necessary
-        # because constant memory must match what the GPU kernels will use.
-        if self._sim_params is not None:
-            old_damping = float(self._sim_params[0]["velocity_damping"])
-            if abs(damping - old_damping) > 1e-8:
-                self._sim_params[0]["velocity_damping"] = np.float32(damping)
-                self._upload_sim_params_all()  # only uploads when value changed
+        self._apply_damping_ramp()
 
         # --- Rigid body: update boundary particles in unsorted arrays ---
         rbm = self.rigid_body_manager
@@ -1295,6 +1282,9 @@ class Simulation:
 
         self._frame_counter_d.fill(self._substep_counter)
         w._density_initialized = True
+
+        # --- Spawn velocity damping ramp (bd-r4-epic-x2j.3: was missing from timed path) ---
+        self._apply_damping_ramp()
 
         # Update rigid body boundary particles
         rbm = self.rigid_body_manager
