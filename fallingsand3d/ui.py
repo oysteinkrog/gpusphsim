@@ -1092,6 +1092,12 @@ class UI:
                 if to_remove is not None:
                     sdf_mgr.remove_kinematic_motion(to_remove)
                     sdf_mgr.remove_sdf_object(to_remove)
+                    # list.pop shifts every index >= to_remove down by 1.
+                    # Clear the cached selection/drag state if it pointed at
+                    # the removed object or any object whose index shifted.
+                    if self._selected_sdf_id is not None and self._selected_sdf_id >= to_remove:
+                        self._selected_sdf_id = None
+                        self._dragging_sdf = False
 
             imgui.end()
 
