@@ -35,6 +35,7 @@ _DEFAULT_TEMPS = {
     14: 1200.0,  # FIRE
     12: 373.0,   # STEAM
     13: 500.0,   # SMOKE
+    11: 253.0,   # ICE -- well below melt point of 273 K; prevents frame-1 thaw
 }
 
 # Ambient temperature
