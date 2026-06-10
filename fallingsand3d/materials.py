@@ -396,7 +396,10 @@ _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     (ACID, STONE, 0.15, 3.0),        # acid slowly corrodes stone
     (ACID, METAL, 0.3, 5.0),         # acid corrodes metal
     (ACID, WOOD, 0.2, 2.0),          # acid corrodes wood
-    (ACID, DIRT, 0.1, 1.0),          # acid dissolves dirt
+    (ACID, DIRT, 0.0, 1.0),          # acid does NOT accumulate corrode-exposure on dirt;
+                                       # DIRT->MUD wetting fires on exp_corrode (reactions.cu:230)
+                                       # so a non-zero rate would route acid through the WATER
+                                       # wetting path unintentionally (bd-unl.19)
     (ACID, ICE, 0.2, 10.0),          # acid melts ice
     # fire interactions
     (FIRE, WOOD, 0.9, 25.0),         # fire burns wood (faster spread)
