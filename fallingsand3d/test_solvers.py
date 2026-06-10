@@ -544,7 +544,7 @@ def test_surface_tension_cohesion_pbf(world, sim):
 
 
 def test_dfsph_density_convergence(world, sim):
-    """bd-mzc.22: DFSPH density_adv formula must be dimensionally consistent.
+    """bd-mzc.22 / bd-unl.10: DFSPH density_adv formula must be dimensionally consistent.
 
     The fix changes: density_adv = rho_i/rho0 + dt*drho
     to:              density_adv = rho_i/rho0 + dt*drho/rho0
@@ -552,13 +552,22 @@ def test_dfsph_density_convergence(world, sim):
     wrong magnitude (off by rho0 ≈ 1000x), causing the Jacobi solver to converge
     to the wrong density and produce a persistent 20-40% error.
 
-    Test: run 20 density Jacobi iterations on a scene with uniform rho=rho0 and
-    zero velocity. At rest, drho=0, so density_adv=rho_i/rho0=1.0, residual=0.
-    p_rho2 should stay near 0 (no spurious pressure driven by the wrong formula).
-    Then inject a large velocity to make drho non-zero and verify the solver is
-    stable (no NaN or Inf) for 20 more iterations.
+    Sub-test 1 (zero-velocity): with all particles at rest, drho=0, so
+    density_adv=rho_i/rho0 and residual≈0. p_rho2 must stay ≈ 0 (no spurious
+    pressure). If the buggy /rho0-missing formula were active, it would produce
+    a drho term off by rho0 even when particles move; with zero velocity it
+    doesn't matter, but the threshold (100*rho0) would catch it when v≠0.
+
+    Sub-test 2 (large velocity): inject vel_limit*0.5 on all particles. The
+    correct formula keeps p_rho2 < 100*rho0 (here rho0=2500 → threshold 250000).
+    The buggy formula would produce p_rho2 off by ~rho0 per iteration and blow
+    past this threshold.
+
+    Threshold: 100 * rho0 ≈ 250000 (tight enough to catch a 20-40% density
+    error, since the buggy formula compounds by ~rho0 per Jacobi step).
     """
     import dfsph_solver
+    from materials import WATER
 
     profile = PROFILES["DFSPH"]
     n = spawn_scene(world)
@@ -583,11 +592,48 @@ def test_dfsph_density_convergence(world, sim):
     )
     cp.cuda.Device().synchronize()
 
-    # Run 20 density Jacobi iterations with a large velocity to produce non-zero drho
+    accel_zero = cp.zeros((n, 4), dtype=cp.float32)
+
+    # --- Sub-test 1: zero velocity --- at rest, drho=0 → p_rho2 must stay ≈ 0.
+    vel_zero = cp.zeros((n, 4), dtype=cp.float32)
+    p_rho2_zero = cp.zeros(n, dtype=cp.float32)
+
+    for _ in range(20):
+        dfsph_solver.density_solver_update(
+            vel_zero, accel_zero,
+            w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+            w.sorted_packed_info[:n],
+            sim._cell_start, sim._cell_end,
+            p_rho2_zero,
+        )
+    cp.cuda.Device().synchronize()
+
+    p_zero = p_rho2_zero.get()
+    # Use WATER rest density from the materials module
+    from materials import MATERIALS
+    rho0 = float(MATERIALS[WATER].rest_density)
+    # At rest, density_adv = rho_i/rho0; if rho_i <= rho0 residual <=0 → p_rho2 clamped to 0.
+    # If rho_i > rho0 slightly (over-compressed at spawn), residual is small but positive.
+    # p_rho2 must stay near zero — threshold 0.5*rho0 to catch any formula error.
+    at_rest_threshold = 0.5 * rho0
+    max_p_zero = float(np.abs(p_zero).max())
+    print(f"  DFSPH density solver (zero vel): max_p_rho2={max_p_zero:.4e}  "
+          f"threshold={at_rest_threshold:.4e}")
+    assert not np.isnan(p_zero).any(), "DFSPH density solver (zero vel) produced NaN"
+    assert not np.isinf(p_zero).any(), "DFSPH density solver (zero vel) produced Inf"
+    assert max_p_zero < at_rest_threshold, (
+        f"DFSPH density solver (zero vel) has spurious pressure: "
+        f"max_p_rho2={max_p_zero:.4e} > {at_rest_threshold:.4e}. "
+        f"At rest drho=0, so p_rho2 should remain ≈ 0."
+    )
+
+    # --- Sub-test 2: large velocity --- p_rho2 must stay < 100*rho0.
+    # With the correct formula drho/rho0 is dimensionless; with the bug drho is
+    # off by ~rho0 per iteration, blowing past 100*rho0 quickly.
     vel_limit = float(sim._sim_params[0]["velocity_limit"])
     vel_large = cp.zeros((n, 4), dtype=cp.float32)
-    vel_large[:, 0] = vel_limit * 0.5   # half the velocity limit — a large but valid velocity
-    accel_zero = cp.zeros((n, 4), dtype=cp.float32)
+    vel_large[:, 0] = vel_limit * 0.5   # half the velocity limit — large but valid
     p_rho2 = cp.zeros(n, dtype=cp.float32)
 
     for _ in range(20):
@@ -604,13 +650,12 @@ def test_dfsph_density_convergence(world, sim):
     p = p_rho2.get()
     assert not np.isnan(p).any(), "DFSPH density solver produced NaN in p_rho2"
     assert not np.isinf(p).any(), "DFSPH density solver produced Inf in p_rho2"
-    max_p = np.abs(p).max()
-    # p_rho2 should be finite and bounded; divergence would indicate formula error.
-    # With the correct formula (dt*drho/rho0), drho/rho0 ~ O(vel_limit/h/rho0) = small;
-    # with the bug (dt*drho), drho ~ O(vel_limit/h) = large, p_rho2 blows up faster.
-    # We just verify no divergence.
-    threshold_p = 1e10
-    print(f"  DFSPH density solver (large vel): max_p_rho2={max_p:.4e}")
+    max_p = float(np.abs(p).max())
+    # Tight threshold: 100 * rho0. With the correct formula p_rho2 is bounded;
+    # with the bug (missing /rho0 in density_adv) it diverges past this quickly.
+    threshold_p = 100.0 * rho0
+    print(f"  DFSPH density solver (large vel): max_p_rho2={max_p:.4e}  "
+          f"threshold={threshold_p:.4e}  (rho0={rho0:.1f})")
     assert max_p < threshold_p, (
         f"DFSPH density solver p_rho2 diverged: max={max_p:.4e} > {threshold_p:.4e}. "
         f"Check density_adv = rho_i/rho0 + dt*drho/rho0 (unit mismatch fix)."
