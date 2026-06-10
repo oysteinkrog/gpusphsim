@@ -864,16 +864,187 @@ def test_dfsph_density_solver_velocity_clamp(world, sim):
 
 
 def test_dfsph_rigid_viscous_force_scaling(world, sim):
-    """bd-mzc.23: DFSPH rigid viscous reaction force must use m_i, not m_j/rho_i.
+    """bd-unl.11 / bd-mzc.23: Rigid viscous reaction force must include /rho_i.
 
-    Run the full DFSPH solver and verify that velocities remain physically
-    bounded after non-pressure forces including rigid body viscous coupling.
-    The old m_j/rho_i scaling could produce forces ~50x too large for water (rho=1000).
+    The bug (bd-unl.1): the two-way reaction force on the rigid body was computed as
+        F_on_body = -F_visc * m_i                   # BUGGY: missing /rho_i
+    instead of the correct:
+        F_on_body = -(F_visc / rho_i) * m_i         # FIXED
+
+    For WATER (rho_i ≈ rho0 = 2500), the buggy code overscales the reaction force
+    by a factor of ~2500x.
+
+    This test sets up a deterministic 2-particle configuration:
+      - Particle 0: WATER (FLUID, mat_id=5), velocity = (1, 0, 0) m/s
+      - Particle 1: RIGID boundary (STATIC, mat_id=18, body_id=0), velocity = (0, 0, 0)
+        placed at distance rlen = h * 0.5 = 0.02 m from particle 0
+
+    Expected force on the rigid body (1 neighbor pair, dv = 1 m/s):
+      visc_factor = mu_b * m_j * (h - rlen) / rho_i
+      mu_b        = base_viscosity * viscosity_lap_coeff = 1.0 * 45/(pi*h^6) ≈ 3.50e9
+      visc_factor ≈ 3.50e9 * 0.02 * 0.02 / 2500 ≈ 560
+      F_visc      ≈ 560 * 1.0 ≈ 560 N/kg (force density on fluid particle)
+
+      CORRECT: F_on_body = F_visc / rho_i * m_i ≈ 560 / 2500 * 0.02 ≈ 4.5e-3 N
+      BUGGY:   F_on_body = F_visc * m_i          ≈ 560       * 0.02 ≈ 11.2 N  (2500x too large)
+
+    Assertion threshold: force magnitude must be < 0.5 N.
+      - CORRECT code: ~4.5e-3 N  → PASS (4.5e-3 < 0.5)
+      - BUGGY code:   ~11.2 N    → FAIL (11.2 > 0.5)
+
+    The threshold gap to the buggy value is >20x, so small numerical variation
+    from real density (not exactly rho0) or multiple neighbors cannot produce
+    false failures.
     """
-    # The most practical way to verify this fix is a stability test with rigid bodies.
-    # Without rigid bodies in the scene, just confirm non-pressure forces don't blow up.
-    assert _run_stability(world, sim, "DFSPH", 5), \
-        "DFSPH became unstable in 5 substeps (possible rigid viscous force scaling issue)"
+    import dfsph_solver
+    import hash_sort
+    from materials import WATER, FLUID, MAT_RIGID, STATIC, MATERIALS
+    from rigid_bodies import RigidBodyManager, SDF_BOX
+
+    profile = PROFILES["DFSPH"]
+    world.packed_info[:] = 0
+    world._high_water = 0
+
+    # --- Scene setup ---
+    # h = 0.04 (smoothing length, same as simulation default)
+    # Place a 2x2x2 cube of WATER particles at the origin (8 particles).
+    # Place one RIGID boundary particle at (h*0.5, 0, 0) = (0.02, 0, 0) from the
+    # cluster center, within the smoothing length so the kernel finds it as a neighbor.
+    h = 0.04
+    spacing = 0.02   # particle spacing = h/2
+
+    # Spawn a small water cluster
+    n_water = world.spawn_cube(
+        min_corner=(-0.02, -0.02, -0.02),
+        max_corner=(0.02, 0.02, 0.02),
+        material_id=WATER,
+        spacing=spacing,
+    )
+
+    # Manually insert one rigid boundary particle at position (h*0.5, 0, 0) from center.
+    # packed_info encoding:
+    #   bits [7:0]   = MAT_RIGID = 18
+    #   bits [9:8]   = STATIC = 3  => (3 << 8) = 768
+    #   bits [20:13] = body_id = 0 => (0 << 13) = 0
+    rigid_pi = np.uint32(MAT_RIGID | (STATIC << 8) | (0 << 13))
+    rho0 = float(MATERIALS[WATER].rest_density)  # 2500.0
+    m = float(0.02)  # particle_mass (matches simulation default)
+
+    rigid_pos = np.array([[h * 0.5, 0.0, 0.0, 0.0]], dtype=np.float32)
+    rigid_vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    rigid_mass = np.array([m], dtype=np.float32)
+
+    idx_rigid = n_water  # append after fluid particles
+    world.position[idx_rigid]   = cp.asarray(rigid_pos[0])
+    world.velocity[idx_rigid]   = cp.asarray(rigid_vel[0])
+    world.mass[idx_rigid]       = cp.float32(m)
+    world.packed_info[idx_rigid] = cp.uint32(rigid_pi)
+    world._high_water = n_water + 1
+    n = n_water + 1
+
+    # Give fluid particles a velocity of +1 m/s in x so there is a relative velocity
+    # between fluid and the stationary rigid body.
+    world.velocity[:n_water, 0] = 1.0
+
+    # --- Grid and solver setup ---
+    sim.set_solver_profile(profile)
+    w = world
+
+    hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
+    sort_perm = cp.argsort(hashes).astype(cp.uint32)
+    sim._sort_perm[:n] = sort_perm
+    w._density_initialized = True
+    sim._run_grid_setup(n)
+
+    # Compute density so rho_i is available for the force kernel.
+    dfsph_solver.compute_density_alpha(
+        w.sorted_position[:n], w.sorted_velocity[:n],
+        w.sorted_mass[:n], None,
+        w.sorted_packed_info[:n], w.sorted_temperature[:n],
+        sim._cell_start, sim._cell_end,
+        w.sorted_density, w.sorted_alpha_dfsph,
+        w.sorted_shear_rate, w.sorted_dTdt,
+        w.sorted_exposure_heat, w.sorted_exposure_corrode,
+    )
+    cp.cuda.Device().synchronize()
+
+    # --- Set up a RigidBodyManager with one body at the rigid particle position ---
+    # The kernel reads d_rigid_bodies[body_id].{position, lin_vel, ang_vel}.
+    # Body 0 is at rest at (h*0.5, 0, 0); its inv_mass does not matter for this test.
+    rbm = RigidBodyManager(max_bodies=8)
+    rbm.add_rigid_body(
+        position=(h * 0.5, 0.0, 0.0),
+        half_extents=(0.02, 0.02, 0.02),
+        mass=1.0,
+        sdf_type=SDF_BOX,
+    )
+
+    # Upload body count to dfsph_solver constant memory and body data to GPU global.
+    # rbm.upload() uses cupy.asarray(structured_dtype) which fails on some CuPy builds;
+    # use raw memcpy instead (same path as the existing constant-memory uploads).
+    module = dfsph_solver.get_module()
+
+    body_bytes = rbm._bodies_cpu[:rbm._num_bodies].view(np.uint8)
+    d_ptr_rb = int(rbm.d_rigid_bodies.data.ptr)
+    cp.cuda.runtime.memcpy(d_ptr_rb, body_bytes.ctypes.data, body_bytes.nbytes, 1)
+
+    h_count = np.array([rbm._num_bodies], dtype=np.int32)
+    try:
+        d_count_ptr = module.get_global("c_num_rigid_bodies")
+        cp.cuda.runtime.memcpy(int(d_count_ptr), h_count.ctypes.data, 4, 1)
+    except Exception:
+        pass  # Symbol may be absent if compiled without rigid bodies
+
+    # Zero force/torque accumulators.
+    rbm.zero_accumulators()
+
+    # --- Run K_DFSPH_NonPressureForces ---
+    vel_out = cp.zeros((n, 4), dtype=cp.float32)
+    dfsph_solver.compute_non_pressure_forces(
+        w.sorted_position[:n], w.sorted_velocity[:n],
+        w.sorted_density[:n], w.sorted_mass[:n],
+        w.sorted_packed_info[:n], w.sorted_shear_rate[:n],
+        w.sorted_temperature[:n],
+        sim._cell_start, sim._cell_end,
+        vel_out,
+        d_rigid_bodies=rbm.d_rigid_bodies,
+        d_rigid_forces=rbm.rigid_forces,
+        d_rigid_torques=rbm.rigid_torques,
+    )
+    cp.cuda.Device().synchronize()
+
+    # --- Read accumulated force on body 0 ---
+    forces_cpu = rbm.rigid_forces.get()  # shape (8, 4)
+    fx, fy, fz = forces_cpu[0, 0], forces_cpu[0, 1], forces_cpu[0, 2]
+    force_mag = float(np.sqrt(fx * fx + fy * fy + fz * fz))
+
+    # --- Thresholds ---
+    # CORRECT formula: F_on_body ≈ F_visc / rho_i * m_i per contributing neighbor pair.
+    # With N_neighbors fluid particles near the rigid particle at rlen ≈ h*0.5:
+    # Single-pair magnitude ≈ 4.5e-3 N; with up to ~8 fluid neighbours ≈ 3.6e-2 N.
+    # BUGGY formula: same values × rho_i ≈ 2500 → ≈ 11–90 N range.
+    #
+    # We set the threshold at 0.5 N:
+    #   - Correct code (few-neighbour cluster): expected < 0.05 N  → PASS
+    #   - Buggy code (missing /rho_i, 2500x):   expected > 10 N   → FAIL
+    # The 20x margin from 0.5 to 10 N guards against any numerical variation.
+    threshold = 0.5  # N
+
+    print(
+        f"  Rigid viscous reaction force: ({fx:.4e}, {fy:.4e}, {fz:.4e}) N, "
+        f"magnitude={force_mag:.4e} N  (threshold={threshold} N)  "
+        f"[buggy code would give ~{force_mag * rho0:.1f} N]"
+    )
+
+    assert force_mag > 0.0, (
+        "Rigid body received zero reaction force — no fluid-rigid neighbor pairs found. "
+        "Check that the rigid boundary particle is within h of the fluid cluster."
+    )
+    assert force_mag < threshold, (
+        f"Rigid viscous reaction force too large: {force_mag:.4e} N > {threshold} N. "
+        f"The formula must be F_on_body = -(F_visc / rho_i) * m_i. "
+        f"Without /rho_i the force is ~{rho0:.0f}x too large (rho_i overscale, bd-unl.1)."
+    )
 
 
 def main():
