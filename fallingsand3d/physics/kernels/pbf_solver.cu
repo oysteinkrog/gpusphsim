@@ -262,12 +262,11 @@ void K_PBF_ComputeLambda(
                     }
 
                     // Density (Poly6, self-included).
-                    // STATIC boundary boost: multiply contribution by 2x so solid
-                    // boundaries create stronger density inflation, preventing fluid
-                    // from leaking through coarse STATIC particle layers.
+                    // Standard Akinci boundary: psi_b = m_j (no extra multiplier).
+                    // The former 2x boundary_scale inflated near-wall density to ~2*rho0,
+                    // causing particles to bounce off walls (unphysical repulsion).
                     float diff = h_sq - r_sq;
-                    float boundary_scale = (behavior_j == STATIC && j != i) ? 2.0f : 1.0f;
-                    sum_density += boundary_scale * m_j * diff * diff * diff;
+                    sum_density += m_j * diff * diff * diff;
 
                     // Gradient + heat + exposure (skip self)
                     if (j != i && r_sq > 1e-12f) {
@@ -275,8 +274,7 @@ void K_PBF_ComputeLambda(
                         float3 gW = grad_spiky(r, rlen, h);
                         // grad_pj C_i = (1/rho0) * m_j * grad_W(x*_i - x*_j)
                         // But for denominator: |grad_pj C_i|^2 = (m_j/rho0)^2 * |gradW|^2
-                        // Apply same boundary_scale to gradients for consistency
-                        float scale = boundary_scale * m_j / rho0;
+                        float scale = m_j / rho0;
                         float gx = scale * gW.x;
                         float gy = scale * gW.y;
                         float gz = scale * gW.z;
@@ -892,7 +890,8 @@ void K_PBF_Finalize(
         }
     }
 
-    // Akinci surface tension (FLUID only, surface particles): vel += dt * (-gamma * n)
+    // Akinci surface tension (FLUID only, surface particles): vel += dt * (+gamma * n)
+    // +gamma * norm_i coheres fluid (inward force toward interior, §10.16)
     if (behavior == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f) {
         float4 norm_i = __ldg(&normal_in[i]);
         float nc_i = norm_i.w;  // neighbor count
@@ -900,9 +899,9 @@ void K_PBF_Finalize(
             float gamma = c_granular.surface_tension_gamma;
             float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
             if (n_mag > 0.01f) {
-                vel_new.x += dt * (-gamma * norm_i.x);
-                vel_new.y += dt * (-gamma * norm_i.y);
-                vel_new.z += dt * (-gamma * norm_i.z);
+                vel_new.x += dt * (+gamma * norm_i.x);
+                vel_new.y += dt * (+gamma * norm_i.y);
+                vel_new.z += dt * (+gamma * norm_i.z);
             }
         }
     }
