@@ -58,9 +58,13 @@ _cupy_stub.unique = _unique
 _cupy_stub.float32 = np.float32
 _cupy_stub.uint32 = np.uint32
 
-sys.modules.setdefault("cupy", _cupy_stub)
-
-# Now import SnapshotRing with the stub in place
+# Import snapshot bound to whatever cupy is present. The tests patch
+# ``snapshot.cp`` per-test (setUp/tearDown) so SnapshotRing uses the numpy stub
+# regardless of import order, and WITHOUT replacing sys.modules['cupy'] (which
+# previously polluted other test files when run in the full suite: a stale
+# `setdefault` was a no-op once the real cupy was loaded, leaving snapshot bound
+# to real cupy and `cp.copyto(numpy, numpy)` failing).
+import snapshot  # noqa: E402
 from snapshot import SnapshotRing  # noqa: E402
 
 
@@ -98,6 +102,15 @@ class _World:
 # ---------------------------------------------------------------------------
 
 class TestSnapshotRingUndo(unittest.TestCase):
+
+    def setUp(self):
+        # Force SnapshotRing to use the numpy stub regardless of whether the
+        # real cupy is already imported. Scoped per-test so it never leaks.
+        self._real_cp = snapshot.cp
+        snapshot.cp = _cupy_stub
+
+    def tearDown(self):
+        snapshot.cp = self._real_cp
 
     def _make_ring(self, max_snapshots: int = 6) -> SnapshotRing:
         return SnapshotRing(max_snapshots=max_snapshots, max_particles=MAX_P)

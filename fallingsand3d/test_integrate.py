@@ -1610,37 +1610,26 @@ def test_body_body_restitution():
 def test_fallback_alloc_no_gpu_cpu_sync():
     """integrate() fallback alloc path uses max_idx=n, not int(sort_indexes.max()).
 
-    bd-mzc.41: The fallback allocation block must not call int() / .max() / .get()
-    on any CuPy array.  We verify this by monkey-patching cupy.ndarray.max to raise
-    on any call, then triggering the fallback path (all output arrays = None).
+    bd-mzc.41: The fallback allocation block must not call int()/.max()/.get() on
+    a CuPy array (that forces a GPU->CPU sync). Verified by SOURCE INSPECTION.
+
+    NOTE: a previous version monkey-patched ``cupy.ndarray.max`` at runtime to
+    detect the sync. Patching an attribute on the cupy extension type corrupts
+    global cupy state for the rest of the process and poisoned later tests
+    (e.g. test_snapshot saw "'cupy' is not a package"). Static inspection of the
+    source is robust and cannot leak state.
     """
-    setup_params()
-    n = 4
-    d = make_simple_particles(n, WATER, FLUID)
+    import inspect
+    import integrate as _integ_mod
 
-    # Remove all pre-allocated outputs to force the fallback alloc path
-    for key in ("position_out", "velocity_out", "color_out", "packed_info_out",
-                "sleep_counter_out", "temperature_out"):
-        d.pop(key, None)
-
-    # Patch cupy.ndarray.max to detect any GPU->CPU sync in the alloc path
-    _original_max = cupy.ndarray.max
-    sync_calls = []
-
-    def _patched_max(self, *args, **kwargs):
-        sync_calls.append(1)
-        return _original_max(self, *args, **kwargs)
-
-    cupy.ndarray.max = _patched_max
-    try:
-        integrate(**d)
-        cupy.cuda.Device().synchronize()
-    finally:
-        cupy.ndarray.max = _original_max
-
-    assert len(sync_calls) == 0, (
-        f"integrate() fallback alloc called .max() {len(sync_calls)} time(s) — "
-        "GPU->CPU sync detected; should use max_idx=n instead"
+    src = inspect.getsource(_integ_mod.integrate)
+    assert "sort_indexes.max()" not in src, (
+        "integrate() still calls sort_indexes.max() — GPU->CPU sync; "
+        "fallback alloc should use max_idx = n"
+    )
+    assert "max_idx = n" in src, (
+        "integrate() fallback alloc should derive size from max_idx = n "
+        "(the active particle count), not a device reduction"
     )
     print("PASS: test_fallback_alloc_no_gpu_cpu_sync")
 
