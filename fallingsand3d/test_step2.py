@@ -442,11 +442,6 @@ def test_xsph_fluid_only() -> None:
     print("[OK] XSPH correction shifts velocities toward neighbors (FLUID)")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="bd-mzc.34: current step2.cu applies XSPH to GRANULAR (finding #18); "
-           "fix in bd-mzc.34 removes this marker",
-)
 def test_xsph_not_for_granular() -> None:
     """XSPH correction is NOT applied to GRANULAR particles."""
     print("\n--- XSPH not for GRANULAR test ---")
