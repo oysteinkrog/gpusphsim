@@ -312,4 +312,10 @@ def load_scene(world, sim, camera, filename: str) -> int:
     sim._last_frame_time = None
     sim.reset_spawn_damping()
 
+    # bd-r4-epic-x2j.2: clear rigid boundary init flag so next step re-initialises
+    # boundary particles at correct positions (preset-load and solver-switch paths
+    # already do this; load_scene was the missing case).
+    if hasattr(sim, '_rigid_boundary_initialized'):
+        del sim._rigid_boundary_initialized
+
     return n
