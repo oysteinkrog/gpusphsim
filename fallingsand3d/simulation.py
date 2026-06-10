@@ -1645,3 +1645,41 @@ class Simulation:
     @property
     def last_substeps(self) -> int:
         return self._last_substeps
+
+    def get_all_modules(self) -> list:
+        """Return all compiled CuPy RawModule objects known to this Simulation.
+
+        Used by RigidBodyManager.upload() to write c_num_rigid_bodies into
+        each module's constant memory via get_global().
+        """
+        mods = [
+            step1.get_module(),
+            step2.get_module(),
+            integrate.get_module(),
+            reactions.get_module(),
+            spawn.get_module(),
+            wake.get_module(),
+            hash_sort.get_module(),
+            fused_sort_reorder_build.get_module(),
+            counting_sort.get_module(),
+        ]
+        # Optional solver modules (may not be compiled yet)
+        try:
+            import pbf_solver
+            mods.append(pbf_solver.get_module())
+        except Exception:
+            pass
+        try:
+            import dfsph_solver
+            mods.append(dfsph_solver.get_module())
+        except Exception:
+            pass
+        try:
+            mods.append(implicit_st.get_module())
+        except Exception:
+            pass
+        try:
+            mods.append(foam.get_module())
+        except Exception:
+            pass
+        return [m for m in mods if m is not None]
