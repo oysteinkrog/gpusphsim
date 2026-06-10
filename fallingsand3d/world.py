@@ -58,6 +58,9 @@ class World:
         self.max_particles: int = max_particles
         self._high_water: int = 0  # one past last allocated slot
         self._spawned_material_ids: set = set()  # CPU-side tracking for conditional skip
+        # Host-side dead count — updated by Simulation via async D2H readback.
+        # num_active uses this instead of count_nonzero to avoid GPU sync.
+        self._dead_count_host: int = 0
         self._allocate()
 
     def _allocate(self) -> None:
@@ -184,22 +187,33 @@ class World:
         self.max_particles = new_max
         self._high_water = 0
         self._spawned_material_ids = set()
+        self._dead_count_host = 0
         self._allocate()
 
     @property
     def num_active(self) -> int:
-        """Count of non-DEAD particles (material_id != 0)."""
-        if self._high_water == 0:
-            return 0
-        return int(cp.count_nonzero(self.packed_info[:self._high_water] & cp.uint32(0xFF)))
+        """Count of non-DEAD particles (material_id != 0).
 
-    def compact(self) -> int:
+        Uses _high_water minus the host-side dead count that is updated
+        asynchronously by Simulation each frame via pinned-memory D2H copy.
+        No GPU->CPU synchronization occurs on this path.
+        """
+        return max(0, self._high_water - self._dead_count_host)
+
+    def compact(self, num_alive: int = -1) -> int:
         """Compact particle arrays by moving alive particles to the front.
 
         Uses CuPy stream compaction (fancy indexing gather) to move all
         non-DEAD particles to contiguous slots [0, num_alive). Dead
         particles are effectively discarded (their slots become available
         for future spawning).
+
+        Parameters
+        ----------
+        num_alive : int, optional
+            Pre-computed count of alive particles (default -1 = compute here).
+            Pass this from the async dead_count readback to avoid a GPU sync.
+            If -1, the count is derived from alive_idx.shape[0] after flatnonzero.
 
         Returns
         -------
@@ -213,7 +227,11 @@ class World:
         # Find alive particle indices: material_id != 0
         alive_mask = (self.packed_info[:n] & cp.uint32(0xFF)) != cp.uint32(0)
         alive_idx = cp.flatnonzero(alive_mask)
-        num_alive = len(alive_idx)
+        # Use caller-supplied count if available to avoid a GPU sync;
+        # fall back to alive_idx.shape[0] (same sync cost as len()) only when
+        # no count was provided.
+        if num_alive < 0:
+            num_alive = int(alive_idx.shape[0])
 
         if num_alive == n:
             # No dead particles, nothing to do
@@ -307,22 +325,15 @@ class World:
         mat = MATERIALS[material_id]
         start = self._high_water
 
-        # Generate random positions in unit sphere using rejection sampling on GPU
-        # Over-generate by ~2x to account for rejection, then take first `actual`
-        needed = actual
-        positions_list = []
-        remaining = needed
-        while remaining > 0:
-            batch = int(remaining * 2.0) + 128
-            pts = cp.random.uniform(-1.0, 1.0, (batch, 3)).astype(cp.float32)
-            r_sq = cp.sum(pts * pts, axis=1)
-            inside = pts[r_sq <= 1.0]
-            take = min(len(inside), remaining)
-            if take > 0:
-                positions_list.append(inside[:take])
-                remaining -= take
-
-        sphere_pts = cp.concatenate(positions_list, axis=0)[:actual]
+        # Generate exactly `actual` random positions uniformly inside a unit sphere.
+        # Uses the Muller/Marsaglia method: sample direction from Gaussian (normalize),
+        # then scale radius by r = uniform^(1/3).  Produces exactly `actual` points
+        # in one GPU operation with no rejection loop and no per-iteration GPU sync.
+        gauss = cp.random.standard_normal((actual, 3), dtype=cp.float32)
+        norms = cp.linalg.norm(gauss, axis=1, keepdims=True)
+        direction = gauss / (norms + 1e-10)  # unit sphere surface points
+        r_scale = cp.random.uniform(0.0, 1.0, (actual, 1), dtype=cp.float32) ** (1.0 / 3.0)
+        sphere_pts = direction * r_scale  # uniform inside unit sphere
         # Scale to desired radius and translate to center
         cx, cy, cz = center
         sphere_pts[:, 0] = sphere_pts[:, 0] * radius + cx
@@ -756,9 +767,9 @@ class World:
         mask = dist_sq <= (radius * radius)
         # Only kill non-DEAD particles
         mask = mask & (self.packed_info[:n] != 0)
-        killed = int(cp.sum(mask))
 
-        if killed > 0:
-            self.packed_info[:n][mask] = cp.uint32(0)
+        # Apply mask; return 0 (count unused by any caller -- removing the
+        # int(cp.sum(mask)) sync that stalled the GPU pipeline on every brush kill).
+        self.packed_info[:n][mask] = cp.uint32(0)
 
-        return killed
+        return 0

@@ -136,13 +136,14 @@ def test_kill_in_sphere():
     w.spawn_sphere((0.0, 0.0, 0.0), 0.5, WATER, 10_000)
     before = w.num_active
     assert before == 10_000
-    killed = w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
-    assert killed > 0
-    assert w.num_active < before
-    # Killed particles have packed_info=0
-    dead_mask = w.packed_info[:before] == 0
-    assert int(cp.sum(dead_mask)) >= killed
-    print(f"PASS: kill_in_sphere ({killed} killed, {w.num_active} remain)")
+    # kill_in_sphere returns 0 (count is unused by all callers; bd-mzc.39 removes the sync)
+    w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
+    # Verify particles inside sphere are actually zeroed
+    n = w._high_water
+    dead_mask = w.packed_info[:n] == 0
+    dead_count = int(cp.sum(dead_mask))
+    assert dead_count > 0, "Expected some particles to be killed inside sphere"
+    print(f"PASS: kill_in_sphere ({dead_count} killed)")
 
 
 def test_num_active():

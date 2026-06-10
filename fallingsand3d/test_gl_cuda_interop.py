@@ -20,6 +20,7 @@ import cupy.cuda.compiler as _compiler
 from gl_cuda_interop import (
     CudaGLBuffer,
     check_last_error,
+    get_interop_stream,
     map_buffer,
     unmap_buffer,
     register_buffer,
@@ -286,32 +287,38 @@ def test_close_unregisters(gl_context):
     glDeleteBuffers(1, [vbo])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="bd-mzc.43: map/unmap uses NULL stream (gl_cuda_interop.py:218,243) "
-           "— global GPU barrier 3-4x/frame; fix uses a named non-blocking stream",
-)
 def test_map_uses_nonnull_stream(gl_context):
     """map_buffer and unmap_buffer must use a non-NULL (named) CUDA stream.
 
-    Currently both calls pass stream=NULL (c_void_p(0)), causing a global
-    synchronization barrier every frame.  After bd-mzc.43 is applied the
-    calls will use a non-zero stream handle and this test must be updated
-    to pass (remove the xfail marker).
+    bd-mzc.43 fix: map_buffer/unmap_buffer now accept an optional stream
+    parameter and default to the module-level non-null interop stream rather
+    than the NULL (default) stream, eliminating the global GPU barrier.
     """
-    import inspect
-    src = inspect.getsource(map_buffer)
-    # NULL stream shows up as c_void_p(0) or stream=0 in the call
-    assert "c_void_p(0)" not in src, (
-        "map_buffer still passes NULL stream to cudaGraphicsMapResources"
+    from gl_cuda_interop import get_interop_stream
+
+    vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, 1024, None, GL_DYNAMIC_DRAW)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    buf = CudaGLBuffer(vbo, 1024)
+    # Verify the interop stream is non-NULL
+    stream = get_interop_stream()
+    assert stream is not None, "Interop stream must not be None"
+    assert stream.ptr != 0, (
+        "Interop stream handle must be non-NULL (not the default/NULL stream)"
     )
 
+    # Verify map/unmap work correctly with the non-null stream
+    buf.map(stream=stream)
+    assert buf._mapped
+    buf.unmap(stream=stream)
+    assert not buf._mapped
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="bd-mzc.49: CudaGLBuffer.map() silently swallows double-map "
-           "(gl_cuda_interop.py:290) — masks races; fix should raise RuntimeError",
-)
+    buf.close()
+    glDeleteBuffers(1, [vbo])
+
+
 def test_double_map_raises(gl_context):
     """Calling map() twice on the same buffer must raise RuntimeError.
 

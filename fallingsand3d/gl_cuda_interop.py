@@ -7,10 +7,11 @@ without any CPU round-trip.
 Exported API
 ------------
 - register_buffer(vbo_id, flags) -> cudaGraphicsResource*
-- map_buffer(resource)
+- map_buffer(resource, stream=None)
 - get_mapped_pointer(resource) -> (dev_ptr, size)
-- unmap_buffer(resource)
+- unmap_buffer(resource, stream=None)
 - CudaGLBuffer  -- convenience class wrapping the lifecycle
+- get_interop_stream() -> cupy.cuda.Stream  -- shared non-null interop stream
 """
 
 from __future__ import annotations
@@ -82,6 +83,29 @@ def _load_cudart() -> ctypes.CDLL:
 
 
 _cudart = _load_cudart()
+
+# ---------------------------------------------------------------------------
+# Per-module non-null CUDA stream for GL interop operations
+# ---------------------------------------------------------------------------
+
+_interop_stream: Optional[object] = None  # cupy.cuda.Stream, lazily created
+
+
+def get_interop_stream() -> object:
+    """Return (creating if necessary) the shared non-null CUDA stream used for
+    cudaGraphicsMapResources / cudaGraphicsUnmapResources calls.
+
+    Using a named non-null stream instead of the NULL (default) stream
+    eliminates the global serialisation barrier that the NULL stream inserts
+    across all CUDA work on the device — removing the 3-4x/frame bottleneck
+    identified in bd-mzc.43.
+    """
+    global _interop_stream
+    if _interop_stream is None:
+        import cupy
+        _interop_stream = cupy.cuda.Stream(non_blocking=True)
+    return _interop_stream
+
 
 # ---------------------------------------------------------------------------
 # Declare function signatures
@@ -208,14 +232,26 @@ def unregister_buffer(resource: int) -> None:
     check_last_error("cudaGraphicsUnregisterResource (post)")
 
 
-def map_buffer(resource: int) -> None:
+def map_buffer(resource: int, stream: Optional[object] = None) -> None:
     """Map a registered resource for access by CUDA kernels.
 
     Must be followed by :func:`unmap_buffer` before OpenGL can use the
     buffer again.
+
+    Parameters
+    ----------
+    resource : int
+        Opaque CUDA graphics resource handle.
+    stream : cupy.cuda.Stream or None
+        CUDA stream to use for the map operation.  When None the module-level
+        non-null interop stream (see :func:`get_interop_stream`) is used,
+        which avoids the NULL-stream global serialisation barrier.
     """
+    if stream is None:
+        stream = get_interop_stream()
+    stream_ptr = c_void_p(stream.ptr)
     res_ptr = c_void_p(resource)
-    err = _cudart.cudaGraphicsMapResources(1, byref(res_ptr), c_void_p(0))
+    err = _cudart.cudaGraphicsMapResources(1, byref(res_ptr), stream_ptr)
     _check(err, "cudaGraphicsMapResources")
     check_last_error("cudaGraphicsMapResources (post)")
 
@@ -237,10 +273,23 @@ def get_mapped_pointer(resource: int) -> tuple[int, int]:
     return dev_ptr.value, size.value
 
 
-def unmap_buffer(resource: int) -> None:
-    """Unmap a previously mapped resource so OpenGL can access it again."""
+def unmap_buffer(resource: int, stream: Optional[object] = None) -> None:
+    """Unmap a previously mapped resource so OpenGL can access it again.
+
+    Parameters
+    ----------
+    resource : int
+        Opaque CUDA graphics resource handle.
+    stream : cupy.cuda.Stream or None
+        CUDA stream to use for the unmap operation.  When None the module-level
+        non-null interop stream (see :func:`get_interop_stream`) is used.
+        Must match the stream used in the corresponding :func:`map_buffer` call.
+    """
+    if stream is None:
+        stream = get_interop_stream()
+    stream_ptr = c_void_p(stream.ptr)
     res_ptr = c_void_p(resource)
-    err = _cudart.cudaGraphicsUnmapResources(1, byref(res_ptr), c_void_p(0))
+    err = _cudart.cudaGraphicsUnmapResources(1, byref(res_ptr), stream_ptr)
     _check(err, "cudaGraphicsUnmapResources")
     check_last_error("cudaGraphicsUnmapResources (post)")
 
@@ -287,20 +336,40 @@ class CudaGLBuffer:
 
     # -- core operations ---------------------------------------------------
 
-    def map(self) -> None:
+    def map(self, stream: Optional[object] = None) -> None:
+        """Map the buffer for CUDA access.
+
+        Parameters
+        ----------
+        stream : cupy.cuda.Stream or None
+            CUDA stream for the map operation.  Defaults to the shared non-null
+            interop stream (:func:`get_interop_stream`), which avoids the
+            NULL-stream global barrier (bd-mzc.43).
+        """
         if self._mapped:
-            return
+            raise RuntimeError(
+                "CudaGLBuffer.map() called while already mapped — missing unmap()?"
+            )
         if self._resource is None:
             raise RuntimeError("CudaGLBuffer: resource already closed")
-        map_buffer(self._resource)
+        map_buffer(self._resource, stream=stream)
         self._mapped = True
 
-    def unmap(self) -> None:
+    def unmap(self, stream: Optional[object] = None) -> None:
+        """Unmap the buffer so OpenGL can draw from it.
+
+        Parameters
+        ----------
+        stream : cupy.cuda.Stream or None
+            CUDA stream for the unmap operation.  Should match the stream used
+            in the corresponding :meth:`map` call.  Defaults to the shared
+            non-null interop stream.
+        """
         if not self._mapped:
             return
         if self._resource is None:
             raise RuntimeError("CudaGLBuffer: resource already closed")
-        unmap_buffer(self._resource)
+        unmap_buffer(self._resource, stream=stream)
         self._mapped = False
 
     def mapped_pointer(self) -> tuple[int, int]:
