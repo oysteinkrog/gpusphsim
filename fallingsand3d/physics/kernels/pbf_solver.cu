@@ -796,6 +796,7 @@ void K_PBF_Finalize(
                         if (r_sq > h_sq || r_sq < 1e-12f) continue;
 
                         // Vorticity eta (all neighbors -- PERF-002)
+                        // Use difference form (omega_j - omega_mag_i) to match step2/neighbor_list.
                         if (do_vort_eta) {
                             float rlv = sqrtf(r_sq);
                             float h_rl = h - rlv;
@@ -805,9 +806,10 @@ void K_PBF_Finalize(
                             float mj_v = __ldg(&mass[j]);
                             float rj_v = __ldg(&density[j]);
                             float wt = mj_v / fmaxf(rj_v, 1.0f);
-                            eta_vort.x += wt * omega_j * gs * r.x;
-                            eta_vort.y += wt * omega_j * gs * r.y;
-                            eta_vort.z += wt * omega_j * gs * r.z;
+                            float omega_diff = omega_j - omega_mag_i;
+                            eta_vort.x += wt * omega_diff * gs * r.x;
+                            eta_vort.y += wt * omega_diff * gs * r.y;
+                            eta_vort.z += wt * omega_diff * gs * r.z;
                         }
 
                         if (!do_xsph) continue;

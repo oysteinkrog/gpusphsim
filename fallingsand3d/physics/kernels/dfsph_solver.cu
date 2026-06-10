@@ -440,15 +440,17 @@ void K_DFSPH_NonPressureForces(
                     float rlen = sqrtf(r_sq);
 
                     // Vorticity eta accumulation (all neighbors -- PERF-002)
+                    // Use difference form (omega_j - omega_mag_i) to match step2/neighbor_list.
                     if (do_vort_eta) {
                         float h_rl = h - rlen;
                         float inv_rl = 1.0f / rlen;
                         float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
                         float omega_j = __ldg(&vorticity_in[j]).w;
                         float wt = m_j / fmaxf(rho_j, RHO_EPSILON);
-                        eta_vort.x += wt * omega_j * gs * r.x;
-                        eta_vort.y += wt * omega_j * gs * r.y;
-                        eta_vort.z += wt * omega_j * gs * r.z;
+                        float omega_diff = omega_j - omega_mag_i;
+                        eta_vort.x += wt * omega_diff * gs * r.x;
+                        eta_vort.y += wt * omega_diff * gs * r.y;
+                        eta_vort.z += wt * omega_diff * gs * r.z;
                     }
 
                     int behavior_j = GET_BEHAVIOR(pi_j);
