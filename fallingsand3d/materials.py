@@ -160,7 +160,7 @@ MUD = 17
 MAT_RIGID = 18
 
 # ---------------------------------------------------------------------------
-# Material definitions (18 entries, IDs 0-17)
+# Material definitions (19 entries, IDs 0-18)
 #
 # Property values chosen for a falling-sand / multi-material SPH game:
 #   - rest_density in kg/m^3 (approximate real-world)
@@ -348,14 +348,6 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
 }
 
-# Materials that participate in reactions (phase transitions, combustion,
-# corrosion, gas lifetime). When ONLY non-reactive materials are present
-# in a scene, the reactions and spawn kernels can be skipped entirely.
-REACTIVE_MATERIAL_IDS = frozenset({
-    WATER, ICE, LAVA, STEAM, FIRE, WOOD, OIL, GUNPOWDER, ACID, SMOKE,
-    SAND, WET_SAND, MUD,
-})
-
 assert len(MATERIALS) == NUM_DEFINED
 
 # ---------------------------------------------------------------------------
@@ -451,7 +443,7 @@ def build_interaction_matrix() -> np.ndarray:
 def build_material_array() -> np.ndarray:
     """Build the MaterialProps[32] array as a numpy structured array.
 
-    IDs 0-17 come from MATERIALS; IDs 18-31 are zeroed (reserved).
+    IDs 0-18 come from MATERIALS; IDs 19-31 are zeroed (reserved).
     """
     arr = np.zeros(MAX_MATERIALS, dtype=MATERIAL_PROPS_DTYPE)
     for mat_id, mat_def in MATERIALS.items():
