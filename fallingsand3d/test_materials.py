@@ -2,12 +2,12 @@
 
 Verifies US-006 acceptance criteria:
   - MaterialDef dataclass fields match MaterialProps C struct
-  - MATERIALS dict has 16 entries with correct IDs
-  - Struct sizes match common.cuh (64 bytes MaterialProps, 8 bytes Interaction)
+  - MATERIALS dict has 19 entries with correct IDs (0-18)
+  - Struct sizes match common.cuh (72 bytes MaterialProps, 8 bytes Interaction)
   - 32x32 interaction matrix with correct values
-  - IDs 16-31 are zeroed
+  - IDs 19-31 are zeroed
   - GPU upload via CuPy RawModule constant memory
-  - Test kernel reads c_materials[5].rest_density == 1000.0 (water)
+  - Test kernel reads c_materials[5].rest_density == 2500.0 (water, game-tuned)
   - Test kernel reads c_interactions[8][10].reaction_rate == 0.3 (acid-metal)
 """
 
@@ -22,47 +22,51 @@ def test_host_side():
         ACID, DEAD, DIRT, FIRE, GRAVEL, GUNPOWDER, ICE, LAVA,
         MATERIAL_PROPS_DTYPE, MATERIALS, MAX_MATERIALS, METAL, NUM_DEFINED,
         OIL, SAND, SMOKE, STEAM, STONE, WATER, WOOD,
+        WET_SAND, MUD, MAT_RIGID,
         INTERACTION_DTYPE, build_interaction_matrix, build_material_array,
     )
 
     print("=== Host-side tests ===")
 
-    # --- 16 materials defined ---
+    # --- 19 materials defined (IDs 0-18: original 16 + WET_SAND, MUD, MAT_RIGID) ---
     print("\nChecking material count...")
-    assert len(MATERIALS) == 16, f"Expected 16 materials, got {len(MATERIALS)}"
+    assert len(MATERIALS) == 19, f"Expected 19 materials, got {len(MATERIALS)}"
     print(f"  OK - {len(MATERIALS)} materials defined")
 
-    # --- All 16 IDs present ---
-    print("\nChecking material IDs 0-15...")
+    # --- All 19 IDs present ---
+    print("\nChecking material IDs 0-18...")
     expected_ids = {
         DEAD: "DEAD", STONE: "STONE", SAND: "SAND", DIRT: "DIRT",
         GRAVEL: "GRAVEL", WATER: "WATER", OIL: "OIL", LAVA: "LAVA",
         ACID: "ACID", WOOD: "WOOD", METAL: "METAL", ICE: "ICE",
         STEAM: "STEAM", SMOKE: "SMOKE", FIRE: "FIRE", GUNPOWDER: "GUNPOWDER",
+        WET_SAND: "WET_SAND", MUD: "MUD", MAT_RIGID: "RIGID",
     }
     for mat_id, expected_name in expected_ids.items():
         assert mat_id in MATERIALS, f"Missing material ID {mat_id} ({expected_name})"
         assert MATERIALS[mat_id].name == expected_name, (
             f"Material {mat_id}: expected name '{expected_name}', got '{MATERIALS[mat_id].name}'"
         )
-    print("  OK - all 16 material IDs present with correct names")
+    print("  OK - all 19 material IDs present with correct names")
 
     # --- Struct sizes ---
     print("\nChecking struct sizes...")
-    assert MATERIAL_PROPS_DTYPE.itemsize == 64, (
-        f"MaterialProps: {MATERIAL_PROPS_DTYPE.itemsize} != 64"
+    assert MATERIAL_PROPS_DTYPE.itemsize == 72, (
+        f"MaterialProps: {MATERIAL_PROPS_DTYPE.itemsize} != 72"
     )
     assert INTERACTION_DTYPE.itemsize == 8, (
         f"Interaction: {INTERACTION_DTYPE.itemsize} != 8"
     )
-    print(f"  MaterialProps: {MATERIAL_PROPS_DTYPE.itemsize} bytes (expected 64)")
+    print(f"  MaterialProps: {MATERIAL_PROPS_DTYPE.itemsize} bytes (expected 72)")
     print(f"  Interaction: {INTERACTION_DTYPE.itemsize} bytes (expected 8)")
     print("  OK")
 
     # --- Water rest_density ---
+    # Game-tuned: 2500.0 kg/m^3 (SPH density is ~2.5x physical to keep Tait EOS stable
+    # with k=500, viscosity=1.0 at particle_spacing=0.02m)
     print("\nChecking water rest_density...")
-    assert MATERIALS[WATER].rest_density == 1000.0, (
-        f"Water rest_density: {MATERIALS[WATER].rest_density} != 1000.0"
+    assert MATERIALS[WATER].rest_density == 2500.0, (
+        f"Water rest_density: {MATERIALS[WATER].rest_density} != 2500.0"
     )
     print(f"  WATER rest_density = {MATERIALS[WATER].rest_density}")
     print("  OK")
@@ -72,19 +76,19 @@ def test_host_side():
     arr = build_material_array()
     assert arr.shape == (32,), f"Shape: {arr.shape} != (32,)"
     assert arr.dtype == MATERIAL_PROPS_DTYPE
-    assert arr[WATER]["rest_density"] == np.float32(1000.0), (
+    assert arr[WATER]["rest_density"] == np.float32(2500.0), (
         f"arr[5].rest_density = {arr[WATER]['rest_density']}"
     )
     print(f"  arr[WATER].rest_density = {arr[WATER]['rest_density']}")
     print("  OK")
 
-    # --- IDs 16-31 are zeroed ---
-    print("\nChecking IDs 16-31 are zeroed...")
-    for i in range(16, 32):
+    # --- IDs 19-31 are zeroed (IDs 0-18 are defined: original 16 + WET_SAND, MUD, MAT_RIGID) ---
+    print("\nChecking IDs 19-31 are zeroed...")
+    for i in range(NUM_DEFINED, 32):
         for field in MATERIAL_PROPS_DTYPE.names:
             val = arr[i][field]
             assert val == 0, f"arr[{i}].{field} = {val} (expected 0)"
-    print("  OK - all reserved slots zeroed")
+    print(f"  OK - all reserved slots ({NUM_DEFINED}-31) zeroed")
 
     # --- Build interaction matrix ---
     print("\nBuilding interaction matrix (32x32)...")
@@ -166,11 +170,11 @@ def test_gpu():
     cupy.cuda.Device().synchronize()
     results = out.get()
 
-    print(f"  c_materials[5].rest_density = {results[0]} (expected 1000.0)")
+    print(f"  c_materials[5].rest_density = {results[0]} (expected 2500.0)")
     print(f"  c_interactions[8][10].reaction_rate = {results[1]} (expected 0.3)")
 
-    assert abs(results[0] - 1000.0) < 1e-6, (
-        f"Water rest_density readback: {results[0]} != 1000.0"
+    assert abs(results[0] - 2500.0) < 1e-3, (
+        f"Water rest_density readback: {results[0]} != 2500.0"
     )
     assert abs(results[1] - 0.3) < 1e-6, (
         f"Acid-metal reaction_rate readback: {results[1]} != 0.3"
