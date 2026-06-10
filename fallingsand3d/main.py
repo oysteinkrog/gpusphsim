@@ -323,6 +323,9 @@ def main():
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.set_solver_profile(profile)
+            # bd-unl.15: upload rigid body count after solver reset so newly compiled
+            # modules receive the correct c_num_rigid_bodies constant.
+            sim.rigid_body_manager.upload(sim.get_all_modules())
             sim.sim_time = 0.0
             sim._last_frame_time = None
             active_spawner = None

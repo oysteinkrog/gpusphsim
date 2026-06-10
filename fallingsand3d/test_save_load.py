@@ -408,24 +408,45 @@ def test_load_scene_uses_get_all_modules() -> None:
 
 
 def test_main_solver_switch_calls_rbm_upload() -> None:
-    """main.py solver-switch block must call rbm.upload after sim.set_solver_profile.
+    """main.py solver-switch block must call rbm.upload AFTER set_solver_profile.
 
     Without this call c_num_rigid_bodies stays stale in newly compiled modules
     after a solver switch (bd-unl.15).
 
     Reads main.py as source text to avoid importing it (which would require glfw).
+    The test checks that the upload call appears *after* set_solver_profile in the
+    solver-switch section, not just somewhere in the file.
     """
     main_path = os.path.join(os.path.dirname(__file__), "main.py")
     with open(main_path, "r", encoding="utf-8") as fh:
         src = fh.read()
 
-    # Look for the pattern introduced by the fix
-    assert "rigid_body_manager.upload(sim.get_all_modules())" in src, (
+    # Locate the solver-switch section by finding set_solver_profile.
+    # The upload call must appear after set_solver_profile and before the
+    # next top-level section marker (preset loading block).
+    set_solver_idx = src.find("sim.set_solver_profile(profile)")
+    assert set_solver_idx != -1, (
+        "main.py does not contain sim.set_solver_profile(profile) — "
+        "cannot verify solver-switch rbm.upload placement"
+    )
+
+    # Find the start of the preset-loading section that comes after solver-switch.
+    preset_section_idx = src.find("# --- Handle preset loading ---")
+    assert preset_section_idx != -1, (
+        "main.py does not contain the '# --- Handle preset loading ---' marker"
+    )
+
+    # The upload call must appear in the window between set_solver_profile
+    # and the preset section (i.e. still inside the solver-switch block).
+    solver_switch_tail = src[set_solver_idx:preset_section_idx]
+    assert "rigid_body_manager.upload(sim.get_all_modules())" in solver_switch_tail, (
         "main.py solver-switch block does not call "
-        "sim.rigid_body_manager.upload(sim.get_all_modules()) after set_solver_profile "
+        "sim.rigid_body_manager.upload(sim.get_all_modules()) after set_solver_profile. "
+        "The call exists elsewhere (preset block) but not in the solver-switch block. "
         "(bd-unl.15)"
     )
-    print("[OK] main.py solver-switch calls sim.rigid_body_manager.upload(sim.get_all_modules())")
+    print("[OK] main.py solver-switch calls sim.rigid_body_manager.upload(sim.get_all_modules()) "
+          "after set_solver_profile")
 
 
 def main() -> None:
