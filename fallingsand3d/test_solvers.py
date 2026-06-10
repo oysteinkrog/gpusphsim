@@ -2,6 +2,7 @@
 
 import sys
 import numpy as np
+import pytest
 
 def _apply_ptx_workaround():
     try:
@@ -26,6 +27,27 @@ from materials import WATER, SAND
 
 MAX_PARTICLES = 100_000
 
+
+# ---------------------------------------------------------------------------
+# Pytest fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def world():
+    """Create a World instance shared across all tests in this module."""
+    return World(max_particles=MAX_PARTICLES)
+
+
+@pytest.fixture
+def sim(world):
+    """Create a Simulation instance for each test (uses module-scoped world)."""
+    return Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
+                      fixed_dt=False, max_substeps=20)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def spawn_scene(world):
     """Spawn water cube + sand bed."""
@@ -76,6 +98,10 @@ def diagnose(world, label, sorted_arrays=None):
                 print(f"    {name}: mag min={mag.min():.6f} mean={mag.mean():.6f} max={mag.max():.6f}")
     return not has_nan and not has_inf
 
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 def test_pbf_detailed(world, sim):
     """Test PBF with intermediate diagnostics."""
@@ -167,7 +193,7 @@ def test_pbf_detailed(world, sim):
                 w.sorted_packed_info[:n],
             )
 
-        # Finalize
+        # Finalize — API matches current pbf_finalize positional signature
         pbf_solver.pbf_finalize(
             w.sorted_predicted_position[:n], w.sorted_position[:n],
             w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
@@ -307,16 +333,19 @@ def test_dfsph_detailed(world, sim):
                 sim._cell_start, sim._cell_end,
             )
 
-        # Finalize
+        # Finalize — API drift: sorted_kappa required after sorted_sleep_counter;
+        # kappa_out required after temperature_out.
         dfsph_solver.finalize(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_health[:n], w.sorted_dTdt[:n],
             w.sorted_sleep_counter[:n],
+            w.sorted_kappa[:n],  # API drift: sorted_kappa inserted here
             sim._sort_perm[:n], sim._cell_start, sim._cell_end,
             w.position, w.velocity, w.color, w.packed_info,
             w.sleep_counter, w.temperature,
+            w.kappa,  # API drift: kappa_out appended here
         )
         cp.cuda.Device().synchronize()
 
@@ -329,8 +358,8 @@ def test_dfsph_detailed(world, sim):
         sim._frame_counter += 1
 
 
-def test_stability(world, sim, profile_name, num_substeps=10):
-    """Quick stability check -- run N substeps and print summary."""
+def _run_stability(world, sim, profile_name, num_substeps=10):
+    """Internal helper: run N substeps and return True if stable."""
     profile = PROFILES[profile_name]
     print(f"\n{'='*60}")
     print(f"Stability Test: {profile_name} ({num_substeps} substeps)")
@@ -351,14 +380,26 @@ def test_stability(world, sim, profile_name, num_substeps=10):
     return True
 
 
+def test_stability_pbf(world, sim):
+    """Stability test: PBF solver runs 10 substeps without NaN or Inf."""
+    assert _run_stability(world, sim, "PBF", 10), \
+        "PBF solver became unstable within 10 substeps"
+
+
+def test_stability_dfsph(world, sim):
+    """Stability test: DFSPH solver runs 10 substeps without NaN or Inf."""
+    assert _run_stability(world, sim, "DFSPH", 10), \
+        "DFSPH solver became unstable within 10 substeps"
+
+
 def main():
     world = World(max_particles=MAX_PARTICLES)
     n = spawn_scene(world)
     sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
 
     # Quick stability checks (20 substeps each)
-    test_stability(world, sim, "PBF", 20)
-    test_stability(world, sim, "DFSPH", 20)
+    _run_stability(world, sim, "PBF", 20)
+    _run_stability(world, sim, "DFSPH", 20)
 
 
 if __name__ == "__main__":
