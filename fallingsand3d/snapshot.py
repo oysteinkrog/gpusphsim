@@ -106,7 +106,10 @@ class SnapshotRing:
         world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)
 
         # Rewind ring buffer so future snapshots don't contain stale "future" state
-        self._write_idx = (self._write_idx - steps_back + 1) % self.max_snapshots
+        # Drop the +1: without it, each successive undo steps back one more slot.
+        # With +1, _write_idx doesn't move for steps_back=1, so every undo reads
+        # the same slot and multi-undo is broken.
+        self._write_idx = (self._write_idx - steps_back) % self.max_snapshots
         self._count = max(0, self._count - steps_back)
 
         return True
