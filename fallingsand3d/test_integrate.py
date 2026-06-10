@@ -550,17 +550,21 @@ def test_boundary_all_walls():
     print("PASS: test_boundary_all_walls")
 
 
-@pytest.mark.xfail(strict=True, reason="UNTRIAGED: integrate.cu line 288 sets friction=0 for FLUID particles (behavior==FLUID); test uses WATER/FLUID and expects non-zero Coulomb friction, but kernel intentionally disables wall friction for fluids to prevent sticking")
 def test_coulomb_friction():
-    """Wall collision applies Coulomb friction to tangential velocity."""
+    """Wall collision applies Coulomb friction to tangential velocity for GRANULAR.
+
+    FLUID particles deliberately have friction=0 (to prevent sticking to walls).
+    GRANULAR particles get wall_friction from sim_params. Use SAND/GRANULAR here.
+    """
     setup_params(gravity=(0.0, 0.0, 0.0), restitution=0.3, wall_friction=0.5)
 
     n = 1
-    # Particle hitting floor with both normal and tangential velocity
+    # GRANULAR particle hitting floor with both normal and tangential velocity
+    # pos near floor (y=-0.999), moving down (vy=-10) and sideways (vx=5)
     pos = np.array([[0.5, -0.999, 0.0, 1.0]], dtype=np.float32)
     vel = np.array([[5.0, -10.0, 0.0, 0.0]], dtype=np.float32)
 
-    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
     _, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
@@ -568,12 +572,22 @@ def test_coulomb_friction():
     # Normal: vy reflected with restitution -> ~0.3 * 10.0 = 3.0 upward
     assert vel_h[0, 1] > 0, f"Expected upward bounce, got vy={vel_h[0, 1]}"
 
-    # Tangential: vx should be reduced by friction
-    # friction_impulse = mu_wall * |vn| = 0.5 * 10.0 = 5.0
-    # reduction = min(5.0 / |vt|, 1.0) = min(5.0/5.0, 1.0) = 1.0
-    # vx = 5.0 * (1 - 1.0) = 0.0
+    # Tangential: vx should be reduced by Coulomb friction
+    # After normal impulse: vy_after = 0.3 * 10 = 3.0
+    # The actual vy at impact (after bounce) is ~3.0, the vn used in
+    # friction is the incoming normal component.
+    # friction_impulse = mu_wall * |vn| * (1+e) = 0.5 * 10 * 1.3 = 6.5
+    # But capped at |vt| = 5.0; reduction = min(6.5/5.0, 1.0) = 1.0 -> vx = 0
     assert abs(vel_h[0, 0]) < 0.5, (
-        f"Expected vx ~0 after friction, got {vel_h[0, 0]}"
+        f"GRANULAR: expected vx ~0 after full Coulomb friction, got {vel_h[0, 0]}"
+    )
+    # Contrast: FLUID particles get zero friction (no sticking)
+    d_fluid = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    _, vel_out_fluid, _, _, _, _, _, _ = integrate(**d_fluid)
+    vel_h_fluid = vel_out_fluid.get()
+    # FLUID: vx should be unchanged (friction=0 for FLUID)
+    assert abs(vel_h_fluid[0, 0] - 5.0) < 1.0, (
+        f"FLUID: expected vx ~5 (no friction), got {vel_h_fluid[0, 0]}"
     )
 
     print("PASS: test_coulomb_friction")
