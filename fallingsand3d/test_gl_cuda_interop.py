@@ -287,12 +287,18 @@ def test_close_unregisters(gl_context):
     glDeleteBuffers(1, [vbo])
 
 
-def test_map_uses_nonnull_stream(gl_context):
-    """map_buffer and unmap_buffer must use a non-NULL (named) CUDA stream.
+def test_map_uses_null_stream_by_default(gl_context):
+    """map_buffer and unmap_buffer default to the NULL CUDA stream (bd-unl.3).
 
-    bd-mzc.43 fix: map_buffer/unmap_buffer now accept an optional stream
-    parameter and default to the module-level non-null interop stream rather
-    than the NULL (default) stream, eliminating the global GPU barrier.
+    bd-unl.3 fix: the previous bd-mzc.43 fix used a non-null interop stream
+    by default, but this introduced a race: copy_to_vbos writes VBOs on
+    CuPy's null stream, and a non-blocking stream does NOT serialise against
+    null-stream work.  The fix reverts map/unmap defaults to the NULL stream,
+    whose implicit global barrier ensures all upstream VBO writes complete
+    before unmap (and the subsequent GL read) are issued.
+
+    get_interop_stream() is still exported for callers that explicitly manage
+    stream ordering; it should not be used as the default.
     """
     from gl_cuda_interop import get_interop_stream
 
@@ -302,14 +308,19 @@ def test_map_uses_nonnull_stream(gl_context):
     glBindBuffer(GL_ARRAY_BUFFER, 0)
 
     buf = CudaGLBuffer(vbo, 1024)
-    # Verify the interop stream is non-NULL
+
+    # Default map/unmap (NULL stream) must work without errors.
+    buf.map()
+    assert buf._mapped
+    buf.unmap()
+    assert not buf._mapped
+
+    # Explicit non-null stream (via get_interop_stream) must also work.
     stream = get_interop_stream()
     assert stream is not None, "Interop stream must not be None"
     assert stream.ptr != 0, (
         "Interop stream handle must be non-NULL (not the default/NULL stream)"
     )
-
-    # Verify map/unmap work correctly with the non-null stream
     buf.map(stream=stream)
     assert buf._mapped
     buf.unmap(stream=stream)

@@ -92,13 +92,16 @@ _interop_stream: Optional[object] = None  # cupy.cuda.Stream, lazily created
 
 
 def get_interop_stream() -> object:
-    """Return (creating if necessary) the shared non-null CUDA stream used for
-    cudaGraphicsMapResources / cudaGraphicsUnmapResources calls.
+    """Return (creating if necessary) the shared non-null CUDA stream.
 
-    Using a named non-null stream instead of the NULL (default) stream
-    eliminates the global serialisation barrier that the NULL stream inserts
-    across all CUDA work on the device — removing the 3-4x/frame bottleneck
-    identified in bd-mzc.43.
+    This stream is available for callers that explicitly want to perform
+    map/unmap on a non-null stream AND ensure that all VBO writes are issued
+    on the same stream before calling unmap.
+
+    Note: map_buffer and unmap_buffer default to the NULL stream (not this
+    stream) since bd-unl.3 -- the NULL stream's implicit global barrier is the
+    only safe default when VBO writes happen on CuPy's null stream.  Pass the
+    result of this function explicitly only when you control the write stream.
     """
     global _interop_stream
     if _interop_stream is None:
@@ -243,13 +246,22 @@ def map_buffer(resource: int, stream: Optional[object] = None) -> None:
     resource : int
         Opaque CUDA graphics resource handle.
     stream : cupy.cuda.Stream or None
-        CUDA stream to use for the map operation.  When None the module-level
-        non-null interop stream (see :func:`get_interop_stream`) is used,
-        which avoids the NULL-stream global serialisation barrier.
+        CUDA stream to use for the map operation.  When None the NULL
+        (default) CUDA stream is used.  The NULL stream provides an
+        implicit global barrier: it serialises against all work on all
+        other streams on the device, which guarantees that any VBO writes
+        dispatched on CuPy's null stream (the default for array copies in
+        copy_to_vbos) are complete before the map is processed.
+
+        Pass an explicit non-null stream only when you are certain that
+        all upstream VBO writes were issued on that same stream, so that
+        CUDA's intra-stream ordering keeps map/unmap consistent with the
+        writes (bd-unl.3).
     """
     if stream is None:
-        stream = get_interop_stream()
-    stream_ptr = c_void_p(stream.ptr)
+        stream_ptr = c_void_p(0)  # NULL stream — implicit global barrier
+    else:
+        stream_ptr = c_void_p(stream.ptr)
     res_ptr = c_void_p(resource)
     err = _cudart.cudaGraphicsMapResources(1, byref(res_ptr), stream_ptr)
     _check(err, "cudaGraphicsMapResources")
@@ -281,13 +293,15 @@ def unmap_buffer(resource: int, stream: Optional[object] = None) -> None:
     resource : int
         Opaque CUDA graphics resource handle.
     stream : cupy.cuda.Stream or None
-        CUDA stream to use for the unmap operation.  When None the module-level
-        non-null interop stream (see :func:`get_interop_stream`) is used.
-        Must match the stream used in the corresponding :func:`map_buffer` call.
+        CUDA stream to use for the unmap operation.  Must match the stream
+        used in the corresponding :func:`map_buffer` call.  When None the
+        NULL (default) CUDA stream is used, consistent with the map_buffer
+        default (bd-unl.3).
     """
     if stream is None:
-        stream = get_interop_stream()
-    stream_ptr = c_void_p(stream.ptr)
+        stream_ptr = c_void_p(0)  # NULL stream — matches map_buffer default
+    else:
+        stream_ptr = c_void_p(stream.ptr)
     res_ptr = c_void_p(resource)
     err = _cudart.cudaGraphicsUnmapResources(1, byref(res_ptr), stream_ptr)
     _check(err, "cudaGraphicsUnmapResources")
@@ -342,9 +356,10 @@ class CudaGLBuffer:
         Parameters
         ----------
         stream : cupy.cuda.Stream or None
-            CUDA stream for the map operation.  Defaults to the shared non-null
-            interop stream (:func:`get_interop_stream`), which avoids the
-            NULL-stream global barrier (bd-mzc.43).
+            CUDA stream for the map operation.  Defaults to the NULL (default)
+            CUDA stream, which serialises against all other streams (bd-unl.3).
+            Pass an explicit stream only if all upstream VBO writes are on that
+            same stream.
         """
         if self._mapped:
             raise RuntimeError(
@@ -362,8 +377,8 @@ class CudaGLBuffer:
         ----------
         stream : cupy.cuda.Stream or None
             CUDA stream for the unmap operation.  Should match the stream used
-            in the corresponding :meth:`map` call.  Defaults to the shared
-            non-null interop stream.
+            in the corresponding :meth:`map` call.  Defaults to the NULL stream
+            (consistent with the map default, bd-unl.3).
         """
         if not self._mapped:
             return
