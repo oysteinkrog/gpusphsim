@@ -453,6 +453,57 @@ void main() {
         self.sdf_manager = None  # set externally by main loop
         self.selected_sdf_id = None  # set by UI for highlight
 
+        # --- SSFR depth-write pass ---
+        # After the SSFR composite fullscreen draw we need to populate the
+        # hardware depth buffer so that _draw_sdf_objects is correctly
+        # occluded by fluid.  The composite draws with GL_DEPTH_TEST disabled
+        # and GL_DEPTH_MASK(FALSE), so the depth buffer only contains skybox
+        # depth at that point.  This fullscreen pass reads the smoothed
+        # eye-space depth texture (_tex_blur2), reconstructs NDC z, and
+        # writes gl_FragDepth — producing a correct depth buffer for SDF
+        # geometry that comes afterwards.
+        _DEPTH_WRITE_VERT = """
+#version 410 core
+out vec2 vUV;
+void main() {
+    float x = float((gl_VertexID & 1) << 2) - 1.0;
+    float y = float((gl_VertexID & 2) << 1) - 1.0;
+    vUV = vec2(x * 0.5 + 0.5, y * 0.5 + 0.5);
+    gl_Position = vec4(x, y, 0.0, 1.0);
+}
+"""
+        _DEPTH_WRITE_FRAG = """
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uDepthTex;   // R32F: eye-space Z (negative)
+uniform mat4 uProj;            // projection matrix (uploaded with GL_TRUE transpose)
+out vec4 FragColor;
+void main() {
+    float eyeZ = texture(uDepthTex, vUV).r;
+    // Background pixels (no fluid): leave depth untouched by discarding.
+    // Composite shader uses >= -0.01 as the background test.
+    if (eyeZ >= -0.01) {
+        discard;
+    }
+    // Reconstruct NDC z from eye-space Z using the same formula as ssfr_depth.frag:
+    //   z_ndc = (P[2][2] * eyeZ + P[2][3]) / (-eyeZ)   (Python row-major indexing)
+    // glUniformMatrix4fv is called with GL_TRUE (transpose), so the Python row-major
+    // matrix is stored column-major in GLSL.  In GLSL mat4, uProj[col][row], so:
+    //   uProj[2][2] == Python P[2][2]   (col2, row2)
+    //   uProj[3][2] == Python P[2][3]   (col3, row2)
+    float z_ndc = (uProj[2][2] * eyeZ + uProj[3][2]) / (-eyeZ);
+    gl_FragDepth = z_ndc * 0.5 + 0.5;
+    FragColor = vec4(0.0);  // color output unused (color mask will be off)
+}
+"""
+        vs_dw = _compile_shader(_DEPTH_WRITE_VERT, GL_VERTEX_SHADER)
+        fs_dw = _compile_shader(_DEPTH_WRITE_FRAG, GL_FRAGMENT_SHADER)
+        self._prog_depth_write = _link_program(vs_dw, fs_dw)
+        glDeleteShader(vs_dw)
+        glDeleteShader(fs_dw)
+        self._u_dw_depth_tex = glGetUniformLocation(self._prog_depth_write, "uDepthTex")
+        self._u_dw_proj = glGetUniformLocation(self._prog_depth_write, "uProj")
+
         # --- Skybox ---
         self._prog_skybox = _build_program("skybox.vert", "skybox.frag")
         self._u_sky_viewrot = glGetUniformLocation(self._prog_skybox, "uViewRot")
@@ -949,6 +1000,32 @@ void main() {
         glBindVertexArray(0)
         glUseProgram(0)
 
+        # ---- Depth-write pass: reconstruct fluid depth into the hardware depth buffer ----
+        # The composite draw above ran with GL_DEPTH_TEST disabled / GL_DEPTH_MASK(FALSE),
+        # so the depth buffer still only has skybox depth.  _draw_sdf_objects (called by
+        # the outer draw() after _draw_ssfr) uses GL_DEPTH_TEST, meaning SDF geometry
+        # always passed the depth test and appeared on top of fluid.
+        #
+        # This fullscreen pass samples _tex_blur2 (smoothed eye-space Z), converts each
+        # fluid pixel to NDC depth, and writes gl_FragDepth — so the subsequent SDF draw
+        # is correctly occluded by fluid.
+        glEnable(GL_DEPTH_TEST)
+        glDepthMask(GL_TRUE)
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE)  # depth only, no color change
+
+        glUseProgram(self._prog_depth_write)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self._tex_blur2)
+        glUniform1i(self._u_dw_depth_tex, 0)
+        glUniformMatrix4fv(self._u_dw_proj, 1, GL_TRUE, proj)
+
+        glBindVertexArray(self._vao_fs)
+        glDrawArrays(GL_TRIANGLES, 0, 3)
+        glBindVertexArray(0)
+        glUseProgram(0)
+
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)  # restore color writes
+
         # Restore GL state for ImGui
         glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
@@ -1168,7 +1245,8 @@ void main() {
 
         for prog in (self._prog_points, self._prog_nonfluid, self._prog_depth,
                       self._prog_thick, self._prog_blur, self._prog_normal,
-                      self._prog_composite, self._prog_foam, self._prog_cursor,
+                      self._prog_composite, self._prog_depth_write,
+                      self._prog_foam, self._prog_cursor,
                       self._prog_skybox, self._prog_sdf):
             if prog:
                 glDeleteProgram(prog)
