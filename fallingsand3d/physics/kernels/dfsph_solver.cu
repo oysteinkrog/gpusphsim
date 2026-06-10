@@ -484,13 +484,17 @@ void K_DFSPH_NonPressureForces(
                             f_visc.y += F_visc.y;
                             f_visc.z += F_visc.z;
                             // Two-way: accumulate reaction on rigid body.
-                            // F_visc is accel [m/s^2]; multiply by m_i to convert to force [N].
-                            // Newton's 3rd law: reaction on body = -F_visc * m_i.
+                            // F_visc is a force density [N/kg = m/s^2]; the acceleration on
+                            // particle i is a_visc = F_visc / rho_i (see a_visc block below).
+                            // Newton's 3rd law: reaction force on body = -a_visc * m_i
+                            //   = -(F_visc / rho_i) * m_i.
+                            // Missing the /rho_i would overscale by ~rho_i (~1000-2500x for water).
                             float m_i = c_sim.particle_mass;
+                            float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_on_body = make_float3(
-                                -F_visc.x * m_i,
-                                -F_visc.y * m_i,
-                                -F_visc.z * m_i
+                                -(F_visc.x * inv_rho) * m_i,
+                                -(F_visc.y * inv_rho) * m_i,
+                                -(F_visc.z * inv_rho) * m_i
                             );
                             float3 tau = make_float3(
                                 r_b.y * F_on_body.z - r_b.z * F_on_body.y,
