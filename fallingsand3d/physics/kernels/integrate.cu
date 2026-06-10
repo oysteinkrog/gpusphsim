@@ -727,13 +727,14 @@ void K_RigidBodyCollisions(
             float rel_vn = rel_vel.x * normal.x + rel_vel.y * normal.y + rel_vel.z * normal.z;
 
             if (rel_vn < 0.0f) {
-                // *0.5f: symmetric body-body collision — each body independently
-                // applies the full impulse formula, so without the factor each body
-                // would receive the full impulse, doubling the total energy change.
-                // Halving here gives the correct energy-conserving split.
-                // The body-SDF path does NOT halve because only one body (the
-                // particle) receives the impulse; the SDF wall is immovable.
-                float e = fminf(restitution, ob.lin_vel.w) * 0.5f;
+                // Symmetric body-body collision: each body (thread) independently
+                // applies the impulse. Newton's 3rd law is preserved because the
+                // two threads apply equal and opposite deltas (opposite normals).
+                // No halving is needed: with both threads running, the full
+                // standard impulse formula gives the correct energy-conserving result.
+                // The body-SDF path uses the same formula since only the particle
+                // receives the impulse; the SDF wall is immovable.
+                float e = fminf(restitution, ob.lin_vel.w);
                 float total_inv_coll = inv_mass + (ob_kinematic ? 0.0f : fmaxf(ob_inv_mass, 0.0f));
                 if (total_inv_coll > 1e-10f) {
                     float impulse = -(1.0f + e) * rel_vn * (inv_mass / total_inv_coll);

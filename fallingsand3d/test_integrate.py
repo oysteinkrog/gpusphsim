@@ -1497,81 +1497,74 @@ def test_accel_clamp_exact_threshold():
     print("PASS: test_accel_clamp_exact_threshold")
 
 
-def test_body_body_restitution_halved():
-    """Body-body restitution applies *0.5f — each body receives half the impulse.
+def test_body_body_restitution():
+    """Body-body restitution: each thread applies the standard impulse formula.
 
-    bd-mzc.35: The *0.5f in K_RigidBodyCollisions line ~730 is intentional for
-    symmetric collisions where both bodies independently apply the impulse.
-    Effective coefficient of restitution for body-body is restitution * 0.5.
-    Body-SDF does NOT halve because only the particle receives the impulse.
+    bd-unl.4: Both threads (one per body) independently apply the full impulse.
+    Since each body's normal points away from the other, the combined result is
+    the correct velocity exchange:
+      - e=0 (perfectly inelastic): relative velocity -> 0, both bodies stop.
+      - e=1 (elastic): bodies exchange velocities (equal mass).
     """
     from integrate import rigid_body_collisions
     from rigid_bodies import RIGID_BODY_DTYPE, MAX_RIGID_BODIES
     import numpy as np
 
-    # Two equal-mass bodies approaching each other along X axis.
-    # Body A at x=-0.5, vx=+1.0; Body B at x=+0.5, vx=-1.0.
-    # Restitution = 1.0 on both.  Bounding sphere radius = 0.35 (< 0.5 gap -> no
-    # penetration yet), so we push them close enough to trigger the collision.
-    # We'll place them so their bounding spheres overlap.
-
-    bodies = np.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
-
     radius = 0.3
-    # Body A
-    bodies[0]["position"] = [0.0, 0.0, 0.0, 1.0]       # inv_mass=1
-    bodies[0]["rotation"] = [0.0, 0.0, 0.0, 1.0]
-    bodies[0]["lin_vel"]  = [1.0, 0.0, 0.0, 1.0]       # vx=+1, restitution=1
-    bodies[0]["half_extents"] = [radius, radius, radius, 0.0]  # sphere-like box, r=sqrt(3)*radius
-    bodies[0]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]   # not kinematic
+    bounding_r = radius * 1.732  # sqrt(3)*radius for a cube
 
-    # Body B: directly adjacent so bounding spheres overlap
-    sep = 2.0 * (radius * 1.732) - 0.01  # just overlapping (r_A + r_B - epsilon)
-    bodies[1]["position"] = [sep, 0.0, 0.0, 1.0]       # inv_mass=1
-    bodies[1]["rotation"] = [0.0, 0.0, 0.0, 1.0]
-    bodies[1]["lin_vel"]  = [-1.0, 0.0, 0.0, 1.0]      # vx=-1, restitution=1
-    bodies[1]["half_extents"] = [radius, radius, radius, 0.0]
-    bodies[1]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]   # not kinematic
+    def run_collision(vx_a_in, vx_b_in, e_in):
+        bodies = np.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+        # Body A at origin, Body B just overlapping to the right
+        sep_dist = 2.0 * bounding_r - 0.01
+        bodies[0]["position"] = [0.0, 0.0, 0.0, 1.0]       # inv_mass=1
+        bodies[0]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+        bodies[0]["lin_vel"]  = [vx_a_in, 0.0, 0.0, e_in]  # restitution in .w
+        bodies[0]["half_extents"] = [radius, radius, radius, 0.0]
+        bodies[0]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]
 
-    # CuPy does not support cupy.asarray() for structured dtypes directly.
-    # Upload via raw memcpy into a CuPy array allocated with the same dtype.
-    d_bodies = cupy.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
-    cupy.cuda.runtime.memcpy(
-        int(d_bodies.data.ptr),
-        bodies.ctypes.data,
-        bodies.nbytes,
-        1,  # host-to-device
+        bodies[1]["position"] = [sep_dist, 0.0, 0.0, 1.0]
+        bodies[1]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+        bodies[1]["lin_vel"]  = [vx_b_in, 0.0, 0.0, e_in]
+        bodies[1]["half_extents"] = [radius, radius, radius, 0.0]
+        bodies[1]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]
+
+        d_bodies = cupy.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+        cupy.cuda.runtime.memcpy(
+            int(d_bodies.data.ptr),
+            bodies.ctypes.data,
+            bodies.nbytes,
+            1,  # host-to-device
+        )
+        rigid_body_collisions(d_bodies, 2)
+        cupy.cuda.Device().synchronize()
+        result = d_bodies.get()
+        return float(result[0]["lin_vel"][0]), float(result[1]["lin_vel"][0])
+
+    # --- e=0 case: perfectly inelastic, relative velocity must go to zero ---
+    # Initial: A at vx=+1, B at vx=-1. After: both should have vx~0.
+    # Physics: impulse = -(1+0)*(-2)*(1/2) = 1.0 per body
+    # A: 1.0 + 1.0*(-1) = 0.0; B: -1.0 + 1.0*(+1) = 0.0
+    vx_a, vx_b = run_collision(1.0, -1.0, e_in=0.0)
+    rel_v_after = abs(vx_a - vx_b)
+    assert rel_v_after < 0.05, (
+        f"e=0 inelastic: relative velocity should be ~0, got |vx_a-vx_b|={rel_v_after:.4f} "
+        f"(vx_a={vx_a:.4f}, vx_b={vx_b:.4f})"
     )
-    rigid_body_collisions(d_bodies, 2)
-    cupy.cuda.Device().synchronize()
 
-    result = d_bodies.get()
-    vx_a = float(result[0]["lin_vel"][0])
-    vx_b = float(result[1]["lin_vel"][0])
-
-    # Relative velocity before: rel_vn = (1 - (-1)) = 2 (approaching, >0 in normal direction)
-    # Actually rel_vel = v_A - v_B along +X normal = 1 - (-1) = 2; rel_vn = dot with normal(+X) = 2
-    # Wait: normal points from B->A, i.e. A is at smaller X, sep points A->B (+X).
-    # sep = pos_A - pos_B = negative; normal = sep/|sep| = -X.
-    # rel_vel = vel_A - vel_B = (1,0,0) - (-1,0,0) = (2,0,0)
-    # rel_vn = rel_vel . normal = 2 * (-1) = -2  (approaching)
-    # e = min(1, 1) * 0.5 = 0.5
-    # impulse = -(1 + 0.5) * (-2) * (1 / (1 + 1)) = 1.5 * 2 * 0.5 = 1.5 (per body)
-    # vel_A_x += 1.5 * normal.x = 1.5 * (-1) = -1.5 -> new vx_A = 1.0 - 1.5 = -0.5
-    # Body B is NOT updated by this kernel (each thread handles its own body only)
-    # So only body A (thread 0) is changed here.
-
-    # Body A should have bounced: vx < 0 (reversed) but magnitude reduced by *0.5 restitution
-    assert vx_a < 0.0, (
-        f"Body A should reverse velocity after body-body collision; got vx_a={vx_a}"
+    # --- e=1 case: elastic, equal masses exchange velocities ---
+    # Initial: A at vx=+1, B at vx=-1. After: A at ~-1, B at ~+1.
+    # Physics: impulse = -(1+1)*(-2)*(1/2) = 2.0 per body
+    # A: 1.0 + 2.0*(-1) = -1.0; B: -1.0 + 2.0*(+1) = +1.0
+    vx_a, vx_b = run_collision(1.0, -1.0, e_in=1.0)
+    assert vx_a < -0.9, (
+        f"e=1 elastic: A should reverse to ~-1.0, got vx_a={vx_a:.4f}"
     )
-    # The *0.5f means effective e=0.5 for this path (restitution=1 * 0.5 = 0.5)
-    # vx_a should be approximately -0.5 (not -1.0 which would be e=1 without *0.5f)
-    assert abs(vx_a) < 0.9, (
-        f"Body-body restitution should be halved (*0.5f), got |vx_a|={abs(vx_a):.4f} "
-        f"(expected ~0.5 for restitution=1; full restitution would give 1.0)"
+    assert vx_b > 0.9, (
+        f"e=1 elastic: B should reverse to ~+1.0, got vx_b={vx_b:.4f}"
     )
-    print(f"PASS: test_body_body_restitution_halved (vx_a={vx_a:.4f})")
+    print(f"PASS: test_body_body_restitution (e=0: vx_a={run_collision(1.0,-1.0,0.0)[0]:.4f}, "
+          f"e=1: vx_a={vx_a:.4f}, vx_b={vx_b:.4f})")
 
 
 def test_fallback_alloc_no_gpu_cpu_sync():
