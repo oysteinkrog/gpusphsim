@@ -305,33 +305,41 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "UNTRIAGED: 2-particle setup produces density ~0.167 << rho0_steam=0.6, "
-        "so GAS linear EOS yields p=0 and no repulsive force.  Needs a denser "
-        "particle cloud (>~20 particles) for density to exceed rest density."
-    ),
-)
 def test_gas_linear_eos():
     """Gas pressure uses linear EOS: p = k_gas * max(rho - rho0, 0).
 
-    Two GAS particles compressed (closer than rest spacing) should produce
-    a positive repulsive force. The key check is that force exists and is
-    directed outward (separation).
+    A 3x3x3 cloud of 27 STEAM particles packed at 0.01 spacing (< h=0.04)
+    produces SPH density >> rho0_steam=0.6 at the interior.  The linear EOS
+    then gives p > 0 and outward repulsive forces.
+
+    Key assertions:
+    - Interior (center) particle density exceeds rho0_steam=0.6
+    - Net force on the cloud is near zero (Newton's 3rd law over whole system)
+    - At least one particle has a non-zero SPH force (EOS is active)
     """
     setup_all_modules(gravity=(0.0, 0.0, 0.0))  # no gravity for pure EOS test
 
-    # Two STEAM particles close together (within h)
-    n = 2
-    sep = 0.02  # within h=0.04
-    pos = np.array([
-        [-sep/2, 0.0, 0.0, 1.0],
-        [sep/2, 0.0, 0.0, 1.0],
-    ], dtype=np.float32)
+    # 3x3x3 = 27 STEAM particles tightly packed
+    GRID_N = 3
+    DENSE_SEP = 0.01  # << h=0.04, forces all 27 within each other's kernel support
+    rho0 = 0.6        # STEAM rest density
+    mass_val = rho0 * SPACING**3  # 0.6 * 0.02^3 = 4.8e-6 kg
+
+    coords = [(ix, iy, iz)
+              for ix in range(GRID_N)
+              for iy in range(GRID_N)
+              for iz in range(GRID_N)]
+    n = len(coords)  # 27
+
+    pos = np.zeros((n, 4), dtype=np.float32)
+    center_offset = (GRID_N - 1) * DENSE_SEP / 2.0
+    for k, (ix, iy, iz) in enumerate(coords):
+        pos[k, 0] = ix * DENSE_SEP - center_offset
+        pos[k, 1] = iy * DENSE_SEP - center_offset
+        pos[k, 2] = iz * DENSE_SEP - center_offset
+        pos[k, 3] = 1.0  # w=1 (active)
+
     vel = np.zeros((n, 4), dtype=np.float32)
-    rho0 = 0.6  # STEAM rest density
-    mass_val = rho0 * SPACING**3
     mass = np.full(n, mass_val, dtype=np.float32)
     packed_info = np.full(n, MAKE_PACKED(STEAM, GAS), dtype=np.uint32)
 
@@ -340,18 +348,16 @@ def test_gas_linear_eos():
     d_mass = cupy.asarray(mass)
     d_pi = cupy.asarray(packed_info)
 
-    # Build grid for these 2 particles
+    # Build grid
     grid_params = build_grid_params()
     import hash_sort as hs_mod
     import build_grid as bg_mod
     hs_mod.upload_grid_params(grid_params)
     bg_mod.upload_grid_params(grid_params)
 
-    # API drift: calc_hash now returns only hashes, not (hashes, indices)
     hashes = calc_hash(d_pos)
     sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
-    # Reorder (trivial for 2 particles)
     s_pos = d_pos[sorted_indices]
     s_vel = d_vel[sorted_indices]
     s_mass = d_mass[sorted_indices]
@@ -362,38 +368,53 @@ def test_gas_linear_eos():
     cell_end.data.memset(0x00, cell_end.nbytes)
     build_data_struct(sorted_hashes, cell_start, cell_end)
 
-    # Step1: density — API drift: returns 6 values now (added pressure_out)
+    # Step1: compute density
     s_temp = cupy.full(n, 373.0, dtype=cupy.float32)
     density, shear_rate, _, _, _, _pressure = compute_step1(
         s_pos, s_vel, s_mass, None, s_pi, s_temp, cell_start, cell_end,
     )
 
+    density_h = density.get()
+
+    # Interior particles should have density > rho0 = 0.6
+    max_density = float(density_h.max())
+    assert max_density > rho0, (
+        f"Max density {max_density:.4f} should exceed rho0_steam={rho0} "
+        f"for 27 tightly packed particles — linear EOS needs rho > rho0 to fire"
+    )
+
     # Pack density into position.w before step2
     pack_density(s_pos, density, n)
 
-    # Step2 — API drift: density removed as arg, shear_rate added
+    # Step2: compute SPH forces (must pass pressure_in; without it step2 defaults to
+    # zeros → zero force.  _pressure was pre-computed by step1 above.)
     sph_force, veleval_out = compute_step2(
         s_pos, s_vel, s_mass, s_pi,
         shear_rate,
         cell_start, cell_end,
+        pressure_in=_pressure,
     )
 
     force_h = sph_force.get()
-    # Particles should be pushed apart: particle 0 (left) gets negative x force,
-    # particle 1 (right) gets positive x force (Newton's 3rd law)
-    # OR both get repulsive force away from each other
-    f0x = force_h[0, 0]
-    f1x = force_h[1, 0]
 
-    # Forces should be roughly opposite (Newton's 3rd law)
-    assert abs(f0x + f1x) < 0.1 * max(abs(f0x), abs(f1x), 1e-6), \
-        f"Newton's 3rd law violation: f0x={f0x}, f1x={f1x}"
+    # Newton's 3rd law: net force over the whole cloud must be near zero
+    net_fx = float(force_h[:, 0].sum())
+    net_fy = float(force_h[:, 1].sum())
+    net_fz = float(force_h[:, 2].sum())
+    max_force = float(np.abs(force_h[:, :3]).max())
+    tol = 0.01 * max(max_force, 1e-10)
 
-    # At least one should be non-zero (EOS produces pressure)
-    assert abs(f0x) > 1e-10 or abs(f1x) > 1e-10, \
-        f"Zero forces: linear EOS not producing pressure for compressed gas"
+    assert abs(net_fx) < tol, f"Net Fx={net_fx:.3e} violates Newton's 3rd law (tol={tol:.3e})"
+    assert abs(net_fy) < tol, f"Net Fy={net_fy:.3e} violates Newton's 3rd law (tol={tol:.3e})"
+    assert abs(net_fz) < tol, f"Net Fz={net_fz:.3e} violates Newton's 3rd law (tol={tol:.3e})"
 
-    print("PASS: test_gas_linear_eos")
+    # At least one particle must experience non-zero repulsive force
+    assert max_force > 1e-10, (
+        f"All SPH forces are zero — linear EOS not producing pressure "
+        f"(max_density={max_density:.4f}, rho0={rho0})"
+    )
+
+    print(f"PASS: test_gas_linear_eos (max_density={max_density:.4f}, max_force={max_force:.3e})")
 
 
 def test_gas_buoyancy_rise():
