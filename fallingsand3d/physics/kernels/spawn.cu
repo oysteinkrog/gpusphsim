@@ -83,35 +83,37 @@ void K_SpawnGas(
     // Clear the flag regardless of whether spawn succeeds
     pi = CLEAR_SPAWN_FLAG(pi);
 
-    // Claim N slots from the freelist atomically using a CAS loop.
-    // Pre-check that dead_count >= SPAWN_N, then atomicCAS to decrement by N.
-    // This prevents the uint32 underflow (wrap to 0xFFFFFFFF) that occurred
-    // when multiple threads raced on atomicSub with dead_count near zero.
+    // Claim N slots from the freelist one at a time via atomicSub.
+    // Each atomicSub is safe because we check the RETURNED old value:
+    //   - If old_val > 0: we successfully claimed slot at index old_val-1.
+    //   - If old_val <= 0: dead_count was 0, the decrement would wrap uint32
+    //     to 0xFFFFFFFF; we detect this, restore with atomicAdd, and bail.
+    //
+    // This avoids the underflow bug where dead_count == 0 and a racing
+    // atomicSub would transiently wrap it to 0xFFFFFFFF, potentially
+    // letting subsequent threads read dead_indices out of bounds.
+    // The pre-check (old_val > 0, not == 0) catches the race: even if two
+    // threads both see dead_count == 1 and both sub, one gets old_val == 1
+    // (ok) and the other gets old_val == 0 (detected, restored immediately).
     uint claimed_slots[SPAWN_N];
+    int n_claimed = 0;
 
-    // Atomically claim N slots: CAS loop decrements dead_count by SPAWN_N only
-    // if the current value is >= SPAWN_N.
-    uint cur = *dead_count;  // relaxed peek (speculative)
-    bool claimed = false;
-    for (int retry = 0; retry < 32; retry++) {
-        if (cur < (uint)SPAWN_N) {
-            // Not enough slots -- do not attempt decrement
+    for (int k = 0; k < SPAWN_N; k++) {
+        int old_val = (int)atomicSub(dead_count, 1u);
+        if (old_val <= 0) {
+            // dead_count was 0 (or already wrapped) -- restore and stop
+            atomicAdd(dead_count, 1u);
             break;
         }
-        uint prev = atomicCAS(dead_count, cur, cur - (uint)SPAWN_N);
-        if (prev == cur) {
-            // CAS succeeded: we own slots [cur-N, cur-1]
-            for (int k = 0; k < SPAWN_N; k++) {
-                claimed_slots[k] = dead_indices[cur - 1 - k];
-            }
-            claimed = true;
-            break;
-        }
-        // Another thread changed dead_count; reload and retry
-        cur = prev;
+        claimed_slots[k] = dead_indices[old_val - 1];
+        n_claimed++;
     }
 
-    if (!claimed) {
+    if (n_claimed < SPAWN_N) {
+        // Restore any slots we successfully claimed before running short
+        if (n_claimed > 0) {
+            atomicAdd(dead_count, (uint)n_claimed);
+        }
         packed_info[i] = pi;
         return;
     }
