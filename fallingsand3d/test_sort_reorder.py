@@ -484,6 +484,60 @@ def test_zero_particles() -> None:
     print("[OK] fused_reorder handles 0 particles")
 
 
+def test_fused_reorder_not_on_production_path() -> None:
+    """bd-mzc.46: fused_reorder is dead on the live production code path.
+
+    The live pipeline uses counting_sort.counting_sort_full (which handles
+    all 13 particle arrays).  fused_reorder covers only 8 of 13 arrays and
+    is kept solely because legacy test files (test_gas_physics.py,
+    test_integration_15mat.py) still import it.
+
+    This test confirms that no production module (simulation.py, integrate.py,
+    step1.py, step2.py, pbf_solver.py, dfsph_solver.py) imports fused_reorder.
+    """
+    import importlib
+    import importlib.util
+    import pathlib
+    import ast
+
+    # Production modules that should NOT import fused_reorder
+    production_modules = [
+        "simulation.py",
+        "integrate.py",
+        "step1.py",
+        "step2.py",
+        "pbf_solver.py",
+        "dfsph_solver.py",
+        "world.py",
+        "main.py",
+    ]
+
+    base = pathlib.Path(os.path.dirname(__file__))
+    found_in = []
+
+    for mod_file in production_modules:
+        src_path = base / mod_file
+        if not src_path.exists():
+            continue
+        tree = ast.parse(src_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if "fused_reorder" in alias.name:
+                        found_in.append(mod_file)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and "fused_reorder" in node.module:
+                    found_in.append(mod_file)
+
+    assert not found_in, (
+        f"fused_reorder is imported by production module(s): {found_in}. "
+        "Either remove the import (use counting_sort.counting_sort_full instead) "
+        "or update fused_reorder to cover all 13 particle arrays (bd-mzc.46 Option B)."
+    )
+    print("[OK] fused_reorder is not imported by any production module "
+          "(dead code path — live pipeline uses counting_sort.counting_sort_full)")
+
+
 def main() -> None:
     test_sort_produces_sorted_hashes()
     test_sorted_index_maps_correctly()
@@ -495,6 +549,7 @@ def main() -> None:
     test_end_to_end_world_sort_reorder()
     test_500k_sort_reorder_no_errors()
     test_zero_particles()
+    test_fused_reorder_not_on_production_path()
     print("\n=== ALL US-009 CHECKS PASSED ===")
 
 
