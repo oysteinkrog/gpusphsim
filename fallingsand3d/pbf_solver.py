@@ -120,9 +120,19 @@ def upload_granular_params(params: np.ndarray) -> None:
     cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
 
 
-def upload_pbf_params(profile) -> None:
-    """Upload PBFParams to constant memory from a SolverProfile."""
-    h = 0.04  # smoothing length
+def upload_pbf_params(profile, h: float = 0.04) -> None:
+    """Upload PBFParams to constant memory from a SolverProfile.
+
+    Parameters
+    ----------
+    profile:
+        SolverProfile carrying PBF-specific knobs.
+    h:
+        Smoothing length (metres).  Callers should pass ``simulation._h``
+        (or the value passed to ``step1.build_sim_params``).  Defaults to
+        0.04 m for backward compatibility when the caller does not yet
+        forward it explicitly.
+    """
     dq = profile.pbf_s_corr_dq * h
     dq_sq = dq * dq
     h_sq = h * h
