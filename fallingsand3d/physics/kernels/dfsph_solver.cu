@@ -1692,11 +1692,15 @@ void K_DFSPH_Finalize(
                 }
             }
         }
-        float c_xsph = c_granular.xsph_epsilon;
-        if (behavior == GRANULAR) c_xsph *= 10.0f;
-        vel_advect.x += c_xsph * xsph.x;
-        vel_advect.y += c_xsph * xsph.y;
-        vel_advect.z += c_xsph * xsph.z;
+        // Apply XSPH to FLUID only (not GRANULAR) — aligns with step2.cu bd-mzc.34 fix.
+        // GRANULAR uses mu(I) rheology for velocity smoothing; XSPH is redundant there
+        // and step2 was already updated to skip it. DFSPH Finalize now matches.
+        if (behavior == FLUID) {
+            float c_xsph = c_granular.xsph_epsilon;
+            vel_advect.x += c_xsph * xsph.x;
+            vel_advect.y += c_xsph * xsph.y;
+            vel_advect.z += c_xsph * xsph.z;
+        }
     }
 
     // Final position: x_final = x + dt * v_advect (XSPH-corrected)
