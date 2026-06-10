@@ -13,7 +13,7 @@ _compiler._use_ptx = True
 for _fn in (_compiler._get_arch, _compiler._get_arch_for_options_for_nvrtc):
     if hasattr(_fn, '_cache'):
         _fn._cache = {}
-from world import World, DEFAULT_SPACING, T_AMBIENT, _MAKE_PACKED
+from world import World, DEFAULT_SPACING, T_AMBIENT, _MAKE_PACKED, PARTICLE_MASS
 from materials import (
     MATERIALS, WATER, SAND, LAVA, FIRE, STEAM, SMOKE, ICE, STONE,
     FLUID, GRANULAR, GAS, STATIC,
@@ -66,9 +66,9 @@ def test_spawn_cube_water():
     n = w.spawn_cube((-0.5, -0.5, -0.5), (0.5, 0.5, 0.5), WATER, spacing=0.02)
     assert n > 0
     assert w.num_active == n
-    # mass = rho0 * spacing^3 = 1000 * 8e-6 = 0.008
+    # mass = PARTICLE_MASS = 0.02 (game-tuned constant, not rho0*dx^3)
     mass_val = float(w.mass[0])
-    assert abs(mass_val - 0.008) < 1e-6, f"mass={mass_val}"
+    assert abs(mass_val - PARTICLE_MASS) < 1e-6, f"mass={mass_val}, expected PARTICLE_MASS={PARTICLE_MASS}"
     # packed_info = MAKE_PACKED(WATER, FLUID)
     pi_val = int(w.packed_info[0])
     expected = _MAKE_PACKED(WATER, FLUID)
