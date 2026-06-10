@@ -947,19 +947,35 @@ void main() {
     # SDF object mesh generation and rendering
     # -----------------------------------------------------------------
 
-    def _upload_mesh(self, verts: np.ndarray) -> tuple:
-        """Upload vertex data to a VBO+VAO, return (vao, vbo, num_verts)."""
+    def _upload_mesh(self, verts: np.ndarray, floats_per_vertex: int = 0) -> tuple:
+        """Upload vertex data to a VBO+VAO, return (vao, vbo, num_verts).
+
+        floats_per_vertex: stride in floats.  If 0 (default), inferred from
+        the array shape: 2-D arrays use shape[1]; 1-D arrays default to 3.
+        The position attribute (location 0) always reads xyz from the first 3
+        floats of each vertex; extra floats (e.g. normals) are ignored by the
+        current SDF shader but stored correctly in the VBO.
+        """
+        flat = verts.ravel()
+        if floats_per_vertex <= 0:
+            if verts.ndim == 2:
+                floats_per_vertex = verts.shape[1]
+            else:
+                floats_per_vertex = 3  # legacy: all current callers are xyz-only
+        stride_bytes = floats_per_vertex * 4  # float32 = 4 bytes
+        num_verts = flat.size // floats_per_vertex
+
         vbo = int(glGenBuffers(1))
         glBindBuffer(GL_ARRAY_BUFFER, vbo)
-        glBufferData(GL_ARRAY_BUFFER, verts.nbytes, verts, GL_STATIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, flat.nbytes, flat, GL_STATIC_DRAW)
         vao = int(glGenVertexArrays(1))
         glBindVertexArray(vao)
         glBindBuffer(GL_ARRAY_BUFFER, vbo)
         glEnableVertexAttribArray(0)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, None)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride_bytes, None)
         glBindVertexArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
-        return (vao, vbo, len(verts) // 3)
+        return (vao, vbo, num_verts)
 
     def _create_box_mesh(self) -> tuple:
         """Unit cube [-1,1]^3 as 12 triangles (36 verts)."""
