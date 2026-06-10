@@ -392,43 +392,71 @@ def test_velocity_clamp():
     print("PASS: test_velocity_clamp")
 
 
-@pytest.mark.xfail(strict=True, reason="UNTRIAGED: FLUID particles use compute_fluid_color (depth-gradient + density + foam) not simple base-color compute_color; test expects flat material color but kernel applies depth tinting (r = base_r * (0.45 + 0.70 * depth_t))")
 def test_color_computation():
-    """Color is computed from material base color, temperature, and health."""
-    setup_params()
+    """FLUID particles use compute_fluid_color: depth-gradient tint + temperature + health.
 
-    # Test 1: room temp, full health -> base material color
+    compute_fluid_color applies a depth gradient to the base color:
+      r = base_r * (0.45 + 0.70 * depth_t)   [depth_t = 0 at bottom, 1 at top]
+      g = base_g * (0.50 + 0.65 * depth_t)
+      b = base_b * (0.65 + 0.40 * depth_t)
+    Additionally: hot-tint for T > 293K, health-fade, alpha = 0 (FLUID transparency).
+    World domain: y in [-1, 1], depth_t = (y + 1) / 2.
+    """
+    # Use gravity=0 to avoid position change during the integration step.
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    # Water base: r=0.2, g=0.5, b=0.9 (from materials.py)
+    BASE_R, BASE_G, BASE_B = 0.2, 0.5, 0.9
     n = 1
+
+    # --- Test 1: depth-gradient tint at y=0 (depth_t=0.5) ---
+    # Expected: r = 0.2*(0.45+0.70*0.5) = 0.16, g = 0.5*(0.50+0.65*0.5) = 0.4125
+    #           b = 0.9*(0.65+0.40*0.5) = 0.765, alpha = 0.0 (FLUID)
     d = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
     d["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
     _, _, color_out, _, _, _, _, _ = integrate(**d)
-    color_h = color_out.get()
+    color_mid = color_out.get()
 
-    # Water color: (0.2, 0.5, 0.9)
-    assert abs(color_h[0, 0] - 0.2) < 0.02, f"Water R={color_h[0, 0]}, expected 0.2"
-    assert abs(color_h[0, 1] - 0.5) < 0.02, f"Water G={color_h[0, 1]}, expected 0.5"
-    assert abs(color_h[0, 2] - 0.9) < 0.02, f"Water B={color_h[0, 2]}, expected 0.9"
-    assert abs(color_h[0, 3] - 1.0) < 0.01, f"Alpha={color_h[0, 3]}, expected 1.0"
+    depth_t_mid = 0.5
+    exp_r = BASE_R * (0.45 + 0.70 * depth_t_mid)
+    exp_g = BASE_G * (0.50 + 0.65 * depth_t_mid)
+    exp_b = BASE_B * (0.65 + 0.40 * depth_t_mid)
+    assert abs(color_mid[0, 0] - exp_r) < 0.02, f"Mid-depth R={color_mid[0, 0]:.4f}, expected {exp_r:.4f}"
+    assert abs(color_mid[0, 1] - exp_g) < 0.02, f"Mid-depth G={color_mid[0, 1]:.4f}, expected {exp_g:.4f}"
+    assert abs(color_mid[0, 2] - exp_b) < 0.02, f"Mid-depth B={color_mid[0, 2]:.4f}, expected {exp_b:.4f}"
+    assert abs(color_mid[0, 3]) < 0.01, f"FLUID alpha should be 0, got {color_mid[0, 3]}"
 
-    # Test 2: hot particle -> red tint
-    d2 = make_simple_particles(n, WATER, FLUID, temp=1293.0, health=1.0)
-    d2["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out2, _, _, _, _, _ = integrate(**d2)
-    color_h2 = color_out2.get()
+    # --- Test 2: depth gradient -- bottom should be darker than top ---
+    d_bot = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
+    d_bot["sorted_position"] = cupy.array([[0.0, -0.9, 0.0, 1.0]], dtype=cupy.float32)
+    d_top = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
+    d_top["sorted_position"] = cupy.array([[0.0, 0.9, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, col_bot, _, _, _, _, _ = integrate(**d_bot)
+    _, _, col_top, _, _, _, _, _ = integrate(**d_top)
+    r_bot = col_bot.get()[0, 0]
+    r_top = col_top.get()[0, 0]
+    assert r_top > r_bot, f"Water should be brighter at top: r_top={r_top:.4f} <= r_bot={r_bot:.4f}"
 
-    # Should be more red than base water
-    assert color_h2[0, 0] > color_h[0, 0], "Hot particle not redder"
-    assert color_h2[0, 2] < color_h[0, 2], "Hot particle blue not reduced"
+    # --- Test 3: hot particle -> red tint (T=1293K, t_excess=1.0) ---
+    d_hot = make_simple_particles(n, WATER, FLUID, temp=1293.0, health=1.0)
+    d_hot["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, color_hot, _, _, _, _, _ = integrate(**d_hot)
+    color_h_hot = color_hot.get()
+    assert color_h_hot[0, 0] > color_mid[0, 0], "Hot particle should be more red than cold"
+    assert color_h_hot[0, 2] < color_mid[0, 2], "Hot particle should be less blue than cold"
 
-    # Test 3: low health -> faded color
-    d3 = make_simple_particles(n, WATER, FLUID, temp=293.0, health=0.5)
-    d3["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out3, _, _, _, _, _ = integrate(**d3)
-    color_h3 = color_out3.get()
-
-    # Should be ~half brightness
-    assert abs(color_h3[0, 0] - 0.1) < 0.02, f"Health fade R={color_h3[0, 0]}"
-    assert abs(color_h3[0, 1] - 0.25) < 0.02, f"Health fade G={color_h3[0, 1]}"
+    # --- Test 4: half health -> half brightness ---
+    d_fade = make_simple_particles(n, WATER, FLUID, temp=293.0, health=0.5)
+    d_fade["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, color_fade, _, _, _, _, _ = integrate(**d_fade)
+    color_h_fade = color_fade.get()
+    # Should be ~half the mid-depth color
+    assert abs(color_h_fade[0, 0] - color_mid[0, 0] * 0.5) < 0.02, (
+        f"Half-health R={color_h_fade[0, 0]:.4f}, expected ~{color_mid[0, 0]*0.5:.4f}"
+    )
+    assert abs(color_h_fade[0, 1] - color_mid[0, 1] * 0.5) < 0.02, (
+        f"Half-health G={color_h_fade[0, 1]:.4f}, expected ~{color_mid[0, 1]*0.5:.4f}"
+    )
 
     print("PASS: test_color_computation")
 
