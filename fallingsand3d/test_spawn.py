@@ -898,6 +898,114 @@ def test_500k_stress():
     print("PASS: test_500k_stress")
 
 
+def test_dead_particle_phase_is_static():
+    """bd-mzc.28 regression: source water particle killed by spawn must be packed as
+    MAKE_PACKED(MAT_DEAD, STATIC), NOT MAKE_PACKED(MAT_DEAD, FLUID).
+
+    DEAD+FLUID particles participate in the SPH neighbor loop and pollute density
+    sums until the next compaction pass.  The fix ensures STATIC phase is used so
+    dead particles are excluded from the fluid loop immediately.
+    """
+    setup_params()
+
+    n = 10
+    arrays = make_sorted_arrays(n)
+
+    arrays["packed_info"][0] = SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID))
+    arrays["mass"][0] = 0.008
+
+    dead_indices, dead_count = allocate_freelist(n)
+    dead_indices[0] = 7
+    dead_indices[1] = 8
+    dead_indices[2] = 9
+    dead_count[0] = 3
+
+    compute_spawn(
+        arrays["packed_info"][:n],
+        arrays["position"][:n],
+        arrays["velocity"][:n],
+        arrays["veleval"][:n],
+        arrays["mass"][:n],
+        arrays["temperature"][:n],
+        arrays["health"][:n],
+        arrays["lifetime"][:n],
+        arrays["color"][:n],
+        arrays["sleep_counter"][:n],
+        arrays["density"][:n],
+        arrays["shear_rate"][:n],
+        dead_indices,
+        dead_count,
+    )
+    cupy.cuda.Device().synchronize()
+
+    pi = int(arrays["packed_info"][0].get())
+    assert GET_MATERIAL_ID(pi) == DEAD, f"Source should be DEAD, got mat={GET_MATERIAL_ID(pi)}"
+    behavior = GET_BEHAVIOR(pi)
+    assert behavior == STATIC, (
+        f"Dead particle packed with behavior={behavior} (FLUID=0, GRANULAR=1, GAS=2, STATIC=3); "
+        f"expected STATIC ({STATIC}).  FLUID dead particles pollute SPH density sums."
+    )
+    print("PASS: test_dead_particle_phase_is_static")
+
+
+def test_freelist_underflow_safety():
+    """bd-mzc.19 regression: concurrent spawns with 0 or few freelist slots must not
+    cause dead_count to wrap around (uint32 underflow to 0xFFFFFFFF).
+
+    The atomicCAS claim loop should guarantee dead_count stays >= 0 regardless
+    of how many racing threads attempt to claim simultaneously.
+    """
+    setup_params()
+
+    # Many water particles all flagged, but freelist is empty.
+    # Before the fix atomicSub would wrap dead_count to 0xFFFFFFFF.
+    n = 512  # fills two GPU blocks
+    arrays = make_sorted_arrays(n)
+
+    for i in range(n):
+        arrays["packed_info"][i] = SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID))
+        arrays["mass"][i] = 0.008
+
+    # Completely empty freelist
+    dead_indices, dead_count = allocate_freelist(n)
+    dead_count[0] = 0
+
+    compute_spawn(
+        arrays["packed_info"][:n],
+        arrays["position"][:n],
+        arrays["velocity"][:n],
+        arrays["veleval"][:n],
+        arrays["mass"][:n],
+        arrays["temperature"][:n],
+        arrays["health"][:n],
+        arrays["lifetime"][:n],
+        arrays["color"][:n],
+        arrays["sleep_counter"][:n],
+        arrays["density"][:n],
+        arrays["shear_rate"][:n],
+        dead_indices,
+        dead_count,
+    )
+    cupy.cuda.Device().synchronize()
+
+    dc = int(dead_count.get()[0])
+    assert dc == 0, (
+        f"dead_count underflowed to {dc} (0x{dc:08X}); expected 0.  "
+        f"atomicSub wrap-around corrupts live particles."
+    )
+
+    # All particles should still be WATER (with flag cleared)
+    pi_out = arrays["packed_info"].get()
+    for i in range(n):
+        mat = GET_MATERIAL_ID(int(pi_out[i]))
+        assert mat == WATER, (
+            f"Particle {i}: expected WATER (no spawn slots), got mat_id={mat}"
+        )
+        assert HAS_SPAWN_FLAG(int(pi_out[i])) == 0, f"Particle {i}: spawn flag not cleared"
+
+    print("PASS: test_freelist_underflow_safety")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -920,6 +1028,8 @@ if __name__ == "__main__":
         test_reactions_backward_compat,
         test_end_to_end_boil_spawn,
         test_500k_stress,
+        test_dead_particle_phase_is_static,
+        test_freelist_underflow_safety,
     ]
 
     passed = 0
