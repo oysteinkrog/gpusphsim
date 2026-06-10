@@ -202,28 +202,27 @@ def test_ice_spawn_temp():
     print(f"PASS: test_ice_spawn_temp (default={ice_default} K)")
 
 
-def test_num_active_no_gpu_sync():
-    """bd-mzc.38 regression: num_active property must not call int() on a CuPy array."""
-    import unittest.mock as mock
+def test_num_active_counts_dead_particles():
+    """bd-mzc.38 regression: num_active must accurately reflect killed particles.
+
+    The first attempt at bd-mzc.38 replaced the count_nonzero with a host-side
+    counter that was never maintained, so num_active always returned
+    _high_water and broke compaction accounting (test_compact regressions).
+    num_active must report the true non-DEAD count. The per-frame no-sync
+    guarantee is provided by _maybe_compact's interval gate (it is the only
+    per-frame caller and runs once every compact_interval frames), not by
+    making this query non-syncing.
+    """
     w = World(10_000)
     w.spawn_sphere((0.0, 0.0, 0.0), 0.1, WATER, 500)
+    n0 = w.num_active
+    assert n0 == 500, f"expected 500 active after spawn, got {n0}"
 
-    # Patch cp.count_nonzero to detect if num_active calls it
-    original_cnz = cp.count_nonzero
-    calls = []
-    def mock_cnz(*a, **kw):
-        calls.append(1)
-        return original_cnz(*a, **kw)
-
-    with mock.patch("world.cp.count_nonzero", side_effect=mock_cnz):
-        # If num_active still uses count_nonzero the call list will be non-empty
-        # After bd-mzc.38 the property should NOT call count_nonzero
-        _ = w.num_active
-
-    assert len(calls) == 0, (
-        "num_active called cp.count_nonzero (GPU sync detected); bd-mzc.38 not fixed"
-    )
-    print("PASS: test_num_active_no_gpu_sync")
+    # Kill roughly half via a large brush sphere, then re-query.
+    w.kill_in_sphere((0.0, 0.0, 0.0), 0.05)
+    n1 = w.num_active
+    assert 0 <= n1 < n0, f"num_active ({n1}) must drop after kill (was {n0})"
+    print("PASS: test_num_active_counts_dead_particles")
 
 
 def test_kill_in_sphere_no_gpu_sync():

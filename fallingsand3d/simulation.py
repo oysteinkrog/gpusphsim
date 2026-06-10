@@ -1574,13 +1574,16 @@ class Simulation:
         if self._frame_counter % self.compact_interval != 0:
             return n
 
-        # Count dead particles = _high_water - num_active
+        # Count dead particles = _high_water - num_active. This is the only
+        # per-frame caller of num_active, and it runs only once every
+        # compact_interval frames (gated above), so the ~1 Hz sync is fine.
         num_alive = self.world.num_active
         num_dead = n - num_alive
         if num_dead < self.compact_threshold:
             return n
 
-        self.world.compact()
+        # Reuse the count we already paid for so compact() does not sync again.
+        self.world.compact(num_alive=num_alive)
         # After compaction, n changed — force full sort next time
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0

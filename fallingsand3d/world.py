@@ -58,9 +58,6 @@ class World:
         self.max_particles: int = max_particles
         self._high_water: int = 0  # one past last allocated slot
         self._spawned_material_ids: set = set()  # CPU-side tracking for conditional skip
-        # Host-side dead count — updated by Simulation via async D2H readback.
-        # num_active uses this instead of count_nonzero to avoid GPU sync.
-        self._dead_count_host: int = 0
         self._allocate()
 
     def _allocate(self) -> None:
@@ -187,18 +184,22 @@ class World:
         self.max_particles = new_max
         self._high_water = 0
         self._spawned_material_ids = set()
-        self._dead_count_host = 0
         self._allocate()
 
     @property
     def num_active(self) -> int:
-        """Count of non-DEAD particles (material_id != 0).
+        """Count of non-DEAD particles (material_id != 0) in [0, _high_water).
 
-        Uses _high_water minus the host-side dead count that is updated
-        asynchronously by Simulation each frame via pinned-memory D2H copy.
-        No GPU->CPU synchronization occurs on this path.
+        Performs one GPU reduction + D2H sync, so it must NOT be called on the
+        per-frame / per-substep hot path. Its only per-frame caller is
+        ``Simulation._maybe_compact``, which is gated to run once every
+        ``compact_interval`` frames (default 60) — a negligible ~1 Hz sync.
+        Also used by UI and tests.
         """
-        return max(0, self._high_water - self._dead_count_host)
+        n = self._high_water
+        if n == 0:
+            return 0
+        return int(cp.count_nonzero((self.packed_info[:n] & cp.uint32(0xFF)) != cp.uint32(0)))
 
     def compact(self, num_alive: int = -1) -> int:
         """Compact particle arrays by moving alive particles to the front.
