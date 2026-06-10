@@ -1646,6 +1646,49 @@ class Simulation:
     def last_substeps(self) -> int:
         return self._last_substeps
 
+    def close(self) -> None:
+        """Release CUDA resources held by this Simulation instance.
+
+        Must be called before discarding a Simulation object (e.g. on
+        max-particles change) to prevent stream/event/pinned-buffer/graph
+        leaks and to avoid an in-flight D2H race on the readback stream.
+
+        Safe to call more than once (idempotent after first call).
+        """
+        # 1. Drain any in-flight async device-to-host copies on the readback stream.
+        #    Without this, the pinned host buffers we are about to release could still
+        #    be written by the GPU after Python frees them.
+        try:
+            if self._readback_stream is not None:
+                self._readback_stream.synchronize()
+        except Exception:
+            pass
+
+        # 2. Free CUDA graph captures so their device-side allocations are returned.
+        try:
+            self._graph_full_sort = None
+            self._graph_gather_only = None
+        except Exception:
+            pass
+
+        # 3. Release the readback event and stream (CuPy handles the CUDA-level
+        #    free when the Python objects are garbage-collected, but nulling here
+        #    makes the intent explicit and helps GC run promptly).
+        try:
+            self._readback_event = None
+            self._readback_stream = None
+        except Exception:
+            pass
+
+        # 4. Release pinned host memory.  CuPy's MemoryPointer.__del__ calls
+        #    cudaFreeHost, but we trigger it now to avoid keeping pinned pages
+        #    around until the next GC cycle.
+        try:
+            self._pinned_displacement = None
+            self._pinned_foam_count = None
+        except Exception:
+            pass
+
     def get_all_modules(self) -> list:
         """Return all compiled CuPy RawModule objects known to this Simulation.
 

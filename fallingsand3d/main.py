@@ -359,6 +359,7 @@ def main():
             new_max = ui_changes['new_max']
             world.resize(new_max)
             renderer.close()
+            sim.close()  # drain readback stream + free pinned buffers/graphs before reassign
             fb_w, fb_h = glfw.get_framebuffer_size(window)
             renderer = Renderer(new_max, point_scale=20.0, width=fb_w, height=fb_h)
             renderer.num_active = 0
