@@ -159,17 +159,17 @@ def integrate(
     sort_indexes : cupy.ndarray, (N,) uint32
         sort_indexes[sorted_i] = original unsorted index.
     position_out : cupy.ndarray, optional
-        Pre-allocated (M, 4) float32 unsorted output.
+        Pre-allocated (N, 4) float32 unsorted output.
     velocity_out : cupy.ndarray, optional
-        Pre-allocated (M, 4) float32 unsorted output.
+        Pre-allocated (N, 4) float32 unsorted output.
     color_out : cupy.ndarray, optional
-        Pre-allocated (M, 4) float32 unsorted output.
+        Pre-allocated (N, 4) float32 unsorted output.
     packed_info_out : cupy.ndarray, optional
-        Pre-allocated (M,) uint32 unsorted output for updated packed_info.
+        Pre-allocated (N,) uint32 unsorted output for updated packed_info.
     sleep_counter_out : cupy.ndarray, optional
-        Pre-allocated (M,) uint8 unsorted output for updated sleep counter.
+        Pre-allocated (N,) uint8 unsorted output for updated sleep counter.
     temperature_out : cupy.ndarray, optional
-        Pre-allocated (M,) float32 unsorted output for updated temperature.
+        Pre-allocated (N,) float32 unsorted output for updated temperature.
 
     Returns
     -------
@@ -199,30 +199,25 @@ def integrate(
     if sorted_angular_velocity is None:
         sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
 
-    # Allocate outputs if not provided
+    # Allocate outputs if not provided.
+    # sort_indexes is a permutation of [0, n), so max index = n-1 and output
+    # size = n.  Using n directly avoids 8 GPU->CPU syncs (bd-mzc.41).
+    max_idx = n
     if position_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         position_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
     if velocity_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         velocity_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
     if color_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         color_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
     if packed_info_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         packed_info_out = cupy.zeros(max_idx, dtype=cupy.uint32)
     if sleep_counter_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         sleep_counter_out = cupy.zeros(max_idx, dtype=cupy.uint8)
     if temperature_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         temperature_out = cupy.zeros(max_idx, dtype=cupy.float32)
     if particle_dye_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         particle_dye_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
     if angular_velocity_out is None:
-        max_idx = int(sort_indexes.max()) + 1 if n > 0 else n
         angular_velocity_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
 
     module = _get_module()
