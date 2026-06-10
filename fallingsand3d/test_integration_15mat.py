@@ -456,7 +456,6 @@ def test_10000_steps_no_nan():
     print(f"PASS: test_10000_steps_no_nan ({elapsed_total:.1f}s for 10000 steps, {n_total} particles)")
 
 
-@pytest.mark.xfail(strict=True, reason="UNTRIAGED: sand collapses to y_std~0 at floor; GRANULAR anti-creep/sleep freeze all particles at same floor height, mu(I) pile shape not maintained; likely related to GRANULAR_ACCEL_REST equilibrium check and sleep-system interaction")
 def test_sand_forms_pile():
     """Sand drops and forms a pile -- doesn't flatten completely due to mu(I)."""
     setup_all_modules()

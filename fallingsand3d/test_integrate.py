@@ -668,7 +668,6 @@ def test_water_pool_no_nan():
     print("PASS: test_water_pool_no_nan")
 
 
-@pytest.mark.xfail(strict=True, reason="UNTRIAGED: GRANULAR_ACCEL_REST equilibrium check blocks anti-creep when gravity is unbalanced (no SPH support); test assumes old behavior where density+shear alone triggered zeroing")
 def test_granular_anti_creep_settled():
     """GRANULAR particles at rest with high density and low shear rate get zeroed velocity.
 
@@ -690,8 +689,8 @@ def test_granular_anti_creep_settled():
 
     d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
 
-    # Density well above 0.95 * rho0 (sand rho0 = 1600)
-    d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
+    # Density well above 0.95 * rho0 (SAND rho0=4000, threshold = 0.95*4000 = 3800)
+    d["sorted_density"] = cupy.full(n, 4200.0, dtype=cupy.float32)
     # Shear rate below gamma_min (0.05)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
@@ -759,7 +758,7 @@ def test_granular_anti_creep_low_density():
     vel[:, 0] = 0.005
 
     d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
-    # Density BELOW 0.95 * 1600 = 1520
+    # Density BELOW 0.95 * 4000 = 3800 (SAND rho0=4000)
     d["sorted_density"] = cupy.full(n, 1000.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
@@ -809,7 +808,6 @@ def test_granular_anti_creep_high_shear():
     print("PASS: test_granular_anti_creep_high_shear")
 
 
-@pytest.mark.xfail(strict=True, reason="UNTRIAGED: GRANULAR_ACCEL_REST equilibrium check blocks anti-creep when gravity is unbalanced (no SPH support force to cancel gravity); test expects strict max_speed < 1e-6 but gravity-only accel exceeds 5 m/s^2 threshold")
 def test_granular_no_jitter_5000_steps():
     """Settled sand pile shows no jitter over 5000 steps.
 
@@ -828,8 +826,8 @@ def test_granular_no_jitter_5000_steps():
 
     pos_gpu = cupy.asarray(pos_np)
     vel_gpu = cupy.asarray(vel_np)
-    # High density (settled/compressed)
-    density_gpu = cupy.full(n, 1700.0, dtype=cupy.float32)
+    # High density (settled/compressed): SAND rho0=4000, threshold = 0.95*4000 = 3800
+    density_gpu = cupy.full(n, 4200.0, dtype=cupy.float32)
     # Low shear rate (at rest)
     shear_rate_gpu = cupy.full(n, 0.01, dtype=cupy.float32)
 
