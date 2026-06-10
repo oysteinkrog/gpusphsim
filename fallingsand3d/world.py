@@ -199,7 +199,7 @@ class World:
         n = self._high_water
         if n == 0:
             return 0
-        return int(cp.count_nonzero((self.packed_info[:n] & cp.uint32(0xFF)) != cp.uint32(0)))
+        return int(cp.count_nonzero(self.packed_info[:n] & cp.uint32(0xFF)))
 
     def compact(self, num_alive: int = -1) -> int:
         """Compact particle arrays by moving alive particles to the front.

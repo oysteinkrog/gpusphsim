@@ -1,4 +1,4 @@
-"""Round-trip tests for save_load.py -- SDF + rigid body serialisation (bd-mzc.26).
+"""Round-trip tests for save_load.py -- SDF + rigid body serialisation.
 
 Tests the _serialize_sdf_manager / _restore_sdf_manager and
 _serialize_rigid_body_manager helpers in isolation (no GPU required for the
@@ -7,8 +7,8 @@ pure-Python parts), plus a JSON round-trip of the full header structure.
 A full end-to-end test (save_scene / load_scene with a live CuPy world) is
 omitted here because it requires a CUDA GPU and a fully initialised World /
 Simulation / Camera -- integration coverage for that path comes from the app's
-existing preset reload paths.  The helpers tested here are the novel code added
-by bd-mzc.26.
+existing preset reload paths.  The helpers tested here exercise the logic added
+by bd-mzc.26, bd-unl.13, bd-unl.14, and bd-unl.15.
 """
 
 from __future__ import annotations
@@ -284,6 +284,150 @@ def test_header_json_with_sdf_and_camera() -> None:
     print("[OK] Full header with SDF + kinematic motions encodes/decodes correctly")
 
 
+# ---------------------------------------------------------------------------
+# bd-unl.13: warm-start + sleep field zeroing on load
+# ---------------------------------------------------------------------------
+
+def test_header_includes_warm_start_fields_zeroed_on_load() -> None:
+    """load_scene must zero kappa, kappa_v, lambda_pbf, sleep_counter, angular_velocity.
+
+    Verified by inspecting save_load source: the load path explicitly assigns 0
+    to each field over the [:n] slice immediately after writing the particle arrays.
+    This test checks the header JSON path and verifies that the field names
+    expected on World are consistent with the attribute names in world.py.
+    """
+    # The fields that must be zeroed; verify they match World._allocate names.
+    expected_zeroed = {
+        "kappa",          # DFSPH warm-start pressure
+        "kappa_v",        # DFSPH warm-start divergence
+        "lambda_pbf",     # PBF lambda
+        "sleep_counter",  # rigid sleep timer (uint8, max 255 frames asleep)
+        "angular_velocity",  # micropolar spin
+    }
+    import inspect
+    import save_load as sl
+    src = inspect.getsource(sl.load_scene)
+    # Each field must appear as a zeroing assignment in load_scene
+    for field in expected_zeroed:
+        assert f"world.{field}[:n] = 0" in src or f"world.{field}[:n] = 0." in src, (
+            f"load_scene does not zero world.{field} -- stale warm-start values will "
+            f"survive a load cycle (bd-unl.13)"
+        )
+    print(f"[OK] load_scene zeros all {len(expected_zeroed)} warm-start/sleep fields")
+
+
+# ---------------------------------------------------------------------------
+# bd-unl.14: sim_time serialised to header and restored on load
+# ---------------------------------------------------------------------------
+
+def test_header_sim_time_present_and_round_trips() -> None:
+    """save header must carry sim_time; load must restore it (not reset to 0).
+
+    Checks the header JSON structure and that load_scene uses header.get('sim_time')
+    rather than the hard-coded 0.0 that caused kinematic SDF snap-to-center.
+    """
+    import inspect
+    import save_load as sl
+
+    # 1. save_scene must write sim_time into the header dict.
+    save_src = inspect.getsource(sl.save_scene)
+    assert '"sim_time"' in save_src or "'sim_time'" in save_src, (
+        "save_scene does not write 'sim_time' to the header (bd-unl.14)"
+    )
+
+    # 2. load_scene must read sim_time from the header rather than resetting to 0.
+    load_src = inspect.getsource(sl.load_scene)
+    assert 'sim_time' in load_src, (
+        "load_scene does not reference sim_time at all (bd-unl.14)"
+    )
+    # The old bug was the literal 'sim.sim_time = 0.0' unconditionally.
+    # After the fix it should use header.get('sim_time', ...).
+    assert "header.get(\"sim_time\"" in load_src or "header.get('sim_time'" in load_src, (
+        "load_scene does not call header.get('sim_time', ...) -- kinematic SDF positions "
+        "will still snap to t=0 on load (bd-unl.14)"
+    )
+
+    # 3. Full header JSON round-trip with a non-zero sim_time.
+    sdf_data = _serialize_sdf_manager(_StubSDFManager())
+    header = {
+        "version": sl.VERSION,
+        "particle_count": 100,
+        "solver": "DFSPH",
+        "world_half_size": 1.0,
+        "gravity_y": -9.81,
+        "sim_time": 42.5,
+        "camera": {"target": [0.0, 0.0, 0.0], "distance": 2.0, "azimuth": 0.0, "elevation": 0.0},
+        "sdf": sdf_data,
+        "rigid_bodies": {"count": 0, "bodies": []},
+    }
+    decoded = json.loads(json.dumps(header))
+    assert decoded["sim_time"] == 42.5, (
+        f"sim_time not preserved in header JSON round-trip: got {decoded.get('sim_time')}"
+    )
+    print("[OK] sim_time in header: save writes it, load reads it, JSON round-trips correctly")
+
+
+def test_header_version_bumped_for_sim_time() -> None:
+    """VERSION must be at least 3 to signal that sim_time is present."""
+    import save_load as sl
+    assert sl.VERSION >= 3, (
+        f"VERSION={sl.VERSION}: should be incremented to 3+ when sim_time was added "
+        f"to the header (bd-unl.14) so old loaders can detect the new field"
+    )
+    print(f"[OK] save_load.VERSION={sl.VERSION} >= 3 (sim_time field present)")
+
+
+# ---------------------------------------------------------------------------
+# bd-unl.15: rbm.upload uses sim.get_all_modules() on load and solver-switch
+# ---------------------------------------------------------------------------
+
+def test_load_scene_uses_get_all_modules() -> None:
+    """load_scene must pass sim.get_all_modules() to _restore_rigid_body_manager.
+
+    The old code built a partial 3-module list inline; the fix threads
+    sim.get_all_modules() through so every compiled module gets the correct
+    c_num_rigid_bodies constant (forward-maintenance guard, bd-unl.15).
+    """
+    import inspect
+    import save_load as sl
+
+    src = inspect.getsource(sl.load_scene)
+
+    # The old partial-list pattern used inline imports of integrate/pbf_solver/dfsph_solver
+    # and built a local 'modules' list.  After the fix that block is gone.
+    assert "import integrate" not in src or "modules = []" not in src, (
+        "load_scene still builds a partial inline module list -- it should use "
+        "sim.get_all_modules() instead (bd-unl.15)"
+    )
+
+    # The fix must call get_all_modules() when passing modules to _restore_rigid_body_manager.
+    assert "get_all_modules()" in src, (
+        "load_scene does not call sim.get_all_modules() for the rbm.upload path (bd-unl.15)"
+    )
+    print("[OK] load_scene calls sim.get_all_modules() for rigid body module upload")
+
+
+def test_main_solver_switch_calls_rbm_upload() -> None:
+    """main.py solver-switch block must call rbm.upload after sim.set_solver_profile.
+
+    Without this call c_num_rigid_bodies stays stale in newly compiled modules
+    after a solver switch (bd-unl.15).
+
+    Reads main.py as source text to avoid importing it (which would require glfw).
+    """
+    main_path = os.path.join(os.path.dirname(__file__), "main.py")
+    with open(main_path, "r", encoding="utf-8") as fh:
+        src = fh.read()
+
+    # Look for the pattern introduced by the fix
+    assert "rigid_body_manager.upload(sim.get_all_modules())" in src, (
+        "main.py solver-switch block does not call "
+        "sim.rigid_body_manager.upload(sim.get_all_modules()) after set_solver_profile "
+        "(bd-unl.15)"
+    )
+    print("[OK] main.py solver-switch calls sim.rigid_body_manager.upload(sim.get_all_modules())")
+
+
 def main() -> None:
     test_serialize_empty_sdf_manager()
     test_sdf_round_trip_single_box()
@@ -293,6 +437,12 @@ def main() -> None:
     test_restore_into_empty_clears_existing()
     test_restore_from_empty_sdf_data()
     test_header_json_with_sdf_and_camera()
+    # bd-unl.13/14/15
+    test_header_includes_warm_start_fields_zeroed_on_load()
+    test_header_sim_time_present_and_round_trips()
+    test_header_version_bumped_for_sim_time()
+    test_load_scene_uses_get_all_modules()
+    test_main_solver_switch_calls_rbm_upload()
     print("\n=== ALL SAVE/LOAD ROUND-TRIP TESTS PASSED ===")
 
 

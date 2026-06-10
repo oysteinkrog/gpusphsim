@@ -9,7 +9,7 @@ import cupy as cp
 import numpy as np
 
 SAVE_DIR = os.path.join(os.path.dirname(__file__), "saves")
-VERSION = 2  # incremented from 1 to include SDF + rigid body state
+VERSION = 3  # v3: added sim_time to header (bd-unl.14)
 
 
 def _ensure_save_dir():
@@ -102,6 +102,7 @@ def save_scene(world, sim, camera, filename: str) -> str:
         "solver": sim._profile.name if hasattr(sim._profile, "name") else str(sim._profile.solver_type),
         "world_half_size": float(sim.world_half_size),
         "gravity_y": float(sim.gravity_y),
+        "sim_time": float(sim.sim_time),  # bd-unl.14: preserve kinematic SDF positions on load
         "camera": {
             "target": camera.target.tolist(),
             "distance": float(camera.distance),
@@ -263,6 +264,17 @@ def load_scene(world, sim, camera, filename: str) -> int:
     world.particle_dye[:n] = cp.asarray(data["particle_dye"])
     world.density[:n] = cp.asarray(data["density"])
     world.veleval[:n] = world.velocity[:n]
+
+    # bd-unl.13: zero warm-start and sleep fields so loaded particles start
+    # fresh -- stale kappa/kappa_v/lambda_pbf produce wrong first-frame forces;
+    # stale sleep_counter (up to 255) keeps particles asleep for ~255 frames;
+    # stale angular_velocity carries micropolar spin from the saved session.
+    world.kappa[:n] = 0.0
+    world.kappa_v[:n] = 0.0
+    world.lambda_pbf[:n] = 0.0
+    world.sleep_counter[:n] = 0
+    world.angular_velocity[:n] = 0.0
+
     world._high_water = n
 
     # Rebuild _spawned_material_ids from loaded packed_info
@@ -270,22 +282,14 @@ def load_scene(world, sim, camera, filename: str) -> int:
     world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)
 
     # Restore rigid body dynamic state
+    # bd-unl.15: use sim.get_all_modules() so every compiled module receives the
+    # updated c_num_rigid_bodies constant -- the old 3-module list was a partial
+    # subset that would silently leave any other module with a stale count.
     rb_data = header.get("rigid_bodies", {})
     if rb_data and hasattr(sim, "rigid_body_manager"):
-        import integrate
-        import pbf_solver
-        import dfsph_solver
-        modules = []
-        for mod_getter in [
-            lambda: integrate.get_module(),
-            lambda: pbf_solver.get_module(),
-            lambda: dfsph_solver.get_module(),
-        ]:
-            try:
-                modules.append(mod_getter())
-            except Exception:
-                pass
-        _restore_rigid_body_manager(sim.rigid_body_manager, rb_data, modules)
+        _restore_rigid_body_manager(
+            sim.rigid_body_manager, rb_data, sim.get_all_modules()
+        )
 
     # Restore simulation params
     if "world_half_size" in header:
@@ -301,7 +305,10 @@ def load_scene(world, sim, camera, filename: str) -> int:
         camera.azimuth = cam["azimuth"]
         camera.elevation = cam["elevation"]
 
-    sim.sim_time = 0.0
+    # bd-unl.14: restore sim_time from save so kinematic SDF objects resume at
+    # their saved positions rather than snapping to t=0.  Falls back to 0.0 for
+    # older saves (version < 3) that don't carry the field.
+    sim.sim_time = float(header.get("sim_time", 0.0))
     sim._last_frame_time = None
     sim.reset_spawn_damping()
 
