@@ -244,7 +244,7 @@ def main():
             renderer.num_active = world._high_water
 
         # --- Periodic spawner (Acid Rain) ---
-        if active_spawner is not None:
+        if active_spawner is not None and not sim.paused:
             spawner_frame_counter += 1
             if spawner_frame_counter >= active_spawner["interval_frames"]:
                 spawner_frame_counter = 0
