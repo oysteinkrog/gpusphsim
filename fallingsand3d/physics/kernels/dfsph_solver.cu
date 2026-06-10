@@ -1413,6 +1413,18 @@ void K_DFSPH_DensitySolverUpdate(
                         vel4_j.y + dt * ap4_j.y,
                         vel4_j.z + dt * ap4_j.z
                     );
+                    // Clamp vt_j symmetrically with vt_i — a neighbor with large a_press
+                    // can produce vt_j >> VELOCITY_LIMIT, which drives an asymmetric drho
+                    // contribution and a minor stability inconsistency.
+                    {
+                        float vt_j_sq = vt_j.x * vt_j.x + vt_j.y * vt_j.y + vt_j.z * vt_j.z;
+                        if (vt_j_sq > VELOCITY_LIMIT_SQ) {
+                            float scale = VELOCITY_LIMIT / sqrtf(vt_j_sq);
+                            vt_j.x *= scale;
+                            vt_j.y *= scale;
+                            vt_j.z *= scale;
+                        }
+                    }
 
                     float3 gW = grad_spiky(r, rlen, h);
                     float dv_dot_gW = (vt_i.x - vt_j.x) * gW.x
