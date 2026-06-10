@@ -80,24 +80,19 @@ struct GranularParams {
 __constant__ GranularParams c_granular;
 
 /* ======================================================================
- * Warp-level reduction for rigid body force/torque accumulation.
+ * Per-lane accumulation for rigid body force/torque.
  *
- * Reduces a float3 value across the warp using __shfl_down_sync,
- * then lane 0 does a single atomicAdd to the target array.
- * Reduces atomicAdd contention ~32x for boundary particles.
+ * Each lane atomically adds its own contribution directly. The function
+ * is called inside divergent neighbor-loop branches where lanes process
+ * different neighbors and may belong to different body_ids, so a
+ * full-warp __shfl_down_sync reduction is incorrect (it would blend
+ * values across bodies and include inactive lanes).
  * ====================================================================== */
 
 __device__ inline void warp_reduce_accumulate(float* target, float3 val, int body_id) {
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        val.x += __shfl_down_sync(0xffffffff, val.x, offset);
-        val.y += __shfl_down_sync(0xffffffff, val.y, offset);
-        val.z += __shfl_down_sync(0xffffffff, val.z, offset);
-    }
-    if ((threadIdx.x & 31) == 0) {
-        atomicAdd(&target[body_id * 4 + 0], val.x);
-        atomicAdd(&target[body_id * 4 + 1], val.y);
-        atomicAdd(&target[body_id * 4 + 2], val.z);
-    }
+    atomicAdd(&target[body_id * 4 + 0], val.x);
+    atomicAdd(&target[body_id * 4 + 1], val.y);
+    atomicAdd(&target[body_id * 4 + 2], val.z);
 }
 
 /* ======================================================================
