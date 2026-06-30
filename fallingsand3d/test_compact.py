@@ -66,11 +66,13 @@ def test_compact_removes_dead():
     w = World(10_000)
     n = w.spawn_cube((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2), WATER, 0.02)
     assert n > 100
-    # Kill particles in center
-    killed = w.kill_in_sphere((0.0, 0.0, 0.0), 0.1)
-    assert killed > 0
+    # Kill particles in center. kill_in_sphere no longer returns a count
+    # (bd-mzc.39 removed the GPU sync); measure via num_active delta instead.
+    active_pre_kill = w.num_active
+    w.kill_in_sphere((0.0, 0.0, 0.0), 0.1)
     alive_before = w.num_active
-    assert alive_before == n - killed
+    killed = active_pre_kill - alive_before
+    assert killed > 0
 
     result = w.compact()
     assert result == alive_before
@@ -280,10 +282,13 @@ def test_compact_10k_kill_and_render():
     n = w.spawn_sphere((0.0, 0.0, 0.0), 0.5, WATER, 20_000)
     assert n == 20_000
 
-    # Kill 10K particles (inner sphere)
-    killed = w.kill_in_sphere((0.0, 0.0, 0.0), 0.32)
-    assert killed >= 5_000  # inner sphere should have many particles
+    # Kill ~10K particles (inner sphere). kill_in_sphere no longer returns a
+    # count (bd-mzc.39); measure via num_active delta instead.
+    active_pre_kill = w.num_active
+    w.kill_in_sphere((0.0, 0.0, 0.0), 0.32)
     alive = w.num_active
+    killed = active_pre_kill - alive
+    assert killed >= 5_000  # inner sphere should have many particles
 
     w.compact()
     assert w._high_water == alive

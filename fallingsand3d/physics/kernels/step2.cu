@@ -367,8 +367,11 @@ void K_Step2(
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
                     }
 
-                    // ---- XSPH correction (FLUID + GRANULAR) ----
-                    if (is_fluid_i || is_granular_i) {
+                    // ---- XSPH correction (FLUID only) ----
+                    // GRANULAR position is advected with vel_new (integrate.cu:265-268),
+                    // not veleval_xsph, so XSPH for GRANULAR would be computed then
+                    // discarded — wasted inner-loop work.  Skip it here (bd-mzc.34).
+                    if (is_fluid_i) {
                         float w = W_poly6(rlen_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
                         float xsph_factor = (m_j / rho_avg) * w;
@@ -442,11 +445,11 @@ void K_Step2(
     float fs = is_granular_i ? 1.0f : c_granular.force_scale;
     sph_force_out[index_i] = make_float4(total_force.x * fs, total_force.y * fs, total_force.z * fs, 0.0f);
 
-    // XSPH-corrected veleval (FLUID + GRANULAR; GAS/STATIC keep original velocity)
-    if (is_fluid_i || is_granular_i) {
+    // XSPH-corrected veleval (FLUID only; GRANULAR/GAS/STATIC keep original velocity).
+    // GRANULAR position is advected with vel_new in integrate.cu, not veleval_xsph,
+    // so XSPH correction for GRANULAR would be discarded.  bd-mzc.34.
+    if (is_fluid_i) {
         float eps = c_granular.xsph_epsilon;
-        // GRANULAR uses stronger XSPH for cohesive binding (like artificial viscosity)
-        if (is_granular_i) eps = fminf(eps * 3.0f, 0.5f);
         veleval_out[index_i] = make_float4(
             vel_i.x + eps * xsph_sum.x,
             vel_i.y + eps * xsph_sum.y,

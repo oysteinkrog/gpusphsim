@@ -32,7 +32,8 @@ from step1 import (
 )
 from materials import (
     FLUID, GRANULAR, GAS, STATIC,
-    DEAD, STONE, SAND, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER,
+    DEAD, STONE, SAND, DIRT, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER,
+    MUD, WET_SAND,
     build_material_array,
 )
 from reactions import (
@@ -320,17 +321,25 @@ def test_corrosion_reduces_health():
 
 
 def test_corrosion_kills_particle():
-    """Corrosion kills particle when health reaches 0."""
+    """Corrosion brings health to 0 -- particle becomes a brief FIRE spark (corrosion flash)."""
     setup_params(dt=0.1)
     d = make_particles(100, METAL, STATIC, health=0.05, exposure_corrode=1.0)
     compute_reactions(**d)
 
     hlth = d["sorted_health"].get()
     pi = d["sorted_packed_info"].get()
-    # health = 0.05 - 1.0 * 0.1 = -0.05 -> dead
+    temp = d["sorted_temperature"].get()
+    lt = d["sorted_lifetime"].get()
+    # health = 0.05 - 1.0 * 0.1 = -0.05 -> corrosion flash: brief FIRE spark
+    # Kernel sets: packed_info=FIRE|GAS, health=1.0, temp=400K, lifetime=0.08s
+    from materials import FIRE, GAS
     for i in range(100):
-        assert hlth[i] <= 0.01, f"Particle {i}: health={hlth[i]}, expected <= 0"
-        assert GET_MATERIAL_ID(int(pi[i])) == DEAD, f"Particle {i}: expected DEAD"
+        assert GET_MATERIAL_ID(int(pi[i])) == FIRE, \
+            f"Particle {i}: expected FIRE spark, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
+        assert GET_BEHAVIOR(int(pi[i])) == GAS, f"Particle {i}: expected GAS"
+        assert abs(hlth[i] - 1.0) < 1e-6, f"Particle {i}: health={hlth[i]}, expected 1.0"
+        assert abs(temp[i] - 400.0) < 1.0, f"Particle {i}: temp={temp[i]}, expected 400K"
+        assert abs(lt[i] - 0.08) < 0.01, f"Particle {i}: lifetime={lt[i]}, expected 0.08s"
     print("PASS: test_corrosion_kills_particle")
 
 
@@ -352,16 +361,21 @@ def test_gas_lifetime_decay():
 
 
 def test_gas_lifetime_expires():
-    """GAS particles die when lifetime reaches 0."""
+    """FIRE GAS particle with expired lifetime transitions to SMOKE (not DEAD)."""
     setup_params(dt=0.1)
     d = make_particles(100, FIRE, GAS, lifetime=0.05)
     compute_reactions(**d)
 
     lt = d["sorted_lifetime"].get()
     pi = d["sorted_packed_info"].get()
+    # FIRE lifetime expiry: kernel converts FIRE -> SMOKE with new lifetime=3.0s
+    # (other GAS types would go to DEAD, but FIRE specifically becomes smoke)
+    from materials import SMOKE
     for i in range(100):
-        assert lt[i] <= 0.01, f"Particle {i}: lifetime={lt[i]}, should be <= 0"
-        assert GET_MATERIAL_ID(int(pi[i])) == DEAD, f"Particle {i}: expected DEAD"
+        assert GET_MATERIAL_ID(int(pi[i])) == SMOKE, \
+            f"Particle {i}: expected SMOKE after FIRE expires, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
+        assert GET_BEHAVIOR(int(pi[i])) == GAS, f"Particle {i}: expected GAS"
+        assert abs(lt[i] - 3.0) < 0.1, f"Particle {i}: lifetime={lt[i]}, expected 3.0s (smoke)"
     print("PASS: test_gas_lifetime_expires")
 
 
@@ -427,24 +441,27 @@ def test_ice_lava_together():
 
 
 def test_acid_metal_corrosion():
-    """Acid near metal: metal health reduces over multiple steps."""
+    """Acid near metal: after enough corrosion steps the particle becomes a FIRE spark."""
     setup_params(dt=0.001)
     d = make_particles(100, METAL, STATIC, health=1.0, exposure_corrode=10.0)
 
-    # Run 110 steps of reactions (slightly more than needed to ensure death)
+    # Run 110 steps of reactions (100 steps to kill METAL, 10 more as FIRE spark)
+    # At dt=0.001 and exp_corrode=10.0, damage=0.01/step -> health=0 at step 100
     for step in range(110):
         # Re-apply exposure each step (simulating continuous acid contact)
         d["sorted_exposure_corrode"] = cupy.full(100, 10.0, dtype=cupy.float32)
         compute_reactions(**d, frame=step)
 
-    hlth = d["sorted_health"].get()
-    # health should be <= 0 after 100+ steps at 0.01/step
-    for i in range(100):
-        assert hlth[i] <= 0.01, f"Particle {i}: health={hlth[i]}, expected ~0"
-
     pi = d["sorted_packed_info"].get()
+    lt = d["sorted_lifetime"].get()
+    # After step 100: METAL -> FIRE spark (health=1.0, temp=400K, lifetime=0.08s)
+    # Steps 101-110: FIRE spark loses lifetime: 0.08 - 10*0.001 = 0.07s -- still FIRE
+    from materials import FIRE, GAS
     for i in range(100):
-        assert GET_MATERIAL_ID(int(pi[i])) == DEAD, f"Particle {i}: expected DEAD after corrosion"
+        assert GET_MATERIAL_ID(int(pi[i])) == FIRE, \
+            f"Particle {i}: expected FIRE spark after corrosion, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
+        assert GET_BEHAVIOR(int(pi[i])) == GAS, f"Particle {i}: expected GAS"
+        assert lt[i] > 0.0, f"Particle {i}: lifetime={lt[i]}, spark should still be alive"
     print("PASS: test_acid_metal_corrosion")
 
 
@@ -511,6 +528,49 @@ def test_500k_stress():
     print("PASS: test_500k_stress")
 
 
+def test_dirt_water_becomes_mud():
+    """bd-mzc.27 regression: DIRT with WATER corrode exposure transitions to MUD,
+    not to a corrosion (crumble/FIRE spark) state.
+
+    The DIRT wetting check fires before the corrosion whitelist, so DIRT with
+    exp_corrode > SAND_WET_THRESHOLD (0.2) becomes MAKE_PACKED(MAT_MUD, FLUID).
+    """
+    setup_params()
+    # DIRT particles with enough water-corrode exposure to trigger the wetting transition
+    d = make_particles(100, DIRT, GRANULAR, exposure_corrode=0.5)
+    compute_reactions(**d)
+
+    pi = d["sorted_packed_info"].get()
+    hlth = d["sorted_health"].get()
+    for i in range(100):
+        mat = GET_MATERIAL_ID(int(pi[i]))
+        assert mat == MUD, (
+            f"Particle {i}: DIRT+WATER should become MUD (mat={MUD}), "
+            f"got mat_id={mat}. Old code produced corrosion spark."
+        )
+        assert GET_BEHAVIOR(int(pi[i])) == FLUID, (
+            f"Particle {i}: MUD should be FLUID, got behavior={GET_BEHAVIOR(int(pi[i]))}"
+        )
+        # Health should be unmodified (wetting path does not damage health)
+        assert abs(hlth[i] - 1.0) < 1e-6, (
+            f"Particle {i}: health={hlth[i]}, expected 1.0 after wetting (not corrosion)"
+        )
+    print("PASS: test_dirt_water_becomes_mud")
+
+
+def test_dirt_no_corrode_below_threshold():
+    """DIRT with exp_corrode below the wetting threshold stays as DIRT."""
+    setup_params()
+    d = make_particles(100, DIRT, GRANULAR, exposure_corrode=0.1)
+    compute_reactions(**d)
+
+    pi = d["sorted_packed_info"].get()
+    for i in range(100):
+        mat = GET_MATERIAL_ID(int(pi[i]))
+        assert mat == DIRT, f"Particle {i}: DIRT should stay DIRT below threshold, got mat_id={mat}"
+    print("PASS: test_dirt_no_corrode_below_threshold")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -539,6 +599,8 @@ if __name__ == "__main__":
         test_ice_lava_together,
         test_acid_metal_corrosion,
         test_500k_stress,
+        test_dirt_water_becomes_mud,
+        test_dirt_no_corrode_below_threshold,
     ]
 
     passed = 0

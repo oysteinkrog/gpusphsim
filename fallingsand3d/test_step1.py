@@ -152,8 +152,9 @@ def _run_full_pipeline(
     temp_gpu = cupy.asarray(temperature_np)
     density_in_gpu = cupy.asarray(density_in_np) if density_in_np is not None else None
 
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    # calc_hash returns only hashes (no indices); sort_by_hash takes only hashes
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
     # Reorder all arrays to sorted order
     sorted_pos = pos_gpu[sorted_indices]
@@ -165,7 +166,8 @@ def _run_full_pipeline(
 
     cell_start, cell_end = build_data_struct(sorted_hashes)
 
-    density, shear_rate, dTdt, exposure_heat, exposure_corrode = compute_step1(
+    # compute_step1 returns 6 values; the 6th (pressure_out) is not used by pipeline
+    density, shear_rate, dTdt, exposure_heat, exposure_corrode, _pressure = compute_step1(
         sorted_pos, sorted_vel, sorted_mass,
         sorted_density_in, sorted_pi,
         sorted_temp,
@@ -208,10 +210,10 @@ def test_compilation() -> None:
 
 
 def test_block_size() -> None:
-    """Verify block size is 128."""
+    """Verify block size is 256."""
     print("\n--- Block size check ---")
-    assert BLOCK_SIZE == 128, f"BLOCK_SIZE = {BLOCK_SIZE}, expected 128"
-    print("[OK] BLOCK_SIZE = 128")
+    assert BLOCK_SIZE == 256, f"BLOCK_SIZE = {BLOCK_SIZE}, expected 256"
+    print("[OK] BLOCK_SIZE = 256")
 
 
 def test_struct_sizes() -> None:
@@ -221,8 +223,10 @@ def test_struct_sizes() -> None:
     sp = build_sim_params()
     pp = build_precalc_params()
 
-    # SimParams: 64 bytes (from US-005 test)
-    assert sp.nbytes == 64, f"SimParams: {sp.nbytes} != 64 bytes"
+    # SimParams: 76 bytes (smoothing_length, smoothing_length_sq, particle_mass,
+    # particle_spacing, gravity(3), dt, restitution, wall_friction, world_min(3),
+    # world_max(3), velocity_damping, velocity_limit, dye_enabled = 19 fields)
+    assert sp.nbytes == 76, f"SimParams: {sp.nbytes} != 76 bytes"
     print(f"[OK] SimParams: {sp.nbytes} bytes")
 
     # PrecalcParams: 20 bytes

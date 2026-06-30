@@ -56,15 +56,19 @@ DEFAULT_COHESION = np.float32(0.002)   # small cohesion for DP stability
 # Numpy dtype matching GranularParams struct in step2.cu
 #
 # struct GranularParams {
-#     float mu_s;               //  4 bytes
-#     float mu_2;               //  4 bytes
-#     float I0;                 //  4 bytes
-#     float mu_max;             //  4 bytes
-#     float particle_spacing;   //  4 bytes
-#     float mu0;                //  4 bytes
-#     float xsph_epsilon;       //  4 bytes
-#     float force_scale;        //  4 bytes
-# };                            // Total: 32 bytes
+#     float mu_s;                    //  4 bytes
+#     float mu_2;                    //  4 bytes
+#     float I0;                      //  4 bytes
+#     float mu_max;                  //  4 bytes
+#     float particle_spacing;        //  4 bytes
+#     float mu0;                     //  4 bytes
+#     float xsph_epsilon;            //  4 bytes
+#     float force_scale;             //  4 bytes
+#     float vorticity_epsilon;       //  4 bytes
+#     float surface_tension_gamma;   //  4 bytes
+#     float tan_phi_f;               //  4 bytes
+#     float cohesion;                //  4 bytes
+# };                                 // Total: 48 bytes
 # ---------------------------------------------------------------------------
 
 GRANULAR_PARAMS_DTYPE = np.dtype(

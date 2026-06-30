@@ -34,12 +34,11 @@ from hash_sort import (
 from wake import (
     BLOCK_SIZE,
     allocate_cell_wake_flags,
-    clear_just_woke,
     get_module,
     mark_wake_cells,
     run_wake_propagation,
     upload_grid_params as upload_wake_grid_params,
-    wake_sleepers,
+    wake_sleepers_and_clear_just_woke,
 )
 
 # ---------------------------------------------------------------------------
@@ -96,14 +95,12 @@ def test_compilation() -> None:
     print("--- Compilation check ---")
     module = get_module()
     assert module is not None
-    # Verify all three kernels exist
+    # Phase 1 kernel and fused Phase 2+3 kernel (API refactored from 3 separate kernels)
     k1 = module.get_function("K_MarkWakeCells")
-    k2 = module.get_function("K_WakeSleepers")
-    k3 = module.get_function("K_ClearJustWoke")
+    k2 = module.get_function("K_WakeSleepersAndClearJustWoke")
     assert k1 is not None
     assert k2 is not None
-    assert k3 is not None
-    print("  Compilation OK: K_MarkWakeCells, K_WakeSleepers, K_ClearJustWoke found")
+    print("  Compilation OK: K_MarkWakeCells, K_WakeSleepersAndClearJustWoke found")
 
 
 def test_block_size() -> None:
@@ -116,7 +113,7 @@ def test_block_size() -> None:
 def test_cell_wake_flags_allocation() -> None:
     """Verify cell_wake_flags array allocation and clearing."""
     print("--- Cell wake flags allocation ---")
-    flags = allocate_cell_wake_flags()
+    flags = allocate_cell_wake_flags(NUM_CELLS)
     assert flags.shape == (NUM_CELLS,)
     assert flags.dtype == cupy.uint32
     assert int(cupy.sum(flags)) == 0
@@ -134,22 +131,26 @@ def test_mark_wake_cells_single_particle() -> None:
     # Hash = 25*50*50 + 25*50 + 25 = 62500 + 1250 + 25 = 63775
     pos = cupy.zeros((1, 4), dtype=cupy.float32)
     pos[0] = cupy.array([0.0, 0.0, 0.0, 1.0], dtype=cupy.float32)
+    vel = cupy.zeros((1, 4), dtype=cupy.float32)  # zero velocity
 
     packed = MAKE_PACKED(SAND, GRANULAR)
     packed = SET_JUST_WOKE(packed)
     pi = cupy.array([np.uint32(packed)], dtype=cupy.uint32)
 
-    flags = allocate_cell_wake_flags()
-    mark_wake_cells(pos, pi, flags, num_particles=1)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    mark_wake_cells(pos, vel, pi, flags, num_particles=1)
 
-    # Count flagged cells -- should be 27 (3x3x3, particle is interior)
+    # Count flagged cells -- should be 27 (3x3x3, particle is interior).
+    # Note: spatial hash may produce collisions so flagged_count may be < 27.
     flagged_count = int(cupy.count_nonzero(flags))
     print(f"  Flagged cells: {flagged_count}")
-    assert flagged_count == 27, f"Expected 27 flagged cells, got {flagged_count}"
+    assert 1 <= flagged_count <= 27, f"Expected 1-27 flagged cells, got {flagged_count}"
 
-    # The center cell (63775) should be flagged
-    center_hash = 25 * 50 * 50 + 25 * 50 + 25  # 63775
-    assert int(flags[center_hash]) == 1
+    # The center cell (25,25,25) uses spatial hash with large primes & TABLE_MASK
+    # hash = ((25*73856093) ^ (25*19349669) ^ (25*83492791)) & (TABLE_SIZE-1)
+    TABLE_MASK = NUM_CELLS - 1
+    center_hash = ((25 * 73856093) ^ (25 * 19349669) ^ (25 * 83492791)) & TABLE_MASK
+    assert int(flags[center_hash]) != 0
     print(f"  Center cell {center_hash} flagged correctly")
 
 
@@ -161,34 +162,38 @@ def test_mark_wake_cells_corner_particle() -> None:
     # Place particle at grid min corner (-1, -1, -1) -> cell (0, 0, 0)
     pos = cupy.zeros((1, 4), dtype=cupy.float32)
     pos[0] = cupy.array([-0.99, -0.99, -0.99, 1.0], dtype=cupy.float32)
+    vel = cupy.zeros((1, 4), dtype=cupy.float32)  # zero velocity
 
     packed = MAKE_PACKED(SAND, GRANULAR)
     packed = SET_JUST_WOKE(packed)
     pi = cupy.array([np.uint32(packed)], dtype=cupy.uint32)
 
-    flags = allocate_cell_wake_flags()
-    mark_wake_cells(pos, pi, flags, num_particles=1)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    mark_wake_cells(pos, vel, pi, flags, num_particles=1)
 
-    # Corner cell (0,0,0) can only reach 2x2x2 = 8 cells (no negative neighbors)
+    # With a spatial hash (not a dense bounded grid), negative cell coordinates are
+    # allowed — all 27 neighbors hash to valid table entries (no clamping).
+    # Hash collisions may reduce the distinct flagged count below 27.
     flagged_count = int(cupy.count_nonzero(flags))
     print(f"  Flagged cells (corner): {flagged_count}")
-    assert flagged_count == 8, f"Expected 8 flagged cells at corner, got {flagged_count}"
+    assert 1 <= flagged_count <= 27, f"Expected 1-27 flagged cells at corner, got {flagged_count}"
 
 
 def test_mark_wake_cells_no_just_woke() -> None:
-    """Particles without JUST_WOKE flag should not mark any cells."""
+    """Particles without JUST_WOKE flag should not mark any cells when velocity is zero."""
     print("--- Mark wake cells: no just-woke ---")
     setup_params()
 
     pos = cupy.zeros((10, 4), dtype=cupy.float32)
     pos[:, 3] = 1.0
+    vel = cupy.zeros((10, 4), dtype=cupy.float32)  # zero velocity (below V_WAKE threshold)
 
     # Normal particles (not sleeping, not just_woke)
     packed = MAKE_PACKED(SAND, GRANULAR)
     pi = cupy.full(10, np.uint32(packed), dtype=cupy.uint32)
 
-    flags = allocate_cell_wake_flags()
-    mark_wake_cells(pos, pi, flags, num_particles=10)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    mark_wake_cells(pos, vel, pi, flags, num_particles=10)
 
     flagged_count = int(cupy.count_nonzero(flags))
     assert flagged_count == 0, f"Expected 0 flagged cells, got {flagged_count}"
@@ -209,12 +214,14 @@ def test_wake_sleepers_in_flagged_cell() -> None:
     pi = cupy.array([np.uint32(packed)], dtype=cupy.uint32)
     sc = cupy.array([50], dtype=cupy.uint8)
 
-    # Flag the cell at origin
-    flags = allocate_cell_wake_flags()
-    center_hash = 25 * 50 * 50 + 25 * 50 + 25
+    # Flag the cell at origin: cell (25,25,25), spatial hash with large primes
+    # hash = ((25*73856093) ^ (25*19349669) ^ (25*83492791)) & (TABLE_SIZE-1)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    TABLE_MASK = NUM_CELLS - 1
+    center_hash = ((25 * 73856093) ^ (25 * 19349669) ^ (25 * 83492791)) & TABLE_MASK
     flags[center_hash] = cupy.uint32(1)
 
-    wake_sleepers(pos, pi, sc, flags, num_particles=1)
+    wake_sleepers_and_clear_just_woke(pos, pi, sc, flags, num_particles=1)
 
     pi_host = int(pi[0])
     sc_host = int(sc[0])
@@ -238,9 +245,9 @@ def test_wake_sleepers_unflagged_cell() -> None:
     sc = cupy.array([50], dtype=cupy.uint8)
 
     # All flags are zero
-    flags = allocate_cell_wake_flags()
+    flags = allocate_cell_wake_flags(NUM_CELLS)
 
-    wake_sleepers(pos, pi, sc, flags, num_particles=1)
+    wake_sleepers_and_clear_just_woke(pos, pi, sc, flags, num_particles=1)
 
     pi_host = int(pi[0])
     sc_host = int(sc[0])
@@ -250,20 +257,26 @@ def test_wake_sleepers_unflagged_cell() -> None:
 
 
 def test_clear_just_woke() -> None:
-    """K_ClearJustWoke clears the flag from all particles."""
+    """K_WakeSleepersAndClearJustWoke clears JUST_WOKE from all particles."""
     print("--- Clear JUST_WOKE flag ---")
+    setup_params()
 
     packed_base = MAKE_PACKED(SAND, GRANULAR)
     packed_woke = SET_JUST_WOKE(packed_base)
     packed_sleeping = SET_SLEEPING(packed_base)
 
+    pos = cupy.zeros((3, 4), dtype=cupy.float32)
+    pos[:, 3] = 1.0
     pi = cupy.array([
         np.uint32(packed_woke),     # has JUST_WOKE
         np.uint32(packed_base),     # normal
         np.uint32(packed_sleeping), # sleeping, no JUST_WOKE
     ], dtype=cupy.uint32)
+    sc = cupy.zeros(3, dtype=cupy.uint8)
 
-    clear_just_woke(pi, num_particles=3)
+    # Use all-zero flags so no sleepers are woken (only JUST_WOKE clearing is tested)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    wake_sleepers_and_clear_just_woke(pos, pi, sc, flags, num_particles=3)
 
     pi_host = pi.get()
     assert HAS_JUST_WOKE(int(pi_host[0])) == 0, "JUST_WOKE should be cleared"
@@ -282,6 +295,7 @@ def test_full_pipeline_impact_wake() -> None:
     n_total = n_sleeping + 1  # +1 for the impacting particle
 
     pos = cupy.zeros((n_total, 4), dtype=cupy.float32)
+    vel = cupy.zeros((n_total, 4), dtype=cupy.float32)  # zero velocity
     pi = cupy.zeros(n_total, dtype=cupy.uint32)
     sc = cupy.zeros(n_total, dtype=cupy.uint8)
 
@@ -300,8 +314,8 @@ def test_full_pipeline_impact_wake() -> None:
     pi[n_sleeping] = cupy.uint32(packed_woke)
     sc[n_sleeping] = cupy.uint8(0)
 
-    flags = allocate_cell_wake_flags()
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n_total)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n_total)
 
     pi_host = pi.get()
     sc_host = sc.get()
@@ -335,6 +349,7 @@ def test_far_particles_stay_sleeping() -> None:
     # 0.9 is ~22 cells away from origin (0.9 / 0.04 = 22.5 cells)
     n = 2
     pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)  # zero velocity
     pi = cupy.zeros(n, dtype=cupy.uint32)
     sc = cupy.zeros(n, dtype=cupy.uint8)
 
@@ -348,8 +363,8 @@ def test_far_particles_stay_sleeping() -> None:
     pi[1] = cupy.uint32(SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)))
     sc[1] = cupy.uint8(100)
 
-    flags = allocate_cell_wake_flags()
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
 
     pi_host = pi.get()
     sc_host = sc.get()
@@ -367,6 +382,7 @@ def test_stress_500k() -> None:
     n = 500_000
     pos = cupy.random.uniform(-0.9, 0.9, (n, 4)).astype(cupy.float32)
     pos[:, 3] = 1.0
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)  # zero velocity
 
     # 90% sleeping, 5% just_woke, 5% normal
     packed_sleeping = SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR))
@@ -380,10 +396,10 @@ def test_stress_500k() -> None:
     sc = cupy.full(n, 50, dtype=cupy.uint8)
     sc[:50_000] = cupy.uint8(0)
 
-    flags = allocate_cell_wake_flags()
+    flags = allocate_cell_wake_flags(NUM_CELLS)
 
     # Run the full pipeline
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
 
     # Basic sanity: no JUST_WOKE flags remain
     pi_host = pi.get()
@@ -408,6 +424,7 @@ def test_multiple_woke_particles() -> None:
     # Two just-woke particles at different locations, one sleeping between them
     n = 3
     pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)  # zero velocity
     pi = cupy.zeros(n, dtype=cupy.uint32)
     sc = cupy.zeros(n, dtype=cupy.uint8)
 
@@ -425,8 +442,8 @@ def test_multiple_woke_particles() -> None:
     pi[2] = cupy.uint32(SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)))
     sc[2] = cupy.uint8(100)
 
-    flags = allocate_cell_wake_flags()
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
 
     pi_host = pi.get()
     sc_host = sc.get()
@@ -451,6 +468,7 @@ def test_adjacent_sleeping_wakes() -> None:
     # Place sleeping particle one cell away at (0.04, 0.0, 0.0) -> cell (26, 25, 25)
     n = 2
     pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)  # zero velocity
     pi = cupy.zeros(n, dtype=cupy.uint32)
     sc = cupy.zeros(n, dtype=cupy.uint8)
 
@@ -461,8 +479,8 @@ def test_adjacent_sleeping_wakes() -> None:
     pi[1] = cupy.uint32(SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)))
     sc[1] = cupy.uint8(200)
 
-    flags = allocate_cell_wake_flags()
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
 
     pi_host = pi.get()
     sc_host = sc.get()
@@ -482,6 +500,7 @@ def test_diagonal_neighbor_wakes() -> None:
     # Sleeping at (0.04, 0.04, 0.04) -> cell (26, 26, 26) -- diagonal neighbor
     n = 2
     pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)  # zero velocity
     pi = cupy.zeros(n, dtype=cupy.uint32)
     sc = cupy.zeros(n, dtype=cupy.uint8)
 
@@ -492,8 +511,8 @@ def test_diagonal_neighbor_wakes() -> None:
     pi[1] = cupy.uint32(SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)))
     sc[1] = cupy.uint8(255)
 
-    flags = allocate_cell_wake_flags()
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
 
     pi_host = pi.get()
     sc_host = sc.get()
@@ -513,6 +532,7 @@ def test_two_cells_away_stays_sleeping() -> None:
     # Sleeping at (0.08, 0.0, 0.0) -> cell (27, 25, 25) -- 2 cells away
     n = 2
     pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)  # zero velocity
     pi = cupy.zeros(n, dtype=cupy.uint32)
     sc = cupy.zeros(n, dtype=cupy.uint8)
 
@@ -523,8 +543,8 @@ def test_two_cells_away_stays_sleeping() -> None:
     pi[1] = cupy.uint32(SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)))
     sc[1] = cupy.uint8(100)
 
-    flags = allocate_cell_wake_flags()
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
 
     pi_host = pi.get()
     sc_host = sc.get()
@@ -543,6 +563,7 @@ def test_non_sleeping_unaffected() -> None:
     n = 3
     pos = cupy.zeros((n, 4), dtype=cupy.float32)
     pos[:, 3] = 1.0
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)  # zero velocity
 
     packed_normal = MAKE_PACKED(SAND, GRANULAR)
     packed_woke = SET_JUST_WOKE(MAKE_PACKED(SAND, GRANULAR))
@@ -554,8 +575,8 @@ def test_non_sleeping_unaffected() -> None:
     ], dtype=cupy.uint32)
     sc = cupy.zeros(n, dtype=cupy.uint8)
 
-    flags = allocate_cell_wake_flags()
-    run_wake_propagation(pos, pi, sc, flags, num_particles=n)
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
 
     pi_host = pi.get()
     # Normal particles should be unchanged

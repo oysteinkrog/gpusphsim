@@ -150,8 +150,8 @@ def test_sum_equals_num_particles() -> None:
     pos_np[:, :3] = rng.uniform(-0.9, 0.9, size=(n, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
     cell_start, cell_end = build_data_struct(sorted_hashes)
     cupy.cuda.Device().synchronize()
@@ -181,8 +181,8 @@ def test_cell_boundaries_match_sorted_hashes() -> None:
     pos_np[:, :3] = rng.uniform(-0.9, 0.9, size=(n, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
     cell_start, cell_end = build_data_struct(sorted_hashes)
     cupy.cuda.Device().synchronize()
@@ -259,8 +259,8 @@ def test_500k_no_errors() -> None:
     pos_np[:, :3] = rng.uniform(-1.0, 1.0, size=(n, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes, indices)
+    hashes = calc_hash(pos_gpu)
+    sorted_hashes, sorted_indices = sort_by_hash(hashes)
 
     cell_start, cell_end = build_data_struct(sorted_hashes)
     cupy.cuda.Device().synchronize()

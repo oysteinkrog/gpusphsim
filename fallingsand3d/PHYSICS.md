@@ -118,13 +118,13 @@ All FLUID and GRANULAR pressure clamped >= 0 (no tensile pressure).
 | Material | rho_0 | k | gamma | EOS |
 |----------|-------|-----|-------|------|
 | WATER | 2500.0 | 500.0 | 7.0 | Tait |
-| OIL | 2500.0 | 400.0 | 7.0 | Tait |
+| OIL | 2125.0 | 400.0 | 7.0 | Tait |
 | ACID | 2500.0 | 450.0 | 7.0 | Tait |
-| LAVA | 2500.0 | 30.0 | 7.0 | Tait |
-| SAND | 2500.0 | 20.0 | 7.0 | Tait |
-| DIRT | 2500.0 | 18.0 | 7.0 | Tait |
+| LAVA | 6500.0 | 800.0 | 7.0 | Tait |
+| SAND | 4000.0 | 5000.0 | 7.0 | Tait |
+| DIRT | 3750.0 | 3000.0 | 7.0 | Tait |
 
-**Source**: `step2.cu:63-82`
+**Source**: `sph_shared.cuh:compute_pressure`
 
 ### 3.2 Pressure Force (SPH momentum equation)
 
@@ -187,12 +187,18 @@ xsph_sum_i = SUM_j (m_j / rho_avg_ij) * (v_j - v_i) * W_poly6(|r_ij|)
 
 where rho_avg_ij = 0.5 * (rho_i + rho_j)
 
-veleval_out_i = v_i + epsilon * xsph_sum_i
+veleval_out_i = v_i + epsilon * xsph_sum_i     [FLUID only]
+GRANULAR/GAS:  veleval_out_i = v_i             [plain velocity, no XSPH correction]
 ```
 
 `epsilon = 0.8` (from `c_granular.xsph_epsilon`)
 
-**Source**: `step2.cu:362-369` (accumulation), `step2.cu:395-402` (output)
+**FLUID only**: XSPH accumulation in the inner loop is guarded by `is_fluid_i` (bd-mzc.34).
+GRANULAR position is advected with `vel_new` in `integrate.cu`, not `veleval_xsph`, so
+computing XSPH for GRANULAR would produce a correction that is immediately discarded.
+Non-FLUID particles write plain velocity to `veleval_out`.
+
+**Source**: `step2.cu:370-381` (accumulation, FLUID guard), `step2.cu:448-461` (output)
 
 ### 3.5 Step2 Output
 
@@ -243,9 +249,9 @@ accel = sph_force + gravity                    [sph_force is acceleration]
 
 For GAS: `accel.y += 0.01 * (T - 293) * 9.81`  (buoyancy)
 
-Clamped: `|accel| <= 30 m/s^2`
+Clamped: `|accel| <= 200 m/s^2`
 
-**Source**: `integrate.cu:316-336`
+**Source**: `integrate.cu:196-206`
 
 ### 4.2 Velocity Update
 
@@ -329,7 +335,7 @@ scalar formula); this was removed as it was redundant and wasted ~40-50% of Step
 I = gamma_dot * d / sqrt(p_eff / rho)
 ```
 
-where `d = particle_spacing = 0.02`, `p_eff = max(p, 1.0)`
+where `d = particle_spacing = 0.02`, `p_eff = max(p, rho0 * |g| * particle_spacing)`
 
 **Note**: `p_eff` uses Tait EOS pressure (from `compute_pressure()`), not the
 lithostatic pressure `p = rho * g * depth` assumed by the original mu(I) model.
@@ -360,8 +366,12 @@ Default: mu_max=10000, mu0=1.0
 
 ```
 eta_ij = 2 * eta_i * eta_j / (eta_i + eta_j)     [harmonic mean]
-f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
+f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / (rho_j * rho_i) * (h - |r|)
 ```
+
+This uses the **dynamic viscosity form** dividing by `rho_i * rho_j` (both densities),
+consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units and
+`force_scale=1.0` for GRANULAR (no global scaling), so the full dynamic form is correct.
 
 **Source**: `step2.cu:122-130` (mu(I)), `step2.cu:326-345` (force)
 
@@ -379,7 +389,7 @@ f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
 | gamma (EOS exponent) | 7.0 (all) | 7 | Tait EOS for all materials |
 | mu_0 (viscosity) | 1.0 | 3.5 | Lowered; effective viscosity = mu0 * force_scale |
 | epsilon (XSPH) | 0.8 | 0.5 | Higher for smoother FLUID advection |
-| gravity | -9.8 | -9.8 | Same |
+| gravity | -4.0 | -9.8 | Reduced for miniature-world aesthetic |
 | dt | adaptive | 0.001 (fixed) | CFL: min(acoustic, viscous) ∈ [1e-5, 0.001]; DT_MAX=0.001 |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
@@ -387,7 +397,7 @@ f_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
 | position update | FLUID: pos += veleval_xsph * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
 | boundaries | impulse SDF | penalty springs | Fundamentally different |
 | velocity_limit | 10 | 200 | Tight clamp prevents particles escaping grid cells |
-| accel_max | 30 | N/A | Prevents shockwave-level accelerations |
+| accel_max | 200 | N/A | Prevents shockwave-level accelerations (FLUID + GRANULAR) |
 | boundary_stiffness | N/A | 20000 | Only in parent |
 | boundary_dampening | N/A | 256 | Only in parent |
 | restitution | 0.3 | N/A | Only in fallingsand3d |
@@ -526,6 +536,25 @@ phase transitions: lava→stone (T<900K), water→steam (T>373K).
 | FIRE+ICE | 25.0 | Moderate melting |
 
 **Source**: `materials.py:351-384`, `step1.cu:174-180`
+
+### 9.3 Material Default Spawn Temperatures
+
+Most particles spawn at `T_AMBIENT = 293 K`. Several materials use non-ambient defaults
+(set in `_DEFAULT_TEMPS` in `world.py`):
+
+| Material | Default spawn temp | Notes |
+|----------|-------------------|-------|
+| LAVA | 1500 K | Above solidification threshold |
+| FIRE | 1200 K | Active combustion temperature |
+| STEAM | 373 K | At boiling point |
+| SMOKE | 500 K | Hot exhaust |
+| ICE | 253 K | **20 K below the 273 K melt threshold (bd-mzc.18)** |
+
+ICE spawns at 253 K so it does not immediately melt on frame 1 when the ambient
+cooling term (293 K environment) would otherwise push a freshly-spawned 293 K ICE
+particle above its `temp_melt=273 K` threshold in the first substep.
+
+**Source**: `world.py:_DEFAULT_TEMPS`
 
 ---
 
@@ -768,7 +797,7 @@ External algorithmic review by GPT 5.2 Pro identified 9 issues. Fixes applied:
 
 **Source**: `sph_shared.cuh`, `pbf_solver.cu`, `dfsph_solver.cu`
 
-### 10.14 FIXED: Physics review fixes (PROBLEMS.md batch)
+### 10.14b FIXED: Physics review fixes (PROBLEMS.md batch)
 
 Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 
@@ -814,6 +843,17 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 - G4: Surface tension is "surface normal cohesion" (not full Akinci model)
 - J10: Sorted array transitions handled by per-particle branching (safe invariant)
 
+**Reaction fixes (2026-06-10 batch, bd-mzc.27):**
+- DIRT + corrosion-exposure (driven by WATER contact reaction_rate) now converts DIRT to
+  MUD (wetting transition), not corrosion damage. This check runs before the acid
+  corrosion whitelist so DIRT is redirected to the wetting path rather than being
+  "corroded" by water.
+- DIRT was removed from the acid-corrosion whitelist. The corrosion path (`health -= damage`)
+  now applies only to: STONE, METAL, WOOD, GRAVEL, ICE, OIL, GUNPOWDER. DIRT reaches
+  MUD via the wetting path (`exp_corrode > SAND_WET_THRESHOLD`) instead.
+
+**Source**: `reactions.cu:225-261`
+
 ### 10.15 FIXED: Rigid body force/acceleration unit mismatch
 
 Step2 accumulates **acceleration** (not force) into `d_rigid_forces[]` because the
@@ -828,7 +868,15 @@ F_on_body = -m_i * a_on_fluid          // Newton's 3rd law, in force units
 ```
 This ensures the rigid body integrator correctly computes `a = F/M_body`.
 
-**Source**: `step2.cu:K_Step2` (rigid body force accumulation block)
+**DFSPH non-pressure viscous reaction force (bd-mzc.23)**: The DFSPH
+`K_DFSPH_NonPressureForces` viscous boundary coupling previously used
+`m_j / rho_i` as the mass factor when accumulating the reaction force, making
+it scale with neighbor mass rather than the fluid particle's own mass. Fixed to
+`F_on_body = -F_visc * particle_mass` (multiply viscous acceleration by `m_i =
+c_sim.particle_mass`), consistent with the WCSPH convention.
+
+**Source**: `step2.cu:K_Step2` (rigid body force accumulation block),
+`dfsph_solver.cu:K_DFSPH_NonPressureForces:486-494` (viscous reaction fix)
 
 ### 10.16 FIXED: Surface tension sign inversion (repulsion instead of cohesion)
 
@@ -843,7 +891,16 @@ accumulated surface normal `n_i = SUM (m_j/rho_j) * grad_W` points **into the
 bulk** (toward higher density). Multiplying by `+gamma` gives inward force
 (cohesion). The previous `-gamma` reversed this to outward repulsion.
 
-**Source**: `step2.cu` (surface tension block)
+All three solvers now apply `+gamma * n_i` (bd-mzc.21):
+- **WCSPH** (`step2.cu`): `f_surface_tension = gamma * norm_i` (acceleration)
+- **DFSPH** (`dfsph_solver.cu:K_DFSPH_NonPressureForces:613-615`): `accel += +gamma * norm_i`
+- **PBF** (`pbf_solver.cu:K_PBF_Finalize:902-904`): `vel_new += dt * (+gamma * norm_i)`
+
+Note: PBF uses `gamma=0.0` by default (disabled; relies on weak attractive density
+constraint instead), but the sign convention in the code is correct.
+
+**Source**: `step2.cu` (surface tension block), `dfsph_solver.cu:K_DFSPH_NonPressureForces`,
+`pbf_solver.cu:K_PBF_Finalize`
 
 ### 10.17 FIXED: GAS density floor clamped above rest density
 
@@ -902,7 +959,7 @@ All three solvers now support the complete material behavior set:
 | Pressure solve | Tait EOS | Density constraint | Div+Dens iters |
 | Viscosity (FLUID) | Laplacian (per-material) | XSPH (per-material scaled) | Laplacian (per-material)/rho_i |
 | Viscosity (GRANULAR) | mu(I) in Step2 | XSPH*10 + DP friction | mu(I) in NonPressure |
-| XSPH smoothing | Step2 (eps=0.8) | Finalize (c=0.05) | NonPressure (eps=0.5) |
+| XSPH smoothing | Step2, FLUID only (eps=0.8) | Finalize (c=0.05) | NonPressure (eps=0.5) |
 | GAS buoyancy | Integrate | Predict (v+=) | NonPressure (accel) |
 | GAS phase separation | Step1 (skip GAS) | ComputeLambda (skip GAS) | DensityAlpha (skip GAS) |
 | Heat diffusion | Step1 | ComputeLambda | DensityAlpha |
@@ -961,6 +1018,13 @@ lambda_i = -C_i / (SUM_j |grad_pj C_i|^2 + epsilon)
 `epsilon = pbf_relaxation` (default 0.01) stabilizes the denominator.
 The 5% attractive factor for under-dense particles prevents fluid surface expansion
 while avoiding the explosion that full negative C would cause.
+
+**Boundary (STATIC) neighbor density (bd-mzc.25)**: STATIC neighbors contribute
+to the density sum with `psi_b = m_j` (standard Akinci weight — particle mass field).
+A previous `2x boundary_scale` multiplier was removed; it over-inflated near-wall
+density to roughly `2*rho_0`, causing lambda to drive particles away from walls
+(unphysical bounce). With the 2x factor gone, near-wall density is correct and
+wall contact is stable. Lambda and delta gradients also use `m_j` without scaling.
 
 **Source**: `pbf_solver.cu:K_PBF_ComputeLambda`
 
@@ -1264,11 +1328,23 @@ where V_j = m_j / rho_j
 2. **K_DFSPH_DensitySolverUpdate** — Predict density using total velocity, Jacobi-update pressure:
 ```
 v_total_i = v_i + dt * a_press_i        [velocity including current pressure effect]
+v_total_i = clamp(v_total_i, VELOCITY_LIMIT)   [bd-mzc.33: prevent Jacobi runaway]
 drho = SUM_j (m_j/rho_j) * (v_total_i - v_total_j) . grad_W_ij
-density_adv = rho_i/rho_0 + dt * drho   [predicted density ratio]
+density_adv = rho_i/rho_0 + dt * drho/rho_0    [bd-mzc.22: both terms normalized by rho_0]
 residual = density_adv - 1.0             [positive = compressed]
 p_rho2 = max(p_rho2 + omega * residual * alpha / dt^2, 0)
 ```
+
+**Density advection normalization (bd-mzc.22)**: Both terms in `density_adv` are divided
+by `rho_0`, making the sum dimensionless (`rho_i/rho_0 + dt*drho/rho_0`). The `drho/rho_0`
+normalization was previously missing, causing the density-change term to be ~rho_0 times
+too large and the solver to converge to a fixed point with a persistent 20-40% density error.
+
+**Velocity clamping before density prediction (bd-mzc.33)**: `v_total = v + dt*a_press` is
+clamped to `VELOCITY_LIMIT` before computing `drho`. Without this clamp, a large `a_press`
+overshoot in one Jacobi iteration can produce a huge `drho` that drives the next iteration
+further out — runaway Jacobi oscillation. The clamp prevents this feedback from diverging.
+
 The `A*p` feedback comes from including `a_press` in the density prediction, which
 accounts for the effect of current pressure on neighbors. This is what makes multiple
 iterations converge — pure velocity correction without pressure feedback would repeat
@@ -1437,12 +1513,18 @@ The magnitude `|omega|` is stored in `.w` for use by the Step2 confinement force
 The vorticity confinement force re-injects energy lost to numerical dissipation:
 
 ```
-eta_i = SUM_j (m_j / rho_j) * |omega_j| * grad_W_spiky(r_ij)
+eta_i = SUM_j (m_j / rho_j) * (omega_j - omega_i) * grad_W_spiky(r_ij)
 N_i = eta_i / |eta_i|                          [normalized vorticity gradient]
 f_conf = epsilon * (N_i × omega_i)              [confinement force]
 ```
 
 Where `epsilon = c_granular.vorticity_epsilon` (default 0.05).
+
+The gradient uses the **difference form** `(omega_j - omega_i)` (not `omega_j`
+alone). This is the SPH approximation of the gradient of a scalar field, which
+vanishes identically when the vorticity field is uniform -- preventing spurious
+confinement forces in solid-body rotation. The difference form is now unified
+across all three solvers (WCSPH, DFSPH, PBF).
 
 The confinement force is perpendicular to the vorticity axis and aligned with the
 gradient of vorticity magnitude, amplifying existing rotational structures without
@@ -1988,7 +2070,18 @@ q = normalize(q)
 
 Velocity damping: linear 1-0.01*dt, angular 1-0.05*dt. Angular velocity clamped to 20 rad/s. Force clamped to 1000*mass.
 
-**Source**: `integrate.cu:K_IntegrateRigidBodies`
+**Box inverse inertia (bd-mzc.24)**: For a box with half-extents `(hx, hy, hz)` and mass `m`,
+the body-frame principal moments use divisor **3** (not 12):
+```
+I_xx = m * (hy^2 + hz^2) / 3
+I_yy = m * (hx^2 + hz^2) / 3
+I_zz = m * (hx^2 + hy^2) / 3
+```
+The divisor 3 applies to half-extents; divisor 12 applies only when the formula uses
+full side lengths (e.g., `l = 2*hx`). Using 12 with half-extents would underestimate
+inertia by 4x, making boxes spin unrealistically fast under torques.
+
+**Source**: `rigid_bodies.py:480-487`, `integrate.cu:K_IntegrateRigidBodies`
 
 ### 22.8 Rigid-Rigid and Rigid-SDF Collision
 

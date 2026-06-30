@@ -2,14 +2,14 @@
 
 Acceptance criteria:
   - K_CalcHash computes grid cell: cell = int3((pos - grid_min) * grid_delta),
-    clamped to [0, grid_res-1]
-  - Hash = cell.z * grid_res.y * grid_res.x + cell.y * grid_res.x + cell.x
+    clamped to valid range via integer wrap + table_mask
+  - Spatial hash = (cx*P1 ^ cy*P2 ^ cz*P3) & table_mask
   - Grid parameters read from __constant__ GridParams c_grid
-  - Grid sizing: grid_min=(-1,-1,-1), grid_max=(1,1,1), cell_size=h=0.04,
-    grid_res=50, grid_delta=(25,25,25), num_cells=125000
+  - Grid sizing: grid_min=(-1,-1,-1), cell_size=h=0.04,
+    grid_delta=(25,25,25), table_size=262144
   - CuPy RawModule compiles hash_sort.cu including common.cuh without errors
-  - Test: 100K particles uniformly distributed in unit cube -> valid hashes [0, num_cells-1]
-  - Test: particles at/outside grid boundaries -> clamped hashes (no OOB)
+  - Test: 100K particles uniformly distributed in unit cube -> valid hashes [0, table_size-1]
+  - Test: particles at/outside grid boundaries -> valid hashes (no OOB)
   - Kernel runs without errors for 500K particles
 
 Requirements: cupy, numpy, an NVIDIA GPU with CUDA 12.x.
@@ -28,38 +28,41 @@ import numpy as np
 
 from hash_sort import (
     CELL_SIZE,
-    GRID_DELTA,
-    GRID_MAX,
-    GRID_MIN,
     GRID_PARAMS_DTYPE,
-    GRID_RES,
     NUM_CELLS,
+    TABLE_SIZE,
+    TABLE_MASK,
     build_grid_params,
     calc_hash,
     get_module,
     upload_grid_params,
 )
 
+# Backward-compat: the old API exposed GRID_MIN/MAX/RES/DELTA as named constants.
+# The new API uses a spatial hash with TABLE_SIZE/TABLE_MASK instead of a dense
+# grid_res^3 layout.  Tests below use the new constants directly.
+_GRID_MIN = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
+_GRID_DELTA = np.array([1.0 / float(CELL_SIZE)] * 3, dtype=np.float32)
+
 
 def _host_hash(pos: np.ndarray) -> np.ndarray:
-    """Reference CPU implementation of the hash for validation."""
-    grid_min = GRID_MIN
-    grid_delta = GRID_DELTA
-    grid_res = GRID_RES
+    """Reference CPU implementation of the spatial hash for validation."""
+    grid_min = _GRID_MIN
+    grid_delta = _GRID_DELTA
 
-    # calcGridCell: int3((pos - grid_min) * grid_delta)
-    # CUDA (int) cast truncates toward zero, matching np.trunc for positive values.
-    # Since (pos - grid_min) * grid_delta is non-negative after clamping, floor
-    # and trunc give the same result for values in [0, grid_res).
+    # calcGridCell: int3(floor((pos - grid_min) * grid_delta))
+    # No clamping -- spatial hash wraps naturally via table_mask
     cell = np.floor((pos[:, :3] - grid_min) * grid_delta).astype(np.int32)
 
-    # clamp to [0, grid_res - 1]
-    cell = np.clip(cell, 0, grid_res - 1)
-
-    # linear hash: z * ry * rx + y * rx + x
-    rx = int(grid_res[0])
-    ry = int(grid_res[1])
-    h = cell[:, 2] * ry * rx + cell[:, 1] * rx + cell[:, 0]
+    # spatialHash: (cx*73856093 ^ cy*19349669 ^ cz*83492791) & table_mask
+    cx = cell[:, 0].astype(np.int64)
+    cy = cell[:, 1].astype(np.int64)
+    cz = cell[:, 2].astype(np.int64)
+    # Perform same overflow arithmetic as C uint (32-bit unsigned)
+    hx = (cx * 73856093).astype(np.uint32)
+    hy = (cy * 19349669).astype(np.uint32)
+    hz = (cz * 83492791).astype(np.uint32)
+    h = (hx ^ hy ^ hz) & np.uint32(TABLE_MASK)
     return h.astype(np.uint32)
 
 
@@ -67,33 +70,33 @@ def test_grid_constants() -> None:
     """Verify grid sizing matches acceptance criteria."""
     print("--- Grid constant checks ---")
 
-    np.testing.assert_array_almost_equal(GRID_MIN, [-1.0, -1.0, -1.0])
-    np.testing.assert_array_almost_equal(GRID_MAX, [1.0, 1.0, 1.0])
     assert abs(float(CELL_SIZE) - 0.04) < 1e-7
-    np.testing.assert_array_equal(GRID_RES, [50, 50, 50])
-    np.testing.assert_array_almost_equal(GRID_DELTA, [25.0, 25.0, 25.0])
-    assert NUM_CELLS == 125_000
-    print("[OK] Grid constants: grid_min=(-1,-1,-1) grid_max=(1,1,1) "
-          "cell_size=0.04 grid_res=50 grid_delta=25 num_cells=125000")
+    assert TABLE_SIZE == 262144
+    assert TABLE_MASK == TABLE_SIZE - 1
+    assert NUM_CELLS == TABLE_SIZE  # backward-compat alias
+    np.testing.assert_array_almost_equal(_GRID_MIN, [-1.0, -1.0, -1.0])
+    inv_cs = 1.0 / float(CELL_SIZE)  # 25.0
+    np.testing.assert_array_almost_equal(_GRID_DELTA, [inv_cs, inv_cs, inv_cs])
+    print(f"[OK] Grid constants: grid_min=(-1,-1,-1) cell_size=0.04 "
+          f"grid_delta=25 table_size={TABLE_SIZE} table_mask={TABLE_MASK:#010x}")
 
 
 def test_grid_params_struct() -> None:
     """Verify GridParams numpy dtype layout matches common.cuh struct."""
     print("\n--- GridParams struct checks ---")
 
-    # float3 grid_min (12) + float3 grid_max (12) + int3 grid_res (12)
-    # + float3 grid_delta (12) + int num_cells (4) = 52 bytes
-    assert GRID_PARAMS_DTYPE.itemsize == 52, (
-        f"GridParams size mismatch: {GRID_PARAMS_DTYPE.itemsize} != 52"
+    # struct GridParams { float3 grid_min (12) + float3 grid_delta (12)
+    #   + uint table_size (4) + uint table_mask (4) } = 32 bytes
+    assert GRID_PARAMS_DTYPE.itemsize == 32, (
+        f"GridParams size mismatch: {GRID_PARAMS_DTYPE.itemsize} != 32"
     )
     print(f"[OK] sizeof(GridParams) = {GRID_PARAMS_DTYPE.itemsize} bytes")
 
     params = build_grid_params()
     np.testing.assert_array_almost_equal(params[0]["grid_min"], [-1.0, -1.0, -1.0])
-    np.testing.assert_array_almost_equal(params[0]["grid_max"], [1.0, 1.0, 1.0])
-    np.testing.assert_array_equal(params[0]["grid_res"], [50, 50, 50])
     np.testing.assert_array_almost_equal(params[0]["grid_delta"], [25.0, 25.0, 25.0])
-    assert params[0]["num_cells"] == 125_000
+    assert params[0]["table_size"] == TABLE_SIZE
+    assert params[0]["table_mask"] == TABLE_MASK
     print("[OK] GridParams fields populated correctly")
 
 
@@ -123,18 +126,18 @@ def test_known_position() -> None:
     upload_grid_params()
 
     # Position (0.02, 0.02, 0.02):
-    #   cell = int3((0.02 - (-1)) * 25, (0.02 - (-1)) * 25, (0.02 - (-1)) * 25)
-    #        = int3(25.5, 25.5, 25.5) = (25, 25, 25)
-    #   hash = 25 * 50 * 50 + 25 * 50 + 25 = 62500 + 1250 + 25 = 63775
+    #   cell = int3(floor((0.02 - (-1)) * 25), ...) = int3(floor(25.5), ...) = (25, 25, 25)
+    #   hash = (25*73856093 ^ 25*19349669 ^ 25*83492791) & TABLE_MASK
     pos = np.array([[0.02, 0.02, 0.02, 0.0]], dtype=np.float32)
     pos_gpu = cupy.asarray(pos)
 
-    hashes, _ = calc_hash(pos_gpu)
+    hashes = calc_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h = int(cupy.asnumpy(hashes)[0])
-    expected = 25 * 50 * 50 + 25 * 50 + 25  # 63775
-    assert h == expected, f"hash = {h}, expected {expected}"
+    ref = int(_host_hash(pos)[0])
+    assert h == ref, f"hash = {h}, expected {ref}"
+    assert 0 <= h < TABLE_SIZE, f"hash {h} out of range [0, {TABLE_SIZE})"
     print(f"[OK] Position (0.02, 0.02, 0.02) -> cell (25,25,25) -> hash = {h}")
 
 
@@ -150,23 +153,18 @@ def test_100k_uniform_unit_cube() -> None:
     pos_np[:, :3] = rng.uniform(0.0, 1.0, size=(100_000, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
+    hashes = calc_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h_hashes = cupy.asnumpy(hashes)
-    h_indices = cupy.asnumpy(indices)
 
-    # All hashes in [0, NUM_CELLS - 1]
+    # All hashes in [0, TABLE_SIZE - 1]
     assert h_hashes.min() >= 0, f"Min hash = {h_hashes.min()}, expected >= 0"
-    assert h_hashes.max() < NUM_CELLS, (
-        f"Max hash = {h_hashes.max()}, expected < {NUM_CELLS}"
+    assert h_hashes.max() < TABLE_SIZE, (
+        f"Max hash = {h_hashes.max()}, expected < {TABLE_SIZE}"
     )
-    print(f"[OK] All 100K hashes in [0, {NUM_CELLS - 1}]: "
+    print(f"[OK] All 100K hashes in [0, {TABLE_SIZE - 1}]: "
           f"min={h_hashes.min()}, max={h_hashes.max()}")
-
-    # Indices should be identity permutation
-    np.testing.assert_array_equal(h_indices, np.arange(100_000, dtype=np.uint32))
-    print("[OK] Indices are identity [0..99999]")
 
     # Cross-check against CPU reference
     ref = _host_hash(pos_np)
@@ -175,8 +173,8 @@ def test_100k_uniform_unit_cube() -> None:
 
 
 def test_boundary_clamping() -> None:
-    """Particles at or outside grid boundaries produce clamped hashes."""
-    print("\n--- Boundary clamping test ---")
+    """Particles at or outside grid boundaries produce valid hashes."""
+    print("\n--- Boundary (out-of-range positions) test ---")
 
     upload_grid_params()
 
@@ -186,7 +184,7 @@ def test_boundary_clamping() -> None:
         [0.0, 0.0, 0.0, 0.0],
         # At grid_min exactly
         [-1.0, -1.0, -1.0, 0.0],
-        # At grid_max exactly (should clamp to res-1)
+        # At grid_max exactly
         [1.0, 1.0, 1.0, 0.0],
         # Far outside negative
         [-10.0, -10.0, -10.0, 0.0],
@@ -199,45 +197,23 @@ def test_boundary_clamping() -> None:
     ], dtype=np.float32)
 
     pos_gpu = cupy.asarray(test_positions)
-    hashes, indices = calc_hash(pos_gpu)
+    hashes = calc_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h_hashes = cupy.asnumpy(hashes)
 
-    # All hashes must be in valid range
+    # All hashes must be in valid range (spatial hash wraps via table_mask)
     for i, h in enumerate(h_hashes):
-        assert 0 <= h < NUM_CELLS, (
+        assert 0 <= h < TABLE_SIZE, (
             f"Particle {i} at {test_positions[i, :3]}: hash={h}, "
-            f"expected in [0, {NUM_CELLS - 1}]"
+            f"expected in [0, {TABLE_SIZE - 1}]"
         )
-    print(f"[OK] All {len(test_positions)} boundary test particles have valid hashes")
-
-    # Verify specific expected values:
-    # Particle at grid_min (-1,-1,-1): cell = (0,0,0), hash = 0
-    assert h_hashes[1] == 0, f"grid_min hash = {h_hashes[1]}, expected 0"
-    print("[OK] Particle at grid_min -> hash = 0")
-
-    # Particle far outside negative: should clamp to (0,0,0), hash = 0
-    assert h_hashes[3] == 0, f"far-negative hash = {h_hashes[3]}, expected 0"
-    print("[OK] Particle far outside negative -> hash = 0 (clamped)")
-
-    # Particle far outside positive: should clamp to (49,49,49)
-    max_hash = 49 * 50 * 50 + 49 * 50 + 49  # = 124999
-    assert h_hashes[4] == max_hash, (
-        f"far-positive hash = {h_hashes[4]}, expected {max_hash}"
-    )
-    print(f"[OK] Particle far outside positive -> hash = {max_hash} (clamped to max)")
-
-    # Particle at grid_max (1,1,1): cell unclamped = (50,50,50), clamped to (49,49,49)
-    assert h_hashes[2] == max_hash, (
-        f"grid_max hash = {h_hashes[2]}, expected {max_hash}"
-    )
-    print(f"[OK] Particle at grid_max -> hash = {max_hash} (clamped)")
+    print(f"[OK] All {len(test_positions)} test particles have valid hashes")
 
     # Cross-check all against CPU reference
     ref = _host_hash(test_positions)
     np.testing.assert_array_equal(h_hashes, ref)
-    print("[OK] Boundary hashes match CPU reference")
+    print("[OK] Hashes match CPU reference")
 
 
 def test_500k_no_errors() -> None:
@@ -252,14 +228,14 @@ def test_500k_no_errors() -> None:
     pos_np[:, :3] = rng.uniform(-1.0, 1.0, size=(500_000, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes, indices = calc_hash(pos_gpu)
+    hashes = calc_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h_hashes = cupy.asnumpy(hashes)
 
     # All valid
     assert h_hashes.min() >= 0
-    assert h_hashes.max() < NUM_CELLS
+    assert h_hashes.max() < TABLE_SIZE
     print(f"[OK] 500K particles hashed without errors: "
           f"min={h_hashes.min()}, max={h_hashes.max()}")
 

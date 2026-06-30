@@ -178,20 +178,47 @@ def foam_generate(
     )
 
 
+# Minimum grid launch size for K_FoamPhysics to avoid pathologically tiny grids.
+_MIN_FOAM_GRID_SIZE = 1024
+
+
 def foam_physics(
     foam_position: cupy.ndarray,
     foam_velocity: cupy.ndarray,
     foam_count: cupy.ndarray,
     max_foam: int,
+    last_foam_count: int = 0,
 ) -> None:
     """Launch K_FoamPhysics: simple physics for each foam particle.
 
-    Uses max_foam for grid size (no GPU->CPU sync). The kernel reads
-    actual count from foam_count device pointer and early-exits.
+    Grid is bounded by max(last_foam_count, _MIN_FOAM_GRID_SIZE) rather than
+    always max_foam (bd-mzc.44).  last_foam_count is the 1-frame-deferred CPU
+    readback available in Simulation._last_foam_count -- zero on the first frame,
+    which triggers the MIN_FOAM_GRID_SIZE fallback.  max_foam is kept as a cap.
+
+    No GPU->CPU sync required: the kernel reads the actual count from the
+    foam_count device pointer and early-exits for out-of-bounds threads.
+
+    Parameters
+    ----------
+    foam_position, foam_velocity : cupy.ndarray
+        Foam particle SoA arrays (shape (max_foam, 4) float32).
+    foam_count : cupy.ndarray
+        Device scalar (shape (1,) uint32) with the live foam particle count.
+    max_foam : int
+        Hard upper bound on foam capacity (used as grid size when
+        last_foam_count is 0 or exceeds it, and for safety clamping).
+    last_foam_count : int
+        1-frame-deferred foam count from async CPU readback.  0 means unknown
+        (first frame); in that case the grid falls back to _MIN_FOAM_GRID_SIZE.
     """
     module = _get_module()
     kernel = module.get_function("K_FoamPhysics")
-    grid = ((max_foam + _BLOCK - 1) // _BLOCK,)
+    # Use deferred count to bound the grid; pad up to MIN to avoid tiny launches.
+    effective = max(int(last_foam_count), _MIN_FOAM_GRID_SIZE)
+    # Never exceed the actual capacity.
+    effective = min(effective, max_foam)
+    grid = ((effective + _BLOCK - 1) // _BLOCK,)
     kernel(
         grid,
         (_BLOCK,),

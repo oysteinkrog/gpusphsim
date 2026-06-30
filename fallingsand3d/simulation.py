@@ -133,6 +133,10 @@ class Simulation:
         self._last_timings: dict = {}      # stage_name -> ms (raw last frame)
         self._timing_ema: dict = {}        # stage_name -> ms (exponential moving avg)
         self._timing_ema_alpha = 0.1       # EMA smoothing factor
+        # Deferred timing: hold last substep's events+labels so we can read
+        # them one step later without a per-substep synchronize() stall.
+        self._pending_timing_events: list = []   # cupy.cuda.Event objects
+        self._pending_timing_labels: list = []   # parallel label strings
 
         # Precompute acoustic speed from materials table
         self._c_sound = self._compute_c_sound()
@@ -553,28 +557,6 @@ class Simulation:
             )
 
         return n_total
-
-    def _ensure_table_size(self, n: int) -> None:
-        """Resize hash table if particle count outgrew it (load factor > 1)."""
-        needed = hash_sort.compute_table_size(n)
-        if needed != self._table_size:
-            self._table_size = needed
-            self._cell_start = cupy.empty(needed, dtype=cupy.uint32)
-            self._cell_end = cupy.empty(needed, dtype=cupy.uint32)
-            self._cell_wake_flags = wake.allocate_cell_wake_flags(needed)
-            self._cs_histogram = cupy.zeros(needed, dtype=cupy.uint32)
-            self._cs_write_offset = cupy.zeros(needed, dtype=cupy.uint32)
-            # Re-upload c_grid to all modules with new table_size
-            hs = self._world_half_size
-            wmin, wmax = (-hs, -hs, -hs), (hs, hs, hs)
-            grid_params, _ = hash_sort.build_grid_params_for_world(
-                wmin, wmax, self._h, num_particles=n,
-            )
-            for mod in [hash_sort, fused_sort_reorder_build, counting_sort,
-                        step1, step2, wake, implicit_st]:
-                mod.upload_grid_params(grid_params)
-            # Invalidate CUDA graphs (grid params changed)
-            self._invalidate_graphs()
 
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
@@ -1089,6 +1071,32 @@ class Simulation:
             max_displacement=w.max_displacement,
         )
 
+    def _apply_damping_ramp(self) -> None:
+        """Apply spawn velocity-damping ramp (shared by _sim_step and _sim_step_timed).
+
+        Increments _spawn_substep, updates velocity_damping in c_sim, and
+        invalidates CUDA graphs while the ramp is active.  Must be called once
+        per substep before any kernel launches that read c_sim.velocity_damping.
+        """
+        if self._spawn_substep < self._damping_duration:
+            t = self._spawn_substep / self._damping_duration
+            damping = 0.8 * (1.0 - t)  # linear ramp 0.8 -> 0.0
+            self._spawn_substep += 1
+            # Invalidate CUDA graphs during damping (constant changes each step)
+            self._invalidate_graphs()
+        else:
+            damping = 0.0
+        # Upload damping to c_sim.velocity_damping only when it actually changed.
+        # This guards against the post-ramp steady state (damping == 0) triggering
+        # repeated redundant uploads each substep.  During the active ramp, damping
+        # decrements each substep so the upload fires once per substep — necessary
+        # because constant memory must match what the GPU kernels will use.
+        if self._sim_params is not None:
+            old_damping = float(self._sim_params[0]["velocity_damping"])
+            if abs(damping - old_damping) > 1e-8:
+                self._sim_params[0]["velocity_damping"] = np.float32(damping)
+                self._upload_sim_params_all()  # only uploads when value changed
+
     def _invalidate_graphs(self) -> None:
         """Invalidate both CUDA graphs (call when constants/solver/grid changes)."""
         self._graph_full_sort = None
@@ -1135,21 +1143,7 @@ class Simulation:
         w._density_initialized = True
 
         # --- Spawn velocity damping ramp ---
-        if self._spawn_substep < self._damping_duration:
-            t = self._spawn_substep / self._damping_duration
-            damping = 0.8 * (1.0 - t)  # linear ramp 0.8 -> 0.0
-            self._spawn_substep += 1
-            # Invalidate CUDA graphs during damping (constant changes each step)
-            self._invalidate_graphs()
-        else:
-            damping = 0.0
-        # Upload damping to c_sim.velocity_damping (reuse _upload_dt which
-        # re-uploads full sim_params to all modules without changing self.dt)
-        if self._sim_params is not None:
-            old_damping = float(self._sim_params[0]["velocity_damping"])
-            if abs(damping - old_damping) > 1e-8:
-                self._sim_params[0]["velocity_damping"] = np.float32(damping)
-                self._upload_sim_params_all()
+        self._apply_damping_ramp()
 
         # --- Rigid body: update boundary particles in unsorted arrays ---
         rbm = self.rigid_body_manager
@@ -1232,7 +1226,8 @@ class Simulation:
 
         # 1. Physics for existing foam (before generate, so new particles
         #    get physics next step). Kernel reads count from device pointer.
-        foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count, max_foam)
+        foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count, max_foam,
+                          last_foam_count=self._last_foam_count)
 
         # 2. Generate new foam from FLUID particles
         foam.foam_generate(
@@ -1287,6 +1282,9 @@ class Simulation:
 
         self._frame_counter_d.fill(self._substep_counter)
         w._density_initialized = True
+
+        # --- Spawn velocity damping ramp (bd-r4-epic-x2j.3: was missing from timed path) ---
+        self._apply_damping_ramp()
 
         # Update rigid body boundary particles
         rbm = self.rigid_body_manager
@@ -1413,20 +1411,39 @@ class Simulation:
         self._run_foam_step(n)
         mark("foam")
 
-        # Single sync then read all timings
-        events[-1].synchronize()
-        raw = {}
-        for i in range(1, len(events)):
-            raw[labels[i]] = cupy.cuda.get_elapsed_time(events[i - 1], events[i])
-        self._last_timings = raw
+        # --- Deferred timing read (1-substep latency, no per-substep sync stall) ---
+        # Read timings from the PREVIOUS substep's events; by the time we get here
+        # those GPU kernels are almost certainly already complete (a full substep
+        # of GPU work has elapsed since they were enqueued), so this is effectively
+        # a non-blocking query rather than a stall.  Displayed values lag by one
+        # substep, which is imperceptible to the user.
+        prev_events = self._pending_timing_events
+        prev_labels = self._pending_timing_labels
+        if prev_events and len(prev_events) > 1:
+            try:
+                # Synchronise only on the PREVIOUS substep's last event.
+                # This event was recorded a full substep ago, so the wait is
+                # typically 0 ms (GPU already past it).
+                prev_events[-1].synchronize()
+                raw = {}
+                for i in range(1, len(prev_events)):
+                    raw[prev_labels[i]] = cupy.cuda.get_elapsed_time(
+                        prev_events[i - 1], prev_events[i]
+                    )
+                self._last_timings = raw
+                # Update EMA
+                alpha = self._timing_ema_alpha
+                for k, v in raw.items():
+                    if k in self._timing_ema:
+                        self._timing_ema[k] = alpha * v + (1 - alpha) * self._timing_ema[k]
+                    else:
+                        self._timing_ema[k] = v
+            except Exception:
+                pass  # timing is advisory — never crash the sim loop
 
-        # Update EMA
-        alpha = self._timing_ema_alpha
-        for k, v in raw.items():
-            if k in self._timing_ema:
-                self._timing_ema[k] = alpha * v + (1 - alpha) * self._timing_ema[k]
-            else:
-                self._timing_ema[k] = v
+        # Store this substep's events for reading next substep
+        self._pending_timing_events = events
+        self._pending_timing_labels = labels
 
         self.sim_time += self.dt
         self._substep_counter += 1
@@ -1548,13 +1565,16 @@ class Simulation:
         if self._frame_counter % self.compact_interval != 0:
             return n
 
-        # Count dead particles = _high_water - num_active
+        # Count dead particles = _high_water - num_active. This is the only
+        # per-frame caller of num_active, and it runs only once every
+        # compact_interval frames (gated above), so the ~1 Hz sync is fine.
         num_alive = self.world.num_active
         num_dead = n - num_alive
         if num_dead < self.compact_threshold:
             return n
 
-        self.world.compact()
+        # Reuse the count we already paid for so compact() does not sync again.
+        self.world.compact(num_alive=num_alive)
         # After compaction, n changed — force full sort next time
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
@@ -1645,3 +1665,84 @@ class Simulation:
     @property
     def last_substeps(self) -> int:
         return self._last_substeps
+
+    def close(self) -> None:
+        """Release CUDA resources held by this Simulation instance.
+
+        Must be called before discarding a Simulation object (e.g. on
+        max-particles change) to prevent stream/event/pinned-buffer/graph
+        leaks and to avoid an in-flight D2H race on the readback stream.
+
+        Safe to call more than once (idempotent after first call).
+        """
+        # 1. Drain any in-flight async device-to-host copies on the readback stream.
+        #    Without this, the pinned host buffers we are about to release could still
+        #    be written by the GPU after Python frees them.
+        try:
+            if self._readback_stream is not None:
+                self._readback_stream.synchronize()
+        except Exception:
+            pass
+
+        # 2. Free CUDA graph captures so their device-side allocations are returned.
+        try:
+            self._graph_full_sort = None
+            self._graph_gather_only = None
+        except Exception:
+            pass
+
+        # 3. Release the readback event and stream (CuPy handles the CUDA-level
+        #    free when the Python objects are garbage-collected, but nulling here
+        #    makes the intent explicit and helps GC run promptly).
+        try:
+            self._readback_event = None
+            self._readback_stream = None
+        except Exception:
+            pass
+
+        # 4. Release pinned host memory.  CuPy's MemoryPointer.__del__ calls
+        #    cudaFreeHost, but we trigger it now to avoid keeping pinned pages
+        #    around until the next GC cycle.
+        try:
+            self._pinned_displacement = None
+            self._pinned_foam_count = None
+        except Exception:
+            pass
+
+    def get_all_modules(self) -> list:
+        """Return all compiled CuPy RawModule objects known to this Simulation.
+
+        Used by RigidBodyManager.upload() to write c_num_rigid_bodies into
+        each module's constant memory via get_global().
+        """
+        mods = [
+            step1.get_module(),
+            step2.get_module(),
+            integrate.get_module(),
+            reactions.get_module(),
+            spawn.get_module(),
+            wake.get_module(),
+            hash_sort.get_module(),
+            fused_sort_reorder_build.get_module(),
+            counting_sort.get_module(),
+        ]
+        # Optional solver modules (may not be compiled yet)
+        try:
+            import pbf_solver
+            mods.append(pbf_solver.get_module())
+        except Exception:
+            pass
+        try:
+            import dfsph_solver
+            mods.append(dfsph_solver.get_module())
+        except Exception:
+            pass
+        try:
+            mods.append(implicit_st.get_module())
+        except Exception:
+            pass
+        try:
+            mods.append(foam.get_module())
+        except Exception:
+            pass
+        return [m for m in mods if m is not None]

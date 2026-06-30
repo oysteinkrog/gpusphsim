@@ -83,15 +83,25 @@ void K_SpawnGas(
     // Clear the flag regardless of whether spawn succeeds
     pi = CLEAR_SPAWN_FLAG(pi);
 
-    // Claim N slots from the freelist one at a time.
-    // Each atomicSub claims one slot; if any fails, restore all and abort.
+    // Claim N slots from the freelist one at a time via atomicSub.
+    // Each atomicSub is safe because we check the RETURNED old value:
+    //   - If old_val > 0: we successfully claimed slot at index old_val-1.
+    //   - If old_val <= 0: dead_count was 0, the decrement would wrap uint32
+    //     to 0xFFFFFFFF; we detect this, restore with atomicAdd, and bail.
+    //
+    // This avoids the underflow bug where dead_count == 0 and a racing
+    // atomicSub would transiently wrap it to 0xFFFFFFFF, potentially
+    // letting subsequent threads read dead_indices out of bounds.
+    // The pre-check (old_val > 0, not == 0) catches the race: even if two
+    // threads both see dead_count == 1 and both sub, one gets old_val == 1
+    // (ok) and the other gets old_val == 0 (detected, restored immediately).
     uint claimed_slots[SPAWN_N];
     int n_claimed = 0;
 
     for (int k = 0; k < SPAWN_N; k++) {
         int old_val = (int)atomicSub(dead_count, 1u);
         if (old_val <= 0) {
-            // Not enough -- restore this failed claim
+            // dead_count was 0 (or already wrapped) -- restore and stop
             atomicAdd(dead_count, 1u);
             break;
         }
@@ -100,7 +110,7 @@ void K_SpawnGas(
     }
 
     if (n_claimed < SPAWN_N) {
-        // Restore any slots we successfully claimed
+        // Restore any slots we successfully claimed before running short
         if (n_claimed > 0) {
             atomicAdd(dead_count, (uint)n_claimed);
         }
@@ -162,10 +172,12 @@ void K_SpawnGas(
         packed_info[slot] = steam_pi;
     }
 
-    // Mark source water particle as DEAD
+    // Mark source water particle as DEAD.
+    // Use STATIC (not FLUID) so dead particles are excluded from the SPH
+    // fluid neighbor loop and cannot pollute density sums until compaction.
     // (NOT added back to freelist here -- would race with concurrent reads
     //  from dead_indices. Compaction (US-029) reclaims dead particles.)
-    packed_info[i] = MAKE_PACKED(MAT_DEAD, FLUID);
+    packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
     health[i] = 0.0f;
     mass[i] = 0.0f;
 }

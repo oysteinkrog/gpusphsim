@@ -23,6 +23,8 @@ import math
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 
 import cupy
@@ -73,7 +75,7 @@ def SET_SLEEPING(p: int) -> int:
 # ---------------------------------------------------------------------------
 
 def setup_params(dt=DT, restitution=0.3, wall_friction=0.5,
-                 gravity=(0.0, -9.8, 0.0)):
+                 gravity=(0.0, -9.8, 0.0), velocity_limit=10.0):
     """Upload SimParams and materials to integrate module's constant memory."""
     sim_params = build_sim_params(
         smoothing_length=H,
@@ -85,6 +87,7 @@ def setup_params(dt=DT, restitution=0.3, wall_friction=0.5,
         wall_friction=wall_friction,
         world_min=(-1.0, -1.0, -1.0),
         world_max=(1.0, 1.0, 1.0),
+        velocity_limit=velocity_limit,
     )
     upload_sim_params(sim_params)
     materials = build_material_array()
@@ -158,7 +161,7 @@ def test_static_skip():
 
     d = make_simple_particles(n, STONE, STATIC, pos=pos, vel=vel)
 
-    pos_out, vel_out, color_out, _, _, _ = integrate(**d)
+    pos_out, vel_out, color_out, _, _, _, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -182,7 +185,7 @@ def test_gravity_freefall():
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     pos_h = pos_out.get()
@@ -213,7 +216,7 @@ def test_bounce_floor():
     vel = np.array([[0.0, -5.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     pos_h = pos_out.get()
@@ -228,7 +231,7 @@ def test_bounce_floor():
     pos2 = np.array([[0.0, -0.995, 0.0, 1.0]], dtype=np.float32)
     vel2 = np.array([[0.0, -10.0, 0.0, 0.0]], dtype=np.float32)
     d2 = make_simple_particles(n, WATER, FLUID, pos=pos2, vel=vel2)
-    pos_out2, vel_out2, _, _, _, _ = integrate(**d2)
+    pos_out2, vel_out2, _, _, _, _, _, _ = integrate(**d2)
 
     vel_h2 = vel_out2.get()
     pos_h2 = pos_out2.get()
@@ -315,7 +318,7 @@ def test_gas_buoyancy():
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=temp)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -345,7 +348,7 @@ def test_gas_drag():
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
 
     d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=293.0)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -360,20 +363,21 @@ def test_gas_drag():
 
 
 def test_velocity_clamp():
-    """Velocity magnitude is clamped to 50.0."""
-    setup_params(gravity=(0.0, 0.0, 0.0))
+    """Velocity magnitude is clamped to velocity_limit (set explicitly to 50.0)."""
+    # API note: build_sim_params velocity_limit defaults to 10.0; pass explicit 50.0
+    # to match the original acceptance criterion.
+    # sorted_sph_force is now acceleration (m/s^2), not raw force (N).
+    setup_params(gravity=(0.0, 0.0, 0.0), velocity_limit=50.0)
 
     n = 1
-    # Start with velocity near the limit, add moderate force to push over 50
-    # accel = force/mass = 20/0.008 = 2500 (below accel_max 5000)
-    # vel_new = 48 + dt*2500 = 48 + 2.5 = 50.5 -> clamped to 50
+    # Start with velocity already above velocity_limit (60 > 50) to trigger clamp.
+    # No SPH force needed -- initial velocity alone exceeds the limit.
+    # vel_new = 60 -> clamped to 50
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
-    vel = np.array([[48.0, 0.0, 0.0, 0.0]], dtype=np.float32)
-    sph_force = np.array([[20.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    vel = np.array([[60.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    d["sorted_sph_force"] = cupy.asarray(sph_force)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     speed = math.sqrt(vel_h[0, 0]**2 + vel_h[0, 1]**2 + vel_h[0, 2]**2)
@@ -389,41 +393,70 @@ def test_velocity_clamp():
 
 
 def test_color_computation():
-    """Color is computed from material base color, temperature, and health."""
-    setup_params()
+    """FLUID particles use compute_fluid_color: depth-gradient tint + temperature + health.
 
-    # Test 1: room temp, full health -> base material color
+    compute_fluid_color applies a depth gradient to the base color:
+      r = base_r * (0.45 + 0.70 * depth_t)   [depth_t = 0 at bottom, 1 at top]
+      g = base_g * (0.50 + 0.65 * depth_t)
+      b = base_b * (0.65 + 0.40 * depth_t)
+    Additionally: hot-tint for T > 293K, health-fade, alpha = 0 (FLUID transparency).
+    World domain: y in [-1, 1], depth_t = (y + 1) / 2.
+    """
+    # Use gravity=0 to avoid position change during the integration step.
+    setup_params(gravity=(0.0, 0.0, 0.0))
+
+    # Water base: r=0.2, g=0.5, b=0.9 (from materials.py)
+    BASE_R, BASE_G, BASE_B = 0.2, 0.5, 0.9
     n = 1
+
+    # --- Test 1: depth-gradient tint at y=0 (depth_t=0.5) ---
+    # Expected: r = 0.2*(0.45+0.70*0.5) = 0.16, g = 0.5*(0.50+0.65*0.5) = 0.4125
+    #           b = 0.9*(0.65+0.40*0.5) = 0.765, alpha = 0.0 (FLUID)
     d = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
     d["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out, _, _, _ = integrate(**d)
-    color_h = color_out.get()
+    _, _, color_out, _, _, _, _, _ = integrate(**d)
+    color_mid = color_out.get()
 
-    # Water color: (0.2, 0.5, 0.9)
-    assert abs(color_h[0, 0] - 0.2) < 0.02, f"Water R={color_h[0, 0]}, expected 0.2"
-    assert abs(color_h[0, 1] - 0.5) < 0.02, f"Water G={color_h[0, 1]}, expected 0.5"
-    assert abs(color_h[0, 2] - 0.9) < 0.02, f"Water B={color_h[0, 2]}, expected 0.9"
-    assert abs(color_h[0, 3] - 1.0) < 0.01, f"Alpha={color_h[0, 3]}, expected 1.0"
+    depth_t_mid = 0.5
+    exp_r = BASE_R * (0.45 + 0.70 * depth_t_mid)
+    exp_g = BASE_G * (0.50 + 0.65 * depth_t_mid)
+    exp_b = BASE_B * (0.65 + 0.40 * depth_t_mid)
+    assert abs(color_mid[0, 0] - exp_r) < 0.02, f"Mid-depth R={color_mid[0, 0]:.4f}, expected {exp_r:.4f}"
+    assert abs(color_mid[0, 1] - exp_g) < 0.02, f"Mid-depth G={color_mid[0, 1]:.4f}, expected {exp_g:.4f}"
+    assert abs(color_mid[0, 2] - exp_b) < 0.02, f"Mid-depth B={color_mid[0, 2]:.4f}, expected {exp_b:.4f}"
+    assert abs(color_mid[0, 3]) < 0.01, f"FLUID alpha should be 0, got {color_mid[0, 3]}"
 
-    # Test 2: hot particle -> red tint
-    d2 = make_simple_particles(n, WATER, FLUID, temp=1293.0, health=1.0)
-    d2["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out2, _, _, _ = integrate(**d2)
-    color_h2 = color_out2.get()
+    # --- Test 2: depth gradient -- bottom should be darker than top ---
+    d_bot = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
+    d_bot["sorted_position"] = cupy.array([[0.0, -0.9, 0.0, 1.0]], dtype=cupy.float32)
+    d_top = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
+    d_top["sorted_position"] = cupy.array([[0.0, 0.9, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, col_bot, _, _, _, _, _ = integrate(**d_bot)
+    _, _, col_top, _, _, _, _, _ = integrate(**d_top)
+    r_bot = col_bot.get()[0, 0]
+    r_top = col_top.get()[0, 0]
+    assert r_top > r_bot, f"Water should be brighter at top: r_top={r_top:.4f} <= r_bot={r_bot:.4f}"
 
-    # Should be more red than base water
-    assert color_h2[0, 0] > color_h[0, 0], "Hot particle not redder"
-    assert color_h2[0, 2] < color_h[0, 2], "Hot particle blue not reduced"
+    # --- Test 3: hot particle -> red tint (T=1293K, t_excess=1.0) ---
+    d_hot = make_simple_particles(n, WATER, FLUID, temp=1293.0, health=1.0)
+    d_hot["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, color_hot, _, _, _, _, _ = integrate(**d_hot)
+    color_h_hot = color_hot.get()
+    assert color_h_hot[0, 0] > color_mid[0, 0], "Hot particle should be more red than cold"
+    assert color_h_hot[0, 2] < color_mid[0, 2], "Hot particle should be less blue than cold"
 
-    # Test 3: low health -> faded color
-    d3 = make_simple_particles(n, WATER, FLUID, temp=293.0, health=0.5)
-    d3["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out3, _, _, _ = integrate(**d3)
-    color_h3 = color_out3.get()
-
-    # Should be ~half brightness
-    assert abs(color_h3[0, 0] - 0.1) < 0.02, f"Health fade R={color_h3[0, 0]}"
-    assert abs(color_h3[0, 1] - 0.25) < 0.02, f"Health fade G={color_h3[0, 1]}"
+    # --- Test 4: half health -> half brightness ---
+    d_fade = make_simple_particles(n, WATER, FLUID, temp=293.0, health=0.5)
+    d_fade["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+    _, _, color_fade, _, _, _, _, _ = integrate(**d_fade)
+    color_h_fade = color_fade.get()
+    # Should be ~half the mid-depth color
+    assert abs(color_h_fade[0, 0] - color_mid[0, 0] * 0.5) < 0.02, (
+        f"Half-health R={color_h_fade[0, 0]:.4f}, expected ~{color_mid[0, 0]*0.5:.4f}"
+    )
+    assert abs(color_h_fade[0, 1] - color_mid[0, 1] * 0.5) < 0.02, (
+        f"Half-health G={color_h_fade[0, 1]:.4f}, expected ~{color_mid[0, 1]*0.5:.4f}"
+    )
 
     print("PASS: test_color_computation")
 
@@ -493,7 +526,7 @@ def test_boundary_all_walls():
     ], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -518,28 +551,43 @@ def test_boundary_all_walls():
 
 
 def test_coulomb_friction():
-    """Wall collision applies Coulomb friction to tangential velocity."""
+    """Wall collision applies Coulomb friction to tangential velocity for GRANULAR.
+
+    FLUID particles deliberately have friction=0 (to prevent sticking to walls).
+    GRANULAR particles get wall_friction from sim_params. Use SAND/GRANULAR here.
+    """
     setup_params(gravity=(0.0, 0.0, 0.0), restitution=0.3, wall_friction=0.5)
 
     n = 1
-    # Particle hitting floor with both normal and tangential velocity
+    # GRANULAR particle hitting floor with both normal and tangential velocity
+    # pos near floor (y=-0.999), moving down (vy=-10) and sideways (vx=5)
     pos = np.array([[0.5, -0.999, 0.0, 1.0]], dtype=np.float32)
     vel = np.array([[5.0, -10.0, 0.0, 0.0]], dtype=np.float32)
 
-    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
     # Normal: vy reflected with restitution -> ~0.3 * 10.0 = 3.0 upward
     assert vel_h[0, 1] > 0, f"Expected upward bounce, got vy={vel_h[0, 1]}"
 
-    # Tangential: vx should be reduced by friction
-    # friction_impulse = mu_wall * |vn| = 0.5 * 10.0 = 5.0
-    # reduction = min(5.0 / |vt|, 1.0) = min(5.0/5.0, 1.0) = 1.0
-    # vx = 5.0 * (1 - 1.0) = 0.0
+    # Tangential: vx should be reduced by Coulomb friction
+    # After normal impulse: vy_after = 0.3 * 10 = 3.0
+    # The actual vy at impact (after bounce) is ~3.0, the vn used in
+    # friction is the incoming normal component.
+    # friction_impulse = mu_wall * |vn| * (1+e) = 0.5 * 10 * 1.3 = 6.5
+    # But capped at |vt| = 5.0; reduction = min(6.5/5.0, 1.0) = 1.0 -> vx = 0
     assert abs(vel_h[0, 0]) < 0.5, (
-        f"Expected vx ~0 after friction, got {vel_h[0, 0]}"
+        f"GRANULAR: expected vx ~0 after full Coulomb friction, got {vel_h[0, 0]}"
+    )
+    # Contrast: FLUID particles get zero friction (no sticking)
+    d_fluid = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    _, vel_out_fluid, _, _, _, _, _, _ = integrate(**d_fluid)
+    vel_h_fluid = vel_out_fluid.get()
+    # FLUID: vx should be unchanged (friction=0 for FLUID)
+    assert abs(vel_h_fluid[0, 0] - 5.0) < 1.0, (
+        f"FLUID: expected vx ~5 (no friction), got {vel_h_fluid[0, 0]}"
     )
 
     print("PASS: test_coulomb_friction")
@@ -557,7 +605,7 @@ def test_xsph_position_update():
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_veleval"] = cupy.asarray(veleval)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -573,7 +621,7 @@ def test_xsph_position_update():
     # Non-FLUID should NOT use XSPH
     d2 = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
     d2["sorted_veleval"] = cupy.asarray(veleval)
-    pos_out2, _, _, _, _, _ = integrate(**d2)
+    pos_out2, _, _, _, _, _, _, _ = integrate(**d2)
     pos_h2 = pos_out2.get()
 
     expected_px2 = DT * 1.0  # no XSPH
@@ -683,12 +731,12 @@ def test_granular_anti_creep_settled():
 
     d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
 
-    # Density well above 0.95 * rho0 (sand rho0 = 1600)
-    d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
+    # Density well above 0.95 * rho0 (SAND rho0=4000, threshold = 0.95*4000 = 3800)
+    d["sorted_density"] = cupy.full(n, 4200.0, dtype=cupy.float32)
     # Shear rate below gamma_min (0.05)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # All velocities should be exactly zero (anti-creep triggered)
@@ -721,7 +769,7 @@ def test_granular_anti_creep_flowing():
     d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (above threshold)
@@ -752,11 +800,11 @@ def test_granular_anti_creep_low_density():
     vel[:, 0] = 0.005
 
     d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
-    # Density BELOW 0.95 * 1600 = 1520
+    # Density BELOW 0.95 * 4000 = 3800 (SAND rho0=4000)
     d["sorted_density"] = cupy.full(n, 1000.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (density too low for anti-creep)
@@ -790,7 +838,7 @@ def test_granular_anti_creep_high_shear():
     # Shear rate ABOVE gamma_min (0.05)
     d["sorted_shear_rate"] = cupy.full(n, 1.0, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (shear rate too high)
@@ -820,8 +868,8 @@ def test_granular_no_jitter_5000_steps():
 
     pos_gpu = cupy.asarray(pos_np)
     vel_gpu = cupy.asarray(vel_np)
-    # High density (settled/compressed)
-    density_gpu = cupy.full(n, 1700.0, dtype=cupy.float32)
+    # High density (settled/compressed): SAND rho0=4000, threshold = 0.95*4000 = 3800
+    density_gpu = cupy.full(n, 4200.0, dtype=cupy.float32)
     # Low shear rate (at rest)
     shear_rate_gpu = cupy.full(n, 0.01, dtype=cupy.float32)
 
@@ -891,7 +939,7 @@ def test_fluid_unaffected_by_anti_creep():
     d["sorted_density"] = cupy.full(n, 1200.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # FLUID velocity should be preserved (not zeroed)
@@ -1055,7 +1103,7 @@ def test_sleep_hysteresis_wake():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    _, vel_out, _, pi_out, sc_out, _ = integrate(**d)
+    _, vel_out, _, pi_out, sc_out, _, _, _ = integrate(**d)
     pi_h = pi_out.get()
     sc_h = sc_out.get()
     vel_h = vel_out.get()
@@ -1118,7 +1166,7 @@ def test_sleeping_skip_force_integration():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    pos_out, vel_out, _, pi_out, _, _ = integrate(**d)
+    pos_out, vel_out, _, pi_out, _, _, _, _ = integrate(**d)
     pos_h = pos_out.get()
     vel_h = vel_out.get()
 
@@ -1218,7 +1266,7 @@ def test_sleeping_particles_density_contribution():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    pos_out, _, _, pi_out, sc_out, _ = integrate(**d)
+    pos_out, _, _, pi_out, sc_out, _, _, _ = integrate(**d)
     pi_h = pi_out.get()
     pos_h = pos_out.get()
 
@@ -1414,41 +1462,29 @@ def test_accel_clamp_normal_unaffected():
     """
     setup_params(gravity=(0.0, -9.8, 0.0))
 
+    # API note: sorted_sph_force is ACCELERATION (m/s^2), not raw force (N).
+    # step2.cu already divides by mass before writing to sph_force_out.
+    # ACCEL_MAX_FLUID = 200.0 (not 5000 as originally written).
+
     n = 1
     pos = np.array([[0.0, 0.5, 0.0, 1.0]], dtype=np.float32)
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
-    # Typical SPH repulsive force (not extreme)
-    sph_force = np.array([[10.0, 50.0, -5.0, 0.0]], dtype=np.float32)
-
-    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    d["sorted_sph_force"] = cupy.asarray(sph_force)
-    _, vel_out, _, _, _, _ = integrate(**d)
-
-    vel_h = vel_out.get()
-
-    # accel = force/mass + gravity
-    # = (10/0.008, 50/0.008, -5/0.008) + (0, -9.8, 0)
-    # = (1250, 6250-9.8, -625) = (1250, 6240.2, -625)
-    # |accel| = sqrt(1250^2 + 6240.2^2 + 625^2) = sqrt(1562500 + 38940096 + 390625) = ~6395
-    # This exceeds 5000 so clamping WILL activate for this force.
-    # Let's use smaller forces that won't trigger.
-
-    # Use a force where accel < 5000
+    # sph_force2 as acceleration: total_accel = sph + gravity = (1, 5-9.8, -0.5)
+    # |accel| = sqrt(1 + 22.09 + 0.25) = sqrt(23.34) ~ 4.83 << ACCEL_MAX_FLUID=200
+    # No clamping should occur.
     sph_force2 = np.array([[1.0, 5.0, -0.5, 0.0]], dtype=np.float32)
     d2 = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d2["sorted_sph_force"] = cupy.asarray(sph_force2)
-    _, vel_out2, _, _, _, _ = integrate(**d2)
+    _, vel_out2, _, _, _, _, _, _ = integrate(**d2)
 
     vel_h2 = vel_out2.get()
 
-    # accel = (1/0.008, 5/0.008 - 9.8, -0.5/0.008) = (125, 615.2, -62.5)
-    # |accel| = sqrt(125^2 + 615.2^2 + 62.5^2) = sqrt(15625 + 378471 + 3906) = ~630.9
-    # Well below 5000, so clamping should NOT activate.
-    inv_mass = 1.0 / MASS
-    expected_vx = DT * (1.0 * inv_mass)
-    expected_vy = DT * (5.0 * inv_mass - 9.8)
-    expected_vz = DT * (-0.5 * inv_mass)
+    # accel_total = sph_force2 + gravity = (1, 5-9.8, -0.5) = (1, -4.8, -0.5)
+    # |accel| ~ 4.83 << ACCEL_MAX_FLUID=200, so no clamping.
+    expected_vx = DT * 1.0
+    expected_vy = DT * (5.0 - 9.8)
+    expected_vz = DT * (-0.5)
 
     assert abs(vel_h2[0, 0] - expected_vx) < 1e-4, (
         f"Accel clamp altered normal vx: expected {expected_vx}, got {vel_h2[0, 0]}"
@@ -1474,23 +1510,24 @@ def test_accel_clamp_exact_threshold():
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
-    # Force that produces accel = 10000 m/s^2 in Y direction
-    # accel = force / mass -> force = accel * mass = 10000 * 0.008 = 80
+    # API note: sorted_sph_force is ACCELERATION (m/s^2), not raw force (N).
+    # ACCEL_MAX_FLUID = 200.0 (the kernel constant, not 5000 as originally written).
+    # Pass accel=10000 directly; expect it clamped to 200.
+    # Without clamping: vel_y = dt * 10000 = 10.0
+    # With clamping: accel clamped to ACCEL_MAX_FLUID=200, vel_y = dt * 200 = 0.2
     target_accel = 10000.0
-    force_y = target_accel * MASS
-    sph_force = np.array([[0.0, force_y, 0.0, 0.0]], dtype=np.float32)
+    sph_force = np.array([[0.0, target_accel, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_sph_force"] = cupy.asarray(sph_force)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
-    # Without clamping: vel_y = dt * 10000 = 10.0
-    # With clamping: accel clamped to 5000, vel_y = dt * 5000 = 5.0
-    expected_vy = DT * 5000.0
+    ACCEL_MAX_FLUID = 200.0
+    expected_vy = DT * ACCEL_MAX_FLUID
     assert abs(vel_h[0, 1] - expected_vy) < 1e-3, (
-        f"Expected clamped vel_y={expected_vy}, got {vel_h[0, 1]}"
+        f"Expected clamped vel_y={expected_vy} (ACCEL_MAX_FLUID={ACCEL_MAX_FLUID}), got {vel_h[0, 1]}"
     )
 
     # Direction should be preserved (only Y component)
@@ -1498,6 +1535,103 @@ def test_accel_clamp_exact_threshold():
     assert abs(vel_h[0, 2]) < 1e-6, f"Unexpected vz={vel_h[0, 2]}"
 
     print("PASS: test_accel_clamp_exact_threshold")
+
+
+def test_body_body_restitution():
+    """Body-body restitution: each thread applies the standard impulse formula.
+
+    bd-unl.4: Both threads (one per body) independently apply the full impulse.
+    Since each body's normal points away from the other, the combined result is
+    the correct velocity exchange:
+      - e=0 (perfectly inelastic): relative velocity -> 0, both bodies stop.
+      - e=1 (elastic): bodies exchange velocities (equal mass).
+    """
+    from integrate import rigid_body_collisions
+    from rigid_bodies import RIGID_BODY_DTYPE, MAX_RIGID_BODIES
+    import numpy as np
+
+    radius = 0.3
+    bounding_r = radius * 1.732  # sqrt(3)*radius for a cube
+
+    def run_collision(vx_a_in, vx_b_in, e_in):
+        bodies = np.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+        # Body A at origin, Body B just overlapping to the right
+        sep_dist = 2.0 * bounding_r - 0.01
+        bodies[0]["position"] = [0.0, 0.0, 0.0, 1.0]       # inv_mass=1
+        bodies[0]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+        bodies[0]["lin_vel"]  = [vx_a_in, 0.0, 0.0, e_in]  # restitution in .w
+        bodies[0]["half_extents"] = [radius, radius, radius, 0.0]
+        bodies[0]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]
+
+        bodies[1]["position"] = [sep_dist, 0.0, 0.0, 1.0]
+        bodies[1]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+        bodies[1]["lin_vel"]  = [vx_b_in, 0.0, 0.0, e_in]
+        bodies[1]["half_extents"] = [radius, radius, radius, 0.0]
+        bodies[1]["inertia_inv"]  = [1.0, 1.0, 1.0, 0.0]
+
+        d_bodies = cupy.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+        cupy.cuda.runtime.memcpy(
+            int(d_bodies.data.ptr),
+            bodies.ctypes.data,
+            bodies.nbytes,
+            1,  # host-to-device
+        )
+        rigid_body_collisions(d_bodies, 2)
+        cupy.cuda.Device().synchronize()
+        result = d_bodies.get()
+        return float(result[0]["lin_vel"][0]), float(result[1]["lin_vel"][0])
+
+    # --- e=0 case: perfectly inelastic, relative velocity must go to zero ---
+    # Initial: A at vx=+1, B at vx=-1. After: both should have vx~0.
+    # Physics: impulse = -(1+0)*(-2)*(1/2) = 1.0 per body
+    # A: 1.0 + 1.0*(-1) = 0.0; B: -1.0 + 1.0*(+1) = 0.0
+    vx_a, vx_b = run_collision(1.0, -1.0, e_in=0.0)
+    rel_v_after = abs(vx_a - vx_b)
+    assert rel_v_after < 0.05, (
+        f"e=0 inelastic: relative velocity should be ~0, got |vx_a-vx_b|={rel_v_after:.4f} "
+        f"(vx_a={vx_a:.4f}, vx_b={vx_b:.4f})"
+    )
+
+    # --- e=1 case: elastic, equal masses exchange velocities ---
+    # Initial: A at vx=+1, B at vx=-1. After: A at ~-1, B at ~+1.
+    # Physics: impulse = -(1+1)*(-2)*(1/2) = 2.0 per body
+    # A: 1.0 + 2.0*(-1) = -1.0; B: -1.0 + 2.0*(+1) = +1.0
+    vx_a, vx_b = run_collision(1.0, -1.0, e_in=1.0)
+    assert vx_a < -0.9, (
+        f"e=1 elastic: A should reverse to ~-1.0, got vx_a={vx_a:.4f}"
+    )
+    assert vx_b > 0.9, (
+        f"e=1 elastic: B should reverse to ~+1.0, got vx_b={vx_b:.4f}"
+    )
+    print(f"PASS: test_body_body_restitution (e=0: vx_a={run_collision(1.0,-1.0,0.0)[0]:.4f}, "
+          f"e=1: vx_a={vx_a:.4f}, vx_b={vx_b:.4f})")
+
+
+def test_fallback_alloc_no_gpu_cpu_sync():
+    """integrate() fallback alloc path uses max_idx=n, not int(sort_indexes.max()).
+
+    bd-mzc.41: The fallback allocation block must not call int()/.max()/.get() on
+    a CuPy array (that forces a GPU->CPU sync). Verified by SOURCE INSPECTION.
+
+    NOTE: a previous version monkey-patched ``cupy.ndarray.max`` at runtime to
+    detect the sync. Patching an attribute on the cupy extension type corrupts
+    global cupy state for the rest of the process and poisoned later tests
+    (e.g. test_snapshot saw "'cupy' is not a package"). Static inspection of the
+    source is robust and cannot leak state.
+    """
+    import inspect
+    import integrate as _integ_mod
+
+    src = inspect.getsource(_integ_mod.integrate)
+    assert "sort_indexes.max()" not in src, (
+        "integrate() still calls sort_indexes.max() — GPU->CPU sync; "
+        "fallback alloc should use max_idx = n"
+    )
+    assert "max_idx = n" in src, (
+        "integrate() fallback alloc should derive size from max_idx = n "
+        "(the active particle count), not a device reduction"
+    )
+    print("PASS: test_fallback_alloc_no_gpu_cpu_sync")
 
 
 def test_500k_stress():
@@ -1544,7 +1678,7 @@ def test_500k_stress():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    pos_out, vel_out, color_out, _, _, _ = integrate(**d)
+    pos_out, vel_out, color_out, _, _, _, _, _ = integrate(**d)
 
     # Synchronize to catch any CUDA errors
     cupy.cuda.Device().synchronize()

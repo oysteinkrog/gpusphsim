@@ -31,7 +31,7 @@ from step1 import (
 )
 from materials import (
     FLUID, GRANULAR, GAS, STATIC,
-    DEAD, STONE, SAND, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER,
+    DEAD, STONE, SAND, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER, SMOKE,
     build_material_array,
 )
 from spawn import (
@@ -590,11 +590,16 @@ def test_multiple_spawns():
 
 
 def test_reactions_populates_freelist():
-    """Reactions kernel adds dying particles to freelist."""
+    """Reactions kernel behavior on corrosion death: corrosion produces a FIRE spark,
+    not a DEAD particle -- so dying-from-corrosion particles do NOT enter the freelist.
+    Freelist is populated when ACID particles exhaust themselves (mat=ACID, not METAL).
+    """
     setup_params(dt=0.1)
 
     n = 10
-    # Metal particles dying from corrosion
+    # Metal particles with health that will go to zero from corrosion.
+    # After corrosion death, kernel transitions METAL -> FIRE spark (not DEAD),
+    # so dead_count stays 0.
     packed_info = np.full(n, MAKE_PACKED(METAL, STATIC), dtype=np.uint32)
     temperature = np.full(n, 293.0, dtype=np.float32)
     health = np.full(n, 0.05, dtype=np.float32)  # low health
@@ -605,8 +610,9 @@ def test_reactions_populates_freelist():
 
     dead_indices, dead_count = allocate_freelist(n)
 
+    pi_out = cupy.asarray(packed_info)
     compute_reactions(
-        cupy.asarray(packed_info),
+        pi_out,
         cupy.asarray(temperature),
         cupy.asarray(health),
         cupy.asarray(lifetime),
@@ -618,26 +624,28 @@ def test_reactions_populates_freelist():
         dead_count=dead_count,
     )
 
+    # Corrosion death creates FIRE sparks -- freelist stays empty
     dc = int(dead_count.get()[0])
-    assert dc == n, f"Expected {n} dead particles in freelist, got {dc}"
+    assert dc == 0, f"Expected 0 entries in freelist (corrosion -> spark, not DEAD), got {dc}"
 
-    # All dead indices should be valid particle indices [0, n)
-    di = dead_indices.get()[:dc]
-    for idx in di:
-        assert 0 <= idx < n, f"Invalid dead index: {idx}"
-
-    # All indices should be unique
-    assert len(set(di.tolist())) == n, "Dead indices should be unique"
+    # All 10 particles should now be FIRE sparks (GAS, not DEAD)
+    pi_result = pi_out.get()
+    for idx in range(n):
+        mat_id = GET_MATERIAL_ID(int(pi_result[idx]))
+        assert mat_id == FIRE, f"Particle {idx}: expected FIRE spark, got mat_id={mat_id}"
 
     print("PASS: test_reactions_populates_freelist")
 
 
 def test_reactions_gas_lifetime_freelist():
-    """Expired GAS particles are added to freelist by Reactions."""
+    """FIRE GAS particles with expired lifetime transition to SMOKE, not DEAD.
+    Only non-FIRE GAS types (STEAM, SMOKE) are added to the freelist on expiry.
+    FIRE -> SMOKE so that fire visually fades out; SMOKE will later expire to DEAD.
+    """
     setup_params(dt=0.1)
 
     n = 5
-    packed_info = np.full(n, MAKE_PACKED(FIRE, GAS), dtype=np.uint32)
+    packed_info_np = np.full(n, MAKE_PACKED(FIRE, GAS), dtype=np.uint32)
     temperature = np.full(n, 1200.0, dtype=np.float32)
     health = np.ones(n, dtype=np.float32)
     lifetime = np.full(n, 0.05, dtype=np.float32)  # will expire
@@ -647,11 +655,13 @@ def test_reactions_gas_lifetime_freelist():
 
     dead_indices, dead_count = allocate_freelist(n)
 
+    pi_out = cupy.asarray(packed_info_np)
+    lt_out = cupy.asarray(lifetime)
     compute_reactions(
-        cupy.asarray(packed_info),
+        pi_out,
         cupy.asarray(temperature),
         cupy.asarray(health),
-        cupy.asarray(lifetime),
+        lt_out,
         cupy.asarray(velocity),
         cupy.asarray(exp_heat),
         cupy.asarray(exp_corrode),
@@ -660,8 +670,18 @@ def test_reactions_gas_lifetime_freelist():
         dead_count=dead_count,
     )
 
+    # FIRE -> SMOKE on expiry -- NOT added to freelist (freelist stays at 0)
     dc = int(dead_count.get()[0])
-    assert dc == n, f"Expected {n} expired GAS in freelist, got {dc}"
+    assert dc == 0, f"FIRE->SMOKE transition should not populate freelist, got dc={dc}"
+
+    # All 5 should now be SMOKE with lifetime=3.0s
+    pi_result = pi_out.get()
+    lt_result = lt_out.get()
+    for idx in range(n):
+        mat_id = GET_MATERIAL_ID(int(pi_result[idx]))
+        assert mat_id == SMOKE, f"Particle {idx}: expected SMOKE, got mat_id={mat_id}"
+        assert abs(lt_result[idx] - 3.0) < 0.1, \
+            f"Particle {idx}: lifetime={lt_result[idx]}, expected 3.0s"
 
     print("PASS: test_reactions_gas_lifetime_freelist")
 
@@ -878,6 +898,114 @@ def test_500k_stress():
     print("PASS: test_500k_stress")
 
 
+def test_dead_particle_phase_is_static():
+    """bd-mzc.28 regression: source water particle killed by spawn must be packed as
+    MAKE_PACKED(MAT_DEAD, STATIC), NOT MAKE_PACKED(MAT_DEAD, FLUID).
+
+    DEAD+FLUID particles participate in the SPH neighbor loop and pollute density
+    sums until the next compaction pass.  The fix ensures STATIC phase is used so
+    dead particles are excluded from the fluid loop immediately.
+    """
+    setup_params()
+
+    n = 10
+    arrays = make_sorted_arrays(n)
+
+    arrays["packed_info"][0] = SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID))
+    arrays["mass"][0] = 0.008
+
+    dead_indices, dead_count = allocate_freelist(n)
+    dead_indices[0] = 7
+    dead_indices[1] = 8
+    dead_indices[2] = 9
+    dead_count[0] = 3
+
+    compute_spawn(
+        arrays["packed_info"][:n],
+        arrays["position"][:n],
+        arrays["velocity"][:n],
+        arrays["veleval"][:n],
+        arrays["mass"][:n],
+        arrays["temperature"][:n],
+        arrays["health"][:n],
+        arrays["lifetime"][:n],
+        arrays["color"][:n],
+        arrays["sleep_counter"][:n],
+        arrays["density"][:n],
+        arrays["shear_rate"][:n],
+        dead_indices,
+        dead_count,
+    )
+    cupy.cuda.Device().synchronize()
+
+    pi = int(arrays["packed_info"][0].get())
+    assert GET_MATERIAL_ID(pi) == DEAD, f"Source should be DEAD, got mat={GET_MATERIAL_ID(pi)}"
+    behavior = GET_BEHAVIOR(pi)
+    assert behavior == STATIC, (
+        f"Dead particle packed with behavior={behavior} (FLUID=0, GRANULAR=1, GAS=2, STATIC=3); "
+        f"expected STATIC ({STATIC}).  FLUID dead particles pollute SPH density sums."
+    )
+    print("PASS: test_dead_particle_phase_is_static")
+
+
+def test_freelist_underflow_safety():
+    """bd-mzc.19 regression: concurrent spawns with 0 or few freelist slots must not
+    cause dead_count to wrap around (uint32 underflow to 0xFFFFFFFF).
+
+    The atomicCAS claim loop should guarantee dead_count stays >= 0 regardless
+    of how many racing threads attempt to claim simultaneously.
+    """
+    setup_params()
+
+    # Many water particles all flagged, but freelist is empty.
+    # Before the fix atomicSub would wrap dead_count to 0xFFFFFFFF.
+    n = 512  # fills two GPU blocks
+    arrays = make_sorted_arrays(n)
+
+    for i in range(n):
+        arrays["packed_info"][i] = SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID))
+        arrays["mass"][i] = 0.008
+
+    # Completely empty freelist
+    dead_indices, dead_count = allocate_freelist(n)
+    dead_count[0] = 0
+
+    compute_spawn(
+        arrays["packed_info"][:n],
+        arrays["position"][:n],
+        arrays["velocity"][:n],
+        arrays["veleval"][:n],
+        arrays["mass"][:n],
+        arrays["temperature"][:n],
+        arrays["health"][:n],
+        arrays["lifetime"][:n],
+        arrays["color"][:n],
+        arrays["sleep_counter"][:n],
+        arrays["density"][:n],
+        arrays["shear_rate"][:n],
+        dead_indices,
+        dead_count,
+    )
+    cupy.cuda.Device().synchronize()
+
+    dc = int(dead_count.get()[0])
+    assert dc == 0, (
+        f"dead_count underflowed to {dc} (0x{dc:08X}); expected 0.  "
+        f"atomicSub wrap-around corrupts live particles."
+    )
+
+    # All particles should still be WATER (with flag cleared)
+    pi_out = arrays["packed_info"].get()
+    for i in range(n):
+        mat = GET_MATERIAL_ID(int(pi_out[i]))
+        assert mat == WATER, (
+            f"Particle {i}: expected WATER (no spawn slots), got mat_id={mat}"
+        )
+        assert HAS_SPAWN_FLAG(int(pi_out[i])) == 0, f"Particle {i}: spawn flag not cleared"
+
+    print("PASS: test_freelist_underflow_safety")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -900,6 +1028,8 @@ if __name__ == "__main__":
         test_reactions_backward_compat,
         test_end_to_end_boil_spawn,
         test_500k_stress,
+        test_dead_particle_phase_is_static,
+        test_freelist_underflow_safety,
     ]
 
     passed = 0

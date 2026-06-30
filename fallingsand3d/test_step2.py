@@ -24,13 +24,21 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+import pytest
 import cupy
 import numpy as np
 
 from hash_sort import (
     NUM_CELLS,
+    TABLE_SIZE,
     build_grid_params,
+    calc_hash,
+    sort_by_hash,
     upload_grid_params as upload_hash_grid_params,
+)
+from build_grid import (
+    build_data_struct,
+    upload_grid_params as upload_build_grid_params,
 )
 from step1 import (
     build_precalc_params,
@@ -43,6 +51,7 @@ from step2 import (
     BLOCK_SIZE,
     GRANULAR_PARAMS_DTYPE,
     build_granular_params,
+    compute_pressure,
     compute_step2,
     get_module,
     upload_granular_params,
@@ -92,6 +101,8 @@ def SET_SLEEPING(p: int) -> int:
 def _upload_all_params() -> None:
     """Upload grid, sim, precalc, materials, and granular params to step2 module."""
     gp = build_grid_params()
+    upload_hash_grid_params(gp)
+    upload_build_grid_params(gp)
     upload_step2_grid_params(gp)
 
     sp = build_sim_params(
@@ -131,19 +142,20 @@ def _make_two_particle_setup(
     """Create a minimal 2-particle setup with grid cell data.
 
     Returns dict with all GPU arrays needed for compute_step2.
+    Density is packed into position.w as required by the current Step2 API.
     """
     if vel_a is None:
         vel_a = [0.0, 0.0, 0.0]
     if vel_b is None:
         vel_b = [0.0, 0.0, 0.0]
 
+    # Pack density into position.w (Step2 reads rho from pos.w after K_PackDensity)
     position = np.array(
-        [pos_a + [0.0], pos_b + [0.0]], dtype=np.float32
+        [pos_a + [density_a], pos_b + [density_b]], dtype=np.float32
     )
     velocity = np.array(
         [vel_a + [0.0], vel_b + [0.0]], dtype=np.float32
     )
-    density = np.array([density_a, density_b], dtype=np.float32)
     mass = np.array([mass_a, mass_b], dtype=np.float32)
 
     pi_a = MAKE_PACKED(mat_id_a, bclass_a)
@@ -154,53 +166,42 @@ def _make_two_particle_setup(
         pi_b = SET_SLEEPING(pi_b)
     packed_info = np.array([pi_a, pi_b], dtype=np.uint32)
 
-    # Build grid cell arrays
-    gp = build_grid_params()
-    gmin = gp[0]["grid_min"]
-    gdelta = gp[0]["grid_delta"]
-    gres = gp[0]["grid_res"].astype(int)
-    num_cells = int(gres[0] * gres[1] * gres[2])
+    # Shear rate (from Step1); use zeros for setup tests
+    shear_rate = np.zeros(2, dtype=np.float32)
 
-    cell_a = np.floor((np.array(pos_a) - gmin) * gdelta).astype(int)
-    cell_a = np.clip(cell_a, 0, gres - 1)
-    hash_a = int(cell_a[2] * gres[1] * gres[0] + cell_a[1] * gres[0] + cell_a[0])
+    # Use GPU calc_hash to get the correct spatial hashes (hash table, not grid_res)
+    pos_gpu = cupy.asarray(position)
+    hashes_gpu = calc_hash(pos_gpu)
+    sorted_hashes_gpu, sorted_indices_gpu = sort_by_hash(hashes_gpu)
+    sorted_indices = cupy.asnumpy(sorted_indices_gpu)
 
-    cell_b = np.floor((np.array(pos_b) - gmin) * gdelta).astype(int)
-    cell_b = np.clip(cell_b, 0, gres - 1)
-    hash_b = int(cell_b[2] * gres[1] * gres[0] + cell_b[1] * gres[0] + cell_b[0])
+    # Reorder all arrays to sorted order
+    position = position[sorted_indices]
+    velocity = velocity[sorted_indices]
+    mass = mass[sorted_indices]
+    packed_info = packed_info[sorted_indices]
+    shear_rate = shear_rate[sorted_indices]
 
-    cell_start = np.full(num_cells, 0xFFFFFFFF, dtype=np.uint32)
-    cell_end = np.zeros(num_cells, dtype=np.uint32)
+    # Build cell_start / cell_end using build_data_struct (hash-table sized)
+    cell_start_gpu, cell_end_gpu = build_data_struct(sorted_hashes_gpu)
 
-    if hash_a == hash_b:
-        cell_start[hash_a] = 0
-        cell_end[hash_a] = 2
-    else:
-        if hash_a < hash_b:
-            cell_start[hash_a] = 0
-            cell_end[hash_a] = 1
-            cell_start[hash_b] = 1
-            cell_end[hash_b] = 2
-        else:
-            # Swap particle order so sorted by hash
-            position = position[::-1].copy()
-            velocity = velocity[::-1].copy()
-            density = density[::-1].copy()
-            mass = mass[::-1].copy()
-            packed_info = packed_info[::-1].copy()
-            cell_start[hash_b] = 0
-            cell_end[hash_b] = 1
-            cell_start[hash_a] = 1
-            cell_end[hash_a] = 2
+    # Pre-compute pressure via K_ComputePressure (PERF-007: Step2 reads from pressure_in)
+    # Density is packed in position.w; extract as a contiguous array for K_ComputePressure
+    position_gpu = cupy.asarray(position)
+    packed_info_gpu = cupy.asarray(packed_info)
+    density_gpu = cupy.ascontiguousarray(position_gpu[:, 3])
+    pressure_gpu = cupy.zeros(len(position), dtype=cupy.float32)
+    compute_pressure(density_gpu, packed_info_gpu, pressure_gpu)
 
     return {
-        "position": cupy.asarray(position),
+        "position": position_gpu,
         "velocity": cupy.asarray(velocity),
-        "density": cupy.asarray(density),
         "mass": cupy.asarray(mass),
-        "packed_info": cupy.asarray(packed_info),
-        "cell_start": cupy.asarray(cell_start),
-        "cell_end": cupy.asarray(cell_end),
+        "packed_info": packed_info_gpu,
+        "shear_rate": cupy.asarray(shear_rate),
+        "cell_start": cell_start_gpu,
+        "cell_end": cell_end_gpu,
+        "pressure_in": pressure_gpu,
     }
 
 
@@ -232,12 +233,14 @@ def test_struct_sizes() -> None:
     """Verify struct dtype sizes match CUDA."""
     print("\n--- Struct size checks ---")
 
-    assert GRANULAR_PARAMS_DTYPE.itemsize == 32, (
-        f"GranularParams size: {GRANULAR_PARAMS_DTYPE.itemsize} != 32"
+    # GranularParams grew from 32 to 48 bytes with added fields:
+    # vorticity_epsilon, surface_tension_gamma, tan_phi_f, cohesion
+    assert GRANULAR_PARAMS_DTYPE.itemsize == 48, (
+        f"GranularParams size: {GRANULAR_PARAMS_DTYPE.itemsize} != 48"
     )
     print(f"[OK] sizeof(GranularParams) = {GRANULAR_PARAMS_DTYPE.itemsize}")
 
-    assert BLOCK_SIZE == 128
+    assert BLOCK_SIZE == 256
     print(f"[OK] Block size = {BLOCK_SIZE}")
 
 
@@ -305,7 +308,9 @@ def test_compressed_repulsive() -> None:
     sep = H * 0.3
     pos_a = [0.0, 0.0, 0.0]
     pos_b = [sep, 0.0, 0.0]
-    compressed_density = RHO0 * 1.1
+    # WATER material (id=5) has rest_density=2500; use 10% above to get positive Tait pressure
+    WATER_RHO0 = 2500.0
+    compressed_density = WATER_RHO0 * 1.1
 
     data = _make_two_particle_setup(
         pos_a=pos_a,
@@ -345,11 +350,13 @@ def test_static_skipped() -> None:
     _upload_all_params()
 
     sep = H * 0.3
+    # WATER (id=5) rest_density=2500; use 20% above so Tait EOS gives positive pressure
+    WATER_RHO0 = 2500.0
     data = _make_two_particle_setup(
         pos_a=[0.0, 0.0, 0.0],
         pos_b=[sep, 0.0, 0.0],
-        density_a=RHO0 * 1.2,
-        density_b=RHO0 * 1.2,
+        density_a=WATER_RHO0 * 1.2,   # STONE (STATIC): pressure doesn't matter (skipped)
+        density_b=WATER_RHO0 * 1.2,   # WATER (FLUID): needs density > 2500 for +pressure
         mat_id_a=1,  # STONE
         bclass_a=STATIC,
         mat_id_b=5,  # WATER
@@ -759,42 +766,43 @@ def test_500k_no_errors() -> None:
     packed_info_np[:n // 2] = MAKE_PACKED(5, FLUID)     # Water
     packed_info_np[n // 2:] = MAKE_PACKED(2, GRANULAR)   # Sand
 
-    # Build grid structure
-    gp = build_grid_params()
-    gmin = gp[0]["grid_min"]
-    gdelta = gp[0]["grid_delta"]
-    gres = gp[0]["grid_res"].astype(int)
-    num_cells = int(gres[0] * gres[1] * gres[2])
+    shear_rate_np = np.zeros(n, dtype=np.float32)
 
-    cells = np.floor((pos_np[:, :3] - gmin) * gdelta).astype(int)
-    cells = np.clip(cells, 0, gres - 1)
-    hashes = (cells[:, 2] * gres[1] * gres[0] + cells[:, 1] * gres[0] + cells[:, 0]).astype(np.uint32)
+    # Pack density into position.w (Step2 reads rho from pos.w)
+    pos_np[:, 3] = density_np
 
-    sort_idx = np.argsort(hashes)
+    # Use GPU-side hash sort to get correct spatial hashes and sorted order
+    pos_gpu = cupy.asarray(pos_np)
+    hashes_gpu = calc_hash(pos_gpu)
+    sorted_hashes_gpu, sorted_indices_gpu = sort_by_hash(hashes_gpu)
+    sort_idx = cupy.asnumpy(sorted_indices_gpu)
+
     pos_np = pos_np[sort_idx]
     vel_np = vel_np[sort_idx]
-    density_np = density_np[sort_idx]
     mass_np = mass_np[sort_idx]
     packed_info_np = packed_info_np[sort_idx]
-    sorted_hashes = hashes[sort_idx]
+    shear_rate_np = shear_rate_np[sort_idx]
 
-    cell_start = np.full(num_cells, 0xFFFFFFFF, dtype=np.uint32)
-    cell_end = np.zeros(num_cells, dtype=np.uint32)
+    # Build cell_start / cell_end using build_data_struct (hash-table sized)
+    cell_start_gpu, cell_end_gpu = build_data_struct(sorted_hashes_gpu)
 
-    for i in range(n):
-        h_val = int(sorted_hashes[i])
-        if i == 0 or sorted_hashes[i] != sorted_hashes[i - 1]:
-            cell_start[h_val] = i
-        cell_end[h_val] = i + 1
+    # Pre-compute pressure via K_ComputePressure before calling Step2
+    # Density is packed in pos.w; extract as a contiguous array for K_ComputePressure
+    pos_gpu = cupy.asarray(pos_np)
+    pi_gpu = cupy.asarray(packed_info_np)
+    density_gpu = cupy.ascontiguousarray(pos_gpu[:, 3])
+    pressure_gpu = cupy.zeros(n, dtype=cupy.float32)
+    compute_pressure(density_gpu, pi_gpu, pressure_gpu)
 
     sph_force, veleval_out = compute_step2(
-        cupy.asarray(pos_np),
+        pos_gpu,
         cupy.asarray(vel_np),
-        cupy.asarray(density_np),
         cupy.asarray(mass_np),
-        cupy.asarray(packed_info_np),
-        cupy.asarray(cell_start),
-        cupy.asarray(cell_end),
+        pi_gpu,
+        cupy.asarray(shear_rate_np),
+        cell_start_gpu,
+        cell_end_gpu,
+        pressure_in=pressure_gpu,
     )
     cupy.cuda.Device().synchronize()
 

@@ -165,6 +165,7 @@ def main():
             renderer.num_active = num_active
             sim.sim_time = 0.0
             sim._last_frame_time = None
+            sim.reset_spawn_damping()  # clear damping ramp so restored particles aren't drag-glitched
             active_spawner = None
             spawner_frame_counter = 0
             snapshots.clear()
@@ -244,7 +245,7 @@ def main():
             renderer.num_active = world._high_water
 
         # --- Periodic spawner (Acid Rain) ---
-        if active_spawner is not None:
+        if active_spawner is not None and not sim.paused:
             spawner_frame_counter += 1
             if spawner_frame_counter >= active_spawner["interval_frames"]:
                 spawner_frame_counter = 0
@@ -322,10 +323,15 @@ def main():
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.set_solver_profile(profile)
+            # bd-unl.15: upload rigid body count after solver reset so newly compiled
+            # modules receive the correct c_num_rigid_bodies constant.
+            sim.rigid_body_manager.upload(sim.get_all_modules())
             sim.sim_time = 0.0
             sim._last_frame_time = None
             active_spawner = None
             spawner_frame_counter = 0
+            # bd-r4-epic-x2j.5: clear snapshots on solver switch (stale GPU state is invalid after solver reset)
+            snapshots.clear()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
@@ -341,6 +347,7 @@ def main():
                 del sim._rigid_boundary_initialized
             n_spawned, spawner_cfg = load_fn(world)
             sim.rigid_body_manager.finalize_boundary_data()  # wire up rigid body pipeline
+            sim.rigid_body_manager.upload(sim.get_all_modules())  # upload body data + count to GPU constant memory
             sim.sdf_manager.upload_if_dirty()  # upload any SDF objects preset added
             world.foam_count.fill(0)  # reset foam pool on preset load
             active_spawner = spawner_cfg
@@ -358,6 +365,7 @@ def main():
             new_max = ui_changes['new_max']
             world.resize(new_max)
             renderer.close()
+            sim.close()  # drain readback stream + free pinned buffers/graphs before reassign
             fb_w, fb_h = glfw.get_framebuffer_size(window)
             renderer = Renderer(new_max, point_scale=20.0, width=fb_w, height=fb_h)
             renderer.num_active = 0
@@ -377,6 +385,12 @@ def main():
         if '_scene_loaded' in ui_changes:
             renderer.num_active = world._high_water
             sim._invalidate_graphs()
+            sim.reset_spawn_damping()  # clear damping ramp to avoid velocity glitch on first post-load frames
+            # bd-r4-epic-x2j.5: reset spawner/foam state on scene load (match preset-load path)
+            active_spawner = None
+            spawner_frame_counter = 0
+            world.foam_count.fill(0)
+            snapshots.clear()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 

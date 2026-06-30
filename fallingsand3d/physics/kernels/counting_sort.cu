@@ -13,7 +13,9 @@
  * Pre-conditions:
  *   - histogram[] must be zeroed before K_Histogram
  *   - write_offset[] must be zeroed before K_ScatterReorder
- *   - cell_start[] must be memset to 0xFFFFFFFF before K_ScatterReorder
+ *   - cell_start[] is filled by the prefix-sum (cupy.cumsum) of histogram[] and
+ *     does NOT need a 0xFFFFFFFF sentinel -- that sentinel was used by the old
+ *     hash_sort K_BuildDataStruct path and does not apply here.
  *
  * GridParams read from __constant__ c_grid declared in common.cuh.
  */

@@ -440,15 +440,17 @@ void K_DFSPH_NonPressureForces(
                     float rlen = sqrtf(r_sq);
 
                     // Vorticity eta accumulation (all neighbors -- PERF-002)
+                    // Use difference form (omega_j - omega_mag_i) to match step2/neighbor_list.
                     if (do_vort_eta) {
                         float h_rl = h - rlen;
                         float inv_rl = 1.0f / rlen;
                         float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
                         float omega_j = __ldg(&vorticity_in[j]).w;
                         float wt = m_j / fmaxf(rho_j, RHO_EPSILON);
-                        eta_vort.x += wt * omega_j * gs * r.x;
-                        eta_vort.y += wt * omega_j * gs * r.y;
-                        eta_vort.z += wt * omega_j * gs * r.z;
+                        float omega_diff = omega_j - omega_mag_i;
+                        eta_vort.x += wt * omega_diff * gs * r.x;
+                        eta_vort.y += wt * omega_diff * gs * r.y;
+                        eta_vort.z += wt * omega_diff * gs * r.z;
                     }
 
                     int behavior_j = GET_BEHAVIOR(pi_j);
@@ -483,12 +485,18 @@ void K_DFSPH_NonPressureForces(
                             f_visc.x += F_visc.x;
                             f_visc.y += F_visc.y;
                             f_visc.z += F_visc.z;
-                            // Two-way: accumulate reaction on rigid body
+                            // Two-way: accumulate reaction on rigid body.
+                            // F_visc is a force density [N/kg = m/s^2]; the acceleration on
+                            // particle i is a_visc = F_visc / rho_i (see a_visc block below).
+                            // Newton's 3rd law: reaction force on body = -a_visc * m_i
+                            //   = -(F_visc / rho_i) * m_i.
+                            // Missing the /rho_i would overscale by ~rho_i (~1000-2500x for water).
+                            float m_i = c_sim.particle_mass;
                             float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_on_body = make_float3(
-                                -(F_visc.x * inv_rho) * m_j,
-                                -(F_visc.y * inv_rho) * m_j,
-                                -(F_visc.z * inv_rho) * m_j
+                                -(F_visc.x * inv_rho) * m_i,
+                                -(F_visc.y * inv_rho) * m_i,
+                                -(F_visc.z * inv_rho) * m_i
                             );
                             float3 tau = make_float3(
                                 r_b.y * F_on_body.z - r_b.z * F_on_body.y,
@@ -600,6 +608,7 @@ void K_DFSPH_NonPressureForces(
     }
 
     // Akinci surface tension (FLUID only, surface particles)
+    // +gamma * norm_i coheres fluid (inward force toward interior, §10.16)
     if (behavior_i == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f) {
         float4 norm_i = __ldg(&normal_in[i]);
         float nc_i = norm_i.w;  // neighbor count
@@ -607,9 +616,9 @@ void K_DFSPH_NonPressureForces(
             float gamma = c_granular.surface_tension_gamma;
             float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
             if (n_mag > 0.01f) {
-                accel.x += -gamma * norm_i.x;
-                accel.y += -gamma * norm_i.y;
-                accel.z += -gamma * norm_i.z;
+                accel.x += +gamma * norm_i.x;
+                accel.y += +gamma * norm_i.y;
+                accel.z += +gamma * norm_i.z;
             }
         }
     }
@@ -1351,6 +1360,18 @@ void K_DFSPH_DensitySolverUpdate(
         vel4_i.y + dt * ap4_i.y,
         vel4_i.z + dt * ap4_i.z
     );
+    // Clamp v_total to velocity limit before density prediction.
+    // Without this, a large a_press overshoot in one Jacobi iteration can produce
+    // a huge drho that drives the next iteration further out (runaway oscillation).
+    {
+        float vt_sq = vt_i.x * vt_i.x + vt_i.y * vt_i.y + vt_i.z * vt_i.z;
+        if (vt_sq > VELOCITY_LIMIT_SQ) {
+            float scale = VELOCITY_LIMIT / sqrtf(vt_sq);
+            vt_i.x *= scale;
+            vt_i.y *= scale;
+            vt_i.z *= scale;
+        }
+    }
 
     // Compute density rate-of-change from total velocity
     float drho = 0.0f;
@@ -1394,6 +1415,18 @@ void K_DFSPH_DensitySolverUpdate(
                         vel4_j.y + dt * ap4_j.y,
                         vel4_j.z + dt * ap4_j.z
                     );
+                    // Clamp vt_j symmetrically with vt_i — a neighbor with large a_press
+                    // can produce vt_j >> VELOCITY_LIMIT, which drives an asymmetric drho
+                    // contribution and a minor stability inconsistency.
+                    {
+                        float vt_j_sq = vt_j.x * vt_j.x + vt_j.y * vt_j.y + vt_j.z * vt_j.z;
+                        if (vt_j_sq > VELOCITY_LIMIT_SQ) {
+                            float scale = VELOCITY_LIMIT / sqrtf(vt_j_sq);
+                            vt_j.x *= scale;
+                            vt_j.y *= scale;
+                            vt_j.z *= scale;
+                        }
+                    }
 
                     float3 gW = grad_spiky(r, rlen, h);
                     float dv_dot_gW = (vt_i.x - vt_j.x) * gW.x
@@ -1407,7 +1440,9 @@ void K_DFSPH_DensitySolverUpdate(
 
     // Predicted density ratio (normalized to rest density)
     // Uses rho/rho0 - 1 formulation (matches SPlisHSPlasH reference)
-    float density_adv = rho_i / rho0 + dt * drho;
+    // drho/rho0 makes both terms dimensionless; without /rho0 the solver
+    // converges to a wrong fixed point with ~20-40% density error.
+    float density_adv = rho_i / rho0 + dt * drho / rho0;
     float residual = density_adv - 1.0f;
 
     // Jacobi update: accumulate pressure correction
@@ -1659,11 +1694,15 @@ void K_DFSPH_Finalize(
                 }
             }
         }
-        float c_xsph = c_granular.xsph_epsilon;
-        if (behavior == GRANULAR) c_xsph *= 10.0f;
-        vel_advect.x += c_xsph * xsph.x;
-        vel_advect.y += c_xsph * xsph.y;
-        vel_advect.z += c_xsph * xsph.z;
+        // Apply XSPH to FLUID only (not GRANULAR) — aligns with step2.cu bd-mzc.34 fix.
+        // GRANULAR uses mu(I) rheology for velocity smoothing; XSPH is redundant there
+        // and step2 was already updated to skip it. DFSPH Finalize now matches.
+        if (behavior == FLUID) {
+            float c_xsph = c_granular.xsph_epsilon;
+            vel_advect.x += c_xsph * xsph.x;
+            vel_advect.y += c_xsph * xsph.y;
+            vel_advect.z += c_xsph * xsph.z;
+        }
     }
 
     // Final position: x_final = x + dt * v_advect (XSPH-corrected)

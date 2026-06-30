@@ -13,9 +13,9 @@ _compiler._use_ptx = True
 for _fn in (_compiler._get_arch, _compiler._get_arch_for_options_for_nvrtc):
     if hasattr(_fn, '_cache'):
         _fn._cache = {}
-from world import World, DEFAULT_SPACING, T_AMBIENT, _MAKE_PACKED
+from world import World, DEFAULT_SPACING, T_AMBIENT, _MAKE_PACKED, PARTICLE_MASS, _DEFAULT_TEMPS
 from materials import (
-    MATERIALS, WATER, SAND, LAVA, FIRE, STEAM, SMOKE, ICE, STONE,
+    MATERIALS, WATER, SAND, LAVA, FIRE, STEAM, SMOKE, ICE, STONE, DIRT, MUD,
     FLUID, GRANULAR, GAS, STATIC,
 )
 
@@ -66,9 +66,9 @@ def test_spawn_cube_water():
     n = w.spawn_cube((-0.5, -0.5, -0.5), (0.5, 0.5, 0.5), WATER, spacing=0.02)
     assert n > 0
     assert w.num_active == n
-    # mass = rho0 * spacing^3 = 1000 * 8e-6 = 0.008
+    # mass = PARTICLE_MASS = 0.02 (game-tuned constant, not rho0*dx^3)
     mass_val = float(w.mass[0])
-    assert abs(mass_val - 0.008) < 1e-6, f"mass={mass_val}"
+    assert abs(mass_val - PARTICLE_MASS) < 1e-6, f"mass={mass_val}, expected PARTICLE_MASS={PARTICLE_MASS}"
     # packed_info = MAKE_PACKED(WATER, FLUID)
     pi_val = int(w.packed_info[0])
     expected = _MAKE_PACKED(WATER, FLUID)
@@ -136,13 +136,14 @@ def test_kill_in_sphere():
     w.spawn_sphere((0.0, 0.0, 0.0), 0.5, WATER, 10_000)
     before = w.num_active
     assert before == 10_000
-    killed = w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
-    assert killed > 0
-    assert w.num_active < before
-    # Killed particles have packed_info=0
-    dead_mask = w.packed_info[:before] == 0
-    assert int(cp.sum(dead_mask)) >= killed
-    print(f"PASS: kill_in_sphere ({killed} killed, {w.num_active} remain)")
+    # kill_in_sphere returns 0 (count is unused by all callers; bd-mzc.39 removes the sync)
+    w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
+    # Verify particles inside sphere are actually zeroed
+    n = w._high_water
+    dead_mask = w.packed_info[:n] == 0
+    dead_count = int(cp.sum(dead_mask))
+    assert dead_count > 0, "Expected some particles to be killed inside sphere"
+    print(f"PASS: kill_in_sphere ({dead_count} killed)")
 
 
 def test_num_active():
@@ -181,6 +182,118 @@ def test_contiguous_arrays():
     print("PASS: all arrays contiguous CuPy on GPU")
 
 
+def test_ice_spawn_temp():
+    """bd-mzc.18 regression: ICE spawns below melt point (253 K), not at ambient 293 K."""
+    # _DEFAULT_TEMPS must have ICE entry at or below 273 K
+    assert ICE in _DEFAULT_TEMPS, "_DEFAULT_TEMPS missing ICE entry (mat id 11)"
+    ice_default = _DEFAULT_TEMPS[ICE]
+    assert ice_default <= 273.0, (
+        f"ICE default temp {ice_default} K >= melt point 273 K; ICE would melt on frame 1"
+    )
+    # Verify spawn actually uses it
+    w = World(10_000)
+    n = w.spawn_sphere((0.0, 0.0, 0.0), 0.1, ICE, 100)
+    assert n == 100
+    temps = w.temperature[:100].get()
+    for i in range(100):
+        assert temps[i] <= 273.0, (
+            f"Particle {i}: spawn temp {temps[i]} K >= melt point 273 K"
+        )
+    print(f"PASS: test_ice_spawn_temp (default={ice_default} K)")
+
+
+def test_num_active_counts_dead_particles():
+    """bd-mzc.38 regression: num_active must accurately reflect killed particles.
+
+    The first attempt at bd-mzc.38 replaced the count_nonzero with a host-side
+    counter that was never maintained, so num_active always returned
+    _high_water and broke compaction accounting (test_compact regressions).
+    num_active must report the true non-DEAD count. The per-frame no-sync
+    guarantee is provided by _maybe_compact's interval gate (it is the only
+    per-frame caller and runs once every compact_interval frames), not by
+    making this query non-syncing.
+    """
+    w = World(10_000)
+    w.spawn_sphere((0.0, 0.0, 0.0), 0.1, WATER, 500)
+    n0 = w.num_active
+    assert n0 == 500, f"expected 500 active after spawn, got {n0}"
+
+    # Kill roughly half via a large brush sphere, then re-query.
+    w.kill_in_sphere((0.0, 0.0, 0.0), 0.05)
+    n1 = w.num_active
+    assert 0 <= n1 < n0, f"num_active ({n1}) must drop after kill (was {n0})"
+    print("PASS: test_num_active_counts_dead_particles")
+
+
+def test_kill_in_sphere_no_gpu_sync():
+    """bd-mzc.39 regression: kill_in_sphere must not call int(cp.sum(...))."""
+    import unittest.mock as mock
+    w = World(10_000)
+    w.spawn_sphere((0.0, 0.0, 0.0), 0.5, WATER, 1_000)
+
+    original_sum = cp.sum
+    int_sum_calls = []
+
+    # Track if int() is called on a CuPy result from cp.sum
+    original_int = __builtins__.__class__.__mro__  # just to have a ref
+
+    # We patch kill_in_sphere indirectly: track cp.sum calls that return arrays
+    sum_calls = []
+    def mock_sum(*a, **kw):
+        result = original_sum(*a, **kw)
+        sum_calls.append(result)
+        return result
+
+    with mock.patch("world.cp.sum", side_effect=mock_sum):
+        # kill_in_sphere uses cp.sum inside; after fix it should not call int() on it
+        # We check via monkeypatching builtins.int and verifying no call on CuPy array
+        original_builtin_int = __builtins__["int"] if isinstance(__builtins__, dict) else int
+        cupy_int_calls = []
+
+        import builtins
+        orig_int = builtins.int
+        def spy_int(x, *a, **kw):
+            if isinstance(x, cp.ndarray):
+                cupy_int_calls.append(x)
+            return orig_int(x, *a, **kw)
+
+        builtins.int = spy_int
+        try:
+            w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
+        finally:
+            builtins.int = orig_int
+
+    assert len(cupy_int_calls) == 0, (
+        f"kill_in_sphere called int() on a CuPy array {len(cupy_int_calls)} time(s) (GPU sync); bd-mzc.39 not fixed"
+    )
+    print("PASS: test_kill_in_sphere_no_gpu_sync")
+
+
+def test_spawn_sphere_no_loop_sync():
+    """bd-mzc.40 regression: spawn_sphere must not call len() on a CuPy array in its hot path."""
+    import builtins
+    w = World(10_000)
+
+    orig_len = builtins.len
+    cupy_len_calls = []
+    def spy_len(x):
+        if isinstance(x, cp.ndarray):
+            cupy_len_calls.append(type(x).__name__)
+        return orig_len(x)
+
+    builtins.len = spy_len
+    try:
+        n = w.spawn_sphere((0.0, 0.0, 0.0), 0.3, WATER, 500)
+    finally:
+        builtins.len = orig_len
+
+    assert n == 500, f"spawn_sphere returned {n}, expected 500"
+    assert len(cupy_len_calls) == 0, (
+        f"spawn_sphere called len() on CuPy array {len(cupy_len_calls)} time(s) (GPU sync); bd-mzc.40 not fixed"
+    )
+    print("PASS: test_spawn_sphere_no_loop_sync")
+
+
 if __name__ == "__main__":
     test_constructor()
     test_array_shapes_dtypes()
@@ -193,4 +306,8 @@ if __name__ == "__main__":
     test_num_active()
     test_resize()
     test_contiguous_arrays()
+    test_ice_spawn_temp()
+    test_num_active_no_gpu_sync()
+    test_kill_in_sphere_no_gpu_sync()
+    test_spawn_sphere_no_loop_sync()
     print("\nALL TESTS PASSED")

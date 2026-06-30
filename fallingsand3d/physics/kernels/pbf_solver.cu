@@ -262,12 +262,11 @@ void K_PBF_ComputeLambda(
                     }
 
                     // Density (Poly6, self-included).
-                    // STATIC boundary boost: multiply contribution by 2x so solid
-                    // boundaries create stronger density inflation, preventing fluid
-                    // from leaking through coarse STATIC particle layers.
+                    // Standard Akinci boundary: psi_b = m_j (no extra multiplier).
+                    // The former 2x boundary_scale inflated near-wall density to ~2*rho0,
+                    // causing particles to bounce off walls (unphysical repulsion).
                     float diff = h_sq - r_sq;
-                    float boundary_scale = (behavior_j == STATIC && j != i) ? 2.0f : 1.0f;
-                    sum_density += boundary_scale * m_j * diff * diff * diff;
+                    sum_density += m_j * diff * diff * diff;
 
                     // Gradient + heat + exposure (skip self)
                     if (j != i && r_sq > 1e-12f) {
@@ -275,8 +274,7 @@ void K_PBF_ComputeLambda(
                         float3 gW = grad_spiky(r, rlen, h);
                         // grad_pj C_i = (1/rho0) * m_j * grad_W(x*_i - x*_j)
                         // But for denominator: |grad_pj C_i|^2 = (m_j/rho0)^2 * |gradW|^2
-                        // Apply same boundary_scale to gradients for consistency
-                        float scale = boundary_scale * m_j / rho0;
+                        float scale = m_j / rho0;
                         float gx = scale * gW.x;
                         float gy = scale * gW.y;
                         float gz = scale * gW.z;
@@ -798,6 +796,7 @@ void K_PBF_Finalize(
                         if (r_sq > h_sq || r_sq < 1e-12f) continue;
 
                         // Vorticity eta (all neighbors -- PERF-002)
+                        // Use difference form (omega_j - omega_mag_i) to match step2/neighbor_list.
                         if (do_vort_eta) {
                             float rlv = sqrtf(r_sq);
                             float h_rl = h - rlv;
@@ -807,9 +806,10 @@ void K_PBF_Finalize(
                             float mj_v = __ldg(&mass[j]);
                             float rj_v = __ldg(&density[j]);
                             float wt = mj_v / fmaxf(rj_v, 1.0f);
-                            eta_vort.x += wt * omega_j * gs * r.x;
-                            eta_vort.y += wt * omega_j * gs * r.y;
-                            eta_vort.z += wt * omega_j * gs * r.z;
+                            float omega_diff = omega_j - omega_mag_i;
+                            eta_vort.x += wt * omega_diff * gs * r.x;
+                            eta_vort.y += wt * omega_diff * gs * r.y;
+                            eta_vort.z += wt * omega_diff * gs * r.z;
                         }
 
                         if (!do_xsph) continue;
@@ -892,7 +892,8 @@ void K_PBF_Finalize(
         }
     }
 
-    // Akinci surface tension (FLUID only, surface particles): vel += dt * (-gamma * n)
+    // Akinci surface tension (FLUID only, surface particles): vel += dt * (+gamma * n)
+    // +gamma * norm_i coheres fluid (inward force toward interior, §10.16)
     if (behavior == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f) {
         float4 norm_i = __ldg(&normal_in[i]);
         float nc_i = norm_i.w;  // neighbor count
@@ -900,9 +901,9 @@ void K_PBF_Finalize(
             float gamma = c_granular.surface_tension_gamma;
             float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
             if (n_mag > 0.01f) {
-                vel_new.x += dt * (-gamma * norm_i.x);
-                vel_new.y += dt * (-gamma * norm_i.y);
-                vel_new.z += dt * (-gamma * norm_i.z);
+                vel_new.x += dt * (+gamma * norm_i.x);
+                vel_new.y += dt * (+gamma * norm_i.y);
+                vel_new.z += dt * (+gamma * norm_i.z);
             }
         }
     }

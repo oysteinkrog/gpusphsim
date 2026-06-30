@@ -1,11 +1,34 @@
-"""Fused reorder kernel -- gathers ALL SoA particle arrays in one pass.
+"""Fused reorder kernel -- gathers SoA particle arrays in one pass.
 
 Compiles physics/kernels/fused_reorder.cu via CuPy RawModule and provides
-a single ``fused_reorder()`` call that gathers all unsorted arrays into
+a single ``fused_reorder()`` call that gathers unsorted arrays into
 sorted-order temporary buffers using the sorted_index permutation.
 
 This is far more bandwidth-efficient than N separate CuPy fancy-indexing
 calls because sorted_index is read from global memory only once per thread.
+
+DEAD CODE WARNING (bd-mzc.46)
+------------------------------
+This module is NOT on the live production code path as of 2026-06.  The
+live pipeline uses ``counting_sort.counting_sort_full`` (which handles all
+13 particle arrays including kappa, kappa_v, lambda_pbf, particle_dye, and
+angular_velocity).
+
+``fused_reorder`` is still called from test files (test_sort_reorder.py,
+test_gas_physics.py, test_integration_15mat.py) that cannot be touched by
+this bead's owner, so the module is kept rather than deleted.
+
+If this path is ever reactivated for production use, the following 5 arrays
+MUST be added to ``K_FusedReorder`` in fused_reorder.cu and to the
+``fused_reorder()`` signature below to match ``counting_sort_full``'s
+``K_ScatterReorder``:
+  - kappa          (float, DFSPH warm-start pressure)
+  - kappa_v        (float, DFSPH warm-start divergence)
+  - lambda_pbf     (float, PBF lambda)
+  - particle_dye   (float4, per-particle dye colour)
+  - angular_velocity (float4, micropolar angular velocity)
+
+Until then this is intentionally a reduced-coverage reorder path.
 """
 
 from __future__ import annotations

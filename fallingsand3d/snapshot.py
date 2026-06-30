@@ -100,13 +100,30 @@ class SnapshotRing:
         cp.copyto(world.veleval[:n], world.velocity[:n])
         world._high_water = n
 
+        # bd-r4-epic-x2j.6: zero warm-start fields so restored particles start fresh
+        # (matches load_scene in save_load.py lines ~272-276).
+        # Guard with hasattr for optional arrays that may not exist in all world configs.
+        if hasattr(world, 'kappa'):
+            world.kappa[:n] = 0
+        if hasattr(world, 'kappa_v'):
+            world.kappa_v[:n] = 0
+        if hasattr(world, 'lambda_pbf'):
+            world.lambda_pbf[:n] = 0
+        if hasattr(world, 'sleep_counter'):
+            world.sleep_counter[:n] = 0
+        if hasattr(world, 'angular_velocity'):
+            world.angular_velocity[:n] = 0
+
         # Rebuild _spawned_material_ids from restored packed_info
         # NOTE: .get() is acceptable here — undo is user-initiated, not hot path
         unique_mats = cp.unique(world.packed_info[:n] & 0xFF).get()
         world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)
 
         # Rewind ring buffer so future snapshots don't contain stale "future" state
-        self._write_idx = (self._write_idx - steps_back + 1) % self.max_snapshots
+        # Drop the +1: without it, each successive undo steps back one more slot.
+        # With +1, _write_idx doesn't move for steps_back=1, so every undo reads
+        # the same slot and multi-undo is broken.
+        self._write_idx = (self._write_idx - steps_back) % self.max_snapshots
         self._count = max(0, self._count - steps_back)
 
         return True

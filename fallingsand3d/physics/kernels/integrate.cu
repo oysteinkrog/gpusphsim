@@ -239,18 +239,21 @@ void K_Integrate(
     }
 
     // --- GRANULAR anti-creep: zero velocity if nearly at rest AND in equilibrium ---
-    // Equilibrium check: only zero velocity when net acceleration is small.
-    // Without this, gravity (9.8 m/s^2 * dt=0.001 = 0.0098 m/s per frame) is always
-    // below the threshold (0.01), trapping unsupported particles in mid-air.
+    // Equilibrium check: only zero velocity when net SPH force (excluding gravity)
+    // is small. We compare |sph_force|^2 rather than |accel|^2 because accel
+    // includes gravity (~9.8 m/s^2), which always exceeds GRANULAR_ACCEL_REST=5
+    // for unsupported particles — making the old check never fire.
+    // sph_force is the net SPH acceleration; it approaches 0 when pressure and
+    // viscosity forces balance (particle fully supported by its neighbors).
     if (behavior == GRANULAR) {
         float vel_sq_ac = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
         if (vel_sq_ac < GRANULAR_V_THRESHOLD_SQ) {
             float rho_i = sorted_density[i];
             float rho0_i = c_materials[mat_id].rest_density;
             float sr_i = sorted_shear_rate[i];
-            float accel_eq = accel.x * accel.x + accel.y * accel.y + accel.z * accel.z;
+            float sph_sq = sph_force.x * sph_force.x + sph_force.y * sph_force.y + sph_force.z * sph_force.z;
             if (rho_i > GRANULAR_RHO_FACTOR * rho0_i && sr_i < GRANULAR_GAMMA_MIN
-                && accel_eq < GRANULAR_ACCEL_REST_SQ) {
+                && sph_sq < GRANULAR_ACCEL_REST_SQ) {
                 vel_new.x = 0.0f;
                 vel_new.y = 0.0f;
                 vel_new.z = 0.0f;
@@ -352,24 +355,31 @@ void K_Integrate(
     }
 
     // --- Sleep counter update ---
-    // Check if particle should start sleeping (low velocity AND low shear rate)
-    // GRANULAR also requires equilibrium (no large unbalanced forces)
+    // Only GRANULAR particles can accumulate the sleep counter.
+    // FLUID and GAS particles must remain awake to respond to pressure
+    // gradients; if they sleep, the whole fluid pool freezes (no forces are
+    // computed for sleeping particles, so they can never be woken by
+    // pressure differentials, causing permanent deadlock).
+    // GRANULAR requires: low velocity, low shear rate, AND small SPH force
+    // (|sph_force|^2 < GRANULAR_ACCEL_REST_SQ, excluding gravity).
     float vel_sq_sleep = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
     float sr_sleep = sorted_shear_rate[i];
 
-    if (vel_sq_sleep < V_SLEEP_SQ && sr_sleep < GAMMA_SLEEP) {
-        bool can_sleep = true;
-        if (behavior == GRANULAR) {
-            float a_eq = accel.x * accel.x + accel.y * accel.y + accel.z * accel.z;
-            can_sleep = (a_eq < GRANULAR_ACCEL_REST_SQ);
-        }
-        if (can_sleep) {
-            if (sc < 255) sc++;
+    if (behavior == GRANULAR) {
+        if (vel_sq_sleep < V_SLEEP_SQ && sr_sleep < GAMMA_SLEEP) {
+            // Use |sph_force|^2, not |accel|^2 (accel includes gravity which always
+            // exceeds GRANULAR_ACCEL_REST for unsupported particles).
+            float sph_sq = sph_force.x * sph_force.x + sph_force.y * sph_force.y + sph_force.z * sph_force.z;
+            if (sph_sq < GRANULAR_ACCEL_REST_SQ) {
+                if (sc < 255) sc++;
+            } else {
+                sc = 0;
+            }
         } else {
             sc = 0;
         }
     } else {
-        // Conditions not met: reset counter
+        // FLUID/GAS: never accumulate sleep counter (reset if it was set externally)
         sc = 0;
     }
 
@@ -727,7 +737,14 @@ void K_RigidBodyCollisions(
             float rel_vn = rel_vel.x * normal.x + rel_vel.y * normal.y + rel_vel.z * normal.z;
 
             if (rel_vn < 0.0f) {
-                float e = fminf(restitution, ob.lin_vel.w) * 0.5f;
+                // Symmetric body-body collision: each body (thread) independently
+                // applies the impulse. Newton's 3rd law is preserved because the
+                // two threads apply equal and opposite deltas (opposite normals).
+                // No halving is needed: with both threads running, the full
+                // standard impulse formula gives the correct energy-conserving result.
+                // The body-SDF path uses the same formula since only the particle
+                // receives the impulse; the SDF wall is immovable.
+                float e = fminf(restitution, ob.lin_vel.w);
                 float total_inv_coll = inv_mass + (ob_kinematic ? 0.0f : fmaxf(ob_inv_mass, 0.0f));
                 if (total_inv_coll > 1e-10f) {
                     float impulse = -(1.0f + e) * rel_vn * (inv_mass / total_inv_coll);

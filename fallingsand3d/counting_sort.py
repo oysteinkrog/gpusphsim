@@ -202,7 +202,15 @@ def counting_sort_full(
     # --- Phase 4: Scatter + Reorder ---
     # Zero write_offset (graph-capturable memset)
     write_offset.data.memset_async(0x00, write_offset.nbytes)
-    # Zero cell_end
+    # Zero cell_end.
+    # INVARIANT (bd-mzc.47): cell_end is zero-initialised here (and in
+    # allocate_scratch via cupy.zeros).  Value 0 is a safe empty-cell sentinel
+    # because valid cell_end indices are always >= 1: cell_end[c] =
+    # cell_start[c] + histogram[c], and for any non-empty cell histogram[c]>=1
+    # so cell_end[c] >= 1.  A cell_end[c]==0 therefore unambiguously means the
+    # cell is empty and contains no particles.
+    # DO NOT change cupy.zeros to cupy.empty in allocate_scratch, and do not
+    # remove this memset — both are load-bearing for correct empty-cell detection.
     cell_end.data.memset_async(0x00, cell_end.nbytes)
 
     _null = cupy.ndarray(0, dtype=cupy.uint32)

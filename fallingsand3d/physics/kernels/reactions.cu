@@ -222,6 +222,16 @@ void K_Reactions(
         return;
     }
 
+    // ---- DIRT wetting: DIRT + WATER exposure -> MUD (not corrosion) ----
+    // This check must come BEFORE the corrosion whitelist so DIRT transitions
+    // to MUD rather than being corroded (crumbled) by water exposure.
+    // WATER has a non-zero corrosion reaction_rate with DIRT in the interaction
+    // matrix, so exp_corrode accumulates when DIRT neighbours WATER.
+    if (mat_id == MAT_DIRT && exp_corrode > SAND_WET_THRESHOLD) {
+        packed_info[i] = MAKE_PACKED(MAT_MUD, FLUID);
+        return;
+    }
+
     // ---- Sand wetting/drying transitions ----
     if (mat_id == MAT_SAND && exp_corrode > SAND_WET_THRESHOLD) {
         packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
@@ -243,9 +253,11 @@ void K_Reactions(
     }
 
     // ---- Corrosion: health -= exposure_corrode * dt ----
-    // Whitelist: only these materials can be corroded by acid
+    // Whitelist: only these materials can be corroded by acid.
+    // MAT_DIRT is excluded: DIRT+WATER is handled above as DIRT->MUD wetting,
+    // so DIRT should never reach this corrosion path via water exposure.
     if (exp_corrode > 0.0f && (mat_id == MAT_STONE || mat_id == MAT_METAL ||
-        mat_id == MAT_WOOD || mat_id == MAT_DIRT || mat_id == MAT_GRAVEL ||
+        mat_id == MAT_WOOD || mat_id == MAT_GRAVEL ||
         mat_id == MAT_ICE || mat_id == MAT_OIL || mat_id == MAT_GUNPOWDER)) {
         float damage = exp_corrode * dt;
         hlth -= damage;
