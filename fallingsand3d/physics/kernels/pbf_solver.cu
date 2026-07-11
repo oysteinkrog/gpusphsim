@@ -842,7 +842,7 @@ void K_PBF_Finalize(
                                 float pp = c_precalc.pressure_precalc;
                                 float psi_b = m_j;
                                 float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
-                                float m_i_val = c_sim.particle_mass;
+                                float m_i_val = __ldg(&mass[i]);
                                 float3 F_on_fluid = make_float3(
                                     m_i_val * psi_b * press_akinci * pp * gW.x,
                                     m_i_val * psi_b * press_akinci * pp * gW.y,

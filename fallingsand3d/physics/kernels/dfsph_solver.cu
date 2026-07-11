@@ -491,7 +491,7 @@ void K_DFSPH_NonPressureForces(
                             // Newton's 3rd law: reaction force on body = -a_visc * m_i
                             //   = -(F_visc / rho_i) * m_i.
                             // Missing the /rho_i would overscale by ~rho_i (~1000-2500x for water).
-                            float m_i = c_sim.particle_mass;
+                            float m_i = __ldg(&mass[i]);
                             float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_on_body = make_float3(
                                 -(F_visc.x * inv_rho) * m_i,
@@ -1663,7 +1663,7 @@ void K_DFSPH_Finalize(
                                 float psi_b = m_j;
                                 float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
                                 // Force on fluid from boundary (acceleration * mass)
-                                float m_i = c_sim.particle_mass;
+                                float m_i = __ldg(&sorted_mass[i]);
                                 float3 F_on_fluid = make_float3(
                                     m_i * psi_b * press_akinci * pp * gW.x,
                                     m_i * psi_b * press_akinci * pp * gW.y,
