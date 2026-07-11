@@ -22,7 +22,7 @@ from OpenGL.GL import (
     glGenVertexArrays, glBindVertexArray, glGenBuffers, glBindBuffer,
     glBufferData, glBufferSubData, glEnableVertexAttribArray, glVertexAttribPointer,
     glDrawArrays, glEnable, glDisable, glDeleteBuffers, glDeleteVertexArrays,
-    glDeleteProgram, glDepthFunc, glDepthMask, glBlendFunc, glClear,
+    glDeleteProgram, glDepthFunc, glDepthMask, glColorMask, glBlendFunc, glClear,
     glGenFramebuffers, glBindFramebuffer, glFramebufferTexture2D,
     glCheckFramebufferStatus, glDeleteFramebuffers,
     glGenTextures, glBindTexture, glTexImage2D, glTexParameteri,
