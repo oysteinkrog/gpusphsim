@@ -1653,15 +1653,21 @@ void K_DFSPH_Finalize(
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             if (mat_id_j == MAT_RIGID) {
                                 float rlen = sqrtf(r_sq);
-                                float3 gW = grad_spiky(r, rlen, h);
+                                // step2.cu Akinci convention: grad_spiky_variable (no baked
+                                // coefficient) times POSITIVE pressure_precalc, so F_on_fluid
+                                // points along +r = away from the boundary (repulsive).
+                                // grad_spiky's baked-in NEGATIVE spiky_grad_coeff would flip
+                                // the sign and push fluid INTO the boundary.
+                                float3 gW = grad_spiky_variable(r, rlen, h);
+                                float pp = c_precalc.pressure_precalc;
                                 float psi_b = m_j;
                                 float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
                                 // Force on fluid from boundary (acceleration * mass)
                                 float m_i = c_sim.particle_mass;
                                 float3 F_on_fluid = make_float3(
-                                    m_i * psi_b * press_akinci * gW.x,
-                                    m_i * psi_b * press_akinci * gW.y,
-                                    m_i * psi_b * press_akinci * gW.z
+                                    m_i * psi_b * press_akinci * pp * gW.x,
+                                    m_i * psi_b * press_akinci * pp * gW.y,
+                                    m_i * psi_b * press_akinci * pp * gW.z
                                 );
                                 // Newton's 3rd law: reaction on body
                                 int body_id = GET_BODY_ID(pi_j);
