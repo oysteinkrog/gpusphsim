@@ -1226,7 +1226,7 @@ void main() {
             S[0,0] = S[1,1] = S[2,2] = size[0]
         elif sdf_type == 2:  # CYLINDER: radius for XZ, half_height for Y
             S[0,0] = size[0]  # radius
-            S[1,1] = size[2]  # half_height (stored in size.z)
+            S[1,1] = size[1]  # half_height (size.y, matching sdf_cylinder in sph_shared.cuh)
             S[2,2] = size[0]  # radius
         elif sdf_type == 3:  # PLANE: large flat quad
             S[0,0] = S[2,2] = 5.0  # 10m across
