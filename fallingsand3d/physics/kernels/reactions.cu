@@ -345,8 +345,13 @@ void K_BlastWave(
     // Only process freshly-exploded gunpowder (FIRE with lifetime == GUNPOWDER_FIRE_LIFETIME)
     if (mat_id != MAT_FIRE) return;
     float lt = sorted_lifetime[i];
-    // Accept lifetime close to GUNPOWDER_FIRE_LIFETIME (within 1 dt tolerance)
-    if (lt < GUNPOWDER_FIRE_LIFETIME - 0.01f || lt > GUNPOWDER_FIRE_LIFETIME + 0.01f) return;
+    // Accept lifetime within half a substep of GUNPOWDER_FIRE_LIFETIME so the
+    // blast fires on exactly one substep: the conversion substep leaves
+    // lifetime == GUNPOWDER_FIRE_LIFETIME (Reactions returns before decay),
+    // and every later substep has decayed it by >= dt, outside this window.
+    // (A fixed +-0.01 window spanned ~10 substeps at dt=0.001.)
+    float tol = 0.5f * c_sim.dt;
+    if (lt < GUNPOWDER_FIRE_LIFETIME - tol || lt > GUNPOWDER_FIRE_LIFETIME + tol) return;
 
     float4 pos_i4 = sorted_position[i];
     float3 pos_i = make_float3(pos_i4.x, pos_i4.y, pos_i4.z);
