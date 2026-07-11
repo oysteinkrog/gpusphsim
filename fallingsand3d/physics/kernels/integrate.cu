@@ -62,6 +62,7 @@ void K_Integrate(
     const uint*     __restrict__ sorted_packed_info,    // sorted packed_info
     const float*    __restrict__ sorted_temperature,    // sorted temperature
     const float*    __restrict__ sorted_health,         // sorted health
+    const float*    __restrict__ sorted_lifetime,       // sorted remaining lifetime (seconds)
     const float*    __restrict__ sorted_density,        // sorted density (from Step1)
     const float*    __restrict__ sorted_shear_rate,     // sorted shear rate (from Step1)
     const float*    __restrict__ sorted_dTdt,           // sorted dTdt (heat diffusion from Step1)
@@ -83,6 +84,9 @@ void K_Integrate(
     float*          __restrict__ temperature_out,       // unsorted temperature (updated)
     float4*         __restrict__ particle_dye_out,       // unsorted particle dye (updated)
     float4*         __restrict__ angular_velocity_out,   // unsorted angular velocity (micropolar update)
+    float*          __restrict__ health_out,             // unsorted health (reaction state carry-back)
+    float*          __restrict__ lifetime_out,           // unsorted lifetime (reaction state carry-back)
+    float*          __restrict__ mass_out,               // unsorted mass (spawn/reaction state carry-back)
     uint*           __restrict__ max_displacement_out    // [1] atomicMax of displacement^2 (float-as-uint)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -95,6 +99,16 @@ void K_Integrate(
 
     // Unsorted index for writeback
     uint orig_idx = sort_indexes[i];
+
+    // --- Carry reaction/spawn state (health, lifetime, mass) back to unsorted.
+    // These are mutated by K_Reactions / K_SpawnGas in sorted space but never by
+    // K_Integrate, and every substep re-gathers them from the unsorted arrays.
+    // Without this scatter, cumulative reaction progress (fire lifetime decay,
+    // acid health loss, gas-spawn mass transfer) is wiped each substep. (CRIT-3)
+    // Done unconditionally here so it covers the STATIC / sleeping early-returns. ---
+    if (health_out)   health_out[orig_idx]   = sorted_health[i];
+    if (lifetime_out) lifetime_out[orig_idx] = sorted_lifetime[i];
+    if (mass_out)     mass_out[orig_idx]     = sorted_mass[i];
 
     // --- Skip STATIC particles ---
     if (behavior == STATIC) {
@@ -533,22 +547,19 @@ void K_IntegrateRigidBodies(
     float4 q = body.rotation;
     float3 Iinv = make_float3(body.inertia_inv.x, body.inertia_inv.y, body.inertia_inv.z);
 
-    // Rotate body-frame diagonal inertia inverse into world frame:
-    // I_world_inv = R * diag(I_body_inv) * R^T
-    // For any vector v: I_world_inv * v = R * diag(Iinv) * (R^T * v)
-    // Equivalently, column j of I_world_inv = quat_rotate(q, e_j * Iinv_j)
-    float3 col0 = quat_rotate(q, make_float3(Iinv.x, 0.0f, 0.0f));
-    float3 col1 = quat_rotate(q, make_float3(0.0f, Iinv.y, 0.0f));
-    float3 col2 = quat_rotate(q, make_float3(0.0f, 0.0f, Iinv.z));
-
-    // I_world_inv * tau = dot(col_k, tau) for each component
-    // Actually: I_world_inv is the matrix [col0 col1 col2] (as columns).
-    // (I_world_inv * tau).x = col0.x*tau.x + col1.x*tau.y + col2.x*tau.z
-    float3 ang_accel = make_float3(
-        col0.x * tau.x + col1.x * tau.y + col2.x * tau.z,
-        col0.y * tau.x + col1.y * tau.y + col2.y * tau.z,
-        col0.z * tau.x + col1.z * tau.y + col2.z * tau.z
+    // Apply the world-frame inverse inertia to the torque:
+    //   I_world_inv = R * diag(I_body_inv) * R^T
+    //   ang_accel   = I_world_inv * tau = R * diag(Iinv) * (R^T * tau)
+    // Evaluated as three steps to keep the full R^T factor (previously the
+    // R^T rotation of tau into the body frame was dropped, giving the wrong
+    // axis and magnitude for any rotated non-cubic body). (HIGH-6)
+    float3 tau_body = quat_rotate_inv(q, tau);              // R^T * tau
+    float3 ang_accel_body = make_float3(                    // diag(Iinv) * tau_body
+        Iinv.x * tau_body.x,
+        Iinv.y * tau_body.y,
+        Iinv.z * tau_body.z
     );
+    float3 ang_accel = quat_rotate(q, ang_accel_body);      // R * (...)
 
     float3 ang_vel = make_float3(body.ang_vel.x, body.ang_vel.y, body.ang_vel.z);
     ang_vel.x += ang_accel.x * dt;
