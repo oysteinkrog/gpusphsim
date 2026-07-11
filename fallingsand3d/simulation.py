@@ -323,6 +323,15 @@ class Simulation:
         """Change the world half-extent and re-upload all constants."""
         self._world_half_size = half_size
         self._upload_constants()
+        # Re-upload grid/sim constants to the active non-WCSPH solver module too;
+        # _upload_constants only touches the WCSPH modules, so PBF/DFSPH would
+        # otherwise keep stale grid_min/cell_size after a resize (CRIT-4).
+        if self._profile.solver_type == SolverType.PBF:
+            import pbf_solver
+            self._upload_solver_constants(pbf_solver)
+        elif self._profile.solver_type == SolverType.DFSPH:
+            import dfsph_solver
+            self._upload_solver_constants(dfsph_solver)
         # Invalidate CUDA graphs (grid changed) and reset sort skip
         self._invalidate_graphs()
         self._sort_skip_next = False
@@ -340,6 +349,10 @@ class Simulation:
             num_particles=self.world._high_water,
         )
 
+        # Cache the authoritative grid params so solver modules (PBF/DFSPH) get
+        # the SAME table_size/table_mask as counting_sort uses (CRIT-4).
+        self._grid_params = grid_params
+
         # Reallocate cell arrays if table size changed
         if table_size != self._table_size:
             self._table_size = table_size
@@ -353,11 +366,20 @@ class Simulation:
         # CFL velocity limit: v_max = factor * h / dt
         vlf = getattr(self._profile, 'velocity_limit_factor', 0.9)
         vel_limit = vlf * self._h / max(self.dt, 1e-8)
+        # Preserve the user's current gravity across re-uploads (e.g. world
+        # resize); only fall back to the default on the very first upload.
+        # Previously this hardcoded (0,-4,0) and silently reset user gravity (HIGH-3).
+        prev = getattr(self, '_sim_params', None)
+        if prev is not None:
+            g = prev[0]["gravity"]
+            gravity = (float(g[0]), float(g[1]), float(g[2]))
+        else:
+            gravity = (0.0, -4.0, 0.0)
         sim_params = step1.build_sim_params(
             smoothing_length=self._h,
             particle_mass=0.02,
             particle_spacing=0.02,
-            gravity=(0.0, -4.0, 0.0),
+            gravity=gravity,
             dt=self.dt,
             restitution=0.3,
             wall_friction=0.5,
@@ -505,10 +527,18 @@ class Simulation:
 
     def _upload_solver_constants(self, solver_module) -> None:
         """Upload all shared constants (grid, sim, precalc, materials, interactions) to a solver module."""
-        hs = self._world_half_size
-        wmin = (-hs, -hs, -hs)
-        wmax = (hs, hs, hs)
-        grid_params, _ = hash_sort.build_grid_params_for_world(wmin, wmax, self._h)
+        # Reuse the exact grid params counting_sort/step1/step2 use, so the
+        # solver kernels hash into the same table (matching table_size/mask and
+        # grid_min/cell_size). Rebuilding here without num_particles previously
+        # left the solver on the default 262144-entry table (CRIT-4).
+        grid_params = getattr(self, '_grid_params', None)
+        if grid_params is None:
+            hs = self._world_half_size
+            wmin = (-hs, -hs, -hs)
+            wmax = (hs, hs, hs)
+            grid_params, _ = hash_sort.build_grid_params_for_world(
+                wmin, wmax, self._h, num_particles=self.world._high_water,
+            )
         precalc_params = step1.build_precalc_params(smoothing_length=0.04, viscosity=1.0)
         materials_data = build_material_array()
         interactions_data = build_interaction_matrix()
@@ -971,20 +1001,25 @@ class Simulation:
             w.sorted_packed_info[:n], w.sorted_shear_rate[:n],
             w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
-            w.sorted_velocity,  # velocity updated in-place
+            # Write to veleval scratch, not in-place: velocity is a __restrict__
+            # neighbour input here, so aliasing it with the output is UB and a
+            # read/write race (MED-3). K_DFSPH_NonPressureForces writes every
+            # particle in [0,n), so the copy-back below is complete.
+            w.sorted_veleval[:n],
             vorticity_in=w.sorted_vorticity[:n],
             normal_in=w.sorted_normal[:n],
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
         )
+        w.sorted_velocity[:n] = w.sorted_veleval[:n]
 
         # 4. Divergence solver (warm-started kappa_v -- PERF-008)
         # Apply warm-started kappa_v from previous substep (scaled during sort reorder writeback)
         if self._profile.dfsph_div_warm_start > 0.0:
             w.sorted_kappa_v[:n] *= self._profile.dfsph_div_warm_start
             dfsph_solver.correct_velocity_div(
-                w.sorted_velocity, w.sorted_density[:n],
+                w.sorted_velocity[:n], w.sorted_density[:n],
                 w.sorted_mass[:n], w.sorted_kappa_v[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
@@ -998,7 +1033,7 @@ class Simulation:
                 w.sorted_kappa_v,
             )
             dfsph_solver.correct_velocity_div(
-                w.sorted_velocity, w.sorted_density[:n],
+                w.sorted_velocity[:n], w.sorted_density[:n],
                 w.sorted_mass[:n], w.sorted_kappa_v[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
