@@ -983,6 +983,8 @@ class Simulation:
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            sorted_lifetime=w.sorted_lifetime[:n],
+            health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
         )
 
@@ -1133,6 +1135,8 @@ class Simulation:
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            sorted_lifetime=w.sorted_lifetime[:n],
+            health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
         )
 
