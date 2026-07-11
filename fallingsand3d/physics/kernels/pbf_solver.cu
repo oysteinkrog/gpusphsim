@@ -609,6 +609,10 @@ void K_PBF_Finalize(
     const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,     // force accumulator (NULL if no bodies)
     float*          __restrict__ d_rigid_torques,    // torque accumulator (NULL if no bodies)
+    const float*    __restrict__ sorted_lifetime,    // reaction-mutated lifetime (sorted), or NULL
+    float*          __restrict__ health_out,         // unsorted health writeback, or NULL
+    float*          __restrict__ lifetime_out,       // unsorted lifetime writeback, or NULL
+    float*          __restrict__ mass_out,           // unsorted mass writeback, or NULL
     uint*           __restrict__ max_displacement_out // [1] atomicMax of displacement^2 (float-as-uint), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -618,6 +622,16 @@ void K_PBF_Finalize(
     int behavior = GET_BEHAVIOR(pi);
     uint mat_id = GET_MATERIAL_ID(pi);
     uint orig_idx = sort_indexes[i];
+
+    // Reaction-state carry-back (bd-r4fix-uup.9): K_Reactions/K_SpawnGas mutate
+    // health/lifetime/mass in SORTED space every substep; scatter them back to
+    // the unsorted arrays or the next substep re-gathers stale values (wiping
+    // fire lifetime decay, acid health loss, gas-spawn mass transfer). None of
+    // these are modified below, so an early unconditional scatter is correct
+    // and also covers the STATIC/sleeping early-return paths.
+    if (health_out)                      health_out[orig_idx]   = health_in[i];
+    if (lifetime_out && sorted_lifetime) lifetime_out[orig_idx] = __ldg(&sorted_lifetime[i]);
+    if (mass_out)                        mass_out[orig_idx]     = mass[i];
 
     float temp = temperature_in[i];
     float hlth = health_in[i];
