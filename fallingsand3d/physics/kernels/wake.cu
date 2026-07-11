@@ -15,7 +15,7 @@
  *   c_grid -- GridParams from common.cuh (for position -> cell mapping)
  */
 
-#include "common.cuh"
+#include "sph_shared.cuh"   // common.cuh + V_WAKE_SQ
 
 /* ======================================================================
  * Grid cell computation (inlined, same as hash_sort.cu)
@@ -49,7 +49,7 @@ void K_MarkWakeCells(
     if (!should_mark && !IS_SLEEPING(pi) && GET_BEHAVIOR(pi) != STATIC) {
         float4 v = velocity[i];
         float v_sq = v.x*v.x + v.y*v.y + v.z*v.z;
-        should_mark = (v_sq > 0.02f * 0.02f);  // V_WAKE_SQ
+        should_mark = (v_sq > V_WAKE_SQ);
     }
     if (!should_mark) return;
 
