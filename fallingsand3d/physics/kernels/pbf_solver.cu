@@ -1031,14 +1031,23 @@ void K_PBF_Finalize(
         }
     }
 
-    // Sleep: velocity-based (replaces shear_rate for PBF)
-    if (vel_sq < V_SLEEP_SQ) {
-        if (sc < 255) sc++;
+    // Sleep: velocity-based (replaces shear_rate for PBF).
+    // GRANULAR only, matching WCSPH (integrate.cu): FLUID and GAS must never
+    // accumulate the sleep counter — sleeping particles get no forces, so a
+    // slow fluid pool (or gas hovering at terminal velocity) would freeze
+    // permanently with no pressure differential left to wake it.
+    if (behavior == GRANULAR) {
+        if (vel_sq < V_SLEEP_SQ) {
+            if (sc < 255) sc++;
+        } else {
+            sc = 0;
+        }
+        if (sc >= SLEEP_THRESHOLD) {
+            pi = SET_SLEEPING(pi);
+        }
     } else {
+        // FLUID/GAS: never accumulate sleep counter (reset if set externally)
         sc = 0;
-    }
-    if (sc >= SLEEP_THRESHOLD) {
-        pi = SET_SLEEPING(pi);
     }
 
     // Temperature integration
