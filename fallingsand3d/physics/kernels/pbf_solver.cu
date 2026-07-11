@@ -373,8 +373,11 @@ void K_PBF_ComputeLambda(
             float inv = 1.0f / grad_len;
             pressure_normal_out[i] = make_float4(grad_ci.x*inv, grad_ci.y*inv, grad_ci.z*inv, grad_len);
         } else {
-            // Fallback to gravity direction when no gradient available
-            pressure_normal_out[i] = make_float4(0.0f, 1.0f, 0.0f, 0.0f);
+            // No usable gradient: emit zero normal so the n_len_sq > 0.5f
+            // validity check in Finalize fails and friction is skipped.
+            // (A fabricated up-normal here would apply friction against a
+            // fictitious contact for free-falling/isolated particles.)
+            pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
     } else {
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -714,18 +717,23 @@ void K_PBF_Finalize(
         float n_len_sq = n.x*n.x + n.y*n.y + n.z*n.z;
 
         if (n_len_sq > 0.5f) {  // valid unit normal
-            // Decompose correction velocity along pressure normal
+            // Decompose correction velocity along pressure normal.
+            // n points INTO the pile (direction of increasing density); the PBF
+            // constraint pushes over-dense particles OUT of the pile, so the
+            // load-bearing normal correction has vc_dot_n < 0. Its magnitude is
+            // the Coulomb normal load that bounds the tangential correction.
             float vc_dot_n = v_corr.x*n.x + v_corr.y*n.y + v_corr.z*n.z;
 
-            if (vc_dot_n > 0.0f) {
+            if (vc_dot_n < 0.0f) {
+                float vn_mag = -vc_dot_n;  // normal correction magnitude (> 0)
                 float3 vc_n = make_float3(vc_dot_n*n.x, vc_dot_n*n.y, vc_dot_n*n.z);
                 float3 vc_t = make_float3(v_corr.x - vc_n.x, v_corr.y - vc_n.y, v_corr.z - vc_n.z);
 
                 float tang_sq = vc_t.x*vc_t.x + vc_t.y*vc_t.y + vc_t.z*vc_t.z;
 
                 // Static friction dead zone: below minimum normal velocity, zero tangential
-                float max_tang = (vc_dot_n < 5e-4f) ? 0.0f
-                               : c_granular.tan_phi_f * vc_dot_n + c_granular.cohesion * inv_dt;
+                float max_tang = (vn_mag < 5e-4f) ? 0.0f
+                               : c_granular.tan_phi_f * vn_mag + c_granular.cohesion * inv_dt;
 
                 if (tang_sq > max_tang * max_tang) {
                     if (max_tang > 0.0f && tang_sq > 1e-12f) {
