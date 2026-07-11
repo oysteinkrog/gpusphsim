@@ -957,6 +957,9 @@ class UI:
                 )
                 if changed:
                     sim.ist_enabled = new_ist
+                    # IST kernels are baked into captured CUDA graphs;
+                    # toggling requires re-capture.
+                    sim._invalidate_graphs()
                 if not is_wcsph:
                     imgui.end_disabled()
 
@@ -978,6 +981,9 @@ class UI:
                     if changed:
                         sim.ist_iterations = val
                         sim.update_ist_params()
+                        # Iteration count changes the kernel launch sequence
+                        # baked into captured CUDA graphs; force re-capture.
+                        sim._invalidate_graphs()
 
             imgui.end()
 
