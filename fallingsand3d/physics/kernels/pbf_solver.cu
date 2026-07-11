@@ -1015,8 +1015,9 @@ void K_PBF_Finalize(
     }
 
     // GRANULAR anti-creep: zero velocity when nearly at rest and well-packed.
-    // Higher threshold than WCSPH (0.05 vs 0.01) because PBF position corrections
-    // generate artificial spreading velocity that must be caught here.
+    // Same 0.01 m/s velocity threshold as WCSPH (integrate.cu
+    // GRANULAR_V_THRESHOLD); catches artificial spreading velocity generated
+    // by PBF position corrections.
     if (behavior == GRANULAR) {
         vel_sq = vel_new.x*vel_new.x + vel_new.y*vel_new.y + vel_new.z*vel_new.z;
         if (vel_sq < 0.01f * 0.01f) {
