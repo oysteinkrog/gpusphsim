@@ -588,6 +588,20 @@ class Simulation:
 
         return n_total
 
+    def notify_scene_changed(self) -> None:
+        """Signal that the particle set was mutated outside the substep loop
+        (brush/gas spawn, R reset, preset load, Ctrl+Z undo, timeline restore).
+
+        Forces a full counting sort on the next step and drops any pending
+        grid-reuse skip, so the reuse path never re-gathers through a stale
+        sort permutation (wrong binning when n is unchanged, or out-of-bounds
+        reads when n grew). n-change alone is caught by the guard in
+        _run_grid_setup; this also covers same-n mutations. (CRIT-5)
+        """
+        self._sort_skip_next = False
+        self._sort_skip_consecutive = 0
+        self._last_full_sort_n = -1
+
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
 
@@ -597,6 +611,15 @@ class Simulation:
         cell_end computation.
         """
         w = self.world
+
+        # Safety guard: the grid-reuse gather reads self._sort_perm[:n], which is
+        # only valid for the n that produced it. If the particle count changed
+        # since the last full sort (brush spawn, gas spawn, preset load, reset,
+        # undo, timeline restore), perm entries in [last_n:n] are uninitialised
+        # -> garbage indices -> OOB device reads. Force a full sort on any n
+        # change so no mutation path can leave a stale/undersized perm (CRIT-5).
+        if n != getattr(self, '_last_full_sort_n', -1):
+            force_sort = True
 
         if self._sort_skip_next and not force_sort:
             # Grid reuse: just re-gather unsorted -> sorted using old sort_perm
@@ -638,6 +661,9 @@ class Simulation:
 
         # Full sort: reset max_displacement tracker (fresh baseline for grid reuse)
         w.max_displacement.data.memset_async(0x00, w.max_displacement.nbytes)
+        # Record the count this full sort was built for; grid reuse is only
+        # valid while n stays equal to this (see guard above).
+        self._last_full_sort_n = n
 
         counting_sort.counting_sort_full(
             num_particles=n,
