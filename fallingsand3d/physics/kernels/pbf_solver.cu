@@ -270,6 +270,9 @@ void K_PBF_ComputeLambda(
     float sum_dTdt = 0.0f;
     float sum_exposure_heat = 0.0f;
     float sum_exposure_corrode = 0.0f;
+    // Kernel support weight of all non-self, non-DEAD neighbours (GAS and
+    // MAT_RIGID included). Exposure sums are divided by it, as in K_Step1.
+    float sum_W = 0.0f;
     float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
     float T_i = 0.0f;
     float kappa_i = 0.0f;
@@ -330,6 +333,7 @@ void K_PBF_ComputeLambda(
                             float T_j = __ldg(&temperature_in[j]);
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float w_poly6_var = diff_xp * diff_xp * diff_xp;
+                            if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
                         }
@@ -342,6 +346,10 @@ void K_PBF_ComputeLambda(
                     // causing particles to bounce off walls (unphysical repulsion).
                     float diff = h_sq - r_sq;
                     sum_density += m_j * diff * diff * diff;
+
+                    // Exposure support weight: every non-self, non-DEAD neighbour,
+                    // MAT_RIGID included, so a wall dilutes exposure (as in K_Step1).
+                    if (do_heat && j != i && GET_MATERIAL_ID(pi_j) != MAT_DEAD) sum_W += diff * diff * diff;
 
                     // Gradient + heat + exposure (skip self)
                     if (j != i && r_sq > 1e-12f) {
@@ -433,8 +441,10 @@ void K_PBF_ComputeLambda(
     if (do_heat) {
         float cp_i = c_materials[mat_id_i].heat_capacity;
         dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, RHO_EPSILON);
-        exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
-        exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+        // Exposure: support fraction, sum(rate*W) / sum(W) (same as K_Step1)
+        float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
+        exposure_heat_out[i] = sum_exposure_heat * inv_sum_W;
+        exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W;
         if (dye_on) dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
     }
 

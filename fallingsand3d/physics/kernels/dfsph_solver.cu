@@ -135,6 +135,9 @@ void K_DFSPH_ComputeDensityAlpha(
     float sum_dTdt = 0.0f;
     float sum_exposure_heat = 0.0f;
     float sum_exposure_corrode = 0.0f;
+    // Kernel support weight of all non-self, non-DEAD neighbours (GAS and
+    // MAT_RIGID included). Exposure sums are divided by it, as in K_Step1.
+    float sum_W = 0.0f;
     float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
     bool dye_on = (c_sim.dye_enabled != 0) && (dye_rate_out != 0);
     float4 dye_i = dye_on ? __ldg(&particle_dye_in[i]) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -187,6 +190,7 @@ void K_DFSPH_ComputeDensityAlpha(
                         float T_j = __ldg(&temperature_in[j]);
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         float w_poly6_var = diff_xp * diff_xp * diff_xp;
+                        if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
                         sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                         sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
                         continue;
@@ -195,6 +199,10 @@ void K_DFSPH_ComputeDensityAlpha(
                     // Density (Poly6)
                     float diff = h_sq - r_sq;
                     sum_density += m_j * diff * diff * diff;
+
+                    // Exposure support weight: every non-self, non-DEAD neighbour,
+                    // MAT_RIGID included, so a wall dilutes exposure (as in K_Step1).
+                    if (j != i && GET_MATERIAL_ID(pi_j) != MAT_DEAD) sum_W += diff * diff * diff;
 
                     // Skip self for non-density quantities
                     if (j != i && r_sq > 1e-12f) {
@@ -310,8 +318,9 @@ void K_DFSPH_ComputeDensityAlpha(
         // Still write heat/exposure outputs (computed above)
         float cp_i_s = c_materials[mat_id_i].heat_capacity;
         dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(c_materials[mat_id_i].rest_density * cp_i_s, 1.0f);
-        exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
-        exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+        float inv_sum_W_s = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
+        exposure_heat_out[i] = sum_exposure_heat * inv_sum_W_s;
+        exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W_s;
         if (dye_rate_out != 0) {
             dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
         }
@@ -347,9 +356,10 @@ void K_DFSPH_ComputeDensityAlpha(
     float cp_i = c_materials[mat_id_i].heat_capacity;
     dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, RHO_EPSILON);
 
-    // Exposure
-    exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
-    exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+    // Exposure: support fraction, sum(rate*W) / sum(W) (same as K_Step1)
+    float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
+    exposure_heat_out[i] = sum_exposure_heat * inv_sum_W;
+    exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W;
 
     // Dye diffusion output
     if (dye_rate_out != 0) {
