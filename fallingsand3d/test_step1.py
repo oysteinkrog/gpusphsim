@@ -1455,5 +1455,77 @@ def main() -> None:
     print("\n=== ALL CHECKS PASSED ===")
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.77: rigid boundary psi_b uses the fluid's own rest density
+# ---------------------------------------------------------------------------
+
+def _fluid_rigid_pair_density(fluid_mat: int, build_nl: bool) -> tuple[float, float, float]:
+    """One FLUID particle of `fluid_mat` with one MAT_RIGID neighbour at 0.5 h.
+
+    The rigid particle carries mass RIGID_PSI_RHO0 * V_b, as
+    rigid_bodies.inject_boundary_particles stores it. Returns
+    (fluid density, fluid self term, W_ij) with W_ij = poly6 at the pair
+    distance, all in kernel units (kg/m^3 and 1/m^3).
+    """
+    from materials import MAT_RIGID, MATERIALS, STATIC
+    from rigid_bodies import RIGID_PSI_RHO0
+    from step1 import compute_step1_build_nl
+
+    V_b = 1.5e-5  # arbitrary boundary volume (m^3)
+    m_fluid = MATERIALS[fluid_mat].rest_density * SPACING**3
+    sep = 0.5 * H
+    pos = np.zeros((2, 4), dtype=np.float32)
+    pos[1, 0] = sep
+    mass = np.array([m_fluid, RIGID_PSI_RHO0 * V_b], dtype=np.float32)
+    packed = np.array([fluid_mat | (FLUID << 8), MAT_RIGID | (STATIC << 8)], dtype=np.uint32)
+
+    _upload_all_params()
+    scene = counting_sort_scene(
+        pos, velocity=np.zeros((2, 4), np.float32), mass=mass, packed_info=packed,
+        temperature=np.full(2, 293.0, np.float32), grid_params=default_grid_params(),
+    )
+    args = (scene["position"], scene["velocity"], scene["mass"], None,
+            scene["packed_info"], scene["temperature"],
+            scene["cell_start"], scene["cell_end"])
+    if build_nl:
+        max_nb = 32
+        density = compute_step1_build_nl(
+            *args, cupy.zeros(2 * max_nb, dtype=cupy.uint32),
+            cupy.zeros(2, dtype=cupy.uint32), max_nb=max_nb,
+            velocity_h=scene["velocity_h"])[0]
+    else:
+        density = compute_step1(*args, velocity_h=scene["velocity_h"])[0]
+    cupy.cuda.Device().synchronize()
+
+    perm = cupy.asnumpy(scene["sort_perm"]).astype(np.int64)
+    rho = np.zeros(2, dtype=np.float64)
+    rho[perm] = cupy.asnumpy(density)
+    self_term = POLY6_COEFF * m_fluid * H_SQ**3
+    w_ij = POLY6_COEFF * (H_SQ - sep * sep) ** 3
+    return float(rho[0]), self_term, w_ij * V_b
+
+
+@pytest.mark.parametrize("build_nl", [False, True])
+@pytest.mark.parametrize("fluid_name,rho0", [
+    ("OIL", 2125.0), ("WATER", 2500.0), ("MUD", 4500.0), ("LAVA", 6500.0),
+])
+def test_rigid_neighbour_density_uses_fluid_rest_density(fluid_name: str, rho0: float,
+                                                          build_nl: bool) -> None:
+    """A rigid neighbour adds rho0_i * V_b * W_ij, with the fluid's own rho0.
+
+    Before the fix it added RIGID_PSI_RHO0 * V_b * W_ij = 2500 * V_b * W_ij
+    for every fluid, so OIL (2125) read the wall 1.18x too dense, MUD (4500)
+    0.56x and LAVA (6500) 0.38x. WATER must be unchanged.
+    """
+    import materials
+    from materials import MATERIALS
+    fluid_mat = getattr(materials, fluid_name)
+    assert MATERIALS[fluid_mat].rest_density == rho0
+    rho, self_term, vw = _fluid_rigid_pair_density(fluid_mat, build_nl)
+    got = rho - self_term
+    want = rho0 * vw
+    assert abs(got - want) <= 1e-4 * want, (fluid_mat, build_nl, got, want, 2500.0 * vw)
+
+
 if __name__ == "__main__":
     main()
