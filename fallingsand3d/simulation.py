@@ -1638,7 +1638,8 @@ class Simulation:
             changed = True
 
         if num_dead < reserve:
-            if w.add_dead_reserve(reserve - num_dead, spacing=self._h) > 0:
+            if w.add_dead_reserve(reserve - num_dead, spacing=self._h,
+                                  grid_min=(-self._world_half_size,) * 3) > 0:
                 changed = True
 
         if changed:

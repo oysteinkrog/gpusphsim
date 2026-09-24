@@ -1071,10 +1071,10 @@ def test_dead_reserve_survives_compaction():
     n = sim._maybe_compact()
     # Add more water and kill enough of it to go past reserve + threshold.
     w.spawn_cube((-0.5, -0.5, -0.5), (0.5, 0.0, 0.5), WATER, 0.02)
-    killed = w.kill_in_sphere((0.0, -0.25, 0.0), 0.45)
-    assert killed > sim.compact_threshold
     n_before = w._high_water
+    w.kill_in_sphere((0.0, -0.25, 0.0), 0.45)
     alive = w.num_active
+    assert n_before - alive > w.dead_reserve + sim.compact_threshold
     sim._frame_counter = sim.compact_interval  # compaction due
     n = sim._maybe_compact()
     assert n < n_before, "compaction did not run"
@@ -1109,7 +1109,7 @@ def _park_bucket_loads(max_particles, start, count, table_size, h=H, half=1.0):
     from world import World
     w = World.__new__(World)
     w.max_particles = max_particles
-    pos = w.park_positions(cupy.arange(start, start + count), h).get()
+    pos = w.park_positions(cupy.arange(start, start + count), h, (-half,) * 3).get()
     gmin = np.float32(-half)
     delta = np.float32(1.0 / h)
     cells = np.floor((pos[:, :3].astype(np.float32) - gmin) * delta).astype(np.int64)
@@ -1126,8 +1126,9 @@ def test_dead_reserve_parked_bucket_load():
     from world import DEAD_RESERVE_DEFAULT
     for max_p in (100_000, 500_000, 1_000_000, 2_000_000):
         for start in (0, 12_345, max_p // 2, max_p - DEAD_RESERVE_DEFAULT):
-            for ts in (1 << 18, 1 << 19, 1 << 20):
-                uniq, worst = _park_bucket_loads(max_p, start, DEAD_RESERVE_DEFAULT, ts)
+            for ts, half in ((1 << 18, 1.0), (1 << 19, 1.37), (1 << 20, 10.0)):
+                uniq, worst = _park_bucket_loads(max_p, start, DEAD_RESERVE_DEFAULT,
+                                                 ts, half=half)
                 assert uniq == DEAD_RESERVE_DEFAULT, (max_p, start, uniq)
                 assert worst <= 8, (max_p, start, ts, worst)
 

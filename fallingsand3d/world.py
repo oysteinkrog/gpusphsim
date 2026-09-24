@@ -383,33 +383,42 @@ class World:
         return (self.dead_reserve > 0
                 and not BOILABLE_MATERIAL_IDS.isdisjoint(self._spawned_material_ids))
 
-    def park_positions(self, slots, spacing: float = PARK_SPACING_DEFAULT):
+    def park_positions(self, slots, spacing: float = PARK_SPACING_DEFAULT,
+                       grid_min: Tuple[float, float, float] = (-1.0, -1.0, -1.0)):
         """Parking positions (float4, w=0) for DEAD reserve slot indices.
 
         Each slot index maps to its own site on a cube lattice of side
         ceil(cbrt(max_particles)) at the given spacing, placed under
         PARK_ORIGIN. Distinct slots never share a site, so with spacing = h
-        every parked particle sits in its own grid cell. Sites are cell
-        centred so float rounding cannot push two into one cell.
+        every parked particle sits in its own grid cell. The lattice is
+        snapped to the grid that starts at grid_min, and each site is at a
+        cell centre, so float rounding cannot push two into one cell.
         """
         slots = cp.asarray(slots, dtype=cp.int64)
         side = max(1, int(np.ceil(self.max_particles ** (1.0 / 3.0))))
         while side ** 3 < self.max_particles:
             side += 1
         ix = slots % side
-        iy = (slots // side) % side
+        iy = slots // side % side
         iz = slots // (side * side)
-        ox, oy, oz = PARK_ORIGIN
+        # Lattice corner: centred on PARK_ORIGIN in x and z, lattice top at
+        # PARK_ORIGIN in y, snapped to a cell corner of the grid.
+        corner = (PARK_ORIGIN[0] - side * 0.5 * spacing,
+                  PARK_ORIGIN[1] - side * spacing,
+                  PARK_ORIGIN[2] - side * 0.5 * spacing)
+        base = [g + round((c - g) / spacing) * spacing
+                for c, g in zip(corner, grid_min)]
         pos = cp.zeros((slots.shape[0], 4), dtype=cp.float32)
-        pos[:, 0] = ox + (ix - side * 0.5 + 0.5) * spacing
-        pos[:, 1] = oy - (iy + 0.5) * spacing
-        pos[:, 2] = oz + (iz - side * 0.5 + 0.5) * spacing
+        pos[:, 0] = base[0] + (ix + 0.5) * spacing
+        pos[:, 1] = base[1] + (iy + 0.5) * spacing
+        pos[:, 2] = base[2] + (iz + 0.5) * spacing
         return pos
 
-    def add_dead_reserve(self, count: int, spacing: float = PARK_SPACING_DEFAULT) -> int:
+    def add_dead_reserve(self, count: int, spacing: float = PARK_SPACING_DEFAULT,
+                         grid_min: Tuple[float, float, float] = (-1.0, -1.0, -1.0)) -> int:
         """Append up to `count` parked DEAD particles at [_high_water, ...).
 
-        They have packed_info 0 (DEAD, STATIC), mass 0 and zero state, so
+        They are DEAD with behavior STATIC, mass 0 and zero state, so
         every kernel early-returns on them and K_Reactions offers them to the
         spawn freelist. Does not change _spawned_material_ids or num_active.
         Returns the number added (capped by max_particles). The caller must
@@ -421,7 +430,7 @@ class World:
         start = self._high_water
         sl = slice(start, start + count)
         self.position[sl] = self.park_positions(
-            cp.arange(start, start + count), spacing)
+            cp.arange(start, start + count), spacing, grid_min)
         for arr in (self.velocity, self.veleval, self.sph_force, self.color,
                     self.particle_dye, self.angular_velocity):
             arr[sl] = 0.0
@@ -430,7 +439,9 @@ class World:
                     self.exposure_corrode, self.kappa, self.kappa_v,
                     self.lambda_pbf):
             arr[sl] = 0.0
-        self.packed_info[sl] = cp.uint32(0)
+        # DEAD with behavior STATIC. Plain 0 would read as behavior FLUID
+        # (FLUID = 0), and K_Integrate would drop the parked slot under gravity.
+        self.packed_info[sl] = cp.uint32(_MAKE_PACKED(0, STATIC))
         self.sleep_counter[sl] = 0
         self._high_water += count
         return count
