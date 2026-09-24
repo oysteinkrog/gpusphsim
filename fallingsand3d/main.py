@@ -70,6 +70,19 @@ def _spawn_initial_scene(world):
     return total
 
 
+def _framebuffer_size(window):
+    """Return the window's real framebuffer size in pixels.
+
+    It can differ from the size passed to glfw.create_window (content
+    scaling, a window manager clamping the size, a small screen), and GLFW
+    does not fire the framebuffer size callback at creation. A minimized
+    window reports 0x0; clamp to 1x1 so FBO allocation stays valid (the
+    resize callback fires with the real size when the window is restored).
+    """
+    w, h = glfw.get_framebuffer_size(window)
+    return max(int(w), 1), max(int(h), 1)
+
+
 def main():
     if not glfw.init():
         raise RuntimeError("Failed to initialize GLFW")
@@ -88,6 +101,10 @@ def main():
     glfw.make_context_current(window)
     glfw.swap_interval(1)  # vsync ON by default (stable substep counts)
 
+    # Size everything from the real framebuffer, not the requested window size
+    fb_w, fb_h = _framebuffer_size(window)
+    glViewport(0, 0, fb_w, fb_h)
+
     # Verify OpenGL version
     gl_version = glGetString(GL_VERSION)
     gl_renderer = glGetString(GL_RENDERER)
@@ -100,7 +117,7 @@ def main():
     glClearColor(0.15, 0.15, 0.15, 1.0)
 
     camera = OrbitCamera(distance=2.0, elevation=20.0)
-    camera.set_aspect(WINDOW_WIDTH, WINDOW_HEIGHT)
+    camera.set_aspect(fb_w, fb_h)
 
     # Apply PTX workaround before any CuPy compilation
     _apply_ptx_workaround()
@@ -114,8 +131,8 @@ def main():
     print("Spawning initial scene...")
     num_active = _spawn_initial_scene(world)
 
-    # Create renderer sized to max_particles (pass initial window dimensions for FBO allocation)
-    renderer = Renderer(MAX_PARTICLES, point_scale=20.0, width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
+    # Create renderer sized to max_particles (FBOs sized to the real framebuffer)
+    renderer = Renderer(MAX_PARTICLES, point_scale=20.0, width=fb_w, height=fb_h)
     renderer.num_active = num_active
 
     # Create simulation orchestrator (adaptive timestep, accuracy=0.4 CFL)
@@ -236,6 +253,12 @@ def main():
         scroll_cb=scroll_callback,
         framebuffer_cb=framebuffer_size_callback,
     )
+
+    # The window may have been resized during kernel compilation, before the
+    # callback was installed. Apply the current size once so nothing is stale.
+    cur_w, cur_h = _framebuffer_size(window)
+    if (cur_w, cur_h) != (fb_w, fb_h):
+        ui._on_framebuffer_size(window, cur_w, cur_h)
 
     # FPS tracking
     frame_count = 0
@@ -382,7 +405,7 @@ def main():
             world.resize(new_max)
             renderer.close()
             sim.close()  # drain readback stream + free pinned buffers/graphs before reassign
-            fb_w, fb_h = glfw.get_framebuffer_size(window)
+            fb_w, fb_h = _framebuffer_size(window)
             renderer = Renderer(new_max, point_scale=20.0, width=fb_w, height=fb_h)
             renderer.num_active = 0
             num_active = _spawn_initial_scene(world)
