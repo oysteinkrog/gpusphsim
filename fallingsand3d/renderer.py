@@ -543,26 +543,37 @@ void main() {
         glBindBuffer(GL_ARRAY_BUFFER, self._vbo_col)
         glBufferData(GL_ARRAY_BUFFER, col_nbytes, None, GL_DYNAMIC_DRAW)
 
-        # Velocity VBO for motion blur (same size as position)
+        # Velocity VBO for motion blur (same size as position). main.py fills
+        # it only while motion blur is on, so start it at zero: the shader
+        # must never read undefined memory (bd-r5-review-n28.115).
         vel_nbytes = pos_nbytes
         self._vbo_vel = int(glGenBuffers(1))
         glBindBuffer(GL_ARRAY_BUFFER, self._vbo_vel)
-        glBufferData(GL_ARRAY_BUFFER, vel_nbytes, None, GL_DYNAMIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, vel_nbytes,
+                     np.zeros(vel_nbytes, dtype=np.uint8), GL_DYNAMIC_DRAW)
 
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        # --- VAO for particle drawing ---
+        # --- VAOs for particle drawing ---
+        # _vao: position + color only. Used by the point pass with motion blur
+        # off and by the SSFR passes. Attribute 2 stays disabled, so the
+        # shader gets the constant (0,0,0,1) and no velocity bytes are fetched.
+        # _vao_blur: also binds the velocity VBO at attribute 2, used only
+        # when motion blur is on (bd-r5-review-n28.115).
         self._vao = int(glGenVertexArrays(1))
-        glBindVertexArray(self._vao)
-        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_pos)
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
-        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_col)
-        glEnableVertexAttribArray(1)
-        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
-        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_vel)
-        glEnableVertexAttribArray(2)
-        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
+        self._vao_blur = int(glGenVertexArrays(1))
+        for vao, with_vel in ((self._vao, False), (self._vao_blur, True)):
+            glBindVertexArray(vao)
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_pos)
+            glEnableVertexAttribArray(0)
+            glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_col)
+            glEnableVertexAttribArray(1)
+            glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
+            if with_vel:
+                glBindBuffer(GL_ARRAY_BUFFER, self._vbo_vel)
+                glEnableVertexAttribArray(2)
+                glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, _FLOAT4_BYTES, None)
         glBindVertexArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
@@ -747,6 +758,10 @@ void main() {
         if self.cursor_visible:
             self._draw_cursor(view, proj)
 
+    def points_vao(self) -> int:
+        """VAO for the point-sprite pass: with the velocity attribute only when motion blur is on."""
+        return self._vao_blur if self.motion_blur_enabled else self._vao
+
     def _draw_points(self, view: np.ndarray, proj: np.ndarray) -> None:
         """Simple point sprite rendering (all particles)."""
         # Draw skybox as background
@@ -757,9 +772,9 @@ void main() {
         glUniformMatrix4fv(self._u_points_mvp, 1, GL_TRUE, mvp)
         glUniformMatrix4fv(self._u_points_mv, 1, GL_TRUE, view)
         glUniform1f(self._u_points_ps, self.point_scale)
-        ts = self.trail_scale if self.motion_blur_enabled else 0.0
-        glUniform1f(self._u_points_trail, ts)
-        glBindVertexArray(self._vao)
+        blur = self.motion_blur_enabled
+        glUniform1f(self._u_points_trail, self.trail_scale if blur else 0.0)
+        glBindVertexArray(self.points_vao())
         glDrawArrays(GL_POINTS, 0, self.num_active)
         glBindVertexArray(0)
         glUseProgram(0)
@@ -1210,6 +1225,7 @@ void main() {
         self.cuda_foam.close()
         glDeleteBuffers(6, [self._vbo_pos, self._vbo_col, self._vbo_vel, self._vbo_foam, self._vbo_cursor, self._vbo_skybox])
         glDeleteVertexArrays(1, [self._vao])
+        glDeleteVertexArrays(1, [self._vao_blur])
         glDeleteVertexArrays(1, [self._vao_foam])
         glDeleteVertexArrays(1, [self._vao_fs])
         glDeleteVertexArrays(1, [self._vao_cursor])

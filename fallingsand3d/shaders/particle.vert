@@ -25,9 +25,11 @@ void main() {
     float dist = length(eyePos.xyz);
     float baseSize = uPointScale / dist;
 
-    // Speed-scaled point size for motion blur effect
-    float speed = length(aVel.xyz);
-    float stretch = 1.0 + uTrailScale * min(speed * 0.3, 3.0);
+    // Speed-scaled point size for motion blur effect. With blur off the
+    // renderer binds a VAO without attribute 2 and sets uTrailScale = 0.
+    float stretch = (uTrailScale > 0.0)
+        ? 1.0 + uTrailScale * min(length(aVel.xyz) * 0.3, 3.0)
+        : 1.0;
     gl_PointSize = clamp(baseSize * stretch, 1.0, 128.0);
 
     gl_Position = uMVP * vec4(aPos.xyz, 1.0);
