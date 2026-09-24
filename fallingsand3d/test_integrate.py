@@ -1634,6 +1634,7 @@ def test_fallback_alloc_no_gpu_cpu_sync():
     print("PASS: test_fallback_alloc_no_gpu_cpu_sync")
 
 
+@pytest.mark.stress
 def test_500k_stress():
     """500K particles run through integrate without errors."""
     setup_params()

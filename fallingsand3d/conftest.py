@@ -48,6 +48,55 @@ _add_cuda_nvrtc_dirs()
 
 
 # ---------------------------------------------------------------------------
+# Stress marker and CuPy pool cleanup (bd-r5-review-n28.7)
+# ---------------------------------------------------------------------------
+#
+# 500K-particle tests are marked ``stress`` and deselected by pytest.ini
+# (``addopts = -m "not stress"``). Run them on their own with
+# ``pytest -m stress``. Tests in files this bead does not own are marked here
+# by node id; tests that carry ``@pytest.mark.stress`` themselves need no entry.
+
+import sys
+
+import pytest
+
+STRESS_TESTS = frozenset({
+    "test_build_grid.py::test_500k_no_errors",
+    "test_compact.py::test_compact_stress_500k",
+    "test_hash_sort.py::test_500k_no_errors",
+    "test_reactions.py::test_500k_stress",
+    "test_sort_reorder.py::test_500k_sort_reorder_no_errors",
+    "test_spawn.py::test_500k_stress",
+    "test_step1.py::test_500k_no_errors",
+    "test_step2.py::test_500k_no_errors",
+    "test_wake.py::test_stress_500k",
+    "test_world.py::test_spawn_cube_max_particles",
+})
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        key = f"{item.path.name}::{getattr(item, 'originalname', item.name)}"
+        if key in STRESS_TESTS:
+            item.add_marker(pytest.mark.stress)
+
+
+@pytest.fixture(autouse=True)
+def _free_cupy_pools():
+    """Return cached CuPy device and pinned memory after every test.
+
+    Without this, blocks from a 500K-particle test stay in the pools for the
+    rest of the session, so peak memory depends on test order.
+    """
+    yield
+    cupy = sys.modules.get("cupy")
+    if cupy is None:
+        return
+    cupy.get_default_memory_pool().free_all_blocks()
+    cupy.get_default_pinned_memory_pool().free_all_blocks()
+
+
+# ---------------------------------------------------------------------------
 # Counting-sort scene helper (bd-r5-review-n28.6)
 # ---------------------------------------------------------------------------
 #
@@ -57,8 +106,6 @@ _add_cuda_nvrtc_dirs()
 # exclusive prefix sum of the histogram and an empty cell has cell_end == 0.
 # The retired hash_sort/build_grid path used a 0xFFFFFFFF cell_start sentinel
 # instead, which the app never produces.
-
-import pytest
 
 
 def counting_sort_scene(
