@@ -43,7 +43,11 @@ from kernel_loader import load_module
 DEFAULT_MU_S = np.float32(0.55)   # tan(~29°), higher for sandcastle-like repose
 DEFAULT_MU_2 = np.float32(0.85)   # dynamic friction (flowing sand)
 DEFAULT_I0 = np.float32(0.3)
-DEFAULT_MU_MAX = np.float32(500.0)  # CFL-safe: nu=mu/rho=500/4000=0.125, dt_visc=0.125*h^2/nu=0.016s >> dt=0.001
+# mu_max: resting sand sits at this cap. Explicit Euler would need
+# dt * mu_max * 15 / (h^2 * rho) < 2 (1.17 at mu 500, rho 4000, dt 1 ms,
+# h 0.04), but step2 treats the viscous self-term implicitly
+# (bd-r5-review-n28.52), so it is stable at any mu_max.
+DEFAULT_MU_MAX = np.float32(500.0)
 DEFAULT_PARTICLE_SPACING = np.float32(0.02)
 DEFAULT_MU0 = np.float32(1.0)
 DEFAULT_XSPH_EPSILON = np.float32(0.8)

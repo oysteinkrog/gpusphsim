@@ -387,6 +387,13 @@ void K_Step2_NL(
     float3 f_viscosity = make_float3(0.0f, 0.0f, 0.0f);
     float3 xsph_sum    = make_float3(0.0f, 0.0f, 0.0f);
 
+    // Implicit viscous self-term (bd-r5-review-n28.52), same as K_Step2.
+    float c_tot = 0.0f;
+    float3 f_visc_explicit = make_float3(0.0f, 0.0f, 0.0f);
+    int    rb_pend = -1;
+    float3 rb_fv   = make_float3(0.0f, 0.0f, 0.0f);
+    float3 rb_tv   = make_float3(0.0f, 0.0f, 0.0f);
+
     float h    = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
 
@@ -499,17 +506,34 @@ void K_Step2_NL(
                     (vel_boundary.y - vel_i.y) * visc_factor_b,
                     (vel_boundary.z - vel_i.z) * visc_factor_b
                 );
-                f_viscosity.x += F_visc.x;
-                f_viscosity.y += F_visc.y;
-                f_viscosity.z += F_visc.z;
+                // First body: implicit, reaction deferred. Others: explicit.
+                float3 F_visc_now = make_float3(0.0f, 0.0f, 0.0f);
+                if (rb_pend < 0 || rb_pend == body_id) {
+                    rb_pend = body_id;
+                    f_viscosity.x += F_visc.x;
+                    f_viscosity.y += F_visc.y;
+                    f_viscosity.z += F_visc.z;
+                    c_tot += visc_factor_b;
+                    rb_fv.x += F_visc.x;
+                    rb_fv.y += F_visc.y;
+                    rb_fv.z += F_visc.z;
+                    rb_tv.x += r_b.y * F_visc.z - r_b.z * F_visc.y;
+                    rb_tv.y += r_b.z * F_visc.x - r_b.x * F_visc.z;
+                    rb_tv.z += r_b.x * F_visc.y - r_b.y * F_visc.x;
+                } else {
+                    f_visc_explicit.x += F_visc.x;
+                    f_visc_explicit.y += F_visc.y;
+                    f_visc_explicit.z += F_visc.z;
+                    F_visc_now = F_visc;
+                }
 
                 float pp = c_precalc.pressure_precalc;
                 float fs = is_granular_i ? 1.0f : c_granular.force_scale;
                 float m_i = __ldg(&mass[index_i]);
                 float3 a_on_fluid = make_float3(
-                    (pp * F_on_fluid.x + F_visc.x) * fs,
-                    (pp * F_on_fluid.y + F_visc.y) * fs,
-                    (pp * F_on_fluid.z + F_visc.z) * fs
+                    (pp * F_on_fluid.x + F_visc_now.x) * fs,
+                    (pp * F_on_fluid.y + F_visc_now.y) * fs,
+                    (pp * F_on_fluid.z + F_visc_now.z) * fs
                 );
                 float3 F_on_body = make_float3(-m_i * a_on_fluid.x, -m_i * a_on_fluid.y, -m_i * a_on_fluid.z);
                 float3 tau = make_float3(
@@ -531,6 +555,7 @@ void K_Step2_NL(
                 f_viscosity.x += (-vel_i.x) * visc_factor_b;
                 f_viscosity.y += (-vel_i.y) * visc_factor_b;
                 f_viscosity.z += (-vel_i.z) * visc_factor_b;
+                c_tot += visc_factor_b;
             }
             continue;
         }
@@ -560,12 +585,14 @@ void K_Step2_NL(
             f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
             f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
             f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+            c_tot += visc_factor;
         } else if (cross_ij) {
             uint mat_fluid = is_granular_i ? mat_id_j : mat_id_i;
             float visc_factor = cross_pair_visc(mat_fluid, m_j, lap_v, rho_i, rho_j) * inv_fs_i;
             f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
             f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
             f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+            c_tot += visc_factor;
         } else {
             float mu_i = c_materials[mat_id_i].base_viscosity;
             float mu_j = c_materials[mat_id_j].base_viscosity;
@@ -574,6 +601,7 @@ void K_Step2_NL(
             f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
             f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
             f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+            c_tot += visc_factor;
         }
 
         // XSPH
@@ -614,6 +642,19 @@ void K_Step2_NL(
                 f_surface_tension.z = gamma * norm_i.z;
             }
         }
+    }
+
+    // Implicit viscous self-term (bd-r5-review-n28.52), see K_Step2.
+    float visc_s = 1.0f / (1.0f + c_sim.dt * fs_i * c_tot);
+    f_viscosity.x = f_viscosity.x * visc_s + f_visc_explicit.x;
+    f_viscosity.y = f_viscosity.y * visc_s + f_visc_explicit.y;
+    f_viscosity.z = f_viscosity.z * visc_s + f_visc_explicit.z;
+    if (rb_pend >= 0) {
+        float k_rb = -__ldg(&mass[index_i]) * fs_i * visc_s;
+        warp_reduce_accumulate(d_rigid_forces,
+            make_float3(k_rb * rb_fv.x, k_rb * rb_fv.y, k_rb * rb_fv.z), rb_pend);
+        warp_reduce_accumulate(d_rigid_torques,
+            make_float3(k_rb * rb_tv.x, k_rb * rb_tv.y, k_rb * rb_tv.z), rb_pend);
     }
 
     float3 total_force;

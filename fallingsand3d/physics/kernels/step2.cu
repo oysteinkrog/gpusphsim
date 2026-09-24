@@ -166,6 +166,17 @@ void K_Step2(
     float3 f_viscosity = make_float3(0.0f, 0.0f, 0.0f);
     float3 xsph_sum    = make_float3(0.0f, 0.0f, 0.0f);
 
+    // Implicit viscous self-term (bd-r5-review-n28.52): c_tot sums every
+    // viscous coefficient that multiplies -vel_i. See the PostCalc note.
+    float c_tot = 0.0f;
+    // Viscous terms left out of the implicit scale (rigid bodies other than
+    // the first one this particle touches) and the deferred viscous reaction
+    // on that first body, emitted once the scale is known.
+    float3 f_visc_explicit = make_float3(0.0f, 0.0f, 0.0f);
+    int    rb_pend = -1;
+    float3 rb_fv   = make_float3(0.0f, 0.0f, 0.0f);
+    float3 rb_tv   = make_float3(0.0f, 0.0f, 0.0f);
+
     float h    = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
 
@@ -317,9 +328,30 @@ void K_Step2(
                                 (vel_boundary.y - vel_i.y) * visc_factor_b,
                                 (vel_boundary.z - vel_i.z) * visc_factor_b
                             );
-                            f_viscosity.x += F_visc.x;
-                            f_viscosity.y += F_visc.y;
-                            f_viscosity.z += F_visc.z;
+                            // Viscous reaction: the first body goes into the
+                            // implicit sum and its reaction is emitted after the
+                            // loop, scaled by the same factor as the fluid side.
+                            // A second body stays explicit with an immediate
+                            // reaction, so action = reaction in both cases.
+                            float3 F_visc_now = make_float3(0.0f, 0.0f, 0.0f);
+                            if (rb_pend < 0 || rb_pend == body_id) {
+                                rb_pend = body_id;
+                                f_viscosity.x += F_visc.x;
+                                f_viscosity.y += F_visc.y;
+                                f_viscosity.z += F_visc.z;
+                                c_tot += visc_factor_b;
+                                rb_fv.x += F_visc.x;
+                                rb_fv.y += F_visc.y;
+                                rb_fv.z += F_visc.z;
+                                rb_tv.x += r_b.y * F_visc.z - r_b.z * F_visc.y;
+                                rb_tv.y += r_b.z * F_visc.x - r_b.x * F_visc.z;
+                                rb_tv.z += r_b.x * F_visc.y - r_b.y * F_visc.x;
+                            } else {
+                                f_visc_explicit.x += F_visc.x;
+                                f_visc_explicit.y += F_visc.y;
+                                f_visc_explicit.z += F_visc.z;
+                                F_visc_now = F_visc;
+                            }
 
                             // Two-way coupling: accumulate reaction FORCE on rigid body.
                             // step2 outputs acceleration (force/mass) for fluid particles,
@@ -329,9 +361,9 @@ void K_Step2(
                             float fs = is_granular_i ? 1.0f : c_granular.force_scale;
                             float m_i = __ldg(&mass[index_i]);
                             float3 a_on_fluid = make_float3(
-                                (pp * F_on_fluid.x + F_visc.x) * fs,
-                                (pp * F_on_fluid.y + F_visc.y) * fs,
-                                (pp * F_on_fluid.z + F_visc.z) * fs
+                                (pp * F_on_fluid.x + F_visc_now.x) * fs,
+                                (pp * F_on_fluid.y + F_visc_now.y) * fs,
+                                (pp * F_on_fluid.z + F_visc_now.z) * fs
                             );
                             // Newton's 3rd law: reaction force on body = -m_i * a_on_fluid
                             float3 F_on_body = make_float3(-m_i * a_on_fluid.x, -m_i * a_on_fluid.y, -m_i * a_on_fluid.z);
@@ -356,6 +388,7 @@ void K_Step2(
                             f_viscosity.x += (-vel_i.x) * visc_factor_b;
                             f_viscosity.y += (-vel_i.y) * visc_factor_b;
                             f_viscosity.z += (-vel_i.z) * visc_factor_b;
+                            c_tot += visc_factor_b;
                         }
                         continue;  // skip XSPH from STATIC
                     }
@@ -400,6 +433,7 @@ void K_Step2(
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                        c_tot += visc_factor;
                     } else if (cross_ij) {
                         // FLUID-GRANULAR pair: one symmetric dynamic-form term on
                         // both sides (bd-r5-review-n28.41), undone by the fs_i multiply.
@@ -408,6 +442,7 @@ void K_Step2(
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                        c_tot += visc_factor;
                     } else {
                         // FLUID/GAS: per-material viscosity via harmonic mean.
                         //
@@ -426,6 +461,7 @@ void K_Step2(
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                        c_tot += visc_factor;
                     }
 
                     // ---- XSPH correction (FLUID only) ----
@@ -479,6 +515,26 @@ void K_Step2(
                 f_surface_tension.z = gamma * norm_i.z;
             }
         }
+    }
+
+    // --- Implicit viscous self-term (bd-r5-review-n28.52) ---
+    // The viscous accel is fs_i * sum_j c_j (v_j - v_i). Explicit Euler on it
+    // needs dt * fs_i * c_tot < 2, which LAVA (18.75 at dt = 1 ms), MUD and
+    // resting sand at mu_max break. Treating v_i implicitly,
+    //   v' = (v + dt * fs_i * sum c_j v_j) / (1 + dt * fs_i * c_tot),
+    // is the same as scaling the viscous sum by s = 1 / (1 + x), x = dt*fs_i*c_tot.
+    // Stable for any x; the checkerboard mode decays by (1 - x) / (1 + x).
+    float visc_s = 1.0f / (1.0f + c_sim.dt * fs_i * c_tot);
+    f_viscosity.x = f_viscosity.x * visc_s + f_visc_explicit.x;
+    f_viscosity.y = f_viscosity.y * visc_s + f_visc_explicit.y;
+    f_viscosity.z = f_viscosity.z * visc_s + f_visc_explicit.z;
+    if (rb_pend >= 0) {
+        // Deferred viscous reaction on the first rigid body, same scale.
+        float k_rb = -__ldg(&mass[index_i]) * fs_i * visc_s;
+        warp_reduce_accumulate(d_rigid_forces,
+            make_float3(k_rb * rb_fv.x, k_rb * rb_fv.y, k_rb * rb_fv.z), rb_pend);
+        warp_reduce_accumulate(d_rigid_torques,
+            make_float3(k_rb * rb_tv.x, k_rb * rb_tv.y, k_rb * rb_tv.z), rb_pend);
     }
 
     // --- PostCalc: apply precalc coefficients and write output ---

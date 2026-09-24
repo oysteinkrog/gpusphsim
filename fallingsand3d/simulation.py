@@ -187,8 +187,6 @@ class Simulation:
 
         # Precompute acoustic speed from materials table
         self._c_sound = self._compute_c_sound()
-        # Precompute max viscosity and min density for viscous CFL
-        self._max_eta, self._rho_min = self._compute_viscosity_bounds()
 
         # Smoothing length (must match _upload_constants)
         self._h = 0.04
@@ -265,38 +263,23 @@ class Simulation:
                 c_sound = max(c_sound, c)
         return max(c_sound, 0.01)  # floor to avoid zero
 
-    def _compute_viscosity_bounds(self) -> tuple:
-        """Compute max viscosity and min density for viscous CFL.
-
-        Uses base_viscosity from the material table (not mu_max, which is
-        a theoretical clamp rarely reached and would cripple the timestep).
-        rho_min excludes GAS materials (they use low constant viscosity,
-        not mu(I), so their low density doesn't tighten the viscous CFL).
-        """
-        max_eta = 0.0
-        rho_min = 1e30
-        for mat in MATERIALS.values():
-            if mat.behavior_class == STATIC or mat.rest_density <= 0.0:
-                continue
-            if mat.behavior_class != GAS and mat.rest_density < rho_min:
-                rho_min = mat.rest_density
-            if mat.base_viscosity > max_eta:
-                max_eta = mat.base_viscosity
-        rho_min = max(rho_min, 0.1)  # floor
-        return max_eta, rho_min
-
     def _compute_adaptive_dt(self, n: int) -> float:
         """Compute adaptive dt from accuracy and CFL limits (CPU-only, no GPU sync).
 
           dt_accuracy = DT_MAX * accuracy / ACCURACY_REF
           dt_acoustic = 0.25 * h / c_sound
-          dt_viscous  = accuracy * rho_min * h^2 / max(max_eta, 1e-6)
-          dt = min(dt_accuracy, dt_acoustic, dt_viscous) clamped to [DT_MIN, DT_MAX]
+          dt = min(dt_accuracy, dt_acoustic) clamped to [DT_MIN, DT_MAX]
 
-        With the current materials dt_acoustic is about 2.2 ms and dt_viscous
-        is about accuracy * 34 ms, so both sit above DT_MAX (1 ms) and
-        dt_accuracy is the bound that acts: accuracy 0.4 gives 1 ms, 0.2 gives
-        0.5 ms, 0.1 gives 0.25 ms. Accuracy above 0.4 is capped by DT_MAX.
+        With the current materials dt_acoustic is about 2.2 ms, above DT_MAX
+        (1 ms), so dt_accuracy is the bound that acts: accuracy 0.4 gives
+        1 ms, 0.2 gives 0.5 ms, 0.1 gives 0.25 ms. Accuracy above 0.4 is
+        capped by DT_MAX.
+
+        There is no viscous CFL. Step2 treats the viscous self-term
+        implicitly (bd-r5-review-n28.52), which is stable at any dt. The old
+        bound, accuracy * rho_min * h^2 / max_eta, assumed nu = mu / rho, but
+        the FLUID form has no 1/rho_i, so it gave about 7 ms and never bound
+        while LAVA needed 0.1 ms explicitly.
 
         The advection CFL (velocity-based) is omitted because velocity_limit
         and accel_max prevent particles from exceeding the speed of sound.
@@ -309,10 +292,7 @@ class Simulation:
         # Acoustic CFL (fixed 0.25 coefficient, not scaled by accuracy)
         dt_acoustic = 0.25 * h / self._c_sound
 
-        # Viscous CFL (uses precomputed max_eta and rho_min)
-        dt_viscous = self.accuracy * self._rho_min * h * h / max(self._max_eta, 1e-6)
-
-        dt = min(dt_accuracy, dt_acoustic, dt_viscous)
+        dt = min(dt_accuracy, dt_acoustic)
         return max(DT_MIN, min(DT_MAX, dt))
 
     def _upload_dt(self, new_dt: float) -> None:
