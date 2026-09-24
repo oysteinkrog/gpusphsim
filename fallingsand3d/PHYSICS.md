@@ -568,15 +568,26 @@ own pressure instead (13.5).
 mu(I) = mu_s + (mu_2 - mu_s) / (1 + I0 / I)
 ```
 
-Default: mu_s=0.36, mu_2=0.70, I0=0.3
+Default: mu_s=0.55, mu_2=0.85, I0=0.3
 
 ### 5.4 Effective Viscosity
 
 ```
-eta = min(mu_max, mu0 + mu(I) * p_eff / (gamma_dot + 1e-6))
+eta = min(mu_max, mu0 + mu(I) * p_eff / max(gamma_dot, 0.1))
 ```
 
-Default: mu_max=10000, mu0=1.0
+Default: mu_max=500, mu0=1.0
+
+The strain-rate floor `MUI_GAMMA_DOT_FLOOR = 0.1 1/s` keeps eta finite and linear
+in `p_eff` in slow flow, instead of growing as `1 / gamma_dot`. The cap acts when
+`gamma_dot < mu(I) * p_eff / mu_max`, about 0.54 1/s at the SAND pressure floor
+(490 Pa), so resting sand sits at `mu_max`. At rest the explicit viscous factor
+would be `dt * mu_max * 15 / (h^2 * rho) = 1.88` at dt 1 ms, rho 2500, h 0.04:
+under 2 but sign-alternating. Step2 treats the viscous self-term implicitly
+(3.3, 10.4), so the relaxation is monotone at any `mu_max` or dt and no viscous
+CFL term is needed for `mu_max`.
+
+**Source**: `sph_shared.cuh:compute_muI_eta`, `step2.py:DEFAULT_MU_MAX`
 
 ### 5.5 Viscosity Force (GRANULAR-GRANULAR)
 
@@ -1053,7 +1064,8 @@ The CFL gave about 7 ms and never bound, while LAVA needed about 0.1 ms. The cor
 explicit bound (1.1e-5 s for LAVA) would have made WCSPH about 20x slower.
 **Fixed** (bd-r5-review-n28.52): step2 treats the viscous self-term implicitly, which
 is stable at any dt, and the viscous CFL is removed. GRANULAR at `mu_max` is covered by
-the same scale.
+the same scale: its explicit factor at dt 1 ms is 1.88 (rho 2500), which the implicit
+self-term turns into a monotone decay, so `mu_max` needs no CFL term either (5.4).
 **Source**: `simulation.py:_compute_adaptive_dt`, `step2.cu` (implicit scale)
 
 ### 10.5 OPEN: Boundary handling differences
