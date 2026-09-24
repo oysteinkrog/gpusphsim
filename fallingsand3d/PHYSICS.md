@@ -694,13 +694,30 @@ STATIC particles still conduct heat (but don't move).
 
 ### 9.1 Cross-Material Heat Boost
 
-SPH heat diffusion uses the particle's `thermal_conductivity` (`kappa_i`),
-divided by `rho_i * cp_i` for physically correct thermal diffusivity:
+SPH heat diffusion uses a pairwise conductivity `k_ij`, the harmonic mean of the two
+particles' `thermal_conductivity` values (Cleary and Monaghan 1999), divided by
+`rho_i * cp_i` for physically correct thermal diffusivity:
 ```
-dTdt = [kappa_i / (rho_i * cp_i)] * [45/(pi*h^6)] * SUM_j (m_j/rho_j) * (T_j - T_i) * (h - |r|)
+k_ij = 2 * kappa_i * kappa_j / max(kappa_i + kappa_j, 1e-6)
+dTdt = [1 / (rho_i * cp_i)] * [45/(pi*h^6)] * SUM_j k_ij * (m_j/rho_j) * (T_j - T_i) * (h - |r|) * heat_boost
 ```
 
-Where `cp_i = c_materials[mat_id].heat_capacity` and `rho_i` is the computed SPH density.
+Where `kappa = c_materials[mat_id].thermal_conductivity`,
+`cp_i = c_materials[mat_id].heat_capacity` and `rho_i` is the computed SPH density.
+
+`k_ij` and `heat_boost` are the same seen from i and from j, so the energy rate
+`m_i cp_i dTdt_i` of a pair is equal and opposite: heat lost by i is gained by j and
+`SUM_i m_i cp_i T_i` is conserved, as long as the density a particle divides by matches
+the `density_in` its neighbours read. Same-material pairs get `k_ij = kappa_i`
+(unchanged). Mixed pairs are limited by the poorer conductor: LAVA (500) and WATER (50)
+give `k_ij = 91`, LAVA and METAL (2000) give 800. All five loop copies use this form:
+`K_Step1`, `K_Step1_BuildNL`, the neighbour-list step1 (`neighbor_list.cu`),
+`K_PBF_ComputeLambda` and `K_DFSPH_ComputeDensityAlpha`.
+
+`test_step1.py::test_heat_energy_conserved_lava_water` checks the step-0 rate balance
+(`|SUM m cp dTdt| / SUM |m cp dTdt| < 1e-4`, measured 3e-8) and the drift of
+`SUM m cp T` over 100 fixed-geometry Euler steps (`< 1e-5`, measured 2e-8). With
+`kappa_i` applied per particle the imbalance was 0.82.
 This means `thermal_conductivity` values must be tuned for the `rho*cp` divisor to produce
 visible heat exchange rates (see updated values in materials.py).
 
