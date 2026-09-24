@@ -30,6 +30,7 @@ from materials import (
 from presets import PRESETS
 from solver_profiles import PROFILES, PROFILE_NAMES
 from rigid_bodies import SDF_BOX, SDF_SPHERE, SDF_CYLINDER, SDF_PLANE
+from save_load import save_scene, load_scene, list_saves
 
 _SDF_TYPE_NAMES = ["Box", "Sphere", "Cylinder", "Plane"]
 _MOTION_TYPE_NAMES = ["rotate_y", "oscillate_x", "oscillate_y", "oscillate_z"]
@@ -365,6 +366,7 @@ class UI:
         self._save_filename: str = "scene"
         self._save_status: str = ""
         self._load_files: list = []
+        self._load_files_scanned: bool = False  # list_saves() ran since last Save/Refresh
         self._load_selected: int = 0
 
         # Cached viewport size
@@ -615,6 +617,56 @@ class UI:
         imgui.render()
         self._imgui_renderer.render(imgui.get_draw_data())
 
+    def _draw_save_load_panel(self, sim, world, changes: dict) -> None:
+        """Draw the Save / Load panel.
+
+        The saves directory is scanned once at first draw, then only on Save
+        and on Refresh. An empty directory is not rescanned every frame.
+        """
+        imgui.set_next_window_pos(imgui.ImVec2(240, 340), imgui.Cond_.first_use_ever)
+        imgui.set_next_window_size(imgui.ImVec2(220, 0), imgui.Cond_.first_use_ever)
+
+        if imgui.begin("Save / Load", None, imgui.WindowFlags_.always_auto_resize)[0]:
+            # Save section
+            _, self._save_filename = imgui.input_text("Name", self._save_filename)
+            if imgui.button("Save", imgui.ImVec2(100, 28)):
+                camera = self._camera_ref
+                if camera is not None:
+                    path = save_scene(world, sim, camera, self._save_filename)
+                    self._save_status = f"Saved: {os.path.basename(path)}"
+                    self._load_files_scanned = False
+                else:
+                    self._save_status = "Error: no camera ref"
+            if self._save_status:
+                imgui.text(self._save_status)
+
+            imgui.separator()
+
+            # Load section
+            if imgui.button("Refresh", imgui.ImVec2(100, 28)):
+                self._load_files_scanned = False
+            if not self._load_files_scanned:
+                self._load_files = list_saves()
+                self._load_files_scanned = True
+            if self._load_files:
+                file_list = self._load_files
+                _, self._load_selected = imgui.combo(
+                    "File", self._load_selected,
+                    file_list,
+                )
+                if imgui.button("Load", imgui.ImVec2(100, 28)):
+                    camera = self._camera_ref
+                    if camera is not None and self._load_selected < len(file_list):
+                        try:
+                            n = load_scene(world, sim, camera, file_list[self._load_selected])
+                            self._save_status = f"Loaded: {n:,} particles"
+                            changes['_scene_loaded'] = True
+                        except Exception as e:
+                            self._save_status = f"Error: {e}"
+            else:
+                imgui.text("No saves found")
+        imgui.end()
+
     def draw(self, sim, world, fps: float, renderer=None) -> dict:
         """Draw all UI panels. Returns dict of changes (empty if nothing changed).
 
@@ -717,52 +769,7 @@ class UI:
         imgui.end()
 
         # --- Save/Load Panel ---
-        imgui.set_next_window_pos(imgui.ImVec2(240, 340), imgui.Cond_.first_use_ever)
-        imgui.set_next_window_size(imgui.ImVec2(220, 0), imgui.Cond_.first_use_ever)
-
-        if imgui.begin("Save / Load", None, imgui.WindowFlags_.always_auto_resize)[0]:
-            from save_load import save_scene, load_scene, list_saves
-
-            # Save section
-            changed, self._save_filename = imgui.input_text(
-                "Name", self._save_filename, 64,
-            )
-            if imgui.button("Save", imgui.ImVec2(100, 28)):
-                camera = self._camera_ref
-                if camera is not None:
-                    path = save_scene(world, sim, camera, self._save_filename)
-                    self._save_status = f"Saved: {os.path.basename(path)}"
-                    self._load_files = list_saves()
-                else:
-                    self._save_status = "Error: no camera ref"
-            if self._save_status:
-                imgui.text(self._save_status)
-
-            imgui.separator()
-
-            # Load section
-            if imgui.button("Refresh", imgui.ImVec2(100, 28)):
-                self._load_files = list_saves()
-            if not self._load_files:
-                self._load_files = list_saves()
-            if self._load_files:
-                file_list = self._load_files
-                changed, self._load_selected = imgui.combo(
-                    "File", self._load_selected,
-                    file_list,
-                )
-                if imgui.button("Load", imgui.ImVec2(100, 28)):
-                    camera = self._camera_ref
-                    if camera is not None and self._load_selected < len(file_list):
-                        try:
-                            n = load_scene(world, sim, camera, file_list[self._load_selected])
-                            self._save_status = f"Loaded: {n:,} particles"
-                            changes['_scene_loaded'] = True
-                        except Exception as e:
-                            self._save_status = f"Error: {e}"
-            else:
-                imgui.text("No saves found")
-        imgui.end()
+        self._draw_save_load_panel(sim, world, changes)
 
         # --- Simulation Controls Panel ---
         imgui.set_next_window_pos(imgui.ImVec2(10, 440), imgui.Cond_.first_use_ever)
