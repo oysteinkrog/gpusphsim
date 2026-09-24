@@ -2,6 +2,7 @@
 
 Acceptance criteria:
   - ICE (mat=11, temp > 273K) -> WATER (mat=5, FLUID)
+  - WATER (mat=5, temp < 263K, sleeping or |v| < 0.02 m/s) -> ICE (mat=11, STATIC)
   - LAVA (mat=7, temp < 900K) -> STONE (mat=1, STATIC)
   - WATER (mat=5, temp > 373K) -> set SPAWN_GAS flag
   - WOOD (mat=9, exposure_heat > 500 K) -> FIRE (mat=14, GAS, T=1200K, lifetime=1.0s)
@@ -166,6 +167,57 @@ def test_ice_stays_frozen():
     for i in range(100):
         assert GET_MATERIAL_ID(int(pi[i])) == ICE, f"Particle {i}: should stay ICE"
     print("PASS: test_ice_stays_frozen")
+
+
+def test_water_freezes_to_ice():
+    """WATER at rest below 263 K becomes STATIC ICE at 263 K, with mass
+    rescaled by the spawn-mass rule (FLUID 1000/2500 -> STATIC 1)."""
+    setup_params()
+    n = 100
+    d = make_particles(n, WATER, FLUID, temp=262.0)
+    mass = cupy.full(n, 0.008, dtype=cupy.float32)
+    compute_reactions(**d, sorted_mass=mass)
+
+    pi = d["sorted_packed_info"].get()
+    temp = d["sorted_temperature"].get()
+    m = mass.get()
+    for i in range(n):
+        assert GET_MATERIAL_ID(int(pi[i])) == ICE, f"Particle {i}: expected ICE"
+        assert GET_BEHAVIOR(int(pi[i])) == STATIC, f"Particle {i}: expected STATIC"
+    np.testing.assert_allclose(temp, 263.0)
+    np.testing.assert_allclose(m, 0.008 * 2.5, rtol=1e-6)
+
+
+def test_water_hysteresis_band():
+    """WATER at 270 K is inside the 263-273 K band and stays WATER."""
+    setup_params()
+    d = make_particles(100, WATER, FLUID, temp=270.0)
+    compute_reactions(**d)
+
+    pi = d["sorted_packed_info"].get()
+    for i in range(100):
+        assert GET_MATERIAL_ID(int(pi[i])) == WATER, f"Particle {i}: should stay WATER"
+        assert GET_BEHAVIOR(int(pi[i])) == FLUID
+
+
+def test_moving_water_does_not_freeze():
+    """Cold WATER moving faster than V_WAKE (0.02 m/s) stays WATER, so a
+    stream does not turn into STATIC ice in mid-air. The same particle
+    freezes when its sleep flag is set."""
+    setup_params()
+    n = 2
+    d = make_particles(n, WATER, FLUID, temp=250.0,
+                       vel=[[0.0, -1.0, 0.0, 0.0]] * n)
+    pi = d["sorted_packed_info"].get()
+    pi[1] |= 0x400  # SET_SLEEPING
+    d["sorted_packed_info"] = cupy.asarray(pi)
+    compute_reactions(**d)
+
+    pi = d["sorted_packed_info"].get()
+    v = d["sorted_velocity"].get()
+    assert GET_MATERIAL_ID(int(pi[0])) == WATER, "moving cold water froze"
+    assert GET_MATERIAL_ID(int(pi[1])) == ICE, "sleeping cold water did not freeze"
+    assert np.all(v[1, :3] == 0.0), "frozen particle kept its velocity"
 
 
 def test_lava_solidifies_to_stone():
