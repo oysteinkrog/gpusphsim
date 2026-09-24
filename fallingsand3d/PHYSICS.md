@@ -128,13 +128,35 @@ All FLUID and GRANULAR pressure clamped >= 0 (no tensile pressure).
 | DIRT | 3750.0 | 3000.0 | 7.0 | Tait | 0.030 |
 | GRAVEL | 4250.0 | 4000.0 | 7.0 | Tait | 0.034 |
 | WET_SAND, MUD, GUNPOWDER | 4500.0 | 5000 / 300 / 3000 | 7.0 | Tait | 0.036 |
+| STEAM | 1200.0 | 3.0 | 1.0 | GAS | 0.020 (0.02/3 boiling child) |
+| SMOKE | 1100.0 | 2.5 | 1.0 | GAS | 0.020 |
+| FIRE | 1000.0 | 4.0 | 1.0 | GAS | 0.020 |
 
 LAVA k = 500 * 6500 / 2500 gives it WATER's sound speed `sqrt(gamma * k / rho_0)` (1.18),
 so under the same head both compress by the same fraction. The GRANULAR k values are
 unchanged: at the spawn mass a settled 0.4 m WCSPH pile sits 2-4% above rho_0 with
 v_rms about 0.01 m/s.
 
-**Source**: `sph_shared.cuh:compute_pressure`
+GAS `rho_0` is in kernel-sum units, not real gas density (bd-r5-review-n28.80). GAS
+particles keep mass 0.02 (K_SpawnGas children 0.02/3), so the Poly6 self term alone is
+`m * 315 / (64 pi h^3)` = 490 (163 for a child) at h = 0.04. Rule: `rho_0` for a gas is
+the kernel-sum density of a mass-0.02 cubic lattice at the target gas spacing, and at least
+2x the 490 self term: STEAM 1200 (spacing about 0.025), SMOKE 1100 (0.026), FIRE 1000
+(0.027). Consequences:
+- An isolated gas particle of either mass has `rho < rho_0` and `p = 0`.
+- A cloud at the spawn spacing (0.02 brush, or three children per boiling water particle)
+  reads `rho` about 2525, so `rho/rho_0` is 2.1-2.5 and pressure pushes it apart until it
+  thins to `rho_0`.
+- `k` and `rho_0` for gas now shape the cloud. In a WCSPH eval a 1000-particle STEAM cube
+  rising for 1.2 s keeps every particle in contact (xz RMS radius 0.081 to 0.128 m, median
+  `rho/rho_0` 0.58); with a real-world `rho_0` of 0.6 all particles ended isolated and the
+  radius reached 0.225 m. The steam from 500 boiling water particles behaves the same way
+  (radius 0.120 m, median `rho/rho_0` 0.53, no isolated particles).
+- `simulation._compute_c_sound` reads `sqrt(k * gamma / rho_0)`, which for gas is now
+  about 0.06, so SAND (2.96) sets the acoustic bound. The gas EOS sound speed is
+  `sqrt(k)`, 1.6-2.0, which stays below it. DT_MAX (1 ms) binds either way.
+
+**Source**: `sph_shared.cuh:compute_pressure`, `materials.py` (GAS rest_density)
 
 ### 3.2 Pressure Force (SPH momentum equation)
 
@@ -1281,23 +1303,24 @@ constraint instead), but the sign convention in the code is correct.
 **Source**: `step2.cu` (surface tension block), `dfsph_solver.cu:K_DFSPH_NonPressureForces`,
 `pbf_solver.cu:K_PBF_Finalize`
 
-### 10.17 FIXED: GAS density floor clamped above rest density
+### 10.17 FIXED: GAS rest density was unreachable
 
-The density output floor `fmaxf(density, 1.0f)` was applied uniformly to all
-behaviors. GAS materials have `rest_density` 0.2–0.6, so this floor prevented
-GAS from ever reaching its natural rest density, keeping it permanently
-"compressed" with artificially high pressure.
-
-**Fix**: Behavior-aware density floor:
+The density output floor is behavior-aware:
 ```
 float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
 density_out[i] = fmaxf(density, rho_floor);
 ```
-GAS uses `RHO_EPSILON` (0.01) as a minimal safety floor while allowing natural
-density values. FLUID/GRANULAR keep the 1.0 floor (rest densities 500–2500).
+Neither floor is reached by a live particle. Its own Poly6 self term is 163-490
+for GAS (mass 0.02/3 to 0.02) and more for every other behavior, so the floors
+are only a guard for massless slots. Denominator guards across the solvers use
+`fmaxf(rho_j, RHO_EPSILON)`.
 
-Additionally, all denominator guards `fmaxf(rho_j, 1.0f)` across all solvers
-were changed to `fmaxf(rho_j, RHO_EPSILON)` for consistency with GAS densities.
+With real-world GAS rest densities (0.2-0.6) the self term alone kept the gas
+EOS `p = k * max(rho - rho0, 0)` on for every particle, so gas clouds scattered
+until no neighbour was within h. GAS `rest_density` is now in kernel-sum units
+(STEAM 1200, SMOKE 1100, FIRE 1000; see section 3.1), so an isolated gas
+particle has `p = 0` and a cloud stops pushing apart at `rho0`
+(bd-r5-review-n28.80). Test: `test_gas_physics.py::test_gas_rest_density_reachable`.
 
 **Source**: `sph_shared.cuh` (RHO_EPSILON), `step1.cu`, `step2.cu`,
 `dfsph_solver.cu`, `pbf_solver.cu`, `implicit_st.cu`
