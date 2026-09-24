@@ -1211,7 +1211,11 @@ def test_dfsph_sleep_is_granular_only(world, sim):
     # and SAND at its own rho0 (bd-r5-review-n28.53) then gets a 0.15 m/s kick.
     world.sorted_density[:] = 0.0
     n_water = world.spawn_cube((-0.6, -0.2, -0.2), (-0.2, 0.2, 0.2), WATER, spacing=0.02)
-    n_sand = world.spawn_cube((0.2, -0.2, -0.2), (0.6, 0.2, 0.2), SAND, spacing=0.02)
+    # At spacing 0.02 the lattice interior sits at 1.01 rho0, so the density
+    # solver pushes the block apart at up to 0.15 m/s and it is not still.
+    # Spacing 0.0202 gives 0.98 rho0: no pressure, the block stays at rest
+    # (bd-r5-review-n28.100).
+    n_sand = world.spawn_cube((0.2, -0.2, -0.2), (0.6, 0.2, 0.2), SAND, spacing=0.0202)
     n = n_water + n_sand
     _dfsph_zero_g(world, sim)
     world.sleep_counter[:n] = 200
