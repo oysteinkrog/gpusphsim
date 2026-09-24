@@ -461,6 +461,41 @@ def test_color_computation():
     print("PASS: test_color_computation")
 
 
+def test_dead_slot_color_alpha_is_negative():
+    """DEAD slots get color.w < 0 so the vertex shaders cull them
+    (bd-r5-review-n28.60). Live slots keep their behavior code in color.w.
+
+    Slot 1 is MAKE_PACKED(DEAD, STATIC) (reactions, brush), so it takes the
+    STATIC path through compute_color. Slot 2 is packed_info 0 (DEAD with
+    FLUID behavior, the old brush encoding), so it takes the FLUID path
+    through compute_fluid_color. Both must come out culled.
+    """
+    setup_params(gravity=(0.0, 0.0, 0.0))
+    n = 6
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = np.linspace(-0.5, 0.5, n)
+    pos[:, 3] = 1.0
+    d = make_simple_particles(n, WATER, FLUID, pos=pos)
+    packed = np.array([
+        MAKE_PACKED(WATER, FLUID),
+        MAKE_PACKED(0, STATIC),     # DEAD, STATIC
+        MAKE_PACKED(0, FLUID),      # DEAD, FLUID (packed_info 0)
+        MAKE_PACKED(SAND, GRANULAR),
+        MAKE_PACKED(STEAM, GAS),
+        MAKE_PACKED(STONE, STATIC),
+    ], dtype=np.uint32)
+    d["sorted_packed_info"] = cupy.asarray(packed)
+    _, _, color_out, _, _, _, _, _ = integrate(**d)
+    alpha = color_out.get()[:, 3]
+
+    assert alpha[1] < 0.0, f"DEAD STATIC slot alpha {alpha[1]} must be < 0"
+    assert alpha[2] < 0.0, f"DEAD FLUID slot alpha {alpha[2]} must be < 0"
+    expected_live = {0: 0.0, 3: 0.25, 4: 0.5, 5: 0.75}
+    for slot, want in expected_live.items():
+        assert abs(alpha[slot] - want) < 1e-6, (
+            f"live slot {slot} alpha {alpha[slot]}, expected {want}")
+
+
 def test_sort_indexes_writeback():
     """Results are written to UNSORTED arrays using sort_indexes mapping."""
     setup_params(gravity=(0.0, -9.8, 0.0))
@@ -1820,6 +1855,7 @@ if __name__ == "__main__":
         test_gas_drag,
         test_velocity_clamp,
         test_color_computation,
+        test_dead_slot_color_alpha_is_negative,
         test_sort_indexes_writeback,
         test_boundary_all_walls,
         test_coulomb_friction,

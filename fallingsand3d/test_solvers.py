@@ -1390,3 +1390,59 @@ def test_dfsph_density_solver_dead_fluid_slot_is_finite(world, sim):
     a_h = accel.get()
     assert np.isfinite(p_h).all(), f"p_rho2 not finite at {np.count_nonzero(~np.isfinite(p_h))} slots"
     assert np.isfinite(a_h).all(), f"a_press not finite at {np.count_nonzero(~np.isfinite(a_h).any(axis=1))} slots"
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.60: DEAD slots get color.w < 0 so the shaders cull them
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("profile_name", ["WCSPH", "PBF", "DFSPH"])
+def test_dead_slot_color_is_culled(world, sim, profile_name):
+    """A slot set to MAKE_PACKED(DEAD, STATIC) gets color.w < 0 after one
+    substep, and brush-killed slots get it at once. Live WATER keeps 0.0."""
+    from materials import STATIC
+    world.packed_info[:] = 0
+    world._high_water = 0
+    n = world.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), WATER, spacing=0.02)
+    sim.set_solver_profile(PROFILES[profile_name])
+    sim._spawn_substep = sim._damping_duration
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+
+    dead_slot = n // 2
+    world.packed_info[dead_slot] = cp.uint32((STATIC & 0x3) << 8)  # DEAD, STATIC
+    world.mass[dead_slot] = cp.float32(0.0)
+    world.health[dead_slot] = cp.float32(0.0)
+    world.color[dead_slot] = cp.asarray([0.3, 0.3, 0.3, 0.0], dtype=cp.float32)
+    sim._sim_step(n)
+
+    color = cp.asnumpy(world.color[:n])
+    assert color[dead_slot, 3] < 0.0, (
+        f"{profile_name}: DEAD slot alpha {color[dead_slot, 3]} must be < 0")
+    live = np.ones(n, dtype=bool)
+    live[dead_slot] = False
+    assert (color[live, 3] >= 0.0).all(), f"{profile_name}: a live slot has alpha < 0"
+    assert np.allclose(color[live, 3], 0.0), f"{profile_name}: WATER alpha must stay 0.0"
+
+    # Brush kill: culled right away, before any substep, and after one.
+    before = world.packed_info[:n].copy()
+    world.kill_in_sphere((0.0, 0.0, 0.0), 0.05)
+    killed = cp.asnumpy(((before & cp.uint32(0xFF)) != 0)
+                        & ((world.packed_info[:n] & cp.uint32(0xFF)) == 0))
+    assert killed.sum() > 5, f"only {killed.sum()} particles killed"
+    assert (cp.asnumpy(world.color[:n, 3])[killed] < 0.0).all(), "kill must set alpha < 0"
+    sim._sim_step(n)
+    alpha = cp.asnumpy(world.color[:n, 3])
+    assert (alpha[killed] < 0.0).all(), f"{profile_name}: killed slot not culled after a substep"
+    alive = cp.asnumpy((world.packed_info[:n] & cp.uint32(0xFF)) != 0)
+    assert (alpha[alive] >= 0.0).all(), f"{profile_name}: a live slot has alpha < 0"
+
+
+def test_add_dead_reserve_color_is_culled():
+    """Parked reserve slots are culled from the moment they are added."""
+    w = World(max_particles=4096)
+    w.spawn_cube((-0.05, -0.05, -0.05), (0.05, 0.05, 0.05), WATER, spacing=0.02)
+    start = w._high_water
+    added = w.add_dead_reserve(64)
+    assert added == 64
+    assert (cp.asnumpy(w.color[start:start + added, 3]) < 0.0).all()
