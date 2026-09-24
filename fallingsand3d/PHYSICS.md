@@ -609,6 +609,7 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | restitution | 0.3 | N/A | Only in fallingsand3d |
 | wall_friction | 0.5 | N/A | Only in fallingsand3d |
 | MAX_RIGID_BODIES | 8 | N/A | Dynamic Akinci bodies (global memory) |
+| RIGID_PSI_RHO0 | 2500 | N/A | Rigid boundary mass = RIGID_PSI_RHO0 * V_b; kernels rescale to psi_b = rho0_i * V_b (22.3) |
 | MAX_SDF_OBJECTS | 16 | N/A | Analytical SDF collision primitives (constant memory) |
 | rigid lin_damp | 1 - 0.01*dt | N/A | Linear velocity damping |
 | rigid ang_damp | 1 - 0.05*dt | N/A | Angular velocity damping |
@@ -1669,6 +1670,7 @@ while avoiding the explosion that full negative C would cause.
 
 **Boundary (STATIC) neighbor density (bd-mzc.25)**: STATIC neighbors contribute
 to the density sum with `psi_b = m_j` (standard Akinci weight — particle mass field).
+MAT_RIGID neighbours use `psi_b = rho0_i * V_b` (22.3).
 A previous `2x boundary_scale` multiplier was removed; it over-inflated near-wall
 density to roughly `2*rho_0`, causing lambda to drive particles away from walls
 (unphysical bounce). With the 2x factor gone, near-wall density is correct and
@@ -2418,7 +2420,7 @@ Surface normal accumulated in Step1 neighbor loop for FLUID particles:
 ```
 n_i = SUM_j V_j * grad_W_spiky(r_ij)
       V_j = m_j / rho_j          for fluid, granular and STONE neighbours
-      V_j = psi_b / rho0_i       for MAT_RIGID neighbours (psi_b is stored as mass)
+      V_j = m_j / RIGID_PSI_RHO0 for MAT_RIGID neighbours (= V_b, see 22.3)
 neighbor_count_i = count of non-self neighbours within h with m_j > 0
 ```
 
@@ -3047,11 +3049,27 @@ Parameters per SDF object: restitution (e), friction (mu).
 
 Dynamic rigid bodies use boundary particles for hydrodynamic coupling (Akinci et al. 2012).
 
-**Volume precomputation** (psi_b): Each boundary particle's contribution volume is:
+**Volume precomputation** (V_b): Each boundary particle's volume is:
 ```
-psi_b = rho_0 / SUM_k W(r_b - r_k, h)
+V_b = 1 / SUM_k W(r_b - r_k, h)
 ```
-where the sum is over neighboring boundary particles of the same body. In practice, `psi_b` is stored directly as the particle's mass field.
+where the sum is over neighboring boundary particles of the same body. Akinci's
+boundary weight is `psi_b = rho0_i * V_b`, with the rest density of the fluid
+particle i that sees the boundary, so it differs per material.
+
+**Storage** (bd-r5-review-n28.77): the mass field holds
+`m_b = RIGID_PSI_RHO0 * V_b` with `RIGID_PSI_RHO0 = 2500` (`common.cuh`,
+`rigid_bodies.py`), and MAT_RIGID particles read density `RIGID_PSI_RHO0`. So:
+
+- volume terms `m_b / rho_b` give `V_b` directly (DFSPH, PBF XSPH, Jacobi).
+- density sums and the Akinci coupling use
+  `psi_b = m_b * (rho0_i / RIGID_PSI_RHO0) = rho0_i * V_b`.
+- the colour-field normal uses `V_b = m_b / RIGID_PSI_RHO0`.
+
+The scale `rho0_i / RIGID_PSI_RHO0` is computed with `__fdiv_rn`, so it is
+exactly 1 for WATER (2500) under `--use_fast_math`. OIL gets 0.85, SAND 1.6,
+MUD 1.8, LAVA 2.6. `add_rigid_body_with_particles` rejects any `rho0` other
+than `RIGID_PSI_RHO0`.
 
 **Material**: Boundary particles use `MAT_RIGID = 18` with `behavior_class = STATIC`.
 
@@ -3061,9 +3079,19 @@ where the sum is over neighboring boundary particles of the same body. In practi
 
 In Step1, boundary particles contribute to fluid density like regular particles:
 ```
-rho_i += SUM_b psi_b * W(r_i - r_b, h)
+rho_i += SUM_b psi_b * W(r_i - r_b, h),   psi_b = rho0_i * V_b = m_b * (rho0_i / RIGID_PSI_RHO0)
 ```
-No special code needed — boundary particles have mass = psi_b and participate in the standard density summation. MAT_RIGID particles skip their own density computation (early return).
+The neighbour loop multiplies a MAT_RIGID neighbour's mass by `rho0_i / RIGID_PSI_RHO0`
+(one multiply per rigid pair). Every other neighbour uses `m_j` unchanged. The same
+term is in K_Step1, K_Step1_BuildNL, K_DFSPH_ComputeDensityAlpha and
+K_PBF_ComputeLambda. MAT_RIGID particles skip their own density computation (early return).
+
+Measured with a kinematic 12 cm box submerged in a 0.6 m pool for 1.5 s
+(before = every fluid sees `2500 * V_b`): particles inside the box drop from
+156 to 0 (DFSPH LAVA), 160 to 0 (PBF LAVA), 64 to 0 (WCSPH LAVA), 58 to 0
+(PBF SAND) and 6 to 0 (DFSPH SAND). WATER is unchanged. WCSPH OIL gets a
+15% weaker wall and more particles inside (38 to 88), because the WCSPH rigid
+wall is already too weak (WCSPH WATER also leaks 10 to 40 particles).
 
 **Source**: `step1.cu:K_Step1`
 
@@ -3075,7 +3103,7 @@ For a fluid particle i near a MAT_RIGID boundary particle b:
 F_pressure = -m_i * (p_i/rho_i² + p_i/rho_0²) * psi_b * grad_W(r_i - r_b)
 ```
 
-The second term uses rest density rho_0 (not rho_b) because boundary particles have no meaningful density of their own. This mirrors the fluid's own pressure onto the boundary.
+The second term uses rest density rho_0 (not rho_b) because boundary particles have no meaningful density of their own. This mirrors the fluid's own pressure onto the boundary. Here `psi_b = rho0_i * V_b` as in 22.3, and the viscous coupling below uses the same `psi_b` (WCSPH `boundary_visc_factor`, DFSPH `K_DFSPH_NonPressureForces`).
 
 **Viscous coupling**: Boundary velocity computed from rigid body state:
 ```
@@ -3105,8 +3133,9 @@ rigid body with Tait pressure, so they do not give the body a Tait force either.
 
 **PBF and DFSPH pressure reaction.** The body gets exactly minus what each
 fluid-rigid pair gives the fluid, in the kernel that applies that push. Here
-`gW = grad_i W(r_i - r_b)` (spiky, points from i toward b), `V_b = psi_b / rho_b`
-with `rho_b = 2500`, and `m_b = psi_b`.
+`gW = grad_i W(r_i - r_b)` (spiky, points from i toward b), `V_b = m_b / rho_b`
+with `rho_b = RIGID_PSI_RHO0 = 2500`, and `m_b = RIGID_PSI_RHO0 * V_b` (22.3). The PBF
+row uses `m_b` without the `rho0_i` scale.
 
 | Solver | Kernel | Push on fluid i from b | Force on body |
 |---|---|---|---|
@@ -3267,7 +3296,7 @@ the flag.
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Body state storage | Global memory (RigidBody struct) | Max 8 bodies; constant memory reserved for SDF objects |
-| psi_b storage | mass field directly | Avoids extra buffer; density sum naturally includes psi_b |
+| psi_b storage | mass field holds RIGID_PSI_RHO0 * V_b | Avoids extra buffer; volume terms read V_b, density sums and Akinci coupling scale by rho0_i / RIGID_PSI_RHO0 |
 | Force accumulation | Warp reduction + atomicAdd | 32x less contention than per-thread atomics |
 | SDF vs boundary | Both coexist | SDF for collision, boundary particles for pressure/viscosity |
 | Quaternion convention | (x,y,z,w) where w=scalar | Matches CUDA float4 layout |
