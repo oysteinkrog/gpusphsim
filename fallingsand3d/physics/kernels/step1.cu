@@ -7,8 +7,10 @@
  *   density_i = max(1.0, poly6_coeff * density_sum)
  *
  * Heat diffusion (all particles):
- *   dTdt += kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|)
- *   where kappa_i = c_materials[mat_id].thermal_conductivity
+ *   dTdt_i = viscosity_lap_coeff / (rho_i cp_i)
+ *            * sum_j k_ij (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|) * heat_boost_ij
+ *   where k_ij = 2 kappa_i kappa_j / (kappa_i + kappa_j) (harmonic mean of
+ *   c_materials[].thermal_conductivity), so each pair exchanges heat symmetrically.
  *
  * Exposure accumulation (all particles, via c_interactions table lookup),
  * normalised by the kernel support weight of the neighbourhood:
@@ -209,7 +211,11 @@ void K_Step1(
                                 if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                                 float lap_var = h - rlen;
                                 float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-                                sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
+                                // Pairwise harmonic-mean conductivity: the pair term is symmetric,
+                                // so heat lost by i equals heat gained by j (bd-r5-review-n28.67).
+                                float kappa_j = c_materials[mat_id_j].thermal_conductivity;
+                                float k_ij = 2.0f * kappa_i * kappa_j / fmaxf(kappa_i + kappa_j, 1e-6f);
+                                sum_dTdt += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
 
                                 // --- Exposure accumulation ---
                                 float w_poly6_var = diff * diff * diff;
@@ -289,10 +295,10 @@ void K_Step1(
     pressure_out[index_i] = compute_pressure(density_out[index_i], behavior_i, mat_id_i);
 
     // --- PostCalc: heat diffusion dTdt ---
-    // dTdt = kappa_i / (rho_i * cp_i) * viscosity_lap_coeff * sum_dTdt
+    // dTdt = viscosity_lap_coeff * sum_dTdt / (rho_i * cp_i); k_ij is inside sum_dTdt
     float cp_i = c_materials[mat_id_i].heat_capacity;
     float rho_i_heat = density_out[index_i];
-    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
+    dTdt_out[index_i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
 
     // --- PostCalc: exposure accumulation ---
     // Normalise by the neighbour support weight (poly6_coeff cancels):
@@ -517,7 +523,11 @@ void K_Step1_BuildNL(
                                 if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                                 float lap_var = h - rlen;
                                 float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-                                sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
+                                // Pairwise harmonic-mean conductivity: the pair term is symmetric,
+                                // so heat lost by i equals heat gained by j (bd-r5-review-n28.67).
+                                float kappa_j = c_materials[mat_id_j].thermal_conductivity;
+                                float k_ij = 2.0f * kappa_i * kappa_j / fmaxf(kappa_i + kappa_j, 1e-6f);
+                                sum_dTdt += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
 
                                 float w_poly6_var = diff * diff * diff;
                                 sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
@@ -593,7 +603,7 @@ void K_Step1_BuildNL(
 
     float cp_i = c_materials[mat_id_i].heat_capacity;
     float rho_i_heat = density_out[index_i];
-    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
+    dTdt_out[index_i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
 
     float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
     exposure_heat_out[index_i] = sum_exposure_heat * inv_sum_W;

@@ -214,7 +214,11 @@ void K_Step1_NL(
             float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
             float lap_var = h - rlen;
             float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-            sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
+            // Pairwise harmonic-mean conductivity: the pair term is symmetric,
+            // so heat lost by i equals heat gained by j (bd-r5-review-n28.67).
+            float kappa_j = c_materials[mat_id_j].thermal_conductivity;
+            float k_ij = 2.0f * kappa_i * kappa_j / fmaxf(kappa_i + kappa_j, 1e-6f);
+            sum_dTdt += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
 
             float w_poly6_var = diff * diff * diff;
             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
@@ -281,7 +285,7 @@ void K_Step1_NL(
 
     float cp_i = c_materials[mat_id_i].heat_capacity;
     float rho_i_heat = density_out[index_i];
-    dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
+    dTdt_out[index_i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
 
     exposure_heat_out[index_i] = c_precalc.poly6_coeff * sum_exposure_heat;
     exposure_corrode_out[index_i] = c_precalc.poly6_coeff * sum_exposure_corrode;

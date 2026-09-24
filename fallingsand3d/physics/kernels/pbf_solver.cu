@@ -318,7 +318,11 @@ void K_PBF_ComputeLambda(
 
                             float lap_var = h - rlen;
                             float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-                            sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
+                            // Pairwise harmonic-mean conductivity: the pair term is symmetric,
+                            // so heat lost by i equals heat gained by j (bd-r5-review-n28.67).
+                            float kappa_j = c_materials[mat_id_j].thermal_conductivity;
+                            float k_ij = 2.0f * kappa_i * kappa_j / fmaxf(kappa_i + kappa_j, 1e-6f);
+                            sum_dTdt += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
 
                             float w_poly6_var = diff * diff * diff;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
@@ -369,7 +373,7 @@ void K_PBF_ComputeLambda(
     // Heat diffusion + exposure + dye output
     if (do_heat) {
         float cp_i = c_materials[mat_id_i].heat_capacity;
-        dTdt_out[i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, RHO_EPSILON);
+        dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, RHO_EPSILON);
         exposure_heat_out[i] = c_precalc.poly6_coeff * sum_exposure_heat;
         exposure_corrode_out[i] = c_precalc.poly6_coeff * sum_exposure_corrode;
         if (dye_on) dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
