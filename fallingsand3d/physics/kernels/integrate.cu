@@ -641,45 +641,55 @@ void K_IntegrateRigidBodies(
     lin_vel.y *= lin_damp;
     lin_vel.z *= lin_damp;
 
-    // --- Angular integration with world-frame inertia ---
+    // --- Angular integration in angular momentum form ---
+    // Euler's equation I*domega/dt + omega x (I*omega) = tau is integrated
+    // through the world-frame angular momentum L = I_world * omega:
+    //   L      = R * diag(I_b) * (R^T * omega)      (old rotation)
+    //   L     += tau * dt; L *= ang_damp
+    //   omega  = R * diag(Iinv) * (R^T * L)         (old rotation, drives the pose)
+    //   pose update with omega
+    //   omega' = R' * diag(Iinv) * (R'^T * L)       (new rotation, stored)
+    // With no torque L is conserved exactly, and the gyroscopic term
+    // -I_world_inv * (omega x I_world * omega) comes out of re-deriving
+    // omega from L at the new rotation. A non-cubic body therefore shows
+    // the intermediate-axis flip. For a cube I_world is isotropic and this
+    // reduces to omega += Iinv * tau * dt. (bd-r5-review-n28.114)
     float4 q = body.rotation;
     float3 Iinv = make_float3(body.inertia_inv.x, body.inertia_inv.y, body.inertia_inv.z);
-
-    // Apply the world-frame inverse inertia to the torque:
-    //   I_world_inv = R * diag(I_body_inv) * R^T
-    //   ang_accel   = I_world_inv * tau = R * diag(Iinv) * (R^T * tau)
-    // Evaluated as three steps to keep the full R^T factor (previously the
-    // R^T rotation of tau into the body frame was dropped, giving the wrong
-    // axis and magnitude for any rotated non-cubic body). (HIGH-6)
-    float3 tau_body = quat_rotate_inv(q, tau);              // R^T * tau
-    float3 ang_accel_body = make_float3(                    // diag(Iinv) * tau_body
-        Iinv.x * tau_body.x,
-        Iinv.y * tau_body.y,
-        Iinv.z * tau_body.z
+    float3 Ib = make_float3(                                 // guard zero Iinv
+        Iinv.x > 0.0f ? 1.0f / Iinv.x : 0.0f,
+        Iinv.y > 0.0f ? 1.0f / Iinv.y : 0.0f,
+        Iinv.z > 0.0f ? 1.0f / Iinv.z : 0.0f
     );
-    float3 ang_accel = quat_rotate(q, ang_accel_body);      // R * (...)
 
     float3 ang_vel = make_float3(body.ang_vel.x, body.ang_vel.y, body.ang_vel.z);
-    ang_vel.x += ang_accel.x * dt;
-    ang_vel.y += ang_accel.y * dt;
-    ang_vel.z += ang_accel.z * dt;
+    float3 w_b = quat_rotate_inv(q, ang_vel);                // R^T * omega
+    float3 L = quat_rotate(q, make_float3(Ib.x * w_b.x, Ib.y * w_b.y, Ib.z * w_b.z));
 
-    // Angular velocity damping
+    // Angular velocity damping (applied to L, same scalar factor)
     float ang_damp = 1.0f - 0.05f * dt;
-    ang_vel.x *= ang_damp;
-    ang_vel.y *= ang_damp;
-    ang_vel.z *= ang_damp;
+    L.x = (L.x + tau.x * dt) * ang_damp;
+    L.y = (L.y + tau.y * dt) * ang_damp;
+    L.z = (L.z + tau.z * dt) * ang_damp;
 
-    // Angular velocity clamp: |omega| < 20 rad/s
+    float3 L_b = quat_rotate_inv(q, L);
+    ang_vel = quat_rotate(q, make_float3(Iinv.x * L_b.x, Iinv.y * L_b.y, Iinv.z * L_b.z));
+
+    // Angular velocity clamp: |omega| < 20 rad/s (scales L with it)
     float omega_sq = ang_vel.x * ang_vel.x + ang_vel.y * ang_vel.y + ang_vel.z * ang_vel.z;
     if (omega_sq > 400.0f) {  // 20^2
         float s = 20.0f / sqrtf(omega_sq);
         ang_vel.x *= s; ang_vel.y *= s; ang_vel.z *= s;
+        L.x *= s; L.y *= s; L.z *= s;
     }
 
     // --- Pose update: pos += v * dt, q += 0.5 * dt * omega_q * q ---
     float3 pos = make_float3(body.position.x, body.position.y, body.position.z);
     rigid_integrate_pose(pos, q, lin_vel, ang_vel, dt);
+
+    // Re-derive omega from the conserved L at the new rotation.
+    L_b = quat_rotate_inv(q, L);
+    ang_vel = quat_rotate(q, make_float3(Iinv.x * L_b.x, Iinv.y * L_b.y, Iinv.z * L_b.z));
 
     // --- World boundary clamp for rigid body COM ---
     float3 wmin = c_sim.world_min;
