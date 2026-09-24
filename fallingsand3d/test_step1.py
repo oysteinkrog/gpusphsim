@@ -898,6 +898,88 @@ def test_heat_conductivity_material_dependence() -> None:
     print("[OK] Metal conducts heat much faster than water")
 
 
+MAT_LAVA = 7    # thermal_conductivity = 500, heat_capacity = 1000
+
+
+def _to_original_order(sorted_vals: np.ndarray, sorted_pos: np.ndarray,
+                       positions: np.ndarray) -> np.ndarray:
+    """Map a sorted-order array back to input order by matching positions."""
+    key = lambda p: (round(float(p[0]) / 1e-4), round(float(p[1]) / 1e-4), round(float(p[2]) / 1e-4))
+    lookup = {key(p): k for k, p in enumerate(sorted_pos)}
+    idx = np.array([lookup[key(p)] for p in positions], dtype=np.int64)
+    return sorted_vals[idx]
+
+
+def _two_material_slab_energy_drift(mat_hot: int, mat_cold: int, steps: int) -> tuple[float, float]:
+    """Hot slab of mat_hot (x < 0, 1000 K) against cold mat_cold (x >= 0, 293 K).
+
+    Geometry is fixed, density_in is the self-consistent step1 density, and
+    T is advanced with explicit Euler from dTdt. Returns
+    (rate imbalance, relative drift of sum m_i cp_i T_i after `steps`).
+    The rate imbalance is |sum m_i cp_i dTdt_i| / sum |m_i cp_i dTdt_i| at step 0.
+    """
+    _upload_all_params()
+    cp_table = build_material_array()["heat_capacity"].astype(np.float64)
+
+    coords = np.arange(-0.07, 0.07 + SPACING * 0.5, SPACING, dtype=np.float32)
+    xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
+    n = xx.size
+    positions = np.zeros((n, 4), dtype=np.float32)
+    positions[:, 0] = xx.ravel() + 0.5 * SPACING  # no particle on x = 0
+    positions[:, 1] = yy.ravel()
+    positions[:, 2] = zz.ravel()
+    positions[:, 3] = 1.0
+    hot = positions[:, 0] < 0.0
+
+    mass_arr = np.full(n, MASS, dtype=np.float32)
+    mat = np.where(hot, mat_hot, mat_cold).astype(np.uint32)
+    packed_info = (mat | (FLUID << 8)).astype(np.uint32)
+    temperature = np.where(hot, 1000.0, 293.0).astype(np.float32)
+    mcp = mass_arr.astype(np.float64) * cp_table[mat]
+
+    # Self-consistent density: PostCalc divides by density_out, the neighbour
+    # weight uses density_in. Energy balances pairwise only when they match.
+    density_s, _, _, _, _, sorted_pos, _ = _run_full_pipeline(
+        positions, mass_arr, None, packed_info, None, temperature,
+    )
+    density_in = _to_original_order(density_s, sorted_pos, positions)
+
+    dt = 1.0e-4
+    e0 = float(np.sum(mcp * temperature))
+    imbalance = 0.0
+    for step in range(steps):
+        _, _, dTdt_s, _, _, sorted_pos, _ = _run_full_pipeline(
+            positions, mass_arr, None, packed_info, density_in, temperature,
+        )
+        dTdt = _to_original_order(dTdt_s, sorted_pos, positions).astype(np.float64)
+        if step == 0:
+            rate = mcp * dTdt
+            imbalance = abs(float(np.sum(rate))) / max(float(np.sum(np.abs(rate))), 1e-30)
+        temperature = (temperature + dt * dTdt).astype(np.float32)
+    e1 = float(np.sum(mcp * temperature.astype(np.float64)))
+    return imbalance, abs(e1 - e0) / e0
+
+
+def test_heat_energy_conserved_single_material() -> None:
+    """WATER/WATER slab: pairwise heat exchange conserves sum m cp T."""
+    imbalance, drift = _two_material_slab_energy_drift(MAT_WATER, MAT_WATER, steps=100)
+    print(f"  WATER/WATER rate imbalance {imbalance:.2e}, energy drift {drift:.2e}")
+    assert imbalance < 1e-4, f"WATER/WATER heat rate imbalance {imbalance:.2e}"
+    assert drift < 1e-5, f"WATER/WATER energy drift {drift:.2e}"
+
+
+def test_heat_energy_conserved_lava_water() -> None:
+    """LAVA/WATER slab: harmonic-mean k_ij keeps sum m cp T constant.
+
+    With kappa_i applied per particle, lava (500) loses 10x the energy water
+    (50) gains, so the rate imbalance is about 0.8 (bd-r5-review-n28.67).
+    """
+    imbalance, drift = _two_material_slab_energy_drift(MAT_LAVA, MAT_WATER, steps=100)
+    print(f"  LAVA/WATER rate imbalance {imbalance:.2e}, energy drift {drift:.2e}")
+    assert imbalance < 1e-4, f"LAVA/WATER heat rate imbalance {imbalance:.2e}"
+    assert drift < 1e-5, f"LAVA/WATER energy drift {drift:.2e}"
+
+
 # ===================================================================
 # Exposure accumulation tests (US-021)
 # ===================================================================
@@ -1182,6 +1264,8 @@ def main() -> None:
     test_hot_particle_among_cold()
     test_uniform_temperature_zero_dTdt()
     test_heat_conductivity_material_dependence()
+    test_heat_energy_conserved_single_material()
+    test_heat_energy_conserved_lava_water()
     test_acid_metal_exposure_corrode()
     test_fire_wood_exposure_heat()
     test_water_water_no_exposure()
