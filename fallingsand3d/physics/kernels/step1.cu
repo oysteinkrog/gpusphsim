@@ -10,9 +10,12 @@
  *   dTdt += kappa_i * viscosity_lap_coeff * sum_j (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|)
  *   where kappa_i = c_materials[mat_id].thermal_conductivity
  *
- * Exposure accumulation (all particles, via c_interactions table lookup):
- *   exposure_corrode_i += c_interactions[mat_i][mat_j].reaction_rate * W_poly6(r_sq, h_sq)
- *   exposure_heat_i += c_interactions[mat_i][mat_j].heat_exchange * max(T_j - T_i, 0) * W_poly6(r_sq, h_sq)
+ * Exposure accumulation (all particles, via c_interactions table lookup),
+ * normalised by the kernel support weight of the neighbourhood:
+ *   exposure_corrode_i = sum_j rate_ij * W_ij / sum_j W_ij
+ *   exposure_heat_i    = sum_j heat_exchange_ij * max(T_j - T_i, 0) * W_ij / sum_j W_ij
+ *   sum_j W_ij runs over every non-self, non-DEAD neighbour in range,
+ *   including cross-phase GAS and MAT_RIGID neighbours.
  *   No if/else branching on material type -- pure table lookup.
  *
  * For GRANULAR particles only, also computes the symmetric strain-rate tensor D
@@ -118,6 +121,9 @@ void K_Step1(
     // Exposure accumulators (from c_interactions table lookup)
     float sum_exposure_heat = 0.0f;
     float sum_exposure_corrode = 0.0f;
+    // Kernel support weight of all non-self, non-DEAD neighbours: the
+    // exposure sums are divided by it, so exposure is a support fraction.
+    float sum_W = 0.0f;
 
     // Strain-rate tensor accumulators (6 symmetric components)
     // D_xx, D_yy, D_zz, D_xy, D_xz, D_yz
@@ -175,6 +181,7 @@ void K_Step1(
                         if (is_gas_i != is_gas_j && index_j != index_i) {
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float w_poly6_var = diff * diff * diff;
+                            if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
                             continue;
@@ -189,6 +196,10 @@ void K_Step1(
 
                             // Single sqrtf per neighbor (PERF-003)
                             float rlen = sqrtf(r_sq);
+
+                            // Exposure support weight counts MAT_RIGID too, so a wall
+                            // dilutes exposure like any other neighbour.
+                            if (mat_id_j != MAT_DEAD) sum_W += diff * diff * diff;
 
                             // Skip MAT_RIGID neighbors for heat/exposure/vorticity/strain
                             // (density contribution already included via mass=psi_b)
@@ -284,9 +295,12 @@ void K_Step1(
     dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
 
     // --- PostCalc: exposure accumulation ---
-    // Apply poly6_coeff to get properly normalized exposure values
-    exposure_heat_out[index_i] = c_precalc.poly6_coeff * sum_exposure_heat;
-    exposure_corrode_out[index_i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+    // Normalise by the neighbour support weight (poly6_coeff cancels):
+    // exposure_corrode is in [0, max reaction_rate] (1/s), exposure_heat is
+    // heat_exchange * K weighted by the fraction of the support that is hotter.
+    float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
+    exposure_heat_out[index_i] = sum_exposure_heat * inv_sum_W;
+    exposure_corrode_out[index_i] = sum_exposure_corrode * inv_sum_W;
 
     // --- PostCalc: vorticity ---
     float omega_mag = sqrtf(omega.x * omega.x + omega.y * omega.y + omega.z * omega.z);
@@ -430,6 +444,9 @@ void K_Step1_BuildNL(
     float sum_dTdt = 0.0f;
     float sum_exposure_heat = 0.0f;
     float sum_exposure_corrode = 0.0f;
+    // Kernel support weight of all non-self, non-DEAD neighbours: the
+    // exposure sums are divided by it, so exposure is a support fraction.
+    float sum_W = 0.0f;
     float Dxx = 0.0f, Dyy = 0.0f, Dzz = 0.0f;
     float Dxy = 0.0f, Dxz = 0.0f, Dyz = 0.0f;
     float3 omega = make_float3(0.0f, 0.0f, 0.0f);
@@ -470,6 +487,7 @@ void K_Step1_BuildNL(
                         if (is_gas_i != is_gas_j && index_j != index_i) {
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float w_poly6_var = diff * diff * diff;
+                            if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
                             // Still record as neighbor for step2
@@ -491,6 +509,8 @@ void K_Step1_BuildNL(
 
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float rlen = sqrtf(r_sq);
+
+                            if (mat_id_j != MAT_DEAD) sum_W += diff * diff * diff;
 
                             if (mat_id_j != MAT_RIGID) {
                                 float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
@@ -575,8 +595,9 @@ void K_Step1_BuildNL(
     float rho_i_heat = density_out[index_i];
     dTdt_out[index_i] = kappa_i * c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
 
-    exposure_heat_out[index_i] = c_precalc.poly6_coeff * sum_exposure_heat;
-    exposure_corrode_out[index_i] = c_precalc.poly6_coeff * sum_exposure_corrode;
+    float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
+    exposure_heat_out[index_i] = sum_exposure_heat * inv_sum_W;
+    exposure_corrode_out[index_i] = sum_exposure_corrode * inv_sum_W;
 
     float omega_mag = sqrtf(omega.x * omega.x + omega.y * omega.y + omega.z * omega.z);
     vorticity_out[index_i] = make_float4(omega.x, omega.y, omega.z, omega_mag);

@@ -51,9 +51,16 @@
 #define WATER_BOIL_TEMP       373.0f   // WATER -> SPAWN_GAS flag above this
 #define STEAM_CONDENSE_TEMP   360.0f   // STEAM -> WATER below this (13K hysteresis below boil)
 
-#define WOOD_IGNITE_EXPOSURE  0.5f     // WOOD -> FIRE above this exposure_heat
-#define OIL_IGNITE_EXPOSURE   0.3f     // OIL  -> FIRE above this exposure_heat
-#define GUNPOWDER_EXPOSURE    0.1f     // GUNPOWDER -> FIRE above this exposure_heat
+/* Exposure from Step1 is normalised by the neighbour kernel support weight
+ * (bd-r5-review-n28.48):
+ *   exposure_heat    = sum_j heat_exchange_ij * max(T_j - T_i, 0) * W_ij / sum_j W_ij   [K]
+ *   exposure_corrode = sum_j reaction_rate_ij * W_ij / sum_j W_ij                       [1/s]
+ * On a 0.5h lattice one nearest neighbour holds about 10% of the support, so
+ * one FIRE neighbour (dT ~ 900 K) gives WOOD 25 * 900 * 0.10 ~ 2300 K, and a
+ * FIRE neighbour at 0.85h (0.5% of the support) gives about 110 K. */
+#define WOOD_IGNITE_EXPOSURE  500.0f   // WOOD -> FIRE above this exposure_heat (K)
+#define OIL_IGNITE_EXPOSURE   300.0f   // OIL  -> FIRE above this exposure_heat (K)
+#define GUNPOWDER_EXPOSURE    100.0f   // GUNPOWDER -> FIRE above this exposure_heat (K)
 
 #define FIRE_TEMPERATURE     1200.0f   // temperature set on combustion
 #define WOOD_FIRE_LIFETIME      1.0f   // seconds
@@ -62,7 +69,11 @@
 
 #define EXPLOSION_SPEED       25.0f    // velocity magnitude for gunpowder burst
 
-/* Sand wetting/drying thresholds */
+/* Sand wetting/drying thresholds on exposure_corrode = rate * water fraction.
+ * With SAND/WATER 0.4, WET_SAND/WATER 0.6, MUD/WATER 0.3, DIRT/WATER 0.5:
+ *   SAND -> WET_SAND above 50% water, WET_SAND -> MUD above 83%,
+ *   MUD -> WET_SAND below 33%, WET_SAND -> SAND below 3.3%,
+ *   DIRT -> MUD above 40% water. */
 #define SAND_WET_THRESHOLD      0.2f   // SAND -> WET_SAND
 #define WETSAND_MUD_THRESHOLD   0.5f   // WET_SAND -> MUD
 #define WETSAND_DRY_THRESHOLD   0.02f  // WET_SAND -> SAND (drying)
@@ -192,7 +203,7 @@ void K_Reactions(
 
     // ---- Combustion transitions based on exposure_heat ----
 
-    // WOOD (mat=9, exposure_heat > 0.5) -> FIRE
+    // WOOD (mat=9, exposure_heat > WOOD_IGNITE_EXPOSURE) -> FIRE
     if (mat_id == MAT_WOOD && exp_heat > WOOD_IGNITE_EXPOSURE) {
         pi = MAKE_PACKED(MAT_FIRE, GAS);
         packed_info[i] = pi;
@@ -201,7 +212,7 @@ void K_Reactions(
         return;
     }
 
-    // OIL (mat=6, exposure_heat > 0.3) -> FIRE
+    // OIL (mat=6, exposure_heat > OIL_IGNITE_EXPOSURE) -> FIRE
     if (mat_id == MAT_OIL && exp_heat > OIL_IGNITE_EXPOSURE) {
         pi = MAKE_PACKED(MAT_FIRE, GAS);
         packed_info[i] = pi;
@@ -210,7 +221,7 @@ void K_Reactions(
         return;
     }
 
-    // GUNPOWDER (mat=15, exposure_heat > 0.1) -> FIRE + explosion
+    // GUNPOWDER (mat=15, exposure_heat > GUNPOWDER_EXPOSURE) -> FIRE + explosion
     if (mat_id == MAT_GUNPOWDER && exp_heat > GUNPOWDER_EXPOSURE) {
         pi = MAKE_PACKED(MAT_FIRE, GAS);
         packed_info[i] = pi;
@@ -269,6 +280,8 @@ void K_Reactions(
     }
 
     // ---- Corrosion: health -= exposure_corrode * dt ----
+    // exposure_corrode is rate * acid support fraction, so a particle fully
+    // surrounded by acid dies after 1/rate seconds (STONE 6.7 s, METAL 3.3 s).
     // Whitelist: only these materials can be corroded by acid.
     // MAT_DIRT is excluded: DIRT+WATER is handled above as DIRT->MUD wetting,
     // so DIRT should never reach this corrosion path via water exposure.
