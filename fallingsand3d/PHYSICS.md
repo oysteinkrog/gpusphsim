@@ -178,6 +178,23 @@ a_visc += eta_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / (rho_j * rho_i) * (h - |r
 GRANULAR uses the standard dynamic form because `eta_i` from mu(I) rheology (see Section 5)
 has true Pa*s units and `force_scale=1.0` (no global scaling).
 
+**STATIC and MAT_RIGID boundary neighbours (WCSPH step2, `boundary_visc_factor`)**
+
+The boundary particle b has mass (or psi_b) m_b and velocity v_b (0 for regular STATIC,
+the body surface velocity for MAT_RIGID).
+```
+FLUID/GAS i:  a_visc += base_viscosity_i * [45/(pi*h^6)] * m_b * (v_b - v_i) / rho_i * (h - |r|)
+GRANULAR i:   a_visc += mu0 * [45/(pi*h^6)] * m_b * (v_b - v_i) / (rho_i * rho0_i) * (h - |r|)
+```
+GRANULAR uses the same dynamic form as its pair code, with the boundary density taken as
+the rest density `rho0_i` of i's own material (Akinci mirror: the wall stands in for more
+sand). It does not read the STATIC particle's own density. The drag rate per boundary
+neighbour therefore equals a GRANULAR-nonGRANULAR pair with mu0 at rest density
+(checked by `test_step2.py::test_granular_static_drag_matches_pair` and
+`test_granular_rigid_drag_matches_pair`). At h=0.04, m=0.02, rho0_sand=4000 and
+r=h/2 this is about 0.12 1/s per neighbour, well inside the explicit limit and far
+below `ACCEL_MAX_GRANULAR = 200`.
+
 **Source**: `step2.cu:348-357` (FLUID), `step2.cu:321-340` (GRANULAR), `dfsph_solver.cu:419-425`
 
 ### 3.4 XSPH Velocity Correction (FLUID only)
@@ -2119,8 +2136,10 @@ The second term uses rest density rho_0 (not rho_b) because boundary particles h
 **Viscous coupling**: Boundary velocity computed from rigid body state:
 ```
 v_b = v_body + omega × (r_b - COM)
-F_visc = mu * (v_b - v_i) / rho_avg * lap_W
 ```
+The viscous acceleration on i uses the boundary form of Section 3.3
+(`boundary_visc_factor` in `step2.cu`): FLUID/GAS divide by rho_i, GRANULAR
+divides by rho_i * rho0_i with mu0.
 
 **Reaction forces** (Newton's 3rd law):
 
