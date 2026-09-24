@@ -1583,9 +1583,11 @@ def test_pbf_gunpowder_blast_moves_water(world, sim, monkeypatch):
     sim.sim_time = 0.0
     sim._last_frame_time = None
     tiny = ((-0.001, -0.001, -0.001), (0.001, 0.001, 0.001))
-    n_w = world.spawn_cube((-0.06, -0.06, -0.06), (0.06, 0.06, 0.06), WATER,
+    # spawn_cube puts lattice points at min + spacing/2, so both cubes put
+    # a point at the origin; the water one is excluded.
+    n_w = world.spawn_cube((-0.07, -0.07, -0.07), (0.07, 0.07, 0.07), WATER,
                            spacing=0.02, exclude_box=tiny)
-    n_g = world.spawn_cube((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), GUNPOWDER,
+    n_g = world.spawn_cube((-0.01, -0.01, -0.01), (0.01, 0.01, 0.01), GUNPOWDER,
                            spacing=0.02)
     assert n_g == 1
     n = n_w + n_g
@@ -1624,4 +1626,8 @@ def test_pbf_gunpowder_blast_moves_water(world, sim, monkeypatch):
           f"fire speed {fire_speed:.3f} m/s")
     assert mean_radial > 1.0, (
         f"PBF lost the blast: mean outward water speed {mean_radial:.3f} m/s")
-    assert fire_speed > 5.0, f"PBF lost the gunpowder burst: {fire_speed:.3f} m/s"
+    # The 25 m/s burst is far above the CFL clamp (0.9 h / dt, 4.3 m/s at
+    # dt = 1/120), so a kept burst leaves the FIRE particle at the clamp.
+    v_limit = float(sim._sim_params[0]["velocity_limit"])
+    assert fire_speed > 0.9 * v_limit, (
+        f"PBF lost the gunpowder burst: {fire_speed:.3f} m/s, limit {v_limit:.3f}")
