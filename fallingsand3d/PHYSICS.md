@@ -944,6 +944,54 @@ is not worth it here (PROBLEMS.md J4).
 
 **Source**: `reactions.cu` (K_Reactions, phase transitions block)
 
+### 9.6 Spawn Slot Initial State and GAS Lifetimes
+
+Every host spawn (`spawn_sphere`, `spawn_cube`, `spawn_ramp`, `spawn_bowl`,
+`spawn_cylinder_shell`, and `spawn_wall_with_gap` through `spawn_cube`) writes
+all per-particle fields of its new slots through one helper,
+`World._init_slot_state`. A reused slot keeps nothing from its previous
+occupant:
+
+| Field | Initial value |
+|-------|---------------|
+| position.xyz | spawn point |
+| position.w | material `rest_density` (read as the previous-substep density by step1) |
+| density | material `rest_density` |
+| velocity, veleval | spawn velocity, w = 0 |
+| sph_force, angular_velocity | 0 |
+| kappa, kappa_v (DFSPH warm start) | 0 |
+| mass | `spawn_mass(material)` (§7.4) |
+| temperature | §9.3 default |
+| health | 1 |
+| lifetime | GAS default below, else 0 |
+| shear_rate, exposure_heat, exposure_corrode | 0 |
+| color, particle_dye | material color |
+
+`presets._clear_world` also zeroes `kappa`, `kappa_v` and `sorted_lambda_pbf`
+for the whole pool, so no DFSPH or PBF warm-start pressure from the previous
+scene reaches the first substep of the next one.
+
+K_Reactions counts `lifetime` down only while it is above 0. A spawned GAS
+particle gets a default lifetime from `_DEFAULT_LIFETIMES` in `world.py`:
+
+| Material | Default lifetime | On expiry |
+|----------|------------------|-----------|
+| FIRE | 1.5 s | becomes SMOKE with lifetime 3.0 s |
+| SMOKE | 3.0 s | becomes DEAD |
+| STEAM | 5.0 s | becomes DEAD |
+
+So brush and preset FIRE turns to SMOKE after 1.5 s and dies after 4.5 s,
+like fire from combustion. A caller can pass `lifetime=` to any `spawn_*`;
+`lifetime=0` makes a GAS particle permanent.
+
+Periodic preset spawners run through `presets.run_spawner`, which skips a
+spawn once `_high_water` is above the spawner's `budget` (default
+0.9 × `max_particles`; Fire and Ice and Water Mill set it explicitly). The
+last batch can pass the budget by at most its own size.
+
+**Source**: `world.py` (`_init_slot_state`, `_DEFAULT_LIFETIMES`),
+`presets.py` (`_clear_world`, `run_spawner`), `reactions.cu` (GAS lifetime decay)
+
 ---
 
 ## 10. Known Issues and Discrepancies
