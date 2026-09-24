@@ -125,6 +125,7 @@ def compute_reactions(
     dead_count: Optional[cupy.ndarray] = None,
     frame: Optional[int] = None,
     sorted_mass: Optional[cupy.ndarray] = None,
+    predicted_position: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_Reactions kernel.
 
@@ -165,6 +166,10 @@ def compute_reactions(
         material change rescales it by the spawn-mass rule of
         world.spawn_mass (SAND -> WET_SAND x1.125, STONE -> LAVA x2.6).
         The simulation always passes it; None skips the writes (unit tests).
+    predicted_position : cupy.ndarray, optional
+        (N, 4) float32 PBF sorted_predicted_position. When given, the
+        gunpowder burst also adds dt * dv to x*, because PBF has already
+        predicted and rebuilds velocity from x*. WCSPH and DFSPH pass None.
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
@@ -185,6 +190,7 @@ def compute_reactions(
     d_dead_indices = dead_indices if dead_indices is not None else np.intp(0)
     d_dead_count = dead_count if dead_count is not None else np.intp(0)
     d_mass = sorted_mass if sorted_mass is not None else np.intp(0)
+    d_pred = predicted_position if predicted_position is not None else np.intp(0)
 
     kernel(
         grid,
@@ -202,6 +208,7 @@ def compute_reactions(
             d_dead_indices,
             d_dead_count,
             d_mass,
+            d_pred,
         ),
     )
 
@@ -217,10 +224,13 @@ def compute_blast_wave(
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     smoothing_length: float = 0.04,
+    predicted_position: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_BlastWave kernel for radial impulse from gunpowder explosions.
 
     Should be called after compute_reactions(), before step2.
+    predicted_position is PBF's sorted_predicted_position: each non-STATIC
+    target's x* also moves by dt * dv. WCSPH and DFSPH pass None.
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
@@ -244,5 +254,6 @@ def compute_blast_wave(
             cell_start,
             cell_end,
             np.float32(smoothing_length),
+            predicted_position if predicted_position is not None else np.intp(0),
         ),
     )

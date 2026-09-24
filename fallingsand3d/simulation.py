@@ -808,7 +808,9 @@ class Simulation:
         only the timed path passes a real callback.
 
         predicted_position is PBF's sorted_predicted_position: K_PBF_Predict has
-        already run, so K_SpawnGas writes each steam child's prediction there.
+        already run, so K_SpawnGas writes each steam child's prediction there,
+        and the gunpowder burst and blast wave add dt * dv to it so Finalize's
+        (x* - x)/dt keeps their kicks.
         WCSPH and DFSPH pass None (DFSPH reuses that buffer as a_press scratch).
         """
         w = self.world
@@ -828,6 +830,8 @@ class Simulation:
             dead_indices=self._dead_indices,
             dead_count=self._dead_count,
             sorted_mass=w.sorted_mass[:n],
+            predicted_position=(predicted_position[:n]
+                                if predicted_position is not None else None),
         )
         mark("reactions")
 
@@ -842,6 +846,8 @@ class Simulation:
                 self._cell_start,
                 self._cell_end,
                 smoothing_length=self._h,
+                predicted_position=(predicted_position[:n]
+                                    if predicted_position is not None else None),
             )
             mark("blast")
 

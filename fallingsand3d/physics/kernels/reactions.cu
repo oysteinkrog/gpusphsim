@@ -151,7 +151,12 @@ void K_Reactions(
     // Dead slots must have mass 0, or they act as invisible boundary
     // particles in every m_j-weighted neighbour sum (bd-r5-review-n28.23).
     // A material change rescales mass by the spawn-mass rule (rescale_mass).
-    float*          __restrict__ mass
+    float*          __restrict__ mass,
+    // --- PBF predicted positions (NULL for WCSPH / DFSPH) ---
+    // K_PBF_Predict has already consumed velocity, and K_PBF_Finalize
+    // rebuilds velocity as (x* - x)/dt, so a velocity kick must also move
+    // x* by dt * dv or PBF loses it (bd-r5-review-n28.49).
+    float4*         __restrict__ predicted_position
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -282,11 +287,20 @@ void K_Reactions(
         float len = sqrtf(dx * dx + dy * dy + dz * dz);
         if (len > 1e-6f) {
             float inv_len = EXPLOSION_SPEED / len;
+            float3 dv = make_float3(dx * inv_len, dy * inv_len, dz * inv_len);
             float4 v = velocity[i];
-            v.x += dx * inv_len;
-            v.y += dy * inv_len;
-            v.z += dz * inv_len;
+            v.x += dv.x;
+            v.y += dv.y;
+            v.z += dv.z;
             velocity[i] = v;
+            if (predicted_position != NULL) {
+                float dt = c_sim.dt;
+                float4 p = predicted_position[i];
+                p.x += dt * dv.x;
+                p.y += dt * dv.y;
+                p.z += dt * dv.z;
+                predicted_position[i] = p;
+            }
         }
         return;
     }
@@ -410,7 +424,8 @@ void K_Reactions(
  * Scans for FIRE particles with lifetime == GUNPOWDER_FIRE_LIFETIME (just
  * converted this frame). For each blast source, neighbor loop applies
  * radial impulse to all particles within smoothing_length h.
- * Uses atomicAdd on velocity for thread safety.
+ * Uses atomicAdd on velocity for thread safety. Under PBF it also adds
+ * dt * dv to the predicted position of every non-STATIC target.
  * ====================================================================== */
 
 #define BLAST_SPEED 15.0f
@@ -424,7 +439,8 @@ void K_BlastWave(
     const float*    __restrict__ sorted_lifetime,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float           h                               // smoothing length
+    float           h,                              // smoothing length
+    float4*         __restrict__ predicted_position // PBF x* (atomicAdd dt*dv); NULL otherwise
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -473,9 +489,21 @@ void K_BlastWave(
                     float impulse = BLAST_SPEED * falloff;
 
                     // Radial direction from blast center to neighbor
-                    atomicAdd(&velocity[j].x, diff.x * inv_dist * impulse);
-                    atomicAdd(&velocity[j].y, diff.y * inv_dist * impulse);
-                    atomicAdd(&velocity[j].z, diff.z * inv_dist * impulse);
+                    float3 dv = make_float3(diff.x * inv_dist * impulse,
+                                            diff.y * inv_dist * impulse,
+                                            diff.z * inv_dist * impulse);
+                    atomicAdd(&velocity[j].x, dv.x);
+                    atomicAdd(&velocity[j].y, dv.y);
+                    atomicAdd(&velocity[j].z, dv.z);
+                    // PBF: move x* too, so Finalize's (x* - x)/dt keeps the
+                    // kick. STATIC x* must stay equal to x.
+                    if (predicted_position != NULL
+                        && GET_BEHAVIOR(sorted_packed_info[j]) != STATIC) {
+                        float dt = c_sim.dt;
+                        atomicAdd(&predicted_position[j].x, dt * dv.x);
+                        atomicAdd(&predicted_position[j].y, dt * dv.y);
+                        atomicAdd(&predicted_position[j].z, dt * dv.z);
+                    }
                 }
             }
         }
