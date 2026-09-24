@@ -794,6 +794,7 @@ class Simulation:
             sorted_velocity_h=sorted_velocity_h,
             sorted_temperature_h=sorted_temperature_h,
             sorted_dye_h=sorted_dye_h,
+            sorted_anchor=w.sorted_anchor,
         )
 
     def _run_reactions_spawn(
@@ -1027,6 +1028,7 @@ class Simulation:
             lifetime_out=w.lifetime,
             mass_out=w.mass,
             max_displacement=w.max_displacement,
+            displacement_anchor=w.sorted_anchor,
             cell_start=self._cell_start,
             cell_end=self._cell_end,
         )
@@ -1158,6 +1160,7 @@ class Simulation:
             sorted_lifetime=w.sorted_lifetime[:n],
             health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
+            displacement_anchor=w.sorted_anchor,
         )
         mark("finalize")
 
@@ -1342,6 +1345,7 @@ class Simulation:
             sorted_lifetime=w.sorted_lifetime[:n],
             health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
+            displacement_anchor=w.sorted_anchor,
         )
         mark("finalize")
 

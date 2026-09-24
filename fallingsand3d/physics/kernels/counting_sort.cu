@@ -119,7 +119,11 @@ void K_ScatterReorder(
     void*         __restrict__ velocity_h_out,      // half4, 8 bytes per particle (NULL = skip)
     // FP16 temperature + dye outputs (PERF-011)
     void*         __restrict__ temperature_h_out,   // half, 2 bytes per particle (NULL = skip)
-    void*         __restrict__ dye_h_out            // half4, 8 bytes per particle (NULL = skip)
+    void*         __restrict__ dye_h_out,           // half4, 8 bytes per particle (NULL = skip)
+    // Grid-reuse drift anchor: position at this full sort, in sorted order.
+    // K_GatherReorder never writes it, so between full sorts anchor_out[i]
+    // stays the sort-time position of the particle in sorted slot i.
+    float4*       __restrict__ anchor_out           // (NULL = skip)
 ) {
     const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numParticles) return;
@@ -137,7 +141,9 @@ void K_ScatterReorder(
     sorted_hashes_out[sorted_idx] = hash;
 
     // Gather and scatter all particle arrays
-    position_out[sorted_idx]      = __ldg(&position_in[idx]);
+    const float4 pos4 = __ldg(&position_in[idx]);
+    position_out[sorted_idx]      = pos4;
+    if (anchor_out) anchor_out[sorted_idx] = pos4;
     float4 vel = __ldg(&velocity_in[idx]);
     velocity_out[sorted_idx]      = vel;
     mass_out[sorted_idx]          = __ldg(&mass_in[idx]);
@@ -170,6 +176,8 @@ void K_ScatterReorder(
  *
  * Used for "grid reuse" when particles moved less than 0.25*h since last sort.
  * Cell_start/cell_end are reused from the previous frame.
+ * It must not write the drift anchor: the anchor holds the positions of the
+ * last full sort, and the finalize kernels measure drift against it.
  * This is cheaper than full counting sort: no hash, no histogram, no prefix sum,
  * no atomics. Just a simple indexed gather with coalesced writes.
  * ====================================================================== */

@@ -258,6 +258,9 @@ class World:
 
         # --- Grid reuse: max displacement tracking ---
         self.max_displacement = cp.zeros(1, dtype=cp.uint32)
+        # Sorted position at the last full sort (bd-r5-review-n28.54). Written
+        # by K_ScatterReorder only; the finalize kernels measure drift against it.
+        self.sorted_anchor = cp.zeros((n, 4), dtype=cp.float32)
 
     # Solver arrays created on demand by allocate_pbf_arrays /
     # allocate_dfsph_arrays. resize() drops them so they are re-created at

@@ -389,6 +389,7 @@ def finalize(
     lifetime_out: "cupy.ndarray | None" = None,
     mass_out: "cupy.ndarray | None" = None,
     max_displacement: "cupy.ndarray | None" = None,
+    displacement_anchor: "cupy.ndarray | None" = None,
 ) -> None:
     n = sorted_position.shape[0]
     _null = np.intp(0)
@@ -414,6 +415,8 @@ def finalize(
     lifetime_out_ptr = lifetime_out if lifetime_out is not None else np.intp(0)
     mass_out_ptr = mass_out if mass_out is not None else np.intp(0)
     max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
+    # Sorted position at the last full sort; NULL measures per-substep motion.
+    anchor_ptr = displacement_anchor if displacement_anchor is not None else np.intp(0)
     module = _get_module()
     kernel = module.get_function("K_DFSPH_Finalize")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -432,4 +435,5 @@ def finalize(
         rb_ptr, rf_ptr, rt_ptr,
         s_lifetime_ptr, health_out_ptr, lifetime_out_ptr, mass_out_ptr,
         max_disp_ptr,
+        anchor_ptr,
     ))

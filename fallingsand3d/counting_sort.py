@@ -153,8 +153,14 @@ def counting_sort_full(
     # FP16 temperature + dye outputs (PERF-011)
     sorted_temperature_h: "Optional[cupy.ndarray]" = None,
     sorted_dye_h: "Optional[cupy.ndarray]" = None,
+    # Grid-reuse drift anchor (bd-r5-review-n28.54)
+    sorted_anchor: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Run the full counting sort pipeline (hash + histogram + prefix_sum + scatter + cell_end).
+
+    sorted_anchor, when given, receives a copy of sorted_position. gather_reorder
+    never writes it, so it keeps the positions of the last full sort and the
+    finalize kernels measure drift since that sort against it.
 
     All operations are CUDA-graph-capturable.
     """
@@ -253,6 +259,8 @@ def counting_sort_full(
         # FP16 temperature + dye (PERF-011)
         sorted_temperature_h if sorted_temperature_h is not None else _null,
         sorted_dye_h if sorted_dye_h is not None else _null,
+        # Drift anchor (NULL = skip)
+        sorted_anchor if sorted_anchor is not None else _null,
     ))
 
     # --- Phase 5: Build cell_end ---
@@ -305,6 +313,7 @@ def gather_reorder(
     Used for grid reuse: when particles moved less than 0.25*h since last sort,
     cell_start/cell_end are still valid. Only the particle data needs re-gathering.
     Cheaper than full counting sort (no hash, no histogram, no prefix sum, no atomics).
+    It leaves the drift anchor from the last full sort untouched.
     """
     if num_particles == 0:
         return

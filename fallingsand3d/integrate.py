@@ -130,6 +130,7 @@ def integrate(
     lifetime_out: "Optional[cupy.ndarray]" = None,
     mass_out: "Optional[cupy.ndarray]" = None,
     max_displacement: "Optional[cupy.ndarray]" = None,
+    displacement_anchor: "Optional[cupy.ndarray]" = None,
     cell_start: "Optional[cupy.ndarray]" = None,
     cell_end: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
@@ -234,6 +235,8 @@ def integrate(
 
     # Use null pointer (0) when max_displacement not provided
     max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
+    # Sorted position at the last full sort; NULL measures per-substep motion.
+    anchor_ptr = displacement_anchor if displacement_anchor is not None else np.intp(0)
     # Reaction-state carry-back outputs: null pointer when not provided
     # (kernel guards each write with `if (ptr)`).
     health_out_ptr = health_out if health_out is not None else np.intp(0)
@@ -280,6 +283,7 @@ def integrate(
             lifetime_out_ptr,
             mass_out_ptr,
             max_disp_ptr,
+            anchor_ptr,
         ),
     )
 

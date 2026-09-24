@@ -1250,7 +1250,8 @@ void K_DFSPH_Finalize(
     float*          __restrict__ health_out,            // unsorted health writeback, or NULL
     float*          __restrict__ lifetime_out,          // unsorted lifetime writeback, or NULL
     float*          __restrict__ mass_out,              // unsorted mass writeback, or NULL
-    uint*           __restrict__ max_displacement_out   // [1] atomicMax of displacement^2 (float-as-uint), or NULL
+    uint*           __restrict__ max_displacement_out,   // [1] atomicMax of displacement^2 (float-as-uint), or NULL
+    const float4*   __restrict__ displacement_anchor  // [N] sorted position at the last full sort, or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -1524,12 +1525,23 @@ void K_DFSPH_Finalize(
         dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt));
     }
 
-    // Track max displacement for grid reuse (Phase 9.2 / PERF-009)
-    // displacement^2 = |pos_new - pos_old|^2
+    // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
+    // The anchor is the sorted position written by K_ScatterReorder at the last
+    // full sort; the permutation is frozen between full sorts, so slot i is the
+    // same particle. atomicMax over all substeps since that sort then holds the
+    // largest drift any particle has made from the cell it was binned in.
+    // NULL anchor: fall back to this substep's start position.
+    // Positive IEEE754 floats order like their uint bits, so atomicMax on
+    // __float_as_uint gives the max float value.
     if (max_displacement_out) {
-        float dx_d = pos_new.x - pos.x;
-        float dy_d = pos_new.y - pos.y;
-        float dz_d = pos_new.z - pos.z;
+        float3 ref = pos;
+        if (displacement_anchor) {
+            const float4 a = __ldg(&displacement_anchor[i]);
+            ref = make_float3(a.x, a.y, a.z);
+        }
+        float dx_d = pos_new.x - ref.x;
+        float dy_d = pos_new.y - ref.y;
+        float dz_d = pos_new.z - ref.z;
         float disp_sq = dx_d * dx_d + dy_d * dy_d + dz_d * dz_d;
         atomicMax(max_displacement_out, __float_as_uint(disp_sq));
     }
