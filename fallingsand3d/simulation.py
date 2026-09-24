@@ -1324,6 +1324,10 @@ class Simulation:
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            # Last substep's converged p/rho, still unscaled: the warm-start
+            # multiply runs later, before the density solver. mu(I) friction
+            # reads it as its confining pressure (bd-r5-review-n28.92).
+            p_prev=w.sorted_kappa[:n],
         )
         w.sorted_velocity[:n] = w.sorted_veleval[:n]
         mark("non_pressure")

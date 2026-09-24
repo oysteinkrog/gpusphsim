@@ -419,7 +419,8 @@ void K_DFSPH_NonPressureForces(
     const float4*   __restrict__ normal_in,        // (n_x,n_y,n_z, neighbor_count) from DensityAlpha, or NULL
     const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques   // torque accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques,  // torque accumulator (NULL if no bodies)
+    const float*    __restrict__ p_prev            // previous substep's converged p/rho (sorted_kappa), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -447,11 +448,20 @@ void K_DFSPH_NonPressureForces(
     bool is_gas_i = (behavior_i == GAS);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
 
-    // mu(I) rheology for GRANULAR particles
+    // mu(I) rheology for GRANULAR particles (bd-r5-review-n28.92).
+    // The confining pressure is the density solver's own pressure from the
+    // previous substep, not Tait EOS: the solver drives rho to rho0, so Tait
+    // would measure solver error instead of load. The stored p_rho2 is p/rho
+    // (ComputePressureAccel uses V_j * (p_i + p_j)), so p = p_rho2 * rho.
+    // The floor is the one-layer lithostatic pressure used by WCSPH step2; it
+    // also covers the first substep and woken particles, where p_prev = 0.
     float eta_i = 0.0f;
     if (is_granular_i) {
         float gamma_dot_i = __ldg(&shear_rate[i]);
-        float p_eff_i = fmaxf(compute_pressure(rho_i, behavior_i, mat_id_i), 1.0f);
+        float p_floor_i = c_materials[mat_id_i].rest_density
+                        * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
+        float p_solver_i = (p_prev != 0) ? __ldg(&p_prev[i]) * rho_i : 0.0f;
+        float p_eff_i = fmaxf(p_solver_i, p_floor_i);
         eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
     }
 
@@ -594,14 +604,16 @@ void K_DFSPH_NonPressureForces(
                     float lap_v = lap_visc_variable(rlen, h);
 
                     if (is_granular_i && behavior_j == GRANULAR) {
-                        // GRANULAR-GRANULAR: mu(I) with harmonic mean eta
-                        float dvx = vel_i.x - vel_j.x;
-                        float dvy = vel_i.y - vel_j.y;
-                        float dvz = vel_i.z - vel_j.z;
-                        float gamma_dot_j = sqrtf(dvx * dvx + dvy * dvy + dvz * dvz)
-                                          / fmaxf(rlen, 1e-8f);
+                        // GRANULAR-GRANULAR: mu(I) with harmonic mean eta.
+                        // eta_j uses j's own stored shear rate and pressure,
+                        // exactly as j computes eta_i for itself, so
+                        // eta_ij == eta_ji and the pair force is antisymmetric.
+                        float gamma_dot_j = __ldg(&shear_rate[j]);
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
-                        float p_eff_j = fmaxf(compute_pressure(rho_j, behavior_j, mat_id_j), 1.0f);
+                        float p_floor_j = c_materials[mat_id_j].rest_density
+                                        * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
+                        float p_solver_j = (p_prev != 0) ? __ldg(&p_prev[j]) * rho_j : 0.0f;
+                        float p_eff_j = fmaxf(p_solver_j, p_floor_j);
                         float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j);
                         float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);
 

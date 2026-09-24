@@ -197,10 +197,19 @@ def compute_non_pressure_forces(
     d_rigid_bodies: "cupy.ndarray | None" = None,
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
+    p_prev: "cupy.ndarray | None" = None,
 ) -> None:
+    """Viscosity, mu(I) friction and gravity into velocity_out.
+
+    p_prev is the previous substep's converged density-solver value p/rho
+    (w.sorted_kappa, before the warm-start scale). GRANULAR mu(I) friction
+    uses p = p_prev * rho as its confining pressure, floored at the one-layer
+    lithostatic pressure. None means floor only.
+    """
     n = position.shape[0]
     _null = np.intp(0)
     _null_f = cupy.ndarray(0, dtype=cupy.float32)
+    pp_ptr = p_prev if p_prev is not None else _null
     vort_in = vorticity_in if vorticity_in is not None else _null
     norm_in = normal_in if normal_in is not None else _null
     rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
@@ -216,6 +225,7 @@ def compute_non_pressure_forces(
         cell_start, cell_end, velocity_out,
         vort_in, norm_in,
         rb_ptr, rf_ptr, rt_ptr,
+        pp_ptr,
     ))
 
 
