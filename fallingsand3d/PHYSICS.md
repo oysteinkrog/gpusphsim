@@ -2688,6 +2688,14 @@ effective_threshold = threshold / (1 + 0.01 * max(temp - 293, 0))
 
 Hysteresis prevents oscillation (wet threshold >> dry threshold).
 
+FIRE is put out the same way. When FIRE's `exposure_corrode` is above
+`FIRE_EXTINGUISH_EXPOSURE = 0.3`, K_Reactions turns it into SMOKE/GAS with
+lifetime 1 s and temperature 373 K, before the GAS lifetime decay. The
+WATER/FIRE rate is 0.8, so this happens when more than 37.5% of the fire's
+kernel support is water. Only WATER feeds FIRE's `exposure_corrode` (see the
+one-way overrides in §21.2), so fire on wood with no water burns for its full
+lifetime.
+
 ### 21.2 Interaction Matrix Entries
 
 | Pair | reaction_rate | heat_exchange | Purpose |
@@ -2712,6 +2720,13 @@ K_Reactions reads it as acid damage, wetting and acid self-consumption. So a
 pair has a non-zero `reaction_rate` only when ACID, WATER, MUD or a combustible
 (WOOD, OIL, GUNPOWDER) is on one side. Heat-only pairs use rate 0 and a
 `heat_exchange`. `test_reactions.py` checks this rule on the full matrix.
+
+The matrix is symmetric except for `_ONE_WAY_RATE_OVERRIDES` in `materials.py`,
+which set one direction's `reaction_rate` only. Row `i` is what particle `i`
+reads. The FIRE row has rate 0 for WOOD, OIL, GUNPOWDER and ICE, so those
+neighbours do not count as wetting fire. The reverse rows (WOOD, OIL and
+GUNPOWDER reading FIRE) keep 0.9, 1.0 and 0.9, and `heat_exchange` stays
+symmetric, so ignition is unchanged.
 
 ### 21.3 Corrosion Guard
 
