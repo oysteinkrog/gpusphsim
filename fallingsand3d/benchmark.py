@@ -115,7 +115,7 @@ def run_benchmark(
     from world import World
     from simulation import Simulation
     from solver_profiles import PROFILES
-    import hash_sort
+    import grid_params as grid_params_mod
     import step1
 
     # Estimate max_particles needed (spawn may produce slightly different count)
@@ -170,7 +170,7 @@ def run_benchmark(
         # Build and upload constant memory to neighbor_list module
         hs = sim._world_half_size
         wmin, wmax = (-hs, -hs, -hs), (hs, hs, hs)
-        grid_params, _ = hash_sort.build_grid_params_for_world(
+        grid_params, _ = grid_params_mod.build_grid_params_for_world(
             wmin, wmax, sim._h, num_particles=n,
         )
         vel_limit = 0.9 * sim._h / max(sim.dt, 1e-8)
@@ -200,7 +200,7 @@ def run_benchmark(
         # Upload constant memory to neighbor_list module for K_Step2_NL
         hs = sim._world_half_size
         wmin, wmax = (-hs, -hs, -hs), (hs, hs, hs)
-        grid_params, _ = hash_sort.build_grid_params_for_world(
+        grid_params, _ = grid_params_mod.build_grid_params_for_world(
             wmin, wmax, sim._h, num_particles=n,
         )
         vel_limit = 0.9 * sim._h / max(sim.dt, 1e-8)

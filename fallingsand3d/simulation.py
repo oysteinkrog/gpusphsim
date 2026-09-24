@@ -28,8 +28,7 @@ from solver_profiles import SolverType, SolverProfile, PROFILES
 
 import cupy
 
-import hash_sort
-import fused_sort_reorder_build
+import grid_params as grid_params_mod
 import counting_sort
 import step1
 import step2
@@ -361,7 +360,7 @@ class Simulation:
         wmax = (hs, hs, hs)
 
         # Build shared param structs -- auto-size hash table for particle count
-        grid_params, table_size = hash_sort.build_grid_params_for_world(
+        grid_params, table_size = grid_params_mod.build_grid_params_for_world(
             wmin, wmax, self._h,
             num_particles=self.world._high_water,
         )
@@ -412,12 +411,6 @@ class Simulation:
         granular_params = step2.build_granular_params()
         materials_data = build_material_array()
         interactions_data = build_interaction_matrix()
-
-        # --- hash_sort module: c_grid ---
-        hash_sort.upload_grid_params(grid_params)
-
-        # --- fused_sort_reorder_build module: c_grid ---
-        fused_sort_reorder_build.upload_grid_params(grid_params)
 
         # --- counting_sort module: c_grid ---
         counting_sort.upload_grid_params(grid_params)
@@ -553,7 +546,7 @@ class Simulation:
             hs = self._world_half_size
             wmin = (-hs, -hs, -hs)
             wmax = (hs, hs, hs)
-            grid_params, _ = hash_sort.build_grid_params_for_world(
+            grid_params, _ = grid_params_mod.build_grid_params_for_world(
                 wmin, wmax, self._h, num_particles=self.world._high_water,
             )
         precalc_params = step1.build_precalc_params(smoothing_length=0.04, viscosity=1.0)
@@ -1770,8 +1763,6 @@ class Simulation:
             reactions.get_module(),
             spawn.get_module(),
             wake.get_module(),
-            hash_sort.get_module(),
-            fused_sort_reorder_build.get_module(),
             counting_sort.get_module(),
         ]
         # Optional solver modules (may not be compiled yet)
