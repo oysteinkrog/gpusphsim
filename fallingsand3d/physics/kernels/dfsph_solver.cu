@@ -266,7 +266,8 @@ void K_DFSPH_ComputeDensityAlpha(
 
     // H1 fix: STATIC particles use rest_density to prevent gaps at boundaries
     if (behavior_i == STATIC) {
-        density_out[i] = c_materials[mat_id_i].rest_density;
+        // Floor at 1: DEAD has rest_density 0, and V_j = m_j / rho_j must stay finite.
+        density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
         alpha_out[i] = 0.0f;
         shear_rate_out[i] = 0.0f;
         // Still write heat/exposure outputs (computed above)
@@ -986,7 +987,8 @@ void K_DFSPH_DensitySolverUpdate(
     float h_sq = c_sim.smoothing_length_sq;
     float dt = c_sim.dt;
     float rho_i = density[i];
-    float rho0 = c_materials[GET_MATERIAL_ID(pi_i)].rest_density;
+    // Floor at 1: DEAD has rest_density 0, and rho_i / rho0 would be inf.
+    float rho0 = fmaxf(c_materials[GET_MATERIAL_ID(pi_i)].rest_density, 1.0f);
 
     // Total velocity = v + dt * a_press (includes pressure effect)
     float3 vt_i = make_float3(
@@ -1276,7 +1278,7 @@ void K_DFSPH_Finalize(
 
         // Akinci pressure mirroring: compute p_i for rigid body force accumulation
         float p_i = compute_pressure(rho_i, behavior, mat_id);
-        float rho0_i = c_materials[mat_id].rest_density;
+        float rho0_i = fmaxf(c_materials[mat_id].rest_density, RHO_EPSILON);  // DEAD has rest_density 0
 
         int3 cell_i = get_cell(pos);
         for (int dz = -1; dz <= 1; dz++) {

@@ -172,7 +172,9 @@ void K_PBF_ComputeLambda(
     // neighbor loop but get lambda=0 forced after (see below).
     // GAS skips PBF constraints entirely (compressible phase).
     if ((behavior_i == STATIC || behavior_i == GAS) && !do_heat) {
-        density_out[i] = c_materials[mat_id_i].rest_density;
+        // STATIC floor at 1: DEAD has rest_density 0 (GAS keeps its own 0.2-0.6).
+        float rho0_out = c_materials[mat_id_i].rest_density;
+        density_out[i] = (behavior_i == STATIC) ? fmaxf(rho0_out, 1.0f) : rho0_out;
         lambda_out[i] = 0.0f;
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
@@ -183,7 +185,8 @@ void K_PBF_ComputeLambda(
 
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
-    float rho0 = c_materials[mat_id_i].rest_density;
+    // Floor at 1: DEAD has rest_density 0, and C = rho / rho0 - 1 would be inf.
+    float rho0 = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
 
     // Density accumulator (Poly6)
     float sum_density = 0.0f;
@@ -389,7 +392,7 @@ void K_PBF_ComputeLambda(
     // They may reach here on the do_heat path to accumulate exposure/heat, but must not
     // participate in PBF constraint solving.
     if (behavior_i == STATIC || behavior_i == GAS) {
-        density_out[i] = (behavior_i == STATIC) ? c_materials[mat_id_i].rest_density : rho;
+        density_out[i] = (behavior_i == STATIC) ? fmaxf(c_materials[mat_id_i].rest_density, 1.0f) : rho;
         lambda_out[i] = 0.0f;
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
@@ -452,7 +455,8 @@ void K_PBF_ComputeDelta(
 
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
-    float rho0 = c_materials[mat_id_i].rest_density;
+    // Floor at 1: DEAD has rest_density 0, and C = rho / rho0 - 1 would be inf.
+    float rho0 = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
     float lambda_i = lambda_pbf[i];
 
     float3 delta = make_float3(0.0f, 0.0f, 0.0f);
@@ -795,7 +799,7 @@ void K_PBF_Finalize(
 
         // Akinci pressure mirroring for rigid body force accumulation
         float p_i = compute_pressure(rho_i, behavior, mat_id);
-        float rho0_i = c_materials[mat_id].rest_density;
+        float rho0_i = fmaxf(c_materials[mat_id].rest_density, RHO_EPSILON);  // DEAD has rest_density 0
 
         int3 cell_i = get_cell(pred);
         for (int dz = -1; dz <= 1; dz++) {

@@ -5,7 +5,9 @@ max_particles at startup, spawning particles in sphere/cube shapes, and
 tracking num_active via counter.
 
 All arrays are contiguous CuPy float32/uint32/uint8 arrays on GPU.
-DEAD particles have packed_info=0 (material_id=0, behavior=STATIC).
+DEAD particles have material_id 0. Kernels and kill_in_sphere write
+DEAD_PACKED (material DEAD, behavior STATIC, 0x300) with mass 0. The alive
+test is always material_id != 0, so a bare packed_info of 0 also counts as dead.
 """
 
 from __future__ import annotations
@@ -19,6 +21,48 @@ from materials import MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER,
 
 # packed_info bitfield macros (mirrors common.cuh)
 _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
+
+# Encoding of a dead slot: material DEAD (0), behavior STATIC. Matches
+# MAKE_PACKED(MAT_DEAD, STATIC) in spawn.cu and reactions.cu.
+DEAD_PACKED = _MAKE_PACKED(0, STATIC)
+
+# Kill every live, non-rigid particle inside a sphere (bd-r5-review-n28.34).
+# One launch and no host sync. A killed slot becomes DEAD_PACKED with zero
+# mass, health, velocity and color, so no solver sees it as fluid, it adds
+# nothing to neighbour density and it cannot move.
+_KILL_SPHERE_SRC = r"""
+extern "C" __global__
+void K_KillSphere(const float4* __restrict__ position,
+                  unsigned int* __restrict__ packed_info,
+                  float* __restrict__ mass,
+                  float* __restrict__ health,
+                  float4* __restrict__ velocity,
+                  float4* __restrict__ color,
+                  float cx, float cy, float cz, float r2,
+                  unsigned int mat_rigid, unsigned int dead_packed, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned int mat = packed_info[i] & 0xFFu;
+    if (mat == 0u || mat == mat_rigid) return;
+    float4 p = position[i];
+    float dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+    if (dx * dx + dy * dy + dz * dz > r2) return;
+    packed_info[i] = dead_packed;
+    mass[i] = 0.0f;
+    health[i] = 0.0f;
+    velocity[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    color[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+}
+"""
+_kill_sphere_kernel = None
+
+
+def _get_kill_sphere_kernel():
+    global _kill_sphere_kernel
+    if _kill_sphere_kernel is None:
+        _kill_sphere_kernel = cp.RawKernel(_KILL_SPHERE_SRC, 'K_KillSphere')
+    return _kill_sphere_kernel
 
 # Default particle spacing (h=0.04 -> spacing=h/2=0.02)
 DEFAULT_SPACING = 0.02
@@ -346,7 +390,7 @@ class World:
 
         # Zero out the dead tail to prevent stale data
         if num_alive < n:
-            self.packed_info[num_alive:n] = cp.uint32(0)
+            self.packed_info[num_alive:n] = cp.uint32(DEAD_PACKED)
 
         self._high_water = num_alive
         return num_alive
@@ -895,28 +939,29 @@ class World:
         center: Tuple[float, float, float],
         radius: float,
     ) -> int:
-        """Mark particles within a sphere as DEAD (packed_info=0).
+        """Mark live particles within a sphere as DEAD.
 
-        Returns the number of particles killed.
+        Killed slots get DEAD_PACKED (material DEAD, behavior STATIC) and zero
+        mass, health, velocity and color, the same state K_SpawnGas and
+        K_Reactions leave behind. Rigid boundary particles are never killed:
+        the rigid body manager owns that block (bd-r5-review-n28.22).
+
+        Runs as one kernel with no GPU to host sync. Returns 0 because the
+        count would need a sync and no caller uses it.
         """
         if self._high_water == 0:
             return 0
 
         n = self._high_water
         cx, cy, cz = center
-        dx = self.position[:n, 0] - cx
-        dy = self.position[:n, 1] - cy
-        dz = self.position[:n, 2] - cz
-        dist_sq = dx * dx + dy * dy + dz * dz
-
-        mask = dist_sq <= (radius * radius)
-        # Only kill non-DEAD particles, and never rigid boundary particles:
-        # the rigid body manager owns that block (bd-r5-review-n28.22).
-        packed = self.packed_info[:n]
-        mask = mask & (packed != 0) & ((packed & cp.uint32(0xFF)) != cp.uint32(MAT_RIGID))
-
-        # Apply mask; return 0 (count unused by any caller -- removing the
-        # int(cp.sum(mask)) sync that stalled the GPU pipeline on every brush kill).
-        self.packed_info[:n][mask] = cp.uint32(0)
-
+        threads = 256
+        blocks = (n + threads - 1) // threads
+        _get_kill_sphere_kernel()(
+            (blocks,), (threads,),
+            (self.position, self.packed_info, self.mass, self.health,
+             self.velocity, self.color,
+             np.float32(cx), np.float32(cy), np.float32(cz),
+             np.float32(radius * radius),
+             np.uint32(MAT_RIGID), np.uint32(DEAD_PACKED), np.int32(n)),
+        )
         return 0
