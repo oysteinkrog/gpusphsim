@@ -742,8 +742,27 @@ it again. A GAS particle that has JUST_WOKE set still marks its cells. Until
 2026-07-11 it ran only for WCSPH, so a sleeping PBF or DFSPH pile never woke
 when something hit it.
 
-**Source**: `integrate.cu:54-59, 280-302, 407-418`, `wake.cu`, `simulation.py`
-(`_run_wcsph_body`, `_run_pbf_body`, `_run_dfsph_body`)
+Rigid bodies wake sleepers through `K_MarkWakeCellsRigid`, one block per body,
+launched from `run_wake_propagation` when the scene has bodies. Rigid boundary
+particles are STATIC, so the particle trigger never fires for them, and a
+sleeping particle returns from the solver before the rigid coupling. Without
+this kernel a box dropped on a sleeping pile got no force and fell through it
+to the floor. A body marks when the fastest point on it can exceed V_WAKE:
+```
+r = |half_extents|                 (bounds a box of any rotation, or a sphere)
+if |v_body| + |omega_body| * r > 0.02:
+    mark every cell of the cube [c - r - cell, c + r + cell]
+```
+One cell (about h) of padding lets sand within one smoothing length of the
+surface wake. A body at rest marks nothing, so a box resting on a pile lets
+the pile sleep; if the box then starts to sink, it wakes the pile again within
+a few substeps. For WCSPH, `K_Integrate` keeps the MAT_RIGID boundary velocity
+(written by `K_UpdateBoundaryParticles`) in the unsorted velocity array, where
+other STATIC particles get zero.
+
+**Source**: `integrate.cu:54-59, 115-127, 280-302, 407-418`, `wake.cu`
+(`K_MarkWakeCells`, `K_MarkWakeCellsRigid`), `wake.py`, `simulation.py`
+(`_run_wcsph_body`, `_run_pbf_body`, `_run_dfsph_body`, `_wake_rigid_kwargs`)
 
 ---
 
