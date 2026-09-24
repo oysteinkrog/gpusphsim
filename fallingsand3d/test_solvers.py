@@ -1206,6 +1206,10 @@ def test_dfsph_sleep_is_granular_only(world, sim):
     from materials import GRANULAR
     world.packed_info[:] = 0
     world._high_water = 0
+    # The first DFSPH substep builds alpha from the previous substep's
+    # sorted_density. Left over from an earlier test it is the wrong scene,
+    # and SAND at its own rho0 (bd-r5-review-n28.53) then gets a 0.15 m/s kick.
+    world.sorted_density[:] = 0.0
     n_water = world.spawn_cube((-0.6, -0.2, -0.2), (-0.2, 0.2, 0.2), WATER, spacing=0.02)
     n_sand = world.spawn_cube((0.2, -0.2, -0.2), (0.6, 0.2, 0.2), SAND, spacing=0.02)
     n = n_water + n_sand
