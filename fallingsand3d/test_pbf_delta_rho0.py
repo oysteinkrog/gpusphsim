@@ -58,7 +58,9 @@ def _spawn(world, blocks):
 def _one_delta(world, sim, blocks, module=None):
     """Spawn, sort, run ComputeLambda + ComputeDelta once on the positions.
 
-    Returns (delta xyz, mass, material id), all sorted order, read back once.
+    Returns (delta xyz, mass, material id) in spawn (unsorted) order, read
+    back once. The counting sort orders particles inside a cell by atomics, so
+    sorted order differs from run to run.
     """
     saved = pbf_solver._module
     try:
@@ -83,6 +85,8 @@ def _one_delta(world, sim, blocks, module=None):
         d = cp.asnumpy(delta)[:, :3].astype(np.float64)
         m = cp.asnumpy(world.sorted_mass[:n]).astype(np.float64)
         mat = cp.asnumpy(world.sorted_packed_info[:n]) & 0xFF
+        perm = cp.asnumpy(sim._sort_perm[:n])
+        d[perm], m[perm], mat[perm] = d.copy(), m.copy(), mat.copy()
     finally:
         pbf_solver._module = saved
         sim.set_solver_profile(PROFILES["PBF"])
@@ -95,13 +99,14 @@ def _momentum_residual(d, m):
     return float(np.linalg.norm(p)), float(scale)
 
 
-# Compressed WATER block against a compressed SAND block (spacing 0.016 < 0.02
-# rest spacing, so both sides are over-dense and every lambda is nonzero).
+# Compressed WATER block against a compressed SAND block (spacing 0.019 < 0.02
+# rest spacing, so both sides are over-dense and every lambda is nonzero,
+# while the largest delta stays well under the 0.5h clamp).
 MIXED = [
-    ((-0.096, -0.08, -0.08), (-0.004, 0.08, 0.08), WATER, 0.016),
-    ((0.004, -0.08, -0.08), (0.096, 0.08, 0.08), SAND, 0.016),
+    ((-0.095, -0.076, -0.076), (-0.0005, 0.076, 0.076), WATER, 0.019),
+    ((0.0005, -0.076, -0.076), (0.095, 0.076, 0.076), SAND, 0.019),
 ]
-WATER_ONLY = [((-0.096, -0.08, -0.08), (0.096, 0.08, 0.08), WATER, 0.016)]
+WATER_ONLY = [((-0.095, -0.076, -0.076), (0.095, 0.076, 0.076), WATER, 0.019)]
 
 
 def test_mixed_block_delta_conserves_momentum(world, sim):
@@ -122,8 +127,8 @@ def test_sand_water_pair_delta_conserves_momentum(world, sim):
     """Two particles 0.8 * spacing apart with zero velocity."""
     gap = 0.8 * 0.02
     pair = [
-        ((0.0, 0.0, 0.0), (0.001, 0.001, 0.001), SAND, 0.02),
-        ((gap, 0.0, 0.0), (gap + 0.001, 0.001, 0.001), WATER, 0.02),
+        ((-0.01, -0.01, -0.01), (0.01, 0.01, 0.01), SAND, 0.02),
+        ((gap - 0.01, -0.01, -0.01), (gap + 0.01, 0.01, 0.01), WATER, 0.02),
     ]
     d, m, mat = _one_delta(world, sim, pair)
     assert len(m) == 2 and set(mat.tolist()) == {WATER, SAND}
@@ -132,8 +137,12 @@ def test_sand_water_pair_delta_conserves_momentum(world, sim):
     assert p < 1e-9, f"|sum m dx| = {p:.3e} (scale {scale:.3e})"
 
 
-def test_water_only_delta_bitwise_unchanged(world, sim):
+def test_water_only_delta_unchanged(world, sim):
+    """Same rest density never takes the new branch. The two runs can still
+    differ in the last bits because the neighbour summation order inside a
+    cell is not fixed, so compare at float precision."""
     d_new, _, _ = _one_delta(world, sim, WATER_ONLY)
     d_old, _, _ = _one_delta(world, sim, WATER_ONLY, module=_pre_fix_module())
-    assert np.abs(d_new).max() > 0.0
-    assert np.array_equal(d_new, d_old), "same-material deltas changed"
+    top = np.abs(d_new).max()
+    assert top > 0.0
+    assert np.abs(d_new - d_old).max() <= 1e-5 * top, "same-material deltas changed"
