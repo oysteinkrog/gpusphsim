@@ -17,7 +17,7 @@ import cupy
 import numpy as np
 import pytest
 
-from materials import FLUID, STATIC, STONE, WATER
+from materials import FLUID, GAS, MAT_RIGID, SMOKE, STATIC, STONE, WATER
 
 H = 0.04
 DX = 0.02
@@ -111,10 +111,13 @@ def _wall_x(n_side=7, x=0.0):
     ]
 
 
-def _run(module, probe, statics, vel=(0.0, 0.0, 0.0)):
-    """Call static_particle_boundary for one FLUID probe among STATIC particles."""
+def _run(module, probe, statics, vel=(0.0, 0.0, 0.0),
+         probe_packed=None, static_mat=STONE):
+    """Call static_particle_boundary for one probe (FLUID by default) among STATIC particles."""
     pts = [probe] + list(statics)
-    packed = [_packed(WATER, FLUID)] + [_packed(STONE, STATIC)] * len(statics)
+    if probe_packed is None:
+        probe_packed = _packed(WATER, FLUID)
+    packed = [probe_packed] + [_packed(static_mat, STATIC)] * len(statics)
     n = len(pts)
     pos = np.zeros((n, 4), dtype=np.float32)
     pos[:, :3] = pts
@@ -233,3 +236,36 @@ def test_corner_push_never_exceeds_deepest_penetration(module):
     assert disp[0] > 0.0 and disp[1] > 0.0, (
         f"push {disp} should point out of the corner"
     )
+
+
+def test_gas_is_pushed_out_of_rigid_body_particles(module):
+    """GAS gets the push from MAT_RIGID particles (bd-r5-review-n28.101).
+
+    Its density ignores the body, so step2 pressure cannot stop it entering.
+    """
+    y = 0.012
+    disp, vel = _run(
+        module, (0.0, y, 0.0), _floor(), vel=(0.0, -1.0, 0.0),
+        probe_packed=_packed(SMOKE, GAS), static_mat=MAT_RIGID,
+    )
+    assert disp[1] == pytest.approx(MIN_DIST - y, abs=2e-6), f"dy={disp[1]}"
+    assert vel[1] == pytest.approx(RESTITUTION * 1.0, abs=1e-5)
+
+
+def test_fluid_is_not_pushed_by_rigid_body_particles(module):
+    """FLUID leaves MAT_RIGID to the solver's Akinci pressure coupling."""
+    disp, vel = _run(
+        module, (0.0, 0.012, 0.0), _floor(), vel=(0.0, -1.0, 0.0),
+        static_mat=MAT_RIGID,
+    )
+    assert np.all(np.abs(disp) < 1e-6), f"moved by {disp}"
+    assert np.allclose(vel, (0.0, -1.0, 0.0)), f"velocity changed to {vel}"
+
+
+def test_gas_still_pushed_by_stone(module):
+    """GAS near a regular STATIC wall gets the same push as before."""
+    y = 0.012
+    disp, _ = _run(
+        module, (0.0, y, 0.0), _floor(), probe_packed=_packed(SMOKE, GAS),
+    )
+    assert disp[1] == pytest.approx(MIN_DIST - y, abs=2e-6), f"dy={disp[1]}"
