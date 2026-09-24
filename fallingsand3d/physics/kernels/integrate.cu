@@ -484,6 +484,27 @@ void K_Integrate(
 }
 
 /* ======================================================================
+ * rigid_support_distance -- how far a body reaches from its COM along n.
+ *
+ * Box:    s(n) = sum_k he_k * |dot(n, R e_k)|  (exact support of an OBB)
+ * Sphere: s(n) = radius (half_extents.x)
+ * n must be unit length. Used by the world-wall clamp and the body-vs-SDF
+ * push-out so a body rests with its real surface on the contact, not a
+ * bounding sphere or a fixed margin. (bd-r5-review-n28.98)
+ * ====================================================================== */
+__device__ inline float rigid_support_distance(const RigidBody& body, float3 n) {
+    int shape = __float_as_int(body.half_extents.w);
+    if (shape == SDF_SPHERE) return body.half_extents.x;
+    float4 q = body.rotation;
+    float3 ax = quat_rotate(q, make_float3(1.0f, 0.0f, 0.0f));
+    float3 ay = quat_rotate(q, make_float3(0.0f, 1.0f, 0.0f));
+    float3 az = quat_rotate(q, make_float3(0.0f, 0.0f, 1.0f));
+    return body.half_extents.x * fabsf(n.x * ax.x + n.y * ax.y + n.z * ax.z)
+         + body.half_extents.y * fabsf(n.x * ay.x + n.y * ay.y + n.z * ay.z)
+         + body.half_extents.z * fabsf(n.x * az.x + n.y * az.y + n.z * az.z);
+}
+
+/* ======================================================================
  * K_IntegrateRigidBodies -- US-017: Rigid body integration kernel.
  *
  * One thread per rigid body. Reads accumulated forces/torques, integrates
@@ -639,13 +660,19 @@ void K_IntegrateRigidBodies(
     // --- World boundary clamp for rigid body COM ---
     float3 wmin = c_sim.world_min;
     float3 wmax = c_sim.world_max;
-    float margin = 0.05f;  // keep COM away from walls
-    if (pos.x < wmin.x + margin) { pos.x = wmin.x + margin; if (lin_vel.x < 0) lin_vel.x *= -0.3f; }
-    if (pos.x > wmax.x - margin) { pos.x = wmax.x - margin; if (lin_vel.x > 0) lin_vel.x *= -0.3f; }
-    if (pos.y < wmin.y + margin) { pos.y = wmin.y + margin; if (lin_vel.y < 0) lin_vel.y *= -0.3f; }
-    if (pos.y > wmax.y - margin) { pos.y = wmax.y - margin; if (lin_vel.y > 0) lin_vel.y *= -0.3f; }
-    if (pos.z < wmin.z + margin) { pos.z = wmin.z + margin; if (lin_vel.z < 0) lin_vel.z *= -0.3f; }
-    if (pos.z > wmax.z - margin) { pos.z = wmax.z - margin; if (lin_vel.z > 0) lin_vel.z *= -0.3f; }
+    // Per-axis margin is the body's support distance along that axis (with
+    // the updated rotation) plus BOUNDARY_MARGIN, so the body surface, not
+    // the COM, stops at the wall. (bd-r5-review-n28.98)
+    body.rotation = q;
+    float mx = rigid_support_distance(body, make_float3(1.0f, 0.0f, 0.0f)) + BOUNDARY_MARGIN;
+    float my = rigid_support_distance(body, make_float3(0.0f, 1.0f, 0.0f)) + BOUNDARY_MARGIN;
+    float mz = rigid_support_distance(body, make_float3(0.0f, 0.0f, 1.0f)) + BOUNDARY_MARGIN;
+    if (pos.x < wmin.x + mx) { pos.x = wmin.x + mx; if (lin_vel.x < 0) lin_vel.x *= -0.3f; }
+    if (pos.x > wmax.x - mx) { pos.x = wmax.x - mx; if (lin_vel.x > 0) lin_vel.x *= -0.3f; }
+    if (pos.y < wmin.y + my) { pos.y = wmin.y + my; if (lin_vel.y < 0) lin_vel.y *= -0.3f; }
+    if (pos.y > wmax.y - my) { pos.y = wmax.y - my; if (lin_vel.y > 0) lin_vel.y *= -0.3f; }
+    if (pos.z < wmin.z + mz) { pos.z = wmin.z + mz; if (lin_vel.z < 0) lin_vel.z *= -0.3f; }
+    if (pos.z > wmax.z - mz) { pos.z = wmax.z - mz; if (lin_vel.z > 0) lin_vel.z *= -0.3f; }
 
     // --- Write back ---
     body.position = make_float4(pos.x, pos.y, pos.z, inv_mass);
@@ -662,7 +689,9 @@ void K_IntegrateRigidBodies(
  *   1. All SDF objects (c_sdf_objects) -- body-vs-static/kinematic
  *   2. All other dynamic bodies (bounding sphere) -- body-vs-body
  *
- * Uses bounding sphere radius = length(half_extents) as conservative proxy.
+ * Body vs SDF: contact depth = rigid_support_distance(body, n) - sdf(COM),
+ * with n the SDF normal at the COM. Body vs body still uses bounding
+ * spheres, radius = length(half_extents).
  * Runs after K_IntegrateRigidBodies, before K_UpdateBoundaryParticles.
  * ====================================================================== */
 
@@ -695,10 +724,16 @@ void K_RigidBodyCollisions(
     for (int s = 0; s < c_num_sdf_objects; s++) {
         SDFObject obj = c_sdf_objects[s];
         float dist = eval_sdf(pos, obj);
+        // Cheap reject: the body cannot touch if the COM is farther than
+        // its bounding radius.
+        if (dist >= b_radius) continue;
 
-        if (dist < b_radius) {
-            float3 normal = sdf_normal(pos, obj);
-            float penetration = b_radius - dist;
+        // Contact depth uses the body's support distance along the SDF
+        // normal, so a box rests face-down on a plane with no gap.
+        float3 normal = sdf_normal(pos, obj);
+        float reach = rigid_support_distance(body, normal);
+        if (dist < reach) {
+            float penetration = reach - dist;
 
             // Push out
             pos.x += normal.x * penetration;
