@@ -54,12 +54,9 @@ from reactions import compute_reactions
 from hash_sort import (
     GRID_PARAMS_DTYPE,
     NUM_CELLS,
-    build_grid_params,
-    calc_hash,
-    sort_by_hash,
 )
-from build_grid import build_data_struct, allocate_cell_tables
-from fused_reorder import fused_reorder
+from counting_sort import allocate_scratch
+from conftest import counting_sort_scene, default_grid_params
 from materials import (
     FLUID,
     GRANULAR,
@@ -123,7 +120,7 @@ def setup_all_modules(dt=DT, gravity=(0.0, -9.8, 0.0)):
         world_max=(1.0, 1.0, 1.0),
     )
     precalc = build_precalc_params(smoothing_length=H, viscosity=1.0)
-    grid_params = build_grid_params()
+    grid_params = default_grid_params()
     materials = build_material_array()
     interactions = build_interaction_matrix()
     granular_params = build_granular_params()
@@ -196,58 +193,49 @@ def make_gas_particles(n, mat_id, pos_center=(0.0, 0.0, 0.0), spread=0.03,
     }
 
 
-def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
-    """Run one full simulation step: hash -> sort -> reorder -> build -> step1 -> reactions -> step2 -> integrate.
+def run_full_pipeline_step(w, grid_params, scratch, frame=0):
+    """Run one full simulation step: counting sort -> step1 -> reactions -> step2 -> integrate.
 
-    w is a dict of unsorted arrays. Returns updated w dict.
+    w is a dict of unsorted arrays. scratch is a counting_sort.allocate_scratch
+    dict reused across steps (holds cell_start/cell_end). Returns updated w dict.
     """
-    import hash_sort as hs_mod
-    import build_grid as bg_mod
-
     n = w["position"].shape[0]
     if n == 0:
         return w
 
-    # Hash — calc_hash returns only hashes (API drift: removed second return value)
-    hs_mod.upload_grid_params(grid_params)
-    hashes = calc_hash(w["position"])
-
-    # Sort — sort_by_hash takes only hashes (API drift: removed indices arg)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-
-    # Reorder — fused_reorder no longer takes veleval/color/shear_rate
-    # (API drift: removed veleval, color, shear_rate from kernel; those are
-    #  overwritten by downstream kernels before being read)
-    sorted_pos = cupy.empty_like(w["position"])
-    sorted_vel = cupy.empty_like(w["velocity"])
-    sorted_mass = cupy.empty(n, dtype=cupy.float32)
-    sorted_pi = cupy.empty(n, dtype=cupy.uint32)
-    sorted_temp = cupy.empty(n, dtype=cupy.float32)
-    sorted_health = cupy.empty(n, dtype=cupy.float32)
-    sorted_lifetime = cupy.empty(n, dtype=cupy.float32)
-    sorted_sc = cupy.empty(n, dtype=cupy.uint8)
-
-    fused_reorder(
-        n, sorted_indices,
-        w["position"], w["velocity"],
-        w["mass"], w["packed_info"], w["temperature"],
-        w["health"], w["lifetime"],
-        w["sleep_counter"],
-        sorted_pos, sorted_vel,
-        sorted_mass, sorted_pi, sorted_temp,
-        sorted_health, sorted_lifetime,
-        sorted_sc,
+    # Same grid build as the app: counting_sort_full (cell_end == 0 marks an
+    # empty cell) plus the FP16 velocity mirror the neighbour loops read.
+    scene = counting_sort_scene(
+        w["position"],
+        velocity=w["velocity"],
+        mass=w["mass"],
+        packed_info=w["packed_info"],
+        temperature=w["temperature"],
+        health=w["health"],
+        lifetime=w["lifetime"],
+        sleep_counter=w["sleep_counter"],
+        grid_params=grid_params,
+        scratch=scratch,
     )
-
-    # Build grid (build_data_struct does its own memset internally)
-    bg_mod.upload_grid_params(grid_params)
-    build_data_struct(sorted_hashes, cell_start, cell_end)
+    sorted_indices = scene["sort_perm"]
+    sorted_pos = scene["position"]
+    sorted_vel = scene["velocity"]
+    sorted_mass = scene["mass"]
+    sorted_pi = scene["packed_info"]
+    sorted_temp = scene["temperature"]
+    sorted_health = scene["health"]
+    sorted_lifetime = scene["lifetime"]
+    sorted_sc = scene["sleep_counter"]
+    velocity_h = scene["velocity_h"]
+    cell_start = scene["cell_start"]
+    cell_end = scene["cell_end"]
 
     # Step1: density, shear_rate, dTdt, exposure
     # API drift: compute_step1 now returns 6 values (added pressure_out)
     density, shear_rate, dTdt, exp_heat, exp_corrode, _pressure = compute_step1(
         sorted_pos, sorted_vel, sorted_mass, None, sorted_pi,
         sorted_temp, cell_start, cell_end,
+        velocity_h=velocity_h,
     )
 
     # Pack density into position.w so Step2 can read it
@@ -265,6 +253,7 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
         sorted_pos, sorted_vel, sorted_mass, sorted_pi,
         shear_rate,
         cell_start, cell_end,
+        velocity_h=velocity_h,
     )
 
     # Integrate — API drift: returns 8 values (added particle_dye_out, angular_velocity_out)
@@ -294,8 +283,9 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
 
     # Write back lifetime and health from sorted (modified by Reactions) to unsorted.
     # Integrate doesn't output these, so scatter them manually via sorted_indices.
-    w["lifetime"][sorted_indices] = sorted_lifetime
-    w["health"][sorted_indices] = sorted_health
+    perm = sorted_indices.astype(cupy.int64)
+    w["lifetime"][perm] = sorted_lifetime
+    w["health"][perm] = sorted_health
 
     return w
 
@@ -348,25 +338,18 @@ def test_gas_linear_eos():
     d_mass = cupy.asarray(mass)
     d_pi = cupy.asarray(packed_info)
 
-    # Build grid
-    grid_params = build_grid_params()
-    import hash_sort as hs_mod
-    import build_grid as bg_mod
-    hs_mod.upload_grid_params(grid_params)
-    bg_mod.upload_grid_params(grid_params)
-
-    hashes = calc_hash(d_pos)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-
-    s_pos = d_pos[sorted_indices]
-    s_vel = d_vel[sorted_indices]
-    s_mass = d_mass[sorted_indices]
-    s_pi = d_pi[sorted_indices]
-
-    cell_start, cell_end = allocate_cell_tables()
-    cell_start.data.memset(0xFF, cell_start.nbytes)
-    cell_end.data.memset(0x00, cell_end.nbytes)
-    build_data_struct(sorted_hashes, cell_start, cell_end)
+    # Build grid with counting_sort_full (the app's path)
+    grid_params = default_grid_params()
+    scene = counting_sort_scene(
+        d_pos, velocity=d_vel, mass=d_mass, packed_info=d_pi,
+        grid_params=grid_params,
+    )
+    s_pos = scene["position"]
+    s_vel = scene["velocity"]
+    s_mass = scene["mass"]
+    s_pi = scene["packed_info"]
+    cell_start = scene["cell_start"]
+    cell_end = scene["cell_end"]
 
     # Step1: compute density
     s_temp = cupy.full(n, 373.0, dtype=cupy.float32)
@@ -425,8 +408,8 @@ def test_gas_buoyancy_rise():
     """
     setup_all_modules(gravity=(0.0, -9.8, 0.0))
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     w = make_gas_particles(100, FIRE, pos_center=(0.0, 0.0, 0.0),
                            spread=0.03, temp=1200.0, lifetime=5.0)
@@ -436,7 +419,7 @@ def test_gas_buoyancy_rise():
 
     # Run 50 steps
     for step in range(50):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     y_final = w["position"].get()[:, 1]
 
@@ -479,12 +462,12 @@ def test_gas_drag_slowdown():
     w["velocity"] = cupy.asarray(vel_init)
     w["veleval"] = cupy.asarray(vel_init.copy())
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Measure velocity after 100 steps
     for step in range(100):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     vel_after_100 = w["velocity"].get().copy()
     alive_mask = is_alive(w["packed_info"].get())
@@ -492,7 +475,7 @@ def test_gas_drag_slowdown():
     # Run another 100 steps and check velocity magnitude decreases
     # (the cloud has expanded by now, so SPH forces are weaker)
     for step in range(100, 200):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     vel_after_200 = w["velocity"].get()
     alive_mask_200 = is_alive(w["packed_info"].get())
@@ -519,7 +502,7 @@ def test_gas_drag_slowdown():
     w_single["veleval"] = cupy.asarray(vel_single.copy())
 
     for step in range(100):
-        w_single = run_full_pipeline_step(w_single, grid_params, cell_start, cell_end, frame=step)
+        w_single = run_full_pipeline_step(w_single, grid_params, scratch, frame=step)
 
     vx_final = abs(float(w_single["velocity"].get()[0, 0]))
     # drag_factor per step: 1 - 2.0*0.001 = 0.998
@@ -534,7 +517,7 @@ def test_gas_drag_slowdown():
     w_single["veleval"] = cupy.asarray(vel_single.copy())
 
     for step in range(100):
-        w_single = run_full_pipeline_step(w_single, grid_params, cell_start, cell_end, frame=step)
+        w_single = run_full_pipeline_step(w_single, grid_params, scratch, frame=step)
 
     vx_final_single = abs(float(w_single["velocity"].get()[0, 0]))
     # Expected: 2.0 * 0.998^100 ~ 1.637 (isolated, no SPH forces with 1 particle)
@@ -559,12 +542,12 @@ def test_fire_properties():
     w = make_gas_particles(n, FIRE, pos_center=(0.0, 0.0, 0.0),
                            spread=0.03, temp=1200.0, lifetime=1.0)
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Run 500 steps (~0.5s): most fire particles should still be FIRE
     for step in range(500):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     fire_count_500 = np.sum((pi_h & 0xFF) == FIRE)
@@ -575,7 +558,7 @@ def test_fire_properties():
     # Run another 600 steps (~1.1s total): fire should have transitioned to SMOKE
     # (reactions.cu: expired FIRE -> SMOKE with lifetime=3.0s, not DEAD)
     for step in range(500, 1100):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     fire_count_1100 = np.sum((pi_h & 0xFF) == FIRE)
@@ -597,12 +580,12 @@ def test_smoke_properties():
     w = make_gas_particles(n, SMOKE, pos_center=(0.0, 0.0, 0.0),
                            spread=0.03, temp=500.0, lifetime=3.0)
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Run 1000 steps (~1.0s): all should still be alive
     for step in range(1000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     alive_1000 = np.sum(is_alive(pi_h))
@@ -636,12 +619,12 @@ def test_steam_condensation():
     w = make_gas_particles(n, STEAM, pos_center=(0.0, 0.0, 0.0),
                            spread=0.03, temp=start_temp, lifetime=10.0)
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Run 2000 steps (~2.0s): cooling should bring temperature below STEAM_CONDENSE_TEMP
     for step in range(2000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     water_count = 0
@@ -672,8 +655,8 @@ def test_gas_no_clumping():
     w = make_gas_particles(n, SMOKE, pos_center=(0.0, 0.0, 0.0),
                            spread=0.01, temp=500.0, lifetime=10.0)
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Measure initial spread (std dev of positions)
     pos_init = w["position"].get()[:, :3]
@@ -681,7 +664,7 @@ def test_gas_no_clumping():
 
     # Run 200 steps
     for step in range(200):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pos_final = w["position"].get()[:, :3]
     alive_mask = is_alive(w["packed_info"].get())
@@ -702,8 +685,8 @@ def test_mixed_gas_fluid_granular_no_nan():
     """
     setup_all_modules()
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Create mixed particles
     n_water = 100
@@ -813,7 +796,7 @@ def test_mixed_gas_fluid_granular_no_nan():
 
     # Run 5000 steps
     for step in range(5000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
         # Check for NaN every 500 steps
         if (step + 1) % 500 == 0:
@@ -850,8 +833,8 @@ def test_fire_rise_slow_disappear():
     w = make_gas_particles(n, FIRE, pos_center=(0.0, 0.0, 0.0),
                            spread=0.03, temp=1200.0, lifetime=1.0)
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     y_history = []
     alive_history = []
@@ -860,7 +843,7 @@ def test_fire_rise_slow_disappear():
     for epoch in range(12):
         for step in range(100):
             frame = epoch * 100 + step
-            w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=frame)
+            w = run_full_pipeline_step(w, grid_params, scratch, frame=frame)
 
         pos_h = w["position"].get()
         pi_h = w["packed_info"].get()
@@ -910,12 +893,12 @@ def test_steam_rise_and_condense():
     w = make_gas_particles(n, STEAM, pos_center=(0.0, 0.0, 0.0),
                            spread=0.03, temp=start_temp, lifetime=10.0)
 
-    grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    grid_params = default_grid_params()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Run 2000 steps (2.0 seconds): cooling crosses STEAM_CONDENSE_TEMP
     for step in range(2000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     temp_h = w["temperature"].get()

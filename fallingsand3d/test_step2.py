@@ -31,15 +31,8 @@ import numpy as np
 from hash_sort import (
     NUM_CELLS,
     TABLE_SIZE,
-    build_grid_params,
-    calc_hash,
-    sort_by_hash,
-    upload_grid_params as upload_hash_grid_params,
 )
-from build_grid import (
-    build_data_struct,
-    upload_grid_params as upload_build_grid_params,
-)
+from conftest import counting_sort_scene, default_grid_params, unsort
 from step1 import (
     build_precalc_params,
     build_sim_params,
@@ -100,9 +93,7 @@ def SET_SLEEPING(p: int) -> int:
 
 def _upload_all_params() -> None:
     """Upload grid, sim, precalc, materials, and granular params to step2 module."""
-    gp = build_grid_params()
-    upload_hash_grid_params(gp)
-    upload_build_grid_params(gp)
+    gp = default_grid_params()
     upload_step2_grid_params(gp)
 
     sp = build_sim_params(
@@ -169,40 +160,43 @@ def _make_two_particle_setup(
     # Shear rate (from Step1); use zeros for setup tests
     shear_rate = np.zeros(2, dtype=np.float32)
 
-    # Use GPU calc_hash to get the correct spatial hashes (hash table, not grid_res)
-    pos_gpu = cupy.asarray(position)
-    hashes_gpu = calc_hash(pos_gpu)
-    sorted_hashes_gpu, sorted_indices_gpu = sort_by_hash(hashes_gpu)
-    sorted_indices = cupy.asnumpy(sorted_indices_gpu)
-
-    # Reorder all arrays to sorted order
-    position = position[sorted_indices]
-    velocity = velocity[sorted_indices]
-    mass = mass[sorted_indices]
-    packed_info = packed_info[sorted_indices]
-    shear_rate = shear_rate[sorted_indices]
-
-    # Build cell_start / cell_end using build_data_struct (hash-table sized)
-    cell_start_gpu, cell_end_gpu = build_data_struct(sorted_hashes_gpu)
+    # Same grid build as the app: counting_sort_full. Within one cell the
+    # sorted order is not deterministic, so sort_perm is returned and
+    # _step2_original_order maps results back to particle a/b order.
+    scene = counting_sort_scene(
+        position, velocity=velocity, mass=mass, packed_info=packed_info,
+        grid_params=default_grid_params(),
+    )
+    perm = scene["sort_perm"].astype(cupy.int64)
+    position_gpu = scene["position"]
+    packed_info_gpu = scene["packed_info"]
 
     # Pre-compute pressure via K_ComputePressure (PERF-007: Step2 reads from pressure_in)
     # Density is packed in position.w; extract as a contiguous array for K_ComputePressure
-    position_gpu = cupy.asarray(position)
-    packed_info_gpu = cupy.asarray(packed_info)
     density_gpu = cupy.ascontiguousarray(position_gpu[:, 3])
     pressure_gpu = cupy.zeros(len(position), dtype=cupy.float32)
     compute_pressure(density_gpu, packed_info_gpu, pressure_gpu)
 
     return {
         "position": position_gpu,
-        "velocity": cupy.asarray(velocity),
-        "mass": cupy.asarray(mass),
+        "velocity": scene["velocity"],
+        "mass": scene["mass"],
         "packed_info": packed_info_gpu,
-        "shear_rate": cupy.asarray(shear_rate),
-        "cell_start": cell_start_gpu,
-        "cell_end": cell_end_gpu,
+        "shear_rate": cupy.asarray(shear_rate)[perm],
+        "cell_start": scene["cell_start"],
+        "cell_end": scene["cell_end"],
         "pressure_in": pressure_gpu,
+        "velocity_h": scene["velocity_h"],
+        "sort_perm": scene["sort_perm"],
     }
+
+
+def _step2_original_order(data: dict) -> tuple:
+    """Run compute_step2 on a setup dict; return (force, veleval) in a/b order."""
+    args = dict(data)
+    perm = args.pop("sort_perm")
+    sph_force, veleval_out = compute_step2(**args)
+    return unsort(sph_force, perm), unsort(veleval_out, perm)
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +278,7 @@ def test_rest_density_zero_force() -> None:
         density_b=RHO0,
     )
 
-    sph_force, veleval_out = compute_step2(**data)
+    sph_force, veleval_out = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     forces = cupy.asnumpy(sph_force)
@@ -319,7 +313,7 @@ def test_compressed_repulsive() -> None:
         density_b=compressed_density,
     )
 
-    sph_force, _ = compute_step2(**data)
+    sph_force, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     forces = cupy.asnumpy(sph_force)
@@ -363,7 +357,7 @@ def test_static_skipped() -> None:
         bclass_b=FLUID,
     )
 
-    sph_force, _ = compute_step2(**data)
+    sph_force, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     forces = cupy.asnumpy(sph_force)
@@ -392,7 +386,7 @@ def test_sleeping_skipped() -> None:
         sleeping_a=True,  # particle 0 is sleeping
     )
 
-    sph_force, _ = compute_step2(**data)
+    sph_force, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     forces = cupy.asnumpy(sph_force)
@@ -423,7 +417,7 @@ def test_xsph_fluid_only() -> None:
         density_b=RHO0,
     )
 
-    _, veleval_out = compute_step2(**data)
+    _, veleval_out = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     vels = cupy.asnumpy(veleval_out)
@@ -465,7 +459,7 @@ def test_xsph_not_for_granular() -> None:
         bclass_b=GRANULAR,
     )
 
-    _, veleval_out = compute_step2(**data)
+    _, veleval_out = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     vels = cupy.asnumpy(veleval_out)
@@ -502,7 +496,7 @@ def test_viscosity_force() -> None:
         density_b=RHO0,
     )
 
-    sph_force, _ = compute_step2(**data)
+    sph_force, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     forces = cupy.asnumpy(sph_force)
@@ -548,7 +542,7 @@ def test_granular_pressure_clamp() -> None:
         bclass_b=GRANULAR,
     )
 
-    sph_force, _ = compute_step2(**data)
+    sph_force, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     forces = cupy.asnumpy(sph_force)
@@ -591,7 +585,7 @@ def test_granular_muI_viscosity() -> None:
         bclass_b=GRANULAR,
     )
 
-    sph_force_gran, _ = compute_step2(**data_granular)
+    sph_force_gran, _ = _step2_original_order(data_granular)
     cupy.cuda.Device().synchronize()
     forces_gran = cupy.asnumpy(sph_force_gran)
 
@@ -609,7 +603,7 @@ def test_granular_muI_viscosity() -> None:
         bclass_b=FLUID,
     )
 
-    sph_force_fluid, _ = compute_step2(**data_fluid)
+    sph_force_fluid, _ = _step2_original_order(data_fluid)
     cupy.cuda.Device().synchronize()
     forces_fluid = cupy.asnumpy(sph_force_fluid)
 
@@ -648,7 +642,7 @@ def test_granular_muI_harmonic_mean() -> None:
         bclass_b=GRANULAR,
     )
 
-    sph_force, _ = compute_step2(**data)
+    sph_force, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
     forces = cupy.asnumpy(sph_force)
 
@@ -684,7 +678,7 @@ def test_fluid_unchanged_by_muI() -> None:
         density_b=RHO0,
     )
 
-    sph_force1, _ = compute_step2(**data)
+    sph_force1, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
     forces1 = cupy.asnumpy(sph_force1)
 
@@ -700,7 +694,7 @@ def test_fluid_unchanged_by_muI() -> None:
         density_b=RHO0,
     )
 
-    sph_force2, _ = compute_step2(**data2)
+    sph_force2, _ = _step2_original_order(data2)
     cupy.cuda.Device().synchronize()
     forces2 = cupy.asnumpy(sph_force2)
 
@@ -733,7 +727,7 @@ def test_granular_no_nan() -> None:
         bclass_b=GRANULAR,
     )
 
-    sph_force, _ = compute_step2(**data)
+    sph_force, _ = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
     forces = cupy.asnumpy(sph_force)
 
@@ -771,38 +765,32 @@ def test_500k_no_errors() -> None:
     # Pack density into position.w (Step2 reads rho from pos.w)
     pos_np[:, 3] = density_np
 
-    # Use GPU-side hash sort to get correct spatial hashes and sorted order
-    pos_gpu = cupy.asarray(pos_np)
-    hashes_gpu = calc_hash(pos_gpu)
-    sorted_hashes_gpu, sorted_indices_gpu = sort_by_hash(hashes_gpu)
-    sort_idx = cupy.asnumpy(sorted_indices_gpu)
-
-    pos_np = pos_np[sort_idx]
-    vel_np = vel_np[sort_idx]
-    mass_np = mass_np[sort_idx]
-    packed_info_np = packed_info_np[sort_idx]
-    shear_rate_np = shear_rate_np[sort_idx]
-
-    # Build cell_start / cell_end using build_data_struct (hash-table sized)
-    cell_start_gpu, cell_end_gpu = build_data_struct(sorted_hashes_gpu)
+    # Same grid build as the app: counting_sort_full + FP16 velocity mirror
+    scene = counting_sort_scene(
+        pos_np, velocity=vel_np, mass=mass_np, packed_info=packed_info_np,
+        grid_params=default_grid_params(),
+    )
+    pos_gpu = scene["position"]
+    pi_gpu = scene["packed_info"]
+    cell_start_gpu = scene["cell_start"]
+    cell_end_gpu = scene["cell_end"]
 
     # Pre-compute pressure via K_ComputePressure before calling Step2
     # Density is packed in pos.w; extract as a contiguous array for K_ComputePressure
-    pos_gpu = cupy.asarray(pos_np)
-    pi_gpu = cupy.asarray(packed_info_np)
     density_gpu = cupy.ascontiguousarray(pos_gpu[:, 3])
     pressure_gpu = cupy.zeros(n, dtype=cupy.float32)
     compute_pressure(density_gpu, pi_gpu, pressure_gpu)
 
     sph_force, veleval_out = compute_step2(
         pos_gpu,
-        cupy.asarray(vel_np),
-        cupy.asarray(mass_np),
+        scene["velocity"],
+        scene["mass"],
         pi_gpu,
         cupy.asarray(shear_rate_np),
         cell_start_gpu,
         cell_end_gpu,
         pressure_in=pressure_gpu,
+        velocity_h=scene["velocity_h"],
     )
     cupy.cuda.Device().synchronize()
 

@@ -44,15 +44,8 @@ import numpy as np
 
 from hash_sort import (
     NUM_CELLS,
-    build_grid_params,
-    calc_hash,
-    sort_by_hash,
-    upload_grid_params as upload_hash_grid_params,
 )
-from build_grid import (
-    build_data_struct,
-    upload_grid_params as upload_build_grid_params,
-)
+from conftest import counting_sort_scene, default_grid_params
 from step1 import (
     BLOCK_SIZE,
     build_precalc_params,
@@ -85,9 +78,7 @@ PACKED_SAND  = 2 | (GRANULAR << 8)  # material 2, GRANULAR
 
 def _upload_all_params() -> None:
     """Upload grid, sim, precalc, and materials params to all kernel modules."""
-    gp = build_grid_params()
-    upload_hash_grid_params(gp)
-    upload_build_grid_params(gp)
+    gp = default_grid_params()
     upload_step1_grid_params(gp)
 
     sp = build_sim_params(
@@ -115,7 +106,7 @@ def _run_full_pipeline(
     density_in_np: np.ndarray | None = None,
     temperature_np: np.ndarray | None = None,
 ) -> tuple:
-    """Run hash -> sort -> build -> step1 and return results.
+    """Run counting sort -> step1 and return results.
 
     Parameters
     ----------
@@ -145,26 +136,27 @@ def _run_full_pipeline(
     if temperature_np is None:
         temperature_np = np.full(n, 293.0, dtype=np.float32)
 
-    pos_gpu = cupy.asarray(positions_np)
-    mass_gpu = cupy.asarray(mass_np)
-    vel_gpu = cupy.asarray(velocity_np)
-    pi_gpu = cupy.asarray(packed_info_np)
-    temp_gpu = cupy.asarray(temperature_np)
-    density_in_gpu = cupy.asarray(density_in_np) if density_in_np is not None else None
-
-    # calc_hash returns only hashes (no indices); sort_by_hash takes only hashes
-    hashes = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-
-    # Reorder all arrays to sorted order
-    sorted_pos = pos_gpu[sorted_indices]
-    sorted_mass = mass_gpu[sorted_indices]
-    sorted_vel = vel_gpu[sorted_indices]
-    sorted_pi = pi_gpu[sorted_indices]
-    sorted_temp = temp_gpu[sorted_indices]
-    sorted_density_in = density_in_gpu[sorted_indices] if density_in_gpu is not None else None
-
-    cell_start, cell_end = build_data_struct(sorted_hashes)
+    # Same grid build as the app: counting_sort_full (cell_end == 0 marks an
+    # empty cell), with the FP16 velocity mirror the neighbour loop reads.
+    scene = counting_sort_scene(
+        positions_np,
+        velocity=velocity_np,
+        mass=mass_np,
+        packed_info=packed_info_np,
+        temperature=temperature_np,
+        grid_params=default_grid_params(),
+    )
+    sorted_pos = scene["position"]
+    sorted_mass = scene["mass"]
+    sorted_vel = scene["velocity"]
+    sorted_pi = scene["packed_info"]
+    sorted_temp = scene["temperature"]
+    cell_start = scene["cell_start"]
+    cell_end = scene["cell_end"]
+    sorted_density_in = None
+    if density_in_np is not None:
+        perm = scene["sort_perm"].astype(cupy.int64)
+        sorted_density_in = cupy.asarray(density_in_np, dtype=cupy.float32)[perm]
 
     # compute_step1 returns 6 values; the 6th (pressure_out) is not used by pipeline
     density, shear_rate, dTdt, exposure_heat, exposure_corrode, _pressure = compute_step1(
@@ -172,6 +164,7 @@ def _run_full_pipeline(
         sorted_density_in, sorted_pi,
         sorted_temp,
         cell_start, cell_end,
+        velocity_h=scene["velocity_h"],
     )
     cupy.cuda.Device().synchronize()
 
