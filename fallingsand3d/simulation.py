@@ -327,6 +327,8 @@ class Simulation:
             import dfsph_solver
             dfsph_solver.upload_sim_params(self._sim_params)
         implicit_st.upload_sim_params(self._sim_params)
+        # Foam kernels read c_sim.gravity for spray and foam motion.
+        foam.upload_sim_params(self._sim_params)
 
     @property
     def gravity_y(self) -> float:
