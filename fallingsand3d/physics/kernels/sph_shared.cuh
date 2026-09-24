@@ -550,6 +550,12 @@ __device__ inline void static_particle_boundary(
     float min_dist = 0.5f * h;
     float min_dist_sq = min_dist * min_dist;
 
+    // GAS gets the push from MAT_RIGID body particles too: its density and
+    // pressure ignore the body, so the Akinci term alone cannot stop gas
+    // entering a moving body (bd-r5-review-n28.101). Other behaviours
+    // leave MAT_RIGID to the solver's pressure coupling.
+    bool push_from_rigid = (GET_BEHAVIOR(__ldg(&packed_info[self_idx])) == GAS);
+
     int3 cell = calcGridCell(pos);
     float3 dir_sum = make_float3(0.0f, 0.0f, 0.0f);
     float max_deficit = 0.0f;
@@ -565,7 +571,7 @@ __device__ inline void static_particle_boundary(
                     if (j == self_idx) continue;
                     uint pi_j = __ldg(&packed_info[j]);
                     if (GET_BEHAVIOR(pi_j) != STATIC) continue;
-                    if (GET_MATERIAL_ID(pi_j) == MAT_RIGID) continue; // Akinci handled by pressure coupling
+                    if (GET_MATERIAL_ID(pi_j) == MAT_RIGID && !push_from_rigid) continue; // Akinci handled by pressure coupling
                     if (GET_MATERIAL_ID(pi_j) == MAT_DEAD) continue;  // free slot, not a wall
                     float4 pos4_j = __ldg(&position[j]);
                     float3 r = make_float3(

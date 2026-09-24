@@ -293,8 +293,13 @@ void K_Step2(
                         eta_vort.z += wt * omega_diff * gs * r.z;
                     }
 
-                    // GAS/non-GAS phase separation: no pressure/viscosity across phases
-                    if (is_gas_i != (behavior_j == GAS)) continue;
+                    // GAS/non-GAS phase separation: no pressure/viscosity across
+                    // phases, except GAS against a MAT_RIGID body particle, which
+                    // takes the Akinci branch below so gas is pushed around and
+                    // dragged by moving bodies (bd-r5-review-n28.101). GAS keeps
+                    // skipping regular STATIC; static_particle_boundary handles it.
+                    if (is_gas_i != (behavior_j == GAS)
+                        && !(is_gas_i && GET_MATERIAL_ID(pi_j) == MAT_RIGID)) continue;
 
                     // density_j packed into position.w by K_PackDensity (OPT-4.1)
                     float3 vel_j = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
