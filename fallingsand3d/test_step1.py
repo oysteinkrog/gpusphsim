@@ -1246,6 +1246,108 @@ def test_exposure_heat_one_fire_neighbour_near_wood_threshold() -> None:
         assert exp_h < threshold, (name, exp_h)
 
 
+# ===================================================================
+# Rigid neighbours in the surface normal (bd-r5-review-n28.68)
+# ===================================================================
+
+def _wall_contact_normals(wall: str, layers: int, build_nl: bool):
+    """Water block (10 x 6 x 10 at spacing 0.02) on a wall of `layers` planes.
+
+    `wall` is "stone" (STONE, mass = water mass), "rigid" (MAT_RIGID, mass =
+    Akinci psi_b from rigid_bodies.compute_boundary_volumes) or "massless"
+    (MAT_RIGID with mass 0, which the kernels skip like DEAD slots, so it
+    reproduces a wall the normal does not see). Returns the mean normal_out
+    (n_x, n_y, n_z, neighbor_count) of the interior contact layer and of the
+    interior free-surface top layer, in original order.
+    """
+    from materials import MAT_RIGID, STATIC, STONE, WATER
+    from rigid_bodies import compute_boundary_volumes
+    from step1 import compute_step1_build_nl
+
+    s, rho = 0.02, 2500.0
+    m_water = rho * s**3
+    water = np.array([(i * s, k * s, j * s) for i in range(10) for k in range(6)
+                      for j in range(10)], dtype=np.float32)
+    wall_pos = np.array([(i * s, -(l + 1) * s, j * s) for l in range(layers)
+                         for i in range(-4, 14) for j in range(-4, 14)], dtype=np.float32)
+    if wall == "stone":
+        wall_mass = np.full(len(wall_pos), m_water, dtype=np.float32)
+        wall_pi = STONE | (STATIC << 8)
+    elif wall == "rigid":
+        wall_mass = cupy.asnumpy(compute_boundary_volumes(wall_pos, H, rho))
+        wall_pi = MAT_RIGID | (STATIC << 8)
+    else:
+        wall_mass = np.zeros(len(wall_pos), dtype=np.float32)
+        wall_pi = MAT_RIGID | (STATIC << 8)
+
+    nw = len(water)
+    n = nw + len(wall_pos)
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:nw, :3] = water
+    pos[nw:, :3] = wall_pos
+    mass = np.concatenate([np.full(nw, m_water, dtype=np.float32), wall_mass])
+    packed = np.concatenate([np.full(nw, WATER | (FLUID << 8), dtype=np.uint32),
+                             np.full(len(wall_pos), wall_pi, dtype=np.uint32)])
+
+    _upload_all_params()
+    scene = counting_sort_scene(
+        pos, velocity=np.zeros((n, 4), np.float32), mass=mass, packed_info=packed,
+        temperature=np.full(n, 293.0, np.float32), grid_params=default_grid_params(),
+    )
+    density_in = cupy.full(n, rho, dtype=cupy.float32)
+    normal = cupy.zeros((n, 4), dtype=cupy.float32)
+    args = (scene["position"], scene["velocity"], scene["mass"], density_in,
+            scene["packed_info"], scene["temperature"],
+            scene["cell_start"], scene["cell_end"])
+    if build_nl:
+        max_nb = 96
+        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
+                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb,
+                               normal_out=normal, velocity_h=scene["velocity_h"])
+    else:
+        compute_step1(*args, normal_out=normal, velocity_h=scene["velocity_h"])
+    cupy.cuda.Device().synchronize()
+
+    out = np.zeros((n, 4), dtype=np.float32)
+    out[cupy.asnumpy(scene["sort_perm"]).astype(np.int64)] = cupy.asnumpy(normal)
+    grid = out[:nw].reshape(10, 6, 10, 4)
+    contact = grid[3:7, 0, 3:7].reshape(-1, 4).mean(axis=0)
+    top = grid[3:7, 5, 3:7].reshape(-1, 4).mean(axis=0)
+    return contact, top
+
+
+def test_rigid_wall_contact_layer_matches_stone() -> None:
+    """Water on a rigid box face must see its wall like water on STONE.
+
+    Before the fix the rigid wall was invisible to the normal: the contact
+    layer had about 21 neighbours (surface, nc < 25) and a normal as large
+    as a free surface's, pointing away from the body (anti-wetting). With
+    MAT_RIGID counted, the neighbour count matches STONE within 10%, the
+    layer is interior, and the normal no longer points away from the wall.
+    The rigid normal is not zero like STONE's: psi_b of a one-plane shell is
+    about 1.6 V, so the wall side outweighs the fluid side and n points into
+    the body at about 0.6 of a free-surface normal. Every consumer gates on
+    nc < 25, so an interior particle gets no force from it.
+    """
+    for build_nl in (False, True):
+        stone, top = _wall_contact_normals("stone", 3, build_nl)
+        n_free = abs(float(top[1]))
+        assert n_free > 0.0 and top[1] < 0.0, top  # normal points into the bulk
+
+        hidden, _ = _wall_contact_normals("massless", 1, build_nl)
+        assert hidden[3] < 25.0, hidden
+        assert hidden[1] > 0.9 * n_free, hidden  # the old anti-wetting normal
+
+        for layers in (1, 3):
+            rigid, _ = _wall_contact_normals("rigid", layers, build_nl)
+            assert abs(rigid[3] - stone[3]) <= 0.10 * stone[3], (build_nl, layers, rigid, stone)
+            assert rigid[3] >= 25.0, (build_nl, layers, rigid)
+            assert rigid[1] <= 0.10 * n_free, (build_nl, layers, rigid, n_free)
+            assert abs(rigid[1]) < n_free, (build_nl, layers, rigid, n_free)
+            # Lateral components cancel like STONE's.
+            assert abs(rigid[0]) <= 0.10 * n_free and abs(rigid[2]) <= 0.10 * n_free, rigid
+
+
 def main() -> None:
     test_compilation()
     test_block_size()
@@ -1271,6 +1373,7 @@ def main() -> None:
     test_water_water_no_exposure()
     test_exposure_corrode_is_support_fraction()
     test_exposure_heat_one_fire_neighbour_near_wood_threshold()
+    test_rigid_wall_contact_layer_matches_stone()
     test_500k_no_errors()
     print("\n=== ALL CHECKS PASSED ===")
 
