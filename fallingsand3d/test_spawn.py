@@ -196,6 +196,7 @@ def test_water_spawns_steam():
     vel = arrays["velocity"].get()
     lt = arrays["lifetime"].get()
     health = arrays["health"].get()
+    color = arrays["color"].get()
 
     # Source water particle should be DEAD
     assert GET_MATERIAL_ID(int(pi[0])) == DEAD, f"Source should be DEAD, got {GET_MATERIAL_ID(int(pi[0]))}"
@@ -229,6 +230,10 @@ def test_water_spawns_steam():
 
         # Health should be 1.0
         assert abs(health[idx] - 1.0) < 0.01, f"Particle {idx}: health={health[idx]}, expected 1.0"
+
+        # color.w carries the GAS behavior code (2 * 0.25) for the SSFR
+        # shaders, not 1.0, which they read as STATIC (bd-r5-review-n28.63).
+        assert color[idx, 3] == 0.5, f"Particle {idx}: color.w={color[idx, 3]}, expected 0.5"
 
     # Total mass conservation: spawned mass == original mass
     assert abs(total_spawned_mass - water_mass) < 1e-5, \
@@ -1422,3 +1427,24 @@ if __name__ == "__main__":
     print(f"\n{passed}/{passed+failed} tests passed.")
     if failed:
         sys.exit(1)
+
+
+def test_world_spawn_writes_behavior_code_in_color_w():
+    """bd-r5-review-n28.63: spawned particles carry behavior * 0.25 in color.w.
+
+    The SSFR shaders decode color.w as the behavior class, so a particle
+    that has not been through a substep must already hold the right code.
+    """
+    from materials import MATERIALS
+    from world import World
+
+    w = World(20_000)
+    for mat_id, expected_w in ((WATER, 0.0), (SAND, 0.25), (STONE, 0.75)):
+        start = w._high_water
+        w.spawn_cube((-0.05, -0.05, -0.05), (0.05, 0.05, 0.05), mat_id, 0.02)
+        col = w.color[start:w._high_water].get()
+        assert col.shape[0] > 0
+        mat = MATERIALS[mat_id]
+        np.testing.assert_array_equal(col[:, 3], np.float32(expected_w))
+        np.testing.assert_allclose(
+            col[:, :3], np.array([[mat.color_r, mat.color_g, mat.color_b]], np.float32))

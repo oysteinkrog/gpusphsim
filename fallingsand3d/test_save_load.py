@@ -823,3 +823,52 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.63: load_scene rebuilds color from the material table
+# ---------------------------------------------------------------------------
+
+def _expected_colors(packed: np.ndarray) -> np.ndarray:
+    """Base material color, with behavior * 0.25 in w (DEAD gets -1)."""
+    from materials import MATERIALS
+    out = np.zeros((packed.shape[0], 4), np.float32)
+    for i, p in enumerate(packed):
+        mat_id, beh = int(p) & 0xFF, (int(p) >> 8) & 0x3
+        if mat_id == 0:
+            out[i] = (0.0, 0.0, 0.0, -1.0)
+            continue
+        m = MATERIALS[mat_id]
+        out[i] = (m.color_r, m.color_g, m.color_b, beh * 0.25)
+    return out
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_load_scene_rebuilds_color(tmp_path, monkeypatch) -> None:
+    """Load into a world whose color holds junk: loaded slots get material colors."""
+    import cupy as cp
+    import save_load as sl
+    from materials import SAND, STONE, WATER
+    from world import World
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    sim, cam = _StubSim(), _stub_camera()
+    world = World(20_000)
+    for i, mat in enumerate((WATER, SAND, STONE)):
+        x = -0.3 + 0.25 * i
+        world.spawn_cube((x, -0.05, -0.05), (x + 0.1, 0.05, 0.05), mat, 0.02)
+    n = world._high_water
+    sl.save_scene(world, sim, cam, "mixed")
+
+    world.color[:] = 9.0
+    assert sl.load_scene(world, sim, cam, "mixed") == n
+    cp.cuda.Device().synchronize()
+
+    packed = world.packed_info[:n].get()
+    got = world.color[:n].get()
+    np.testing.assert_allclose(got, _expected_colors(packed), rtol=0, atol=1e-7)
+    mats = set((packed & 0xFF).tolist())
+    assert {WATER, SAND, STONE} <= mats
+    w_by_mat = {m: set(got[(packed & 0xFF) == m, 3].tolist()) for m in (WATER, SAND, STONE)}
+    assert w_by_mat == {WATER: {0.0}, SAND: {0.25}, STONE: {0.75}}
+
