@@ -1067,11 +1067,17 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
 4. **DFSPH**: STATIC kappa=0, p_rho2=0, vel=0 set by early returns. Correction
    kernels include STATIC neighbors for one-sided corrections.
 5. **Dye diffusion**: STATIC neighbors skipped to prevent color bleeding from stone.
-6. **GAS phase separation preserved**: GAS particles still skip STATIC neighbors.
+6. **GAS phase separation**: GAS particles skip regular STATIC neighbours in
+   the SPH loops. In WCSPH step2 a GAS particle does take the MAT_RIGID Akinci
+   branch (pressure mirror with the gas EOS pressure and gas rest density,
+   viscous drag toward the body surface velocity, reaction force and torque on
+   the body), so moving bodies push and drag smoke and steam. Gas density in
+   step1 still ignores the body. (bd-r5-review-n28.101)
 
 7. **Position push** (`static_particle_boundary`, `sph_shared.cuh`): after
-   integration, a FLUID or GRANULAR particle closer than `min_dist = 0.5 h`
-   (one rest spacing, 0.02 m) to a STATIC particle gets one correction:
+   integration, a FLUID, GRANULAR or GAS particle closer than
+   `min_dist = 0.5 h` (one rest spacing, 0.02 m) to a STATIC particle gets one
+   correction:
    `n = normalise(sum_j (min_dist - r_j) * r_hat_j)`,
    `pos += max_j (min_dist - r_j) * n`. The push length is the deepest
    penetration, not a sum over neighbours, so a particle over a flat floor
@@ -1079,6 +1085,10 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
    `n` only, and only when moving into the wall. A particle resting one
    spacing from the wall is not touched. Called from WCSPH `K_Integrate`, PBF
    Finalize and DFSPH Finalize. (bd-r5-review-n28.43)
+   MAT_RIGID particles push only GAS: FLUID and GRANULAR get their rigid
+   response from the solver's Akinci coupling, but gas density ignores the
+   body, so without the push gas would cross the body surface
+   (bd-r5-review-n28.101).
 
    Measured on a 1500-particle water column in a closed STONE box (bottom
    layer after 5 s, old 0.8 h summed push vs this version): PBF gap
@@ -1500,6 +1510,7 @@ up `+curl(v)`, see §16.1.
 - **Max 8 dynamic bodies, 16 SDF objects**: Hardcoded limits in constant memory (`MAX_RIGID_BODIES`, `MAX_SDF_OBJECTS`).
 - **CUDA graph disabled**: Rigid body forces vary per substep, so the CUDA graph pipeline is disabled when any rigid body is present.
 - **No body-frame friction/rolling**: Only linear velocity is reflected in collision; angular velocity is not affected by rigid-rigid contacts.
+- **Gas against bodies** (bd-r5-review-n28.101): GAS is kept out of a body by the `static_particle_boundary` push (all solvers) plus, in WCSPH, the step2 Akinci term. `test_gas_rigid.py` drops a 12 cm, 50 kg box at 1 m/s through an ambient-temperature SMOKE block for 0.2 s. DFSPH: no smoke inside the box at any check. WCSPH: 216 inside, because the push is dead there until the integrate module gets `c_grid` (10.6, bd-r5-review-n28.214); with `c_grid` uploaded by hand it is 0 inside and the box slows from 1.0 to 0.86 m/s (0.998 m/s with no smoke in its path), and peak gas pressure under the box is about 30000 against 3600 at rest. PBF: up to about 90 inside, because at dt 1/120 the box moves 8 mm per substep, the PBF gas density solve does not see the body, and one push per substep lags behind.
 
 ---
 
@@ -1556,7 +1567,8 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   the zero survives the next sort.
 - **No position push.** `static_particle_boundary` (`sph_shared.cuh`) pushes a
   moving particle out to `0.5 h` from STATIC neighbours (see 10.6),
-  and that push has no mass factor. It skips `MAT_DEAD` as well as `MAT_RIGID`.
+  and that push has no mass factor. It skips `MAT_DEAD`, and it skips
+  `MAT_RIGID` for every particle except GAS (see 10.6).
 - `MAT_DEAD = 0` is defined in `common.cuh` next to `MAT_RIGID`.
 - **Brush kill.** `World.kill_in_sphere` runs one kernel (`K_KillSphere`, no
   host sync). Each live, non-rigid particle in the sphere gets
