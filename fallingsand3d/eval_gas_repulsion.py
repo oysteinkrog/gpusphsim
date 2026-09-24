@@ -56,7 +56,9 @@ def measure(name: str, sim_time: float = SIM_TIME, free: bool = False) -> dict:
     sim.set_solver_profile(profile)
     if free:
         sim.set_gravity(0.0)
-    sim.reset_spawn_damping()
+    # No spawn damping: it runs for 30 substeps, so it would cover 0.25 s
+    # of PBF but 15 ms of WCSPH and skew the comparison.
+    sim._spawn_substep = sim._damping_duration
     sim.sim_time = 0.0
     sim._last_frame_time = None
     steps = max(1, int(round(sim_time / sim.fixed_dt_value)))

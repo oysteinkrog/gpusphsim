@@ -1056,7 +1056,7 @@ def _free_gas_cloud(solver: str, sim_time: float) -> tuple[float, float, float]:
     from solver_profiles import PROFILES
 
     world = World(max_particles=1024)
-    n = world.spawn_cube((-0.04, 0.46, -0.04), (0.04, 0.54, 0.04), SMOKE,
+    n = world.spawn_cube((-0.05, 0.45, -0.05), (0.05, 0.55, 0.05), SMOKE,
                          spacing=SPACING, lifetime=0.0)
     assert n == 125
     world.temperature[:n] = 293.0
@@ -1068,7 +1068,9 @@ def _free_gas_cloud(solver: str, sim_time: float) -> tuple[float, float, float]:
                      fixed_dt=True, max_substeps=40)
     sim.set_solver_profile(profile)
     sim.set_gravity(0.0)
-    sim.reset_spawn_damping()
+    # No spawn damping: it runs for 30 substeps, so it would cover 0.25 s
+    # of PBF but 15 ms of WCSPH and skew the comparison.
+    sim._spawn_substep = sim._damping_duration
     sim.sim_time = 0.0
     sim._last_frame_time = None
 
