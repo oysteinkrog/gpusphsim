@@ -2268,15 +2268,31 @@ done yet.
 
 Surface normal accumulated in Step1 neighbor loop for FLUID particles:
 ```
-n_i = SUM_j (m_j / rho_j) * grad_W_spiky(r_ij)
-neighbor_count_i = count of neighbors within h
+n_i = SUM_j V_j * grad_W_spiky(r_ij)
+      V_j = m_j / rho_j          for fluid, granular and STONE neighbours
+      V_j = psi_b / rho0_i       for MAT_RIGID neighbours (psi_b is stored as mass)
+neighbor_count_i = count of non-self neighbours within h with m_j > 0
 ```
+
+MAT_RIGID neighbours count in both sums, so fluid resting on a rigid body is
+interior like fluid resting on STONE (bd-r5-review-n28.68). DEAD slots (mass 0)
+are not counted. For a water block on a wall at spacing 0.02, h = 0.04, the
+interior contact layer has 31 neighbours on a three-plane STONE wall, 30 on a
+one-plane rigid shell and 31 on a three-plane rigid slab; with the rigid wall
+left out it had 21, so it was classed as surface and its normal pointed away
+from the body at free-surface strength. The rigid contact normal is not zero:
+psi_b of a one-plane shell is about 1.6 V, so n points into the body at about
+0.6 of a free-surface normal (0.2 for a three-plane slab). No force follows
+from it while nc >= 25, because every consumer gates on nc < 25.
+Vorticity, strain rate, heat, exposure and dye still skip MAT_RIGID.
+PBF (K_PBF_ComputeLambda) and DFSPH (K_DFSPH_ComputeDensityAlpha) use the same rule.
 
 Output: `normal_out[i] = float4(n_x, n_y, n_z, as_float(neighbor_count))`
 
 The neighbor count is packed into `.w` as a reinterpreted float for efficient storage.
 
-**Source**: `step1.cu` (neighbor loop, FLUID branch)
+**Source**: `step1.cu` (K_Step1 and K_Step1_BuildNL neighbor loops),
+test: `test_step1.py::test_rigid_wall_contact_layer_matches_stone`
 
 ### 17.2 Surface Detection
 
