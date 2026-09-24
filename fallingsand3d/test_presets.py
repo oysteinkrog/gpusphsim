@@ -157,16 +157,8 @@ def gpu_sim():
     sim.close()
 
 
-@pytest.mark.parametrize("name,material,min_count", [
-    ("Sand Castle", WATER, 10_000),
-    ("Waterfall", WATER, 10_000),
-    # Nested spawns fixed by bd-r5-review-n28.47 (exclude_box).
-    ("Lava Lamp", WATER, 10_000),
-    ("Debris Flow", MUD, 10_000),
-    ("SDF Hourglass", SAND, 1_000),
-])
-def test_fixed_preset_density_after_one_substep(gpu_sim, name, material,
-                                                min_count):
+@pytest.mark.parametrize("name", ["Sand Castle", "Waterfall"])
+def test_fixed_preset_water_density_after_one_substep(gpu_sim, name):
     cp, world, sim = gpu_sim
     PRESETS[name](world)
     sim.notify_scene_changed()
@@ -176,9 +168,57 @@ def test_fixed_preset_density_after_one_substep(gpu_sim, name, material,
 
     mat = world.sorted_packed_info[:n].get() & 0xFF
     rho = world.sorted_density[:n].get()
-    sel = mat == material
-    assert sel.sum() > min_count
-    rho0 = MATERIALS[material].rest_density
-    ratio = float(rho[sel].max()) / rho0
-    assert ratio < 1.3, (
-        f"{name}: max {MATERIALS[material].name} density {ratio:.3f}x rest")
+    water = mat == WATER
+    assert water.sum() > 10_000
+    rho0 = MATERIALS[WATER].rest_density
+    ratio = float(rho[water].max()) / rho0
+    assert ratio < 1.3, f"{name}: max water density {ratio:.3f}x rest density"
+
+
+# ---------------------------------------------------------------------------
+# Spawn density of the nested presets (bd-r5-review-n28.47)
+# ---------------------------------------------------------------------------
+
+def _poly6_density(pos: np.ndarray, mass: float, h: float) -> np.ndarray:
+    """SPH poly6 density of every point over all points, on the CPU."""
+    from scipy.spatial import cKDTree
+    coeff = 315.0 / (64.0 * np.pi * h ** 9)
+    pairs = cKDTree(pos).query_pairs(h, output_type="ndarray")
+    r2 = ((pos[pairs[:, 0]] - pos[pairs[:, 1]]) ** 2).sum(axis=1)
+    w = coeff * (h * h - r2) ** 3
+    rho = np.full(len(pos), coeff * h ** 6)
+    np.add.at(rho, pairs[:, 0], w)
+    np.add.at(rho, pairs[:, 1], w)
+    return rho * mass
+
+
+@pytest.mark.parametrize("name,material", [
+    ("Lava Lamp", WATER),
+    ("Debris Flow", MUD),
+    ("SDF Hourglass", SAND),
+])
+def test_nested_preset_spawn_density(name, material):
+    """The outer material must not start with a second lattice inside it.
+
+    Before the exclude_box fix the outer lattice filled the inner box too,
+    so its peak spawn density was 1.5x to 2.0x its own median. The check uses
+    the spawn positions (h = 0.04, poly6, all neighbours) rather than a GPU
+    substep, so it measures the lattice and nothing else.
+    """
+    pytest.importorskip("scipy")
+    pytest.importorskip("cupy")
+    from world import World, PARTICLE_MASS
+    world = World(max_particles=500_000)
+    world.sdf_manager = MagicMock()
+    world.rigid_body_manager = MagicMock()
+    PRESETS[name](world)
+    n = world._high_water
+    pos = world.position[:n, :3].get().astype(np.float64)
+    mat = world.packed_info[:n].get() & 0xFF
+    rho = _poly6_density(pos, PARTICLE_MASS, 0.04)[mat == material]
+    assert len(rho) > 1_000
+    peak = float(rho.max())
+    assert peak / float(np.median(rho)) < 1.4, (
+        f"{name}: {MATERIALS[material].name} peak {peak:.0f} is "
+        f"{peak / np.median(rho):.2f}x its median")
+    assert peak / MATERIALS[material].rest_density < 1.3
