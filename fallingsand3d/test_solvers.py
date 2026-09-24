@@ -1324,3 +1324,69 @@ def test_old_dead_encoding_stays_finite(world, sim, profile_name):
     assert np.isfinite(pos).all(), f"{profile_name}: non-finite position"
     assert np.isfinite(vel).all(), f"{profile_name}: non-finite velocity"
     assert np.isfinite(p_rho2).all(), f"{profile_name}: non-finite p_rho2"
+
+
+def test_dfsph_density_solver_dead_fluid_slot_is_finite(world, sim):
+    """A DEAD slot with FLUID behavior (packed_info 0, what the brush wrote
+    before bd-r5-review-n28.34) must not drive p_rho2 or a_press to inf/NaN.
+
+    DEAD has rest_density 0, so K_DFSPH_DensitySolverUpdate divided by zero.
+    The kernel now floors rho0 at 1. Under --use_fast_math the unfloored
+    division happens to come out as NaN, which fmaxf(new_p, 0) clamps to 0,
+    so this check also passes without the floor today. It guards p_rho2 and
+    a_press against inf or NaN if the build or the clamp changes.
+    """
+    import dataclasses
+    import dfsph_solver
+
+    w = world
+    w.packed_info[:] = 0
+    w._high_water = 0
+    half = 0.09
+    n = w.spawn_cube((-half, 0.3 - half, -half), (half, 0.3 + half, half),
+                     WATER, spacing=0.02)
+    profile = dataclasses.replace(PROFILES["DFSPH"], dfsph_alpha_limit=1.0e9)
+    sim.set_solver_profile(profile)
+    w._density_initialized = True
+    sim._run_grid_setup(n, force_sort=True)
+
+    pos = w.sorted_position[:n, :3].get()
+    centre = pos.mean(axis=0)
+    dist = np.linalg.norm(pos - centre, axis=1)
+    dead = cp.asarray(np.nonzero(dist < 0.03)[0])
+    assert dead.size > 5
+    w.sorted_packed_info[dead] = cp.uint32(0)  # MAT_DEAD, FLUID
+
+    for pass_idx in range(2):
+        density_in = None if pass_idx == 0 else w.sorted_density[:n].copy()
+        dfsph_solver.compute_density_alpha(
+            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_mass[:n], density_in,
+            w.sorted_packed_info[:n], w.sorted_temperature[:n],
+            sim._cell_start, sim._cell_end,
+            w.sorted_density, w.sorted_alpha_dfsph,
+            w.sorted_shear_rate, w.sorted_dTdt,
+            w.sorted_exposure_heat, w.sorted_exposure_corrode,
+        )
+    assert float(w.sorted_alpha_dfsph[dead].max()) > 0.0, "dead slot has alpha 0"
+
+    dt = float(profile.dt)
+    k = 0.1 / (3.0 * dt)
+    vel = cp.zeros((n, 4), dtype=cp.float32)
+    vel[:, :3] = cp.asarray((-k * (pos - centre)).astype(np.float32))
+    p = cp.zeros(n, dtype=cp.float32)
+    accel = cp.zeros((n, 4), dtype=cp.float32)
+    for _ in range(8):
+        dfsph_solver.density_solver_update(
+            vel, accel, w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+            w.sorted_packed_info[:n], sim._cell_start, sim._cell_end, p,
+        )
+        dfsph_solver.compute_pressure_accel(
+            p, w.sorted_position[:n], w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n], sim._cell_start, sim._cell_end, accel,
+        )
+    p_h = p.get()
+    a_h = accel.get()
+    assert np.isfinite(p_h).all(), f"p_rho2 not finite at {np.count_nonzero(~np.isfinite(p_h))} slots"
+    assert np.isfinite(a_h).all(), f"a_press not finite at {np.count_nonzero(~np.isfinite(a_h).any(axis=1))} slots"
