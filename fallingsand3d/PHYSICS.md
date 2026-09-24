@@ -1871,10 +1871,12 @@ creating spurious rotation.
 
 The epsilon values were kept when the vorticity sign was fixed. Before the fix
 the force pointed against the flow and drained vortex cores. With the right sign
-it amplifies them. A Taylor-Green run over 300 substeps showed net L_z drift of
-2.9e-8 (eps 0), 1.1e-7 (eps 0.05) and 4.2e-7 (eps 0.10), so these values do not
-inject measurable angular momentum. A visual A/B at eps 0.01 and 0.05 has not
-been done yet.
+it amplifies them. After the fix, the `test_odd_viscosity.py` Taylor-Green run
+(WCSPH, 300 substeps) shows net L_z drift of 1.3e-7 (eps 0), 2.2e-7 (eps 0.05)
+and 1.5e-7 (eps 0.10), against a noise floor of 5e-4. Transverse RMS v_x is
+2.822e-3 with and without confinement. So these values do not inject
+measurable angular momentum. A visual A/B at eps 0.01 and 0.05 has not been
+done yet.
 
 ---
 
