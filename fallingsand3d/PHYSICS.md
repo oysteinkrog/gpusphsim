@@ -2226,7 +2226,31 @@ v_world = v_body + omega × r_world   // velocity
 
 Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
 
-**Source**: `integrate.cu:K_UpdateBoundaryParticles`
+**Slot layout**: all boundary particles of all bodies form one contiguous block
+`[boundary_offset, boundary_offset + N_b)` in the unsorted arrays, inside
+`world._high_water`. The kernel writes position, velocity and mass (psi_b) at
+`rbm.boundary_offset + i` every substep.
+
+- `inject_boundary_particles()` writes the block once, at the current
+  `_high_water`, then raises `_high_water` by `N_b`. It also sets packed_info
+  (MAT_RIGID, STATIC, body id in bits [20:13]), color, density, temperature,
+  health, lifetime and sleep_counter. It syncs, so it runs only on scene events.
+- `rbm.boundary_injected` is the one flag that says the block exists.
+  `reset()` and `mark_for_reinjection()` clear it. Before writing, injection
+  kills and compacts away any MAT_RIGID particles already in the world, so
+  there is only ever one block.
+- Brush spawns append after the block, so they never move it. Brush kill skips
+  MAT_RIGID.
+- `World.compact()` moves `boundary_offset` to the number of alive slots below
+  it (the gather keeps order, so the block stays contiguous). If any block slot
+  is dead, it calls `mark_for_reinjection()` instead.
+- Scene load, undo and R reset call `mark_for_reinjection()`. `save_scene()`
+  does not write MAT_RIGID particles, and `load_scene()` drops any it finds.
+  The block is rebuilt from the body state on the next substep.
+- Boundary particles are drawn, because they sit inside `_high_water`.
+
+**Source**: `integrate.cu:K_UpdateBoundaryParticles`, `rigid_bodies.py:inject_boundary_particles`,
+`simulation.py:_update_rigid_boundary`, `world.py:_shift_rigid_boundary_block`
 
 ### 22.10 Design Decisions
 
