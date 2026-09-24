@@ -23,6 +23,8 @@ def main() -> None:
     ap.add_argument("--frames", type=int, default=300)
     ap.add_argument("--ssfr", type=int, default=1)
     ap.add_argument("--errcheck", type=int, default=0)
+    ap.add_argument("--module", default="renderer",
+                    help="module that provides Renderer (for A/B runs)")
     args = ap.parse_args()
 
     import OpenGL
@@ -48,7 +50,8 @@ def main() -> None:
     glfw.swap_interval(0)
 
     from camera import OrbitCamera
-    from renderer import Renderer
+    import importlib
+    Renderer = importlib.import_module(args.module).Renderer
 
     n = args.particles
     r = Renderer(n, point_scale=20.0, width=1280, height=720)
@@ -83,7 +86,7 @@ def main() -> None:
     glFinish()
     err = glGetError()
     t = np.array(times) * 1e3
-    print(f"particles={n} ssfr={args.ssfr} errcheck={args.errcheck} "
+    print(f"module={args.module} particles={n} ssfr={args.ssfr} errcheck={args.errcheck} "
           f"frames={len(t)} mean={t.mean():.3f}ms median={np.median(t):.3f}ms "
           f"p90={np.percentile(t, 90):.3f}ms gl_error={'none' if err == GL_NO_ERROR else err}")
     r.close()
