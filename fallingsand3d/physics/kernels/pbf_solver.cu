@@ -192,9 +192,11 @@ void K_PBF_ComputeLambda(
     // neighbor loop but get lambda=0 forced after (see below).
     // GAS skips PBF constraints entirely (compressible phase).
     if ((behavior_i == STATIC || behavior_i == GAS) && !do_heat) {
-        // STATIC floor at 1: DEAD has rest_density 0 (GAS keeps its own 0.2-0.6).
-        float rho0_out = c_materials[mat_id_i].rest_density;
-        density_out[i] = (behavior_i == STATIC) ? fmaxf(rho0_out, 1.0f) : rho0_out;
+        // STATIC floor at 1: DEAD has rest_density 0. GAS keeps the density the
+        // first (do_heat) call computed this substep; heat and dye read it as rho_j
+        // next substep, so overwriting it with rest_density would be wrong.
+        if (behavior_i == STATIC)
+            density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
         lambda_out[i] = 0.0f;
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;

@@ -938,6 +938,34 @@ def test_steam_rise_and_condense():
 # Main
 # ===========================================================================
 
+def test_pbf_gas_density_survives_iterations():
+    """bd-r5-review-n28.62: PBF computes GAS density once per substep (first
+    ComputeLambda call). Later iterations used to overwrite it with
+    rest_density (0.6 for STEAM), so heat and dye terms next substep saw
+    vol_j = m_j / 0.6 instead of m_j / rho. An isolated STEAM particle has
+    rho = m * W(0), about 163, so the surviving density must be above 100."""
+    import dataclasses
+    import cupy as cp
+    from world import World
+    from simulation import Simulation
+    from solver_profiles import PROFILES
+
+    world = World(max_particles=1024)
+    n = world.spawn_cube((0.0, 0.5, 0.0), (0.02, 0.52, 0.02), STEAM, spacing=0.02)
+    assert n == 1
+    sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
+                     fixed_dt=False, max_substeps=20)
+    profile = dataclasses.replace(PROFILES["PBF"], pbf_iterations=6)
+    sim.set_solver_profile(profile)
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+    sim._sim_step(n)
+    info = cp.asnumpy(world.sorted_packed_info[:n])
+    assert (info[0] & 0xFF) == STEAM, "particle is no longer STEAM"
+    rho = float(cp.asnumpy(world.sorted_density[:n])[0])
+    assert rho > 100.0, f"GAS density after 6 PBF iterations is {rho:.3f}"
+
+
 if __name__ == "__main__":
     tests = [
         test_gas_linear_eos,
