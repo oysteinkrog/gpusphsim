@@ -632,6 +632,102 @@ def test_xsph_position_update():
     print("PASS: test_xsph_position_update")
 
 
+def test_xsph_position_update_with_gravity():
+    """FLUID advects with vel_new plus the XSPH delta, so gravity reaches the
+    position in the same substep (symplectic Euler). bd-r5-review-n28.44.
+
+    Before the fix FLUID advected with veleval = v_old + eps*xsph, giving
+    pos_y = pos0_y + dt * v_old_y with no dt*g term.
+    """
+    g = 4.0
+    setup_params(gravity=(0.0, -g, 0.0))
+
+    n = 1
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    vel = np.array([[1.0, 0.2, 0.0, 0.0]], dtype=np.float32)
+    # XSPH delta of +0.5 in x only; y has no XSPH correction.
+    veleval = np.array([[1.5, 0.2, 0.0, 0.0]], dtype=np.float32)
+
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d["sorted_veleval"] = cupy.asarray(veleval)
+    pos_out, vel_out, _, _, _, _, _, _ = integrate(**d)
+    pos_h = pos_out.get()
+    vel_h = vel_out.get()
+
+    dt = np.float32(DT)
+    vy_new = np.float32(0.2) - dt * np.float32(g)
+    assert abs(vel_h[0, 1] - vy_new) < 1e-7
+    expected_py = np.float32(0.0) + dt * vy_new
+    assert abs(pos_h[0, 1] - expected_py) < 1e-7, (
+        f"FLUID pos_y should use vel_new: expected {expected_py}, got {pos_h[0, 1]} "
+        f"(old forward-Euler value would be {dt * np.float32(0.2)})"
+    )
+    expected_px = dt * np.float32(1.0 + 0.5)
+    assert abs(pos_h[0, 0] - expected_px) < 1e-7, (
+        f"XSPH delta lost: expected pos_x={expected_px}, got {pos_h[0, 0]}"
+    )
+
+
+def test_fluid_granular_freefall_match():
+    """A FLUID and a GRANULAR particle in free fall, far apart, stay at the
+    same height over 1000 substeps. Before bd-r5-review-n28.44 FLUID lagged
+    by one substep of gravity (g*dt*t apart)."""
+    g = 1.0
+    setup_params(gravity=(0.0, -g, 0.0))
+
+    n = 2
+    pos_np = np.array([[-0.5, 0.8, 0.0, 1.0],
+                       [0.5, 0.8, 0.0, 1.0]], dtype=np.float32)
+    vel_np = np.array([[0.0, -0.5, 0.0, 0.0],
+                       [0.0, -0.5, 0.0, 0.0]], dtype=np.float32)
+    pos_gpu = cupy.asarray(pos_np)
+    vel_gpu = cupy.asarray(vel_np)
+    pi_gpu = cupy.asarray(np.array([MAKE_PACKED(WATER, FLUID),
+                                    MAKE_PACKED(SAND, GRANULAR)], dtype=np.uint32))
+    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
+    sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
+    # Zero density keeps GRANULAR anti-creep off (it needs rho > 0.95*rho0).
+    density_gpu = cupy.zeros(n, dtype=cupy.float32)
+    shear_gpu = cupy.zeros(n, dtype=cupy.float32)
+    zeros4 = cupy.zeros((n, 4), dtype=cupy.float32)
+    mass_gpu = cupy.full(n, MASS, dtype=cupy.float32)
+    temp_gpu = cupy.full(n, 293.0, dtype=cupy.float32)
+    hlth_gpu = cupy.full(n, 1.0, dtype=cupy.float32)
+    idx_gpu = cupy.arange(n, dtype=cupy.uint32)
+
+    steps = 1000
+    for _ in range(steps):
+        integrate(
+            sorted_position=pos_gpu,
+            sorted_velocity=vel_gpu,
+            sorted_veleval=vel_gpu.copy(),
+            sorted_sph_force=zeros4,
+            sorted_mass=mass_gpu,
+            sorted_packed_info=pi_gpu,
+            sorted_temperature=temp_gpu,
+            sorted_health=hlth_gpu,
+            sorted_density=density_gpu,
+            sorted_shear_rate=shear_gpu,
+            sorted_sleep_counter=sc_gpu,
+            sort_indexes=idx_gpu,
+            position_out=pos_gpu,
+            velocity_out=vel_gpu,
+            color_out=color_gpu,
+            packed_info_out=pi_gpu,
+            sleep_counter_out=sc_gpu,
+        )
+
+    pos_h = pos_gpu.get()
+    vel_h = vel_gpu.get()
+    # Both fell (sanity) and match each other.
+    assert pos_h[0, 1] < 0.8 - 0.5 and pos_h[1, 1] < 0.8 - 0.5
+    assert abs(vel_h[0, 1] - vel_h[1, 1]) < 1e-6
+    # Old gap would be g*dt*t = 1.0 * 1e-3 * 1.0 = 1e-3 m.
+    assert abs(pos_h[0, 1] - pos_h[1, 1]) < 1e-6, (
+        f"FLUID y={pos_h[0, 1]} vs GRANULAR y={pos_h[1, 1]}"
+    )
+
+
 def test_water_pool_no_nan():
     """10K water particles in box settle without NaN after 1000 steps.
 
