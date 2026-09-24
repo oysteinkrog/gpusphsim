@@ -85,11 +85,28 @@ def _get_kill_sphere_kernel():
 # Default particle spacing (h=0.04 -> spacing=h/2=0.02)
 DEFAULT_SPACING = 0.02
 
-# Global particle mass -- matches parent project convention.
-# Using mass = 0.02 (instead of rho0*dx^3 = 0.008) produces SPH densities
-# ~2.5x rest_density, which keeps the Tait EOS in a stable high-pressure
-# regime where k=3.0 and viscosity=3.5 are properly tuned.
+# Reference particle mass. At spacing 0.02 the kernel-sum density of a
+# lattice of 0.02 kg particles is about 2525, so a material with
+# rest_density MASS_REF_DENSITY = 2500 (WATER, ACID) rests at rho0 with it.
 PARTICLE_MASS = 0.02
+MASS_REF_DENSITY = 2500.0
+
+
+def spawn_mass(material_id: int) -> float:
+    """Spawn mass for one particle of material_id at the default spacing.
+
+    FLUID and GRANULAR materials get PARTICLE_MASS * rest_density / 2500,
+    so every one of them spawns at its own rho0 (SAND 0.032, LAVA 0.052,
+    OIL 0.017) instead of at 2500 (bd-r5-review-n28.53).  STATIC keeps
+    PARTICLE_MASS: STONE 6500 or METAL 19500 would make wall-adjacent fluid
+    read far above its rho0.  GAS keeps PARTICLE_MASS (its units are a
+    separate issue, bd-r5-review-n28.80).  K_Reactions applies the same
+    rule when a particle changes material.
+    """
+    mat = MATERIALS[material_id]
+    if mat.behavior_class in (FLUID, GRANULAR):
+        return PARTICLE_MASS * mat.rest_density / MASS_REF_DENSITY
+    return PARTICLE_MASS
 
 # Default temperatures for hot materials (Kelvin)
 _DEFAULT_TEMPS = {
@@ -595,7 +612,7 @@ class World:
         self.veleval[sl, 3] = 0.0
         self.sph_force[sl] = 0.0
 
-        self.mass[sl] = PARTICLE_MASS
+        self.mass[sl] = spawn_mass(material_id)
 
         packed = _MAKE_PACKED(material_id, mat.behavior_class)
         self.packed_info[sl] = cp.uint32(packed)
@@ -716,7 +733,7 @@ class World:
         self.veleval[sl, 3] = 0.0
         self.sph_force[sl] = 0.0
 
-        self.mass[sl] = PARTICLE_MASS
+        self.mass[sl] = spawn_mass(material_id)
 
         packed = _MAKE_PACKED(material_id, mat.behavior_class)
         self.packed_info[sl] = cp.uint32(packed)
@@ -820,7 +837,7 @@ class World:
         self.velocity[sl] = 0.0
         self.veleval[sl] = 0.0
         self.sph_force[sl] = 0.0
-        self.mass[sl] = PARTICLE_MASS
+        self.mass[sl] = spawn_mass(material_id)
         packed = _MAKE_PACKED(material_id, mat.behavior_class)
         self.packed_info[sl] = cp.uint32(packed)
         temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
@@ -889,7 +906,7 @@ class World:
         self.velocity[sl] = 0.0
         self.veleval[sl] = 0.0
         self.sph_force[sl] = 0.0
-        self.mass[sl] = PARTICLE_MASS
+        self.mass[sl] = spawn_mass(material_id)
         packed = _MAKE_PACKED(material_id, mat.behavior_class)
         self.packed_info[sl] = cp.uint32(packed)
         temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
@@ -985,7 +1002,7 @@ class World:
         self.velocity[sl] = 0.0
         self.veleval[sl] = 0.0
         self.sph_force[sl] = 0.0
-        self.mass[sl] = PARTICLE_MASS
+        self.mass[sl] = spawn_mass(material_id)
         packed = _MAKE_PACKED(material_id, mat.behavior_class)
         self.packed_info[sl] = cp.uint32(packed)
         temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)

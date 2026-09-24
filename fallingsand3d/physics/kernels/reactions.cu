@@ -81,6 +81,35 @@
 #define DRYING_TEMP_ACCEL       0.01f  // temperature acceleration for drying
 
 /* ======================================================================
+ * Spawn-mass rule on material change (bd-r5-review-n28.53)
+ *
+ * world.spawn_mass gives FLUID and GRANULAR particles
+ * PARTICLE_MASS * rest_density / MASS_REF_DENSITY, so each rests at its own
+ * rho0 at spacing 0.02; STATIC and GAS keep PARTICLE_MASS.  A particle that
+ * changes material has its mass rescaled by the ratio of the two scale
+ * factors, so it keeps resting at the new material's rho0:
+ *   SAND -> WET_SAND x1.125, DIRT -> MUD x1.2, STONE -> LAVA x2.6,
+ *   LAVA -> STONE /2.6, OIL -> FIRE back to PARTICLE_MASS.
+ * Mass is not conserved across these transitions; the rest volume is.
+ * MASS_REF_DENSITY must match world.MASS_REF_DENSITY.
+ * ====================================================================== */
+
+#define MASS_REF_DENSITY 2500.0f
+
+__device__ inline float spawn_mass_scale(uint mat_id) {
+    int b = c_materials[mat_id].behavior_class;
+    if (b == FLUID || b == GRANULAR)
+        return c_materials[mat_id].rest_density / MASS_REF_DENSITY;
+    return 1.0f;
+}
+
+/* Rescale mass[i] for a change from old_mat to new_mat (NULL mass: no-op). */
+__device__ inline void rescale_mass(float* mass, uint i, uint old_mat, uint new_mat) {
+    if (mass != 0)
+        mass[i] *= spawn_mass_scale(new_mat) / spawn_mass_scale(old_mat);
+}
+
+/* ======================================================================
  * Wang hash RNG for explosion direction
  * ====================================================================== */
 
@@ -118,9 +147,10 @@ void K_Reactions(
     // --- Freelist output (for spawn system) ---
     uint*           __restrict__ dead_indices,      // array of dead particle indices
     uint*           __restrict__ dead_count,         // atomic counter
-    // --- Sorted mass (write-only on death; NULL skips the write) ---
+    // --- Sorted mass (NULL skips every mass write) ---
     // Dead slots must have mass 0, or they act as invisible boundary
     // particles in every m_j-weighted neighbour sum (bd-r5-review-n28.23).
+    // A material change rescales mass by the spawn-mass rule (rescale_mass).
     float*          __restrict__ mass
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -162,6 +192,7 @@ void K_Reactions(
     if (mat_id == MAT_ICE && temp > ICE_MELT_TEMP) {
         pi = MAKE_PACKED(MAT_WATER, FLUID);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_ICE, MAT_WATER);
         temperature[i] = ICE_MELT_TEMP;
         return;  // done with this particle
     }
@@ -170,6 +201,7 @@ void K_Reactions(
     if (mat_id == MAT_STONE && temp > c_materials[MAT_STONE].temp_melt) {
         pi = MAKE_PACKED(MAT_LAVA, FLUID);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_STONE, MAT_LAVA);
         temperature[i] = c_materials[MAT_STONE].temp_melt;
         return;
     }
@@ -178,6 +210,7 @@ void K_Reactions(
     if (mat_id == MAT_SAND && temp > c_materials[MAT_SAND].temp_melt) {
         pi = MAKE_PACKED(MAT_LAVA, FLUID);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_SAND, MAT_LAVA);
         temperature[i] = c_materials[MAT_SAND].temp_melt;
         return;
     }
@@ -186,6 +219,7 @@ void K_Reactions(
     if (mat_id == MAT_LAVA && temp < c_materials[MAT_LAVA].temp_melt) {
         pi = MAKE_PACKED(MAT_STONE, STATIC);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_LAVA, MAT_STONE);
         temperature[i] = c_materials[MAT_LAVA].temp_melt;
         return;
     }
@@ -201,6 +235,7 @@ void K_Reactions(
     if (mat_id == MAT_STEAM && temp < STEAM_CONDENSE_TEMP) {
         pi = MAKE_PACKED(MAT_WATER, FLUID);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_STEAM, MAT_WATER);
         temperature[i] = temp;
         return;
     }
@@ -211,6 +246,7 @@ void K_Reactions(
     if (mat_id == MAT_WOOD && exp_heat > WOOD_IGNITE_EXPOSURE) {
         pi = MAKE_PACKED(MAT_FIRE, GAS);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_WOOD, MAT_FIRE);
         temperature[i] = FIRE_TEMPERATURE;
         lifetime[i] = WOOD_FIRE_LIFETIME;
         return;
@@ -220,6 +256,7 @@ void K_Reactions(
     if (mat_id == MAT_OIL && exp_heat > OIL_IGNITE_EXPOSURE) {
         pi = MAKE_PACKED(MAT_FIRE, GAS);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_OIL, MAT_FIRE);
         temperature[i] = FIRE_TEMPERATURE;
         lifetime[i] = OIL_FIRE_LIFETIME;
         return;
@@ -229,6 +266,7 @@ void K_Reactions(
     if (mat_id == MAT_GUNPOWDER && exp_heat > GUNPOWDER_EXPOSURE) {
         pi = MAKE_PACKED(MAT_FIRE, GAS);
         packed_info[i] = pi;
+        rescale_mass(mass, i, MAT_GUNPOWDER, MAT_FIRE);
         temperature[i] = FIRE_TEMPERATURE;
         lifetime[i] = GUNPOWDER_FIRE_LIFETIME;
 
@@ -260,26 +298,31 @@ void K_Reactions(
     // matrix, so exp_corrode accumulates when DIRT neighbours WATER.
     if (mat_id == MAT_DIRT && exp_corrode > SAND_WET_THRESHOLD) {
         packed_info[i] = MAKE_PACKED(MAT_MUD, FLUID);
+        rescale_mass(mass, i, MAT_DIRT, MAT_MUD);
         return;
     }
 
     // ---- Sand wetting/drying transitions ----
     if (mat_id == MAT_SAND && exp_corrode > SAND_WET_THRESHOLD) {
         packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
+        rescale_mass(mass, i, MAT_SAND, MAT_WET_SAND);
         return;
     }
     if (mat_id == MAT_WET_SAND && exp_corrode > WETSAND_MUD_THRESHOLD) {
         packed_info[i] = MAKE_PACKED(MAT_MUD, FLUID);
+        rescale_mass(mass, i, MAT_WET_SAND, MAT_MUD);
         return;
     }
     if (mat_id == MAT_MUD && exp_corrode < MUD_DRY_THRESHOLD
             * (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
         packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
+        rescale_mass(mass, i, MAT_MUD, MAT_WET_SAND);
         return;
     }
     if (mat_id == MAT_WET_SAND && exp_corrode < WETSAND_DRY_THRESHOLD
             * (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
         packed_info[i] = MAKE_PACKED(MAT_SAND, GRANULAR);
+        rescale_mass(mass, i, MAT_WET_SAND, MAT_SAND);
         return;
     }
 
@@ -341,6 +384,7 @@ void K_Reactions(
             if (mat_id == MAT_FIRE) {
                 // Fire expires -> becomes SMOKE with new lifetime
                 packed_info[i] = MAKE_PACKED(MAT_SMOKE, GAS);
+                rescale_mass(mass, i, MAT_FIRE, MAT_SMOKE);
                 lifetime[i] = 3.0f;
                 temperature[i] = fminf(temp, 500.0f);  // cool down
             } else {

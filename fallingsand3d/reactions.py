@@ -161,8 +161,10 @@ def compute_reactions(
         a temporary device buffer is created (not graph-safe).
     sorted_mass : cupy.ndarray, optional
         (N,) float32 sorted mass. Set to 0 for every DEAD slot, including
-        particles that die this call (consumed acid, expired gas). The
-        simulation always passes it; None skips the write (unit tests).
+        particles that die this call (consumed acid, expired gas). A
+        material change rescales it by the spawn-mass rule of
+        world.spawn_mass (SAND -> WET_SAND x1.125, STONE -> LAVA x2.6).
+        The simulation always passes it; None skips the writes (unit tests).
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
