@@ -295,43 +295,47 @@ def test_dfsph_detailed(world, sim):
                 sim._cell_start, sim._cell_end,
             )
 
-        # Predict position
-        dfsph_solver.predict_position(
-            w.sorted_position[:n], w.sorted_velocity[:n],
+        # Density solver: the live Jacobi loop on p/rho^2 (same calls as
+        # Simulation._sim_step DFSPH path).  sorted_kappa holds p_rho2 and
+        # sorted_predicted_position holds a_press.
+        p_rho2 = w.sorted_kappa
+        a_press = w.sorted_predicted_position
+        p_rho2[:n] *= profile.dfsph_warm_start
+        dfsph_solver.compute_pressure_accel(
+            p_rho2[:n], w.sorted_position[:n],
+            w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n],
-            w.sorted_predicted_position,
-        )
-        cp.cuda.Device().synchronize()
-
-        # Density at predicted positions
-        dfsph_solver.compute_density_adv(
-            w.sorted_predicted_position[:n], w.sorted_mass[:n],
-            w.sorted_packed_info[:n], w.sorted_position[:n],
             sim._cell_start, sim._cell_end,
-            w.sorted_density,
+            a_press,
         )
-        cp.cuda.Device().synchronize()
-
-        dens_adv = w.sorted_density[:n].get()
-        print(f"  density_adv: min={dens_adv.min():.2f} mean={dens_adv.mean():.2f} max={dens_adv.max():.2f}")
-
-        # Density solver
         for it in range(profile.dfsph_dens_iters):
-            dfsph_solver.compute_kappa(
-                w.sorted_density[:n], w.sorted_alpha_dfsph[:n],
+            dfsph_solver.density_solver_update(
+                w.sorted_velocity[:n], a_press[:n],
+                w.sorted_position[:n], w.sorted_density[:n],
+                w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
                 w.sorted_packed_info[:n],
-                w.sorted_kappa,
+                sim._cell_start, sim._cell_end,
+                p_rho2,
+            )
+            dfsph_solver.compute_pressure_accel(
+                p_rho2[:n], w.sorted_position[:n],
+                w.sorted_density[:n], w.sorted_mass[:n],
+                w.sorted_packed_info[:n],
+                sim._cell_start, sim._cell_end,
+                a_press,
             )
             cp.cuda.Device().synchronize()
-            kd = w.sorted_kappa[:n].get()
-            print(f"  dens iter {it}: kappa min={kd.min():.4f} mean={kd.mean():.4f} max={kd.max():.4f}")
+            pr = p_rho2[:n].get()
+            ap = a_press[:n].get()
+            assert np.isfinite(pr).all(), f"p_rho2 not finite at dens iter {it}"
+            assert np.isfinite(ap).all(), f"a_press not finite at dens iter {it}"
+            print(f"  dens iter {it}: p_rho2 min={pr.min():.6f} mean={pr.mean():.6f} max={pr.max():.6f}")
 
-            dfsph_solver.correct_velocity_dens(
-                w.sorted_velocity, w.sorted_density[:n],
-                w.sorted_mass[:n], w.sorted_kappa[:n],
-                w.sorted_packed_info[:n], w.sorted_position[:n],
-                sim._cell_start, sim._cell_end,
-            )
+        dfsph_solver.apply_pressure_velocity(
+            w.sorted_velocity[:n], a_press[:n],
+            w.sorted_packed_info[:n],
+        )
+        cp.cuda.Device().synchronize()
 
         # Finalize — API drift: sorted_kappa required after sorted_sleep_counter;
         # kappa_out required after temperature_out.
@@ -1081,3 +1085,30 @@ def test_wcsph_density_in_carries_previous_density(world, sim):
     frac_unit = float(np.mean(np.abs(prev[live] - 1.0) < 1e-3))
     assert frac_unit < 0.01, f"{frac_unit:.1%} of density_in entries are 1.0"
     assert np.median(prev[live]) > 100.0, f"median density_in {np.median(prev[live]):.2f}"
+
+
+def test_dfsph_module_has_only_live_kernels():
+    """bd-r5-review-n28.11: dfsph_solver.cu holds only the 8 live kernels."""
+    import os
+    import re
+    import dfsph_solver
+    live = {
+        "K_DFSPH_ComputeDensityAlpha", "K_DFSPH_NonPressureForces",
+        "K_DFSPH_ComputeKappaV", "K_DFSPH_CorrectVelocityDiv",
+        "K_DFSPH_ComputePressureAccel", "K_DFSPH_DensitySolverUpdate",
+        "K_DFSPH_ApplyPressureVelocity", "K_DFSPH_Finalize",
+    }
+    cu_path = os.path.join(os.path.dirname(dfsph_solver.__file__),
+                           "physics", "kernels", "dfsph_solver.cu")
+    with open(cu_path, encoding="utf-8") as f:
+        src = f.read()
+    defined = set(re.findall(r"^void\s+(K_DFSPH_\w+)\s*\(", src, re.M))
+    assert defined == live
+    assert "LEGACY" not in src
+    module = dfsph_solver.get_module()
+    for name in live:
+        module.get_function(name)
+    assert dfsph_solver.DFSPH_PARAMS_DTYPE.itemsize == 32
+    for gone in ("predict_position", "compute_density_adv", "compute_kappa",
+                 "compute_kappa_from_velocity", "correct_velocity_dens"):
+        assert not hasattr(dfsph_solver, gone)

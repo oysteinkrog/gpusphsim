@@ -1,7 +1,9 @@
 """DFSPH solver kernel wrapper -- Divergence-Free SPH (Bender & Koschier, SCA 2015).
 
 Compiles physics/kernels/dfsph_solver.cu via CuPy RawModule and provides
-launch functions for the 9 DFSPH kernels.
+launch functions for the 8 DFSPH kernels: ComputeDensityAlpha,
+NonPressureForces, ComputeKappaV, CorrectVelocityDiv, ComputePressureAccel,
+DensitySolverUpdate, ApplyPressureVelocity and Finalize.
 
 Constant memory (each RawModule has its own address space):
   c_grid, c_sim, c_precalc, c_materials -- shared with other kernels
@@ -22,8 +24,8 @@ import numpy as np
 
 DFSPH_PARAMS_DTYPE = np.dtype(
     [
-        ("div_iters", np.int32),
-        ("dens_iters", np.int32),
+        ("_pad_iters0", np.float32),
+        ("_pad_iters1", np.float32),
         ("warm_start", np.float32),
         ("omega", np.float32),
         ("alpha_limit", np.float32),
@@ -122,8 +124,6 @@ def upload_interactions(interactions_data: np.ndarray) -> None:
 def upload_dfsph_params(profile) -> None:
     """Upload DFSPHParams to constant memory from a SolverProfile."""
     params = np.zeros(1, dtype=DFSPH_PARAMS_DTYPE)
-    params[0]["div_iters"] = profile.dfsph_div_iters
-    params[0]["dens_iters"] = profile.dfsph_dens_iters
     params[0]["warm_start"] = profile.dfsph_warm_start
     params[0]["omega"] = profile.dfsph_omega
     params[0]["alpha_limit"] = profile.dfsph_alpha_limit
@@ -259,106 +259,6 @@ def correct_velocity_div(
     block = (BLOCK_SIZE,)
     kernel(grid, block, (
         np.uint32(n), velocity, density, mass, kappa_v,
-        packed_info, position, cell_start, cell_end,
-    ))
-
-
-def predict_position(
-    position: cupy.ndarray,
-    velocity: cupy.ndarray,
-    packed_info: cupy.ndarray,
-    predicted_out: cupy.ndarray,
-) -> None:
-    n = position.shape[0]
-    module = _get_module()
-    kernel = module.get_function("K_DFSPH_PredictPosition")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-    kernel(grid, block, (
-        np.uint32(n), position, velocity, packed_info, predicted_out,
-    ))
-
-
-def compute_density_adv(
-    predicted_pos: cupy.ndarray,
-    mass: cupy.ndarray,
-    packed_info: cupy.ndarray,
-    original_pos: cupy.ndarray,
-    cell_start: cupy.ndarray,
-    cell_end: cupy.ndarray,
-    density_out: cupy.ndarray,
-) -> None:
-    n = predicted_pos.shape[0]
-    module = _get_module()
-    kernel = module.get_function("K_DFSPH_ComputeDensityAdv")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-    kernel(grid, block, (
-        np.uint32(n), predicted_pos, mass, packed_info,
-        original_pos, cell_start, cell_end, density_out,
-    ))
-
-
-def compute_kappa(
-    density: cupy.ndarray,
-    alpha: cupy.ndarray,
-    packed_info: cupy.ndarray,
-    kappa_out: cupy.ndarray,
-) -> None:
-    n = density.shape[0]
-    module = _get_module()
-    kernel = module.get_function("K_DFSPH_ComputeKappa")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-    kernel(grid, block, (
-        np.uint32(n), density, alpha, packed_info, kappa_out,
-    ))
-
-
-def compute_kappa_from_velocity(
-    velocity: cupy.ndarray,
-    position: cupy.ndarray,
-    density: cupy.ndarray,
-    mass: cupy.ndarray,
-    alpha: cupy.ndarray,
-    packed_info: cupy.ndarray,
-    cell_start: cupy.ndarray,
-    cell_end: cupy.ndarray,
-    kappa_out: cupy.ndarray,
-) -> None:
-    """Compute density kappa using velocity-based density prediction.
-
-    Instead of computing poly6 density at predicted positions (stale grid),
-    predicts density from the velocity divergence: rho_adv = rho + dt * drho/dt.
-    """
-    n = velocity.shape[0]
-    module = _get_module()
-    kernel = module.get_function("K_DFSPH_ComputeKappaFromVelocity")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-    kernel(grid, block, (
-        np.uint32(n), velocity, position, density, mass, alpha,
-        packed_info, cell_start, cell_end, kappa_out,
-    ))
-
-
-def correct_velocity_dens(
-    velocity: cupy.ndarray,
-    density: cupy.ndarray,
-    mass: cupy.ndarray,
-    kappa: cupy.ndarray,
-    packed_info: cupy.ndarray,
-    position: cupy.ndarray,
-    cell_start: cupy.ndarray,
-    cell_end: cupy.ndarray,
-) -> None:
-    n = velocity.shape[0]
-    module = _get_module()
-    kernel = module.get_function("K_DFSPH_CorrectVelocityDens")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-    kernel(grid, block, (
-        np.uint32(n), velocity, density, mass, kappa,
         packed_info, position, cell_start, cell_end,
     ))
 
