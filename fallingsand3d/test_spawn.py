@@ -218,10 +218,11 @@ def test_water_spawns_steam():
         assert abs(temp[idx] - 373.0) < 1.0, \
             f"Particle {idx}: temp={temp[idx]}, expected 373K"
 
-        # Velocity should have upward kick: original_vel + (0, 2, 0)
-        assert abs(vel[idx, 0] - 1.0) < 1e-5, f"Particle {idx}: vx={vel[idx,0]}, expected 1.0"
+        # Velocity: original_vel + (0, 2, 0) plus a horizontal spread of
+        # SPAWN_VEL_SPREAD (0.1 m/s) that sums to zero over the children.
+        assert abs(vel[idx, 0] - 1.0) < 0.1 + 1e-5, f"Particle {idx}: vx={vel[idx,0]}, expected 1.0 +- 0.1"
         assert abs(vel[idx, 1] - 2.0) < 1e-5, f"Particle {idx}: vy={vel[idx,1]}, expected 2.0"
-        assert abs(vel[idx, 2] - 0.0) < 1e-5, f"Particle {idx}: vz={vel[idx,2]}, expected 0.0"
+        assert abs(vel[idx, 2] - 0.0) < 0.1 + 1e-5, f"Particle {idx}: vz={vel[idx,2]}, expected 0.0 +- 0.1"
 
         # Lifetime should be 5.0s
         assert abs(lt[idx] - 5.0) < 0.01, f"Particle {idx}: lifetime={lt[idx]}, expected 5.0"
@@ -797,10 +798,10 @@ def test_end_to_end_boil_spawn():
     for idx in [5, 12, 18]:
         if GET_MATERIAL_ID(int(pi[idx])) == STEAM:
             steam_count += 1
-            # Velocity should be original + upward kick
-            assert abs(vel[idx, 0] - 0.5) < 1e-5
+            # Velocity should be original + upward kick (+- 0.1 m/s spread)
+            assert abs(vel[idx, 0] - 0.5) < 0.1 + 1e-5
             assert abs(vel[idx, 1] - 2.0) < 1e-5
-            assert abs(vel[idx, 2] - (-0.5)) < 1e-5
+            assert abs(vel[idx, 2] - (-0.5)) < 0.1 + 1e-5
 
     assert steam_count == 3, f"Expected 3 steam, got {steam_count}"
 
@@ -1223,6 +1224,164 @@ def test_whirlpool_water_inside_bowl():
     assert np.all(r2 < 0.62 ** 2)
     horiz = water[:, 0] ** 2 + water[:, 2] ** 2
     assert np.mean(horiz < 0.62 ** 2) >= 0.99
+
+
+# ---------------------------------------------------------------------------
+# Spawned slot state (bd-r5-review-n28.42)
+# ---------------------------------------------------------------------------
+
+def _half4_to_float(raw: np.ndarray) -> np.ndarray:
+    """(N, 2) uint32 half4 mirror -> (N, 4) float32."""
+    return raw.astype(np.uint32).view(np.float16).reshape(-1, 4).astype(np.float32)
+
+
+def test_spawn_children_ring_and_slot_state():
+    """Children are separated, conserve momentum and reset all per-slot state."""
+    setup_params()
+    n = 10
+    arrays = make_sorted_arrays(n)
+    src_pos = np.array([0.1, 0.2, -0.3], dtype=np.float32)
+    src_vel = np.array([0.5, -0.25, 0.75], dtype=np.float32)
+    arrays["packed_info"][0] = SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID))
+    arrays["mass"][0] = 0.009
+    arrays["position"][0] = cupy.asarray([*src_pos, 1000.0], dtype=cupy.float32)
+    arrays["velocity"][0] = cupy.asarray([*src_vel, 0.0], dtype=cupy.float32)
+    slots = [7, 8, 9]
+    for idx in slots:
+        arrays["packed_info"][idx] = MAKE_PACKED(DEAD, STATIC)
+        # Dead slots parked 1 m away, as the reserve parks them.
+        arrays["position"][idx] = cupy.asarray([0.9, -0.9, 0.9, 1000.0], dtype=cupy.float32)
+    dead_indices, dead_count = allocate_freelist(n)
+    dead_indices[:3] = cupy.asarray(slots, dtype=cupy.uint32)
+    dead_count[0] = 3
+
+    predicted = cupy.full((n, 4), 7.0, dtype=cupy.float32)
+    velocity_h = cupy.full((n, 2), 0x47004700, dtype=cupy.uint32)  # half(7.0) pairs
+    pressure = cupy.full(n, 7.0, dtype=cupy.float32)
+    dye = cupy.full((n, 4), 7.0, dtype=cupy.float32)
+    ang = cupy.full((n, 4), 7.0, dtype=cupy.float32)
+    kappa = cupy.full(n, 7.0, dtype=cupy.float32)
+    kappa_v = cupy.full(n, 7.0, dtype=cupy.float32)
+    lam = cupy.full(n, 7.0, dtype=cupy.float32)
+
+    compute_spawn(
+        arrays["packed_info"], arrays["position"], arrays["velocity"],
+        arrays["veleval"], arrays["mass"], arrays["temperature"],
+        arrays["health"], arrays["lifetime"], arrays["color"],
+        arrays["sleep_counter"], arrays["density"], arrays["shear_rate"],
+        dead_indices, dead_count,
+        predicted_position=predicted, velocity_h=velocity_h, pressure=pressure,
+        particle_dye=dye, angular_velocity=ang,
+        kappa=kappa, kappa_v=kappa_v, lambda_pbf=lam,
+    )
+    cupy.cuda.Device().synchronize()
+
+    mats = build_material_array()
+    steam_rho0 = float(mats[STEAM]["rest_density"])
+    pos = arrays["position"].get()[slots]
+    vel = arrays["velocity"].get()[slots]
+    mass = arrays["mass"].get()[slots]
+
+    # Distinct positions, at least 0.4 * spacing apart, near the source.
+    for a in range(3):
+        assert np.linalg.norm(pos[a, :3] - src_pos) < SPACING
+        for b in range(a + 1, 3):
+            d = np.linalg.norm(pos[a, :3] - pos[b, :3])
+            assert d > 0.4 * SPACING, (a, b, d)
+    # position.w is the steam rest density, not the water density.
+    np.testing.assert_allclose(pos[:, 3], steam_rho0, rtol=1e-6)
+
+    # Momentum: sum of child momenta = source momentum + upkick.
+    p_children = (mass[:, None] * vel[:, :3]).sum(axis=0)
+    p_expected = 0.009 * (src_vel + np.array([0.0, 2.0, 0.0], dtype=np.float32))
+    np.testing.assert_allclose(p_children, p_expected, atol=1e-6)
+
+    # PBF prediction: child position + dt * child velocity.
+    pred = predicted.get()[slots]
+    np.testing.assert_allclose(pred[:, :3], pos[:, :3] + DT * vel[:, :3], atol=1e-6)
+
+    # FP16 mirror holds the half of the child velocity.
+    vh = _half4_to_float(velocity_h.get()[slots])
+    np.testing.assert_allclose(vh, vel.astype(np.float16).astype(np.float32), atol=0)
+
+    for name, arr in [("pressure", pressure), ("dye", dye), ("angular_velocity", ang),
+                      ("kappa", kappa), ("kappa_v", kappa_v), ("lambda", lam)]:
+        assert np.all(arr.get()[slots] == 0.0), name
+        # Slots that were not claimed keep their values.
+        assert np.all(arr.get()[1:7] == 7.0), name
+
+
+def test_spawn_optional_state_null_safe():
+    """Without the optional arrays the kernel still spawns (NULL pointers)."""
+    setup_params()
+    n = 4
+    arrays = make_sorted_arrays(n)
+    arrays["packed_info"][0] = SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID))
+    arrays["mass"][0] = 0.009
+    dead_indices, dead_count = allocate_freelist(n)
+    dead_indices[:3] = cupy.asarray([1, 2, 3], dtype=cupy.uint32)
+    dead_count[0] = 3
+    compute_spawn(
+        arrays["packed_info"], arrays["position"], arrays["velocity"],
+        arrays["veleval"], arrays["mass"], arrays["temperature"],
+        arrays["health"], arrays["lifetime"], arrays["color"],
+        arrays["sleep_counter"], arrays["density"], arrays["shear_rate"],
+        dead_indices, dead_count,
+    )
+    pi = arrays["packed_info"].get()
+    assert all(GET_MATERIAL_ID(int(pi[k])) == STEAM for k in (1, 2, 3))
+
+
+def _boil_one_step(profile_name):
+    """Reserve world on the given solver; boil water particle 0 for one substep."""
+    from solver_profiles import PROFILES
+    w, sim = _reserve_sim()
+    sim.set_solver_profile(PROFILES[profile_name])
+    # Skip the post-reset spawn damping ramp (it scales velocity by 0.2 on
+    # the first substep), as eval_solvers.py does.
+    sim._spawn_substep = sim._damping_duration
+    n = sim._maybe_compact()
+    src = w.position[0, :3].get().copy()
+    w.temperature[0] = 450.0
+    sim._sim_step(n)
+    n_now = w._high_water
+    steam = np.nonzero((w.packed_info[:n_now].get() & 0xFF) == STEAM)[0]
+    return w, sim, src, steam
+
+
+def test_pbf_spawned_steam_stays_at_source():
+    """PBF: steam children end the spawn substep next to the boiling water.
+
+    Before the fix K_PBF_Finalize took the dead slot's stale predicted
+    position (the reserve parks slots at y < -900) as the child's final
+    position and derived a velocity at the limit from it.
+    """
+    w, sim, src, steam = _boil_one_step("PBF")
+    assert len(steam) == SPAWN_N
+    dt = sim._profile.dt
+    pos = w.position[steam, :3].get()
+    vel = w.velocity[steam, :3].get()
+    target = src + dt * np.array([0.0, 2.0, 0.0], dtype=np.float32)
+    for k in range(SPAWN_N):
+        d = np.linalg.norm(pos[k] - target)
+        assert d < H, (k, pos[k], target, d)
+        speed = np.linalg.norm(vel[k])
+        assert speed < 3.0, (k, vel[k])
+        assert vel[k, 1] > 1.0, (k, vel[k])
+    # The spawn also marks the grid for a full sort on the next decision.
+    assert int(w.max_displacement.get()[0]) == 0x7F800000
+
+
+def test_wcsph_spawned_steam_stays_at_source():
+    """WCSPH: same check, children separated and near the source."""
+    w, sim, src, steam = _boil_one_step("WCSPH")
+    assert len(steam) == SPAWN_N
+    pos = w.position[steam, :3].get()
+    for k in range(SPAWN_N):
+        assert np.linalg.norm(pos[k] - src) < H
+    for a in range(SPAWN_N):
+        for b in range(a + 1, SPAWN_N):
+            assert np.linalg.norm(pos[a] - pos[b]) > 0.4 * SPACING
 
 
 if __name__ == "__main__":
