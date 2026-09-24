@@ -5,7 +5,7 @@ Acceptance criteria:
   - Impulse SDF boundary: 6 planes of box (-1,-1,-1) to (1,1,1), restitution=0.3,
     Coulomb friction mu_wall=0.5
   - STATIC particles skipped (position unchanged)
-  - GAS buoyancy: beta=0.01 * (T-293) * (0, 9.81, 0)
+  - GAS buoyancy: net -g * ((T-293)/293 + buoyancy_extra), along live gravity
   - GAS drag: vel *= (1 - 2.0 * dt)
   - Velocity clamp at 50.0
   - Color from c_materials, tinted red for T>293K, faded by health
@@ -308,12 +308,26 @@ def test_bounce_multi_step():
     print("PASS: test_bounce_multi_step")
 
 
-def test_gas_buoyancy():
-    """GAS particles with T > 293K get upward buoyancy force."""
-    setup_params(gravity=(0.0, -9.8, 0.0))
+def _gas_buoyancy_net_accel(temp, gravity_y, extra):
+    """Ideal-gas buoyancy net acceleration (y) with gravity (0, gravity_y, 0).
+
+    The kernel adds -g * (T/T_amb + extra) on top of +g, so the net is
+    -g * ((T - T_amb)/T_amb + extra).
+    """
+    return -gravity_y * ((temp - 293.0) / 293.0 + extra)
+
+
+@pytest.mark.parametrize("gravity_y", [-4.0, -9.81, 5.0])
+def test_gas_buoyancy(gravity_y):
+    """STEAM at 373 K moves against the live gravity vector.
+
+    Rises (+y) for gravity -4 and -9.81, falls (-y) for gravity +5.
+    Magnitude follows the ideal-gas form plus STEAM buoyancy_extra (0.01).
+    """
+    setup_params(gravity=(0.0, gravity_y, 0.0))
 
     n = 1
-    temp = 500.0  # hot gas
+    temp = 373.0
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
@@ -322,21 +336,90 @@ def test_gas_buoyancy():
 
     vel_h = vel_out.get()
 
-    # Expected: accel_y = -9.8 + 0.01 * (500 - 293) * 9.81 = -9.8 + 20.306 = +10.506
-    # vel_new_y = 0 + 0.001 * 10.506 = +0.010506
-    # Then drag: vel_new_y *= (1 - 2.0 * 0.001) = 0.998 -> ~0.01049
-    expected_buoyancy = 0.01 * (500.0 - 293.0) * 9.81
-    expected_accel_y = -9.8 + expected_buoyancy
+    expected_accel_y = _gas_buoyancy_net_accel(temp, gravity_y, 0.01)
     expected_vel_y = DT * expected_accel_y * (1.0 - 2.0 * DT)
 
-    assert vel_h[0, 1] > 0, (
-        f"Expected positive vel_y for hot gas, got {vel_h[0, 1]}"
-    )
-    assert abs(vel_h[0, 1] - expected_vel_y) < 1e-4, (
+    if gravity_y < 0:
+        assert vel_h[0, 1] > 0, f"STEAM should rise at g={gravity_y}, got vy={vel_h[0, 1]}"
+    else:
+        assert vel_h[0, 1] < 0, f"STEAM should fall at g={gravity_y}, got vy={vel_h[0, 1]}"
+    assert abs(vel_h[0, 1] - expected_vel_y) < 1e-5, (
         f"Expected vel_y ~{expected_vel_y}, got {vel_h[0, 1]}"
     )
+    assert abs(vel_h[0, 0]) < 1e-7 and abs(vel_h[0, 2]) < 1e-7
 
-    print("PASS: test_gas_buoyancy")
+    print(f"PASS: test_gas_buoyancy[g={gravity_y}]")
+
+
+def test_gas_buoyancy_follows_sideways_gravity():
+    """Buoyancy is a vector along -g, not a fixed +y push."""
+    setup_params(gravity=(-4.0, 0.0, 0.0))
+
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    d = make_simple_particles(1, STEAM, GAS, pos=pos, temp=373.0)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    expected_vx = DT * _gas_buoyancy_net_accel(373.0, -4.0, 0.01) * (1.0 - 2.0 * DT)
+    assert abs(vel_h[0, 0] - expected_vx) < 1e-5, f"vx={vel_h[0, 0]}, want {expected_vx}"
+    assert abs(vel_h[0, 1]) < 1e-7, f"vy should be 0, got {vel_h[0, 1]}"
+
+
+def test_gas_ambient_weightless():
+    """STEAM at T_amb is weightless apart from its buoyancy_extra (0.01)."""
+    setup_params(gravity=(0.0, -9.81, 0.0))
+
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    d = make_simple_particles(1, STEAM, GAS, pos=pos, temp=293.0)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    expected_vy = DT * (9.81 * 0.01) * (1.0 - 2.0 * DT)
+    assert abs(vel_h[0, 1] - expected_vy) < 1e-6, f"vy={vel_h[0, 1]}, want {expected_vy}"
+
+
+def test_fire_terminal_rise_speed():
+    """FIRE at 1200 K and g = 4 reaches a terminal speed of a few m/s.
+
+    Net ideal-gas acceleration is 4 * (907/293 + 0.02) = 12.5 m/s^2 and drag
+    is 2/s, so the terminal speed is about 6.2 m/s, far below the 36 m/s
+    velocity clamp that the old fixed 89 m/s^2 push hit.
+    """
+    from materials import FIRE
+
+    setup_params(gravity=(0.0, -4.0, 0.0), velocity_limit=36.0)
+
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    vel = np.zeros((1, 4), dtype=np.float32)
+    # 3 s of sim time (6 drag time constants). The position is reset each
+    # step so the particle never reaches the ceiling.
+    for _ in range(3000):
+        d = make_simple_particles(1, FIRE, GAS, pos=pos, vel=vel, temp=1200.0)
+        _, vel_out, _, _, _, _, _, _ = integrate(**d)
+        vel = vel_out.get()
+
+    a_net = _gas_buoyancy_net_accel(1200.0, -4.0, 0.02)
+    v_term = a_net * DT * (1.0 - 2.0 * DT) / (1.0 - (1.0 - 2.0 * DT))
+    vy = float(vel[0, 1])
+    assert 2.0 < vy < 10.0, f"FIRE terminal speed {vy} m/s is not a few m/s"
+    assert abs(vy - v_term) < 0.05 * v_term, f"vy={vy}, want ~{v_term}"
+    print(f"PASS: test_fire_terminal_rise_speed (vy={vy:.3f}, v_term={v_term:.3f})")
+
+
+@pytest.mark.parametrize("gravity_y", [-4.0, -9.81, 5.0])
+def test_fluid_boussinesq_follows_gravity(gravity_y):
+    """Hot WATER gets -g * beta * (T - T_amb) on top of gravity."""
+    setup_params(gravity=(0.0, gravity_y, 0.0))
+
+    pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    d = make_simple_particles(1, WATER, FLUID, pos=pos, temp=373.0)
+    _, vel_out, _, _, _, _, _, _ = integrate(**d)
+    vel_h = vel_out.get()
+
+    expected_ay = gravity_y - gravity_y * 0.0003 * (373.0 - 293.0)
+    assert abs(vel_h[0, 1] - DT * expected_ay) < 1e-6, (
+        f"vy={vel_h[0, 1]}, want {DT * expected_ay}"
+    )
 
 
 def test_gas_drag():
@@ -1898,7 +1981,7 @@ if __name__ == "__main__":
         test_gravity_freefall,
         test_bounce_floor,
         test_bounce_multi_step,
-        test_gas_buoyancy,
+        lambda: test_gas_buoyancy(-9.81),
         test_gas_drag,
         test_velocity_clamp,
         test_color_computation,
