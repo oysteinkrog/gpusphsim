@@ -51,6 +51,16 @@ def _no_mark(label: str) -> None:
 
 StageMark = Callable[[str], None]
 
+# Stage labels each solver body passes to mark(), in order.  'blast', 'ist'
+# and 'rigid' only appear when that feature is active in the scene.
+WCSPH_STAGES = ("sort", "step1", "reactions", "blast", "spawn", "step2",
+                "ist", "integrate", "wake")
+PBF_STAGES = ("sort", "predict", "lambda0", "reactions", "blast", "spawn",
+              "iterations", "finalize", "wake")
+DFSPH_STAGES = ("sort", "density_alpha", "reactions", "blast", "spawn",
+                "non_pressure", "divergence", "density_solve", "finalize", "wake")
+EPILOGUE_STAGES = ("rigid", "foam")
+
 
 class Simulation:
     """Orchestrates the full SPH pipeline with sim/render decoupling.
@@ -782,14 +792,13 @@ class Simulation:
         Dispatches to the correct solver body based on the active profile.
         mark is a per-stage callback for the timed path.  It must stay the
         no-op default during graph capture (event records cannot be captured).
-        PBF/DFSPH report their whole body as one 'solver' stage.
+        Each solver body reports its own stage labels (see PBF_STAGES,
+        DFSPH_STAGES and WCSPH_STAGES).
         """
         if self._profile.solver_type == SolverType.PBF:
-            self._run_pbf_body(n)
-            mark("solver")
+            self._run_pbf_body(n, mark)
         elif self._profile.solver_type == SolverType.DFSPH:
-            self._run_dfsph_body(n)
-            mark("solver")
+            self._run_dfsph_body(n, mark)
         else:
             self._run_wcsph_body(n, mark)
 
@@ -935,13 +944,17 @@ class Simulation:
         )
         mark("wake")
 
-    def _run_pbf_body(self, n: int) -> None:
-        """PBF pipeline: Grid -> Predict -> [Lambda -> Delta -> Apply]xN -> Finalize."""
+    def _run_pbf_body(self, n: int, mark: StageMark = _no_mark) -> None:
+        """PBF pipeline: Grid -> Predict -> [Lambda -> Delta -> Apply]xN -> Finalize.
+
+        mark(label) is called after each stage (PBF_STAGES); see _run_graph_body.
+        """
         import pbf_solver
         w = self.world
 
         # Grid setup
         self._run_grid_setup(n)
+        mark("sort")
 
         # 1. Predict positions (gravity integration)
         pbf_solver.pbf_predict(
@@ -949,6 +962,7 @@ class Simulation:
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_predicted_position,
         )
+        mark("predict")
 
         # Snapshot previous-substep density into a dedicated read buffer so density_in
         # is not aliased with the density_out target (sorted_density); the kernel
@@ -973,9 +987,10 @@ class Simulation:
             vorticity_out=w.sorted_vorticity,
             normal_out=w.sorted_normal,
         )
+        mark("lambda0")
 
         # 3. Reactions + Spawn
-        self._run_reactions_spawn(n)
+        self._run_reactions_spawn(n, mark)
 
         # 4. Solver iterations (fixed count for CUDA graph)
         for i in range(self._profile.pbf_iterations):
@@ -999,6 +1014,7 @@ class Simulation:
                 w.sorted_predicted_position[:n], w.sorted_delta_position[:n],
                 w.sorted_packed_info[:n],
             )
+        mark("iterations")
 
         # 5. Finalize: velocity update, XSPH, friction, color, sleep, writeback
         rbm = self.rigid_body_manager
@@ -1027,6 +1043,7 @@ class Simulation:
             health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
         )
+        mark("finalize")
 
         # Wake propagation: without this, sleeping GRANULAR piles under PBF never
         # wake from a disturbance (bd-r4fix-uup.15).  Operates on the unsorted
@@ -1039,14 +1056,19 @@ class Simulation:
             self._cell_wake_flags,
             num_particles=n,
         )
+        mark("wake")
 
-    def _run_dfsph_body(self, n: int) -> None:
-        """DFSPH pipeline: Grid -> DensityAlpha -> NonPressure -> DivSolve -> PredictPos -> DensAdv -> DensSolve -> Finalize."""
+    def _run_dfsph_body(self, n: int, mark: StageMark = _no_mark) -> None:
+        """DFSPH pipeline: Grid -> DensityAlpha -> NonPressure -> DivSolve -> PredictPos -> DensAdv -> DensSolve -> Finalize.
+
+        mark(label) is called after each stage (DFSPH_STAGES); see _run_graph_body.
+        """
         import dfsph_solver
         w = self.world
 
         # Grid setup
         self._run_grid_setup(n)
+        mark("sort")
 
         # 1. Density + alpha precompute (also computes shear_rate for GRANULAR)
         # Snapshot previous-substep density into a dedicated read buffer so density_in
@@ -1068,9 +1090,10 @@ class Simulation:
             vorticity_out=w.sorted_vorticity,
             normal_out=w.sorted_normal,
         )
+        mark("density_alpha")
 
         # 2. Reactions + Spawn
-        self._run_reactions_spawn(n)
+        self._run_reactions_spawn(n, mark)
 
         # 3. Non-pressure forces (viscosity, gravity, mu(I), vorticity confinement, surface tension)
         rbm = self.rigid_body_manager
@@ -1092,6 +1115,7 @@ class Simulation:
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
         )
         w.sorted_velocity[:n] = w.sorted_veleval[:n]
+        mark("non_pressure")
 
         # 4. Divergence solver (warm-started kappa_v -- PERF-008)
         # Apply warm-started kappa_v from previous substep (scaled during sort reorder writeback)
@@ -1117,6 +1141,8 @@ class Simulation:
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
             )
+
+        mark("divergence")
 
         # kappa_v writeback now done in K_DFSPH_Finalize (PERF-008)
 
@@ -1161,6 +1187,7 @@ class Simulation:
             w.sorted_velocity[:n], a_press[:n],
             w.sorted_packed_info[:n],
         )
+        mark("density_solve")
 
         # 8. Finalize + writeback (includes sleep logic via velocity magnitude)
         # Pass sorted_kappa (= p_rho2) through to unsorted kappa for warm-start next frame
@@ -1190,6 +1217,7 @@ class Simulation:
             health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
         )
+        mark("finalize")
 
         # Wake propagation: sleeping GRANULAR piles under DFSPH otherwise never
         # wake from a disturbance (bd-r4fix-uup.15).  Unsorted arrays from finalize.
@@ -1201,6 +1229,7 @@ class Simulation:
             self._cell_wake_flags,
             num_particles=n,
         )
+        mark("wake")
 
     def _apply_damping_ramp(self) -> None:
         """Apply spawn velocity-damping ramp (shared by _sim_step and _sim_step_timed).
@@ -1458,6 +1487,64 @@ class Simulation:
             except Exception:
                 pass  # timing is advisory — never crash the sim loop
 
+    def _update_sort_skip_decision(self) -> None:
+        """Decide whether the next substeps may skip the full sort (grid reuse).
+
+        Called once per rendered frame that ran substeps.  Uses the async
+        readback of max_displacement from the previous frame, so it never
+        waits on the GPU.  bench_substep.py --grid-reuse calls it too.
+        """
+        # --- Grid reuse decision for next frame (uses 1-frame-old async readback) ---
+        # max_displacement accumulates since the last full sort (atomicMax across all
+        # substeps). We use last frame's async readback value — safe because the
+        # 0.25h threshold is conservative and 1-frame lag is negligible.
+        import struct
+        import ctypes as _ctypes
+        # Read last frame's async readback result (no sync needed)
+        max_disp_sq_uint = self._last_max_disp_uint
+        if max_disp_sq_uint > 0:
+            max_disp_sq = struct.unpack('f', struct.pack('I', max_disp_sq_uint))[0]
+        else:
+            max_disp_sq = 0.0
+        if self._profile.solver_type == SolverType.WCSPH:
+            threshold = self._sort_skip_threshold_sq
+            max_consec = self._MAX_SORT_SKIP_FRAMES
+        else:
+            threshold = self._sort_skip_threshold_sq_tight
+            max_consec = self._MAX_SORT_SKIP_FRAMES_TIGHT
+        can_skip = (max_disp_sq < threshold
+                    and self._sort_skip_consecutive < max_consec)
+        if can_skip:
+            self._sort_skip_next = True
+            self._sort_skip_consecutive += 1
+        else:
+            self._sort_skip_next = False
+            self._sort_skip_consecutive = 0
+
+        # Latch the pinned values from the PREVIOUS frame's async copy
+        # (by now that copy has completed — a full frame of GPU work elapsed)
+        self._last_max_disp_uint = _ctypes.c_uint32.from_address(
+            self._pinned_displacement.ptr).value
+        self._last_foam_count = _ctypes.c_uint32.from_address(
+            self._pinned_foam_count.ptr).value
+
+        # Record event on default stream so readback stream waits for kernels
+        self._readback_event.record()
+        self._readback_stream.wait_event(self._readback_event)
+        # Launch async D2H copy of THIS frame's data for NEXT frame's decision
+        cupy.cuda.runtime.memcpyAsync(
+            self._pinned_displacement.ptr,
+            self.world.max_displacement.data.ptr,
+            4, cupy.cuda.runtime.memcpyDeviceToHost,
+            self._readback_stream.ptr,
+        )
+        cupy.cuda.runtime.memcpyAsync(
+            self._pinned_foam_count.ptr,
+            self.world.foam_count.data.ptr,
+            4, cupy.cuda.runtime.memcpyDeviceToHost,
+            self._readback_stream.ptr,
+        )
+
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
         now = time.perf_counter()
@@ -1503,57 +1590,8 @@ class Simulation:
         if sim_steps > 0:
             self._frame_counter += 1
 
-        # --- Grid reuse decision for next frame (uses 1-frame-old async readback) ---
-        # max_displacement accumulates since the last full sort (atomicMax across all
-        # substeps). We use last frame's async readback value — safe because the
-        # 0.25h threshold is conservative and 1-frame lag is negligible.
         if sim_steps > 0:
-            import struct
-            import ctypes as _ctypes
-            # Read last frame's async readback result (no sync needed)
-            max_disp_sq_uint = self._last_max_disp_uint
-            if max_disp_sq_uint > 0:
-                max_disp_sq = struct.unpack('f', struct.pack('I', max_disp_sq_uint))[0]
-            else:
-                max_disp_sq = 0.0
-            if self._profile.solver_type == SolverType.WCSPH:
-                threshold = self._sort_skip_threshold_sq
-                max_consec = self._MAX_SORT_SKIP_FRAMES
-            else:
-                threshold = self._sort_skip_threshold_sq_tight
-                max_consec = self._MAX_SORT_SKIP_FRAMES_TIGHT
-            can_skip = (max_disp_sq < threshold
-                        and self._sort_skip_consecutive < max_consec)
-            if can_skip:
-                self._sort_skip_next = True
-                self._sort_skip_consecutive += 1
-            else:
-                self._sort_skip_next = False
-                self._sort_skip_consecutive = 0
-
-            # Latch the pinned values from the PREVIOUS frame's async copy
-            # (by now that copy has completed — a full frame of GPU work elapsed)
-            self._last_max_disp_uint = _ctypes.c_uint32.from_address(
-                self._pinned_displacement.ptr).value
-            self._last_foam_count = _ctypes.c_uint32.from_address(
-                self._pinned_foam_count.ptr).value
-
-            # Record event on default stream so readback stream waits for kernels
-            self._readback_event.record()
-            self._readback_stream.wait_event(self._readback_event)
-            # Launch async D2H copy of THIS frame's data for NEXT frame's decision
-            cupy.cuda.runtime.memcpyAsync(
-                self._pinned_displacement.ptr,
-                self.world.max_displacement.data.ptr,
-                4, cupy.cuda.runtime.memcpyDeviceToHost,
-                self._readback_stream.ptr,
-            )
-            cupy.cuda.runtime.memcpyAsync(
-                self._pinned_foam_count.ptr,
-                self.world.foam_count.data.ptr,
-                4, cupy.cuda.runtime.memcpyDeviceToHost,
-                self._readback_stream.ptr,
-            )
+            self._update_sort_skip_decision()
         # else: sim_steps==0 — keep previous _sort_skip_next
 
         # Periodic compaction: remove dead particles from the active range
