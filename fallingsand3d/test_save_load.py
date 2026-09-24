@@ -567,7 +567,10 @@ def test_load_corrupt_file_leaves_world_untouched(tmp_path, monkeypatch) -> None
     world = World(10_000)
     n = world.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), WATER, 0.02)
     assert n > 1
-    sl.save_scene(world, sim, cam, "good")
+    path = sl.save_scene(world, sim, cam, "good")
+    # save_scene must write exactly <name>.fs3d (NumPy appends .npz to a path).
+    assert os.path.isfile(path) and path.endswith("good.fs3d")
+    assert sl.list_saves() == ["good.fs3d"]
 
     with np.load(str(tmp_path / "good.fs3d"), allow_pickle=False) as z:
         good = {k: z[k] for k in z.files}

@@ -113,19 +113,22 @@ def save_scene(world, sim, camera, filename: str) -> str:
         "rigid_bodies": rb_data,
     }
 
-    np.savez_compressed(
-        path,
-        header=np.frombuffer(json.dumps(header).encode(), dtype=np.uint8),
-        position=world.position[:n].get(),
-        velocity=world.velocity[:n].get(),
-        packed_info=world.packed_info[:n].get(),
-        temperature=world.temperature[:n].get(),
-        health=world.health[:n].get(),
-        lifetime=world.lifetime[:n].get(),
-        mass=world.mass[:n].get(),
-        particle_dye=world.particle_dye[:n].get(),
-        density=world.density[:n].get(),
-    )
+    arrays = {
+        "header": np.frombuffer(json.dumps(header).encode(), dtype=np.uint8),
+        "position": world.position[:n].get(),
+        "velocity": world.velocity[:n].get(),
+        "packed_info": world.packed_info[:n].get(),
+        "temperature": world.temperature[:n].get(),
+        "health": world.health[:n].get(),
+        "lifetime": world.lifetime[:n].get(),
+        "mass": world.mass[:n].get(),
+        "particle_dye": world.particle_dye[:n].get(),
+        "density": world.density[:n].get(),
+    }
+    # Write through a file object: given a path, NumPy appends ".npz", so the
+    # file became "<name>.fs3d.npz" and list_saves/load_scene never found it.
+    with open(path, "wb") as fh:
+        np.savez_compressed(fh, **arrays)
     return path
 
 
