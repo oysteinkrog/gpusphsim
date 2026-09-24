@@ -356,11 +356,31 @@ def _validate_header(header: dict) -> None:
         )
 
 
+def _saved_solver_profile(header: dict, sim, warnings: list):
+    """Return the profile to switch to for header['solver'], or None.
+
+    None when the save names no solver, names the active one, or the sim
+    cannot switch. An unknown name adds a warning and keeps the active
+    solver. (bd-r5-review-n28.117)
+    """
+    saved = header.get("solver")
+    if not isinstance(saved, str) or not hasattr(sim, "set_solver_profile"):
+        return None
+    from solver_profiles import PROFILES
+    if saved not in PROFILES:
+        warnings.append(f"unknown solver {saved!r} in save; kept the active solver")
+        return None
+    if saved == getattr(getattr(sim, "_profile", None), "name", None):
+        return None
+    return PROFILES[saved]
+
+
 def load_scene(world, sim, camera, filename: str, report: dict | None = None) -> int:
     """Load scene from saves/<filename>. Returns particle count.
 
-    Resets world, restores all particle arrays, SDF collision geometry
-    (including kinematic motions), rigid bodies, and camera.
+    Switches to the saved solver profile when it differs from the active
+    one, then resets world, restores all particle arrays, SDF collision
+    geometry (including kinematic motions), rigid bodies, and camera.
 
     Header values and particle arrays are checked before the world is
     touched, so a bad file raises and leaves the current scene intact. The
@@ -401,6 +421,7 @@ def load_scene(world, sim, camera, filename: str, report: dict | None = None) ->
     # a clean ValueError and leaves the current scene intact.
     arrays = _validate_scene_arrays(data, n)
     _validate_header(header)
+    target_profile = _saved_solver_profile(header, sim, warnings)
 
     # Drop any rigid boundary particles in the file: the RigidBodyManager
     # rebuilds its block from the bodies on the next substep, so keeping them
@@ -415,6 +436,18 @@ def load_scene(world, sim, camera, filename: str, report: dict | None = None) ->
     report["world_modified"] = True
     world.packed_info[:] = 0
     world._high_water = 0
+
+    # Switch to the solver the save was made with before the particles go
+    # in, so a DFSPH save does not run under WCSPH with the wrong dt. The
+    # switch only changes solver params and constants, not particle arrays.
+    # Rigid body restore below re-uploads the body count; re-upload here too
+    # so a save without bodies still reaches the new modules.
+    # (bd-r5-review-n28.117)
+    if target_profile is not None:
+        print(f"Load: switching solver to {target_profile.name}")
+        sim.set_solver_profile(target_profile)
+        if hasattr(sim, "rigid_body_manager"):
+            sim.rigid_body_manager.upload(sim.get_all_modules())
 
     # Restore SDF geometry BEFORE setting _high_water so GPU kernels
     # dispatched during the same frame see the correct constant memory state.
