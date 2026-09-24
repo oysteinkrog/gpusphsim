@@ -891,6 +891,7 @@ the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
 | Transition | Condition | Temperature after |
 |------------|-----------|-------------------|
 | ICE → WATER (FLUID) | T > 273 K | 273 K |
+| WATER → ICE (STATIC) | T < 263 K and (sleeping or \|v\| < 0.02 m/s) | 263 K; velocity set to 0 |
 | STONE → LAVA (FLUID) | T > STONE `temp_melt` (1500 K) | 1500 K |
 | SAND → LAVA (FLUID) | T > SAND `temp_melt` (1700 K) | 1700 K |
 | LAVA → STONE (STATIC) | T < LAVA `temp_melt` (1000 K) | 1000 K |
@@ -902,6 +903,11 @@ Every material change also rescales mass by the spawn-mass rule (7.3):
 STATIC and GAS. STONE → LAVA multiplies by 2.6, LAVA → STONE divides by 2.6,
 SAND → WET_SAND multiplies by 1.125, DIRT → MUD by 1.2, and WOOD, OIL or GUNPOWDER →
 FIRE go back to 0.02. Mass is not conserved across a transition; the rest volume is.
+
+WATER freezes 10 K below the ICE melt point, so water between 263 K and 273 K
+stays liquid and ice at 273 K does not flip back and forth. ICE is STATIC, so
+only water that is sleeping or slower than V_WAKE (0.02 m/s) freezes. Faster cold
+water keeps flowing until it slows, so a stream does not stop in mid-air.
 
 Melt and solidify set the temperature to the threshold. The heat above it (or
 missing below it) is taken as consumed latent heat, so melted ice starts as
@@ -2915,6 +2921,9 @@ effective_threshold = threshold / (1 + 0.01 * max(temp - 293, 0))
 ```
 
 Hysteresis prevents oscillation (wet threshold >> dry threshold).
+
+Temperature-driven transitions, including WATER → ICE below 263 K, are listed
+in §9.5.
 
 FIRE is put out the same way. When FIRE's `exposure_corrode` is above
 `FIRE_EXTINGUISH_EXPOSURE = 0.3`, K_Reactions turns it into SMOKE/GAS with
