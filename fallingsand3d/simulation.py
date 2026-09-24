@@ -737,6 +737,21 @@ class Simulation:
         # valid while n stays equal to this (see guard above).
         self._last_full_sort_n = n
 
+        # PBF queries the grid with predicted positions x*, so bucket the cells
+        # by x* too. K_PBF_Predict runs here on the unsorted arrays into the
+        # otherwise unused w.predicted_position; the per-particle result is the
+        # same one _run_pbf_body gets after the sort, so the cell of every x*
+        # matches the bucket it was sorted into (bd-r5-review-n28.55).
+        hash_positions = w.position[:n]
+        if is_pbf:
+            import pbf_solver
+            pbf_solver.pbf_predict(
+                w.position[:n], w.velocity[:n],
+                w.packed_info[:n], w.temperature[:n],
+                w.predicted_position,
+            )
+            hash_positions = w.predicted_position[:n]
+
         counting_sort.counting_sort_full(
             num_particles=n,
             num_cells=self._table_size,
@@ -747,7 +762,7 @@ class Simulation:
             cell_end=self._cell_end,
             sort_perm=self._sort_perm[:n],
             # Hash I/O
-            positions=w.position[:n],
+            positions=hash_positions,
             hashes=w.hashes,
             sorted_hashes=w.sorted_hashes,
             # Unsorted particle arrays
