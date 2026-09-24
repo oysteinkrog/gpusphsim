@@ -274,5 +274,59 @@ def test_restore_rebuilds_color_on_gpu():
         np.testing.assert_array_equal(rows[:, 3], np.float32(beh_w))
 
 
+class TestSnapshotSDFUndo(unittest.TestCase):
+    """Undo restores the SDF object list and motions (bd-r5-review-n28.61)."""
+
+    def setUp(self):
+        self._real_cp = snapshot.cp
+        snapshot.cp = _cupy_stub
+
+    def tearDown(self):
+        snapshot.cp = self._real_cp
+
+    def test_restore_drops_added_and_puts_back_moved_sdf_objects(self):
+        from rigid_bodies import SDFManager
+
+        sim = types.SimpleNamespace(sdf_manager=SDFManager())
+        sdf = sim.sdf_manager
+        sdf.add_sdf_object(0, position=(0.1, 0.2, 0.3))
+        sdf.add_kinematic_motion(0, "oscillate_x", {"amplitude": 0.1, "frequency": 1.0})
+        sdf._dirty = False
+
+        ring = SnapshotRing(max_snapshots=4, max_particles=MAX_P)
+        world = _World()
+        ring.capture(world, sim=sim)
+
+        # After the capture: move object 0, drop its motion, add object 1.
+        sdf.update_sdf_object(0, position=(0.5, 0.5, 0.5))
+        sdf.remove_kinematic_motion(0)
+        sdf.add_sdf_object(1, position=(-0.2, 0.0, 0.0))
+        sdf._dirty = False
+
+        self.assertTrue(ring.restore(world, steps_back=1, sim=sim))
+        self.assertEqual(sdf.count, 1)
+        self.assertEqual(sdf._objects[0]["position"], [0.1, 0.2, 0.3])
+        self.assertEqual(sdf._motions[0]["type"], "oscillate_x")
+        self.assertEqual(sdf._motions[0]["center"], [0.1, 0.2, 0.3])
+        self.assertTrue(sdf._dirty)
+
+        # The slot keeps its own copy: editing the live list after restore
+        # must not change what a second restore of the same slot gives.
+        sdf.update_sdf_object(0, position=(0.9, 0.9, 0.9))
+        slot = ring._slots[ring._write_idx]
+        self.assertEqual(slot["sdf_state"]["objects"][0]["position"], [0.1, 0.2, 0.3])
+
+    def test_restore_without_sim_leaves_sdf_alone(self):
+        from rigid_bodies import SDFManager
+
+        sim = types.SimpleNamespace(sdf_manager=SDFManager())
+        ring = SnapshotRing(max_snapshots=4, max_particles=MAX_P)
+        world = _World()
+        ring.capture(world)  # no sim: slot has no SDF state
+        sim.sdf_manager.add_sdf_object(0)
+        self.assertTrue(ring.restore(world, steps_back=1, sim=sim))
+        self.assertEqual(sim.sdf_manager.count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
