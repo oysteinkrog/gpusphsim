@@ -755,12 +755,33 @@ arbitrarily large world sizes without memory blowup.
 
 **New approach** (spatial hash):
 ```
-hash = (cx * 73856093 ^ cy * 19349669 ^ cz * 83492791) & TABLE_MASK
+hash = ((uint)cx * 73856093u + (uint)cy * 19349669u + (uint)cz * 83492791u) & TABLE_MASK
 ```
-- TABLE_SIZE = 262144 (2^18), fixed regardless of world size
-- cell_start/cell_end always 262K entries (~2MB total)
-- Hash collisions cause extra (harmless) distance checks, never missed neighbors
-- At ~17K active cells, load factor ~6.5%, collisions rare
+- TABLE_SIZE = 262144 (2^18) by default; `compute_table_size` picks 2^18 to 2^20
+  from the particle count
+- cell_start/cell_end always 262K entries (~2MB total) at 2^18
+- The products and the sum wrap in 32-bit unsigned arithmetic, so negative
+  cell coordinates are well defined
+- **Stencil cells never share a bucket.** The combiner is addition, so
+  `hash(c + d1) - hash(c + d2) = (d1 - d2) . P (mod table_size)` does not
+  depend on the cell `c`. No difference `d1 - d2` in {-2..2}^3 is 0 mod 2^18,
+  2^19 or 2^20, so the 27 cells of every 3x3x3 neighbour stencil land in 27
+  distinct buckets and no particle is counted twice. `test_hash_sort.py`
+  checks this for world edges, faces, interior and negative cells.
+- Why not XOR: `P ^ (-P)` has the same low 18 bits (0x3FFFE) for all three
+  primes, so for a cell with two coordinates at 0 (the first in-world layer,
+  since `grid_min = world_min`) offsets (a,-1,-1) and (a,+1,+1) shared a
+  bucket. Particles in the 0.04 m strip along those world edges scanned cell
+  (a,1,1) twice: +3 to +12% density and +23 to +120% Tait pressure.
+- Far-apart cells can still share a bucket. That costs extra distance checks
+  but never misses or double-counts a neighbour. The hash is linear, so two
+  cells collide only when their offset `d` has `d . P = 0 mod table_size`;
+  at 2^18 the shortest such offset is (18, 47, 45) cells.
+- CuPy's kernel disk cache keys on the `.cu` source text and options, not on
+  included headers. After changing `spatialHash` or anything else in
+  `common.cuh`, clear `~/.cupy/kernel_cache`, or modules whose `.cu` file did
+  not change keep the old code, and the hash then disagrees between the sort
+  and the neighbour loops.
 
 **GridParams struct** (common.cuh, 32 bytes):
 ```
