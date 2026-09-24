@@ -100,6 +100,17 @@ def _step(sim) -> None:
     cp.cuda.Device().synchronize()
 
 
+def _pin_body(rbm, pos) -> None:
+    """Put body 0 back at pos after a step, like a conveyor belt.
+
+    A kinematic body moves with its lin_vel (bd-r5-review-n28.105). The drag
+    tests want a surface that moves while the body stays put, so they reset
+    the position after every step and keep lin_vel as the surface velocity.
+    """
+    flat = rbm.d_rigid_bodies.view(cp.float32).reshape(-1, 24)
+    flat[0, 0:3] = cp.asarray(pos, dtype=cp.float32)
+
+
 def _quiet_surface_terms(sim, profile_name: str) -> None:
     """Turn off surface tension and vorticity confinement.
 
@@ -221,6 +232,7 @@ def test_pbf_moving_surface_drags_side_layer():
     )
     for _ in range(100):
         sim._sim_step(world._high_water)
+        _pin_body(rbm, body)
     pos, vel = _fluid_state(world)
     h = 0.04
     ry = np.abs(pos[:, 1] - body[1])
@@ -243,6 +255,7 @@ def test_pbf_water_on_moving_plate_is_dragged():
     )
     for _ in range(60):
         sim._sim_step(world._high_water)
+        _pin_body(rbm, (0.0, -0.30, 0.0))
     _, vel = _fluid_state(world)
     vx = float(vel[:, 0].mean())
     print(f"layer mean vx = {vx:.4f} m/s")
@@ -287,10 +300,12 @@ def test_pbf_drag_reaction_balances_fluid_momentum():
     )
     _quiet_surface_terms(sim, "PBF")
     _step(sim)
+    _pin_body(rbm, (0.0, 0.0, 0.0))
     p0 = _fluid_momentum(world)
     impulse = np.zeros(3)
     for _ in range(20):
         _step(sim)
+        _pin_body(rbm, (0.0, 0.0, 0.0))
         impulse += _body_force(rbm) * sim.dt
     dp_fluid = _fluid_momentum(world) - p0
     print(f"dp_fluid = {dp_fluid}, body impulse = {impulse}")
