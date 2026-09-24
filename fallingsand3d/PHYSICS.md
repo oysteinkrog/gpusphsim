@@ -2583,6 +2583,30 @@ by dt*(v - v_sort), which is small next to the threshold. Cost: one coalesced
 16 B read per particle per substep (about +23 us in integrate at 1M) and one
 16 B store per particle per full sort.
 
+**Rigid boundary drift (bd-r5-review-n28.65).** Rigid boundary particles are
+STATIC, so the finalize kernels skip them, but `K_UpdateBoundaryParticles`
+moves them every substep. That kernel records their drift instead, against a
+per-boundary-particle anchor in unsorted order (`rbm.boundary_anchor`, float4
+per boundary particle, same index as `boundary_data`). The body moves after
+the solver, so the kernel extrapolates one substep to match the fluid, which
+records its drift after it moves:
+
+```
+x_end   = 2 * x - x_old          (x_old: the slot's position from the last substep)
+disp_sq = |x_end - anchor[i]|^2  -> atomicMax into max_displacement
+```
+
+On a substep that runs a full sort, `_update_rigid_boundary` clears
+`max_displacement` before the kernel and sets `anchor[i] = x`, and
+`_run_grid_setup` skips its own clear, so the boundary drift of that substep
+is kept. Rigid bodies disable CUDA graphs, so a captured graph always keeps
+the clear in `_run_grid_setup`. A block with no anchor yet (after injection,
+reinjection or reset) makes the substep a full sort. A body at 2 m/s with
+dt = 1e-3 and 10 substeps per frame moves 20 mm (0.5h) per frame and sorts
+every frame; a body at rest adds zero drift and calm water keeps skipping.
+Cost: one extra 16 B read of the old position and one 16 B anchor access per
+boundary particle per substep.
+
 **Miss bound.** Cell size equals h and the search covers the 27 cells around
 the current position of particle i, which reaches at least h from x_i. A
 neighbour j is binned at its anchor, within d of x_j, so it is found whenever
@@ -2639,8 +2663,10 @@ seeing it, so the next frame does a full sort.
 `integrate.cu:K_Integrate`, `pbf_solver.cu:K_PBF_Finalize`,
 `dfsph_solver.cu:K_DFSPH_Finalize` (max_displacement_out, displacement_anchor),
 `world.py` (`sorted_anchor`),
-`simulation.py:_count_substep_sort` and `_update_sort_skip_decision` (latch,
-prediction and threshold logic),
+`integrate.cu:K_UpdateBoundaryParticles` (rigid boundary drift),
+`rigid_bodies.py` (`boundary_anchor`, `boundary_anchor_valid`),
+`simulation.py:_update_rigid_boundary`, `_count_substep_sort` and
+`_update_sort_skip_decision` (latch, prediction and threshold logic),
 `spawn.cu:K_SpawnGas` (+inf on spawn)
 
 ## 10.13 Micropolar SPH (Phase 8, item 5.2)
