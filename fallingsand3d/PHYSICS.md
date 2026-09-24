@@ -600,7 +600,19 @@ own pressure instead (13.5).
 mu(I) = mu_s + (mu_2 - mu_s) / (1 + I0 / I)
 ```
 
-Default: mu_s=0.55, mu_2=0.85, I0=0.3
+Globals: mu_s=0.55, mu_2=0.85, I0=0.3.
+
+`mu_s` is per material: WCSPH Step2 uses `c_materials[mat].friction_coeff`, or the
+global `mu_s` when that is 0. The gap `mu_2 - mu_s = 0.30` stays global, so each
+material's `mu_2 = friction_coeff + 0.30`. Each particle's `eta` uses its own
+material, and the pair uses the harmonic mean of the two (5.5). Table values:
+DIRT 0.5, GUNPOWDER 0.5, SAND 0.6, GRAVEL 0.65, WET_SAND 0.75 (bd-r5-review-n28.89).
+DFSPH and the neighbour-list Step2 still use the global `mu_s`.
+
+Measured effect (WCSPH, 0.2 x 0.6 x 0.2 m column on the floor, 2 s, pile height
+over 95th-percentile radius): DIRT 0.102, SAND 0.119, WET_SAND 0.121, GRAVEL 0.131.
+With the global mu_s all four were 0.111 to 0.114. The effect is small because
+resting sand sits at the `mu_max` cap (5.4), where `mu_s` has no effect.
 
 ### 5.4 Effective Viscosity
 
@@ -669,6 +681,14 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | rigid ang_damp | 1 - 0.05*dt | N/A | Angular velocity damping |
 | rigid omega_max | 20 rad/s | N/A | Angular velocity clamp |
 | rigid F_max | 1000*mass | N/A | Force magnitude clamp |
+| mu_s (GRANULAR) | per material `friction_coeff`, global 0.55 if 0 | N/A | WCSPH mu(I) and PBF Drucker-Prager slope (5.3, 12.7.3) |
+| phase points | from the material table | N/A | ICE/STONE/SAND/LAVA `temp_melt`, WATER `temp_boil` (9.5) |
+
+MaterialProps fields no kernel reads: `cohesion` (PBF cohesion is the global
+`c_granular.cohesion`, a length in metres, and the table column is not a length),
+`temp_ignite` (ignition is exposure-based, 9.4), and `eos_stiffness`/`eos_gamma`
+for STATIC materials (Akinci mirrors the fluid's own pressure, 3.2).
+`test_materials.py::test_every_materialdef_field_is_read_by_a_kernel` checks this list.
 
 ---
 
@@ -963,13 +983,17 @@ the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
 
 | Transition | Condition | Temperature after |
 |------------|-----------|-------------------|
-| ICE → WATER (FLUID) | T > 273 K | 273 K |
-| WATER → ICE (STATIC) | T < 263 K and (sleeping or \|v\| < 0.02 m/s) | 263 K; velocity set to 0 |
+| ICE → WATER (FLUID) | T > ICE `temp_melt` (273 K) | 273 K |
+| WATER → ICE (STATIC) | T < WATER `temp_melt` - 10 K (263 K) and (sleeping or \|v\| < 0.02 m/s) | 263 K; velocity set to 0 |
 | STONE → LAVA (FLUID) | T > STONE `temp_melt` (1500 K) | 1500 K |
 | SAND → LAVA (FLUID) | T > SAND `temp_melt` (1700 K) | 1700 K |
 | LAVA → GRAVEL (GRANULAR) | T < LAVA `temp_melt` (1000 K) | 1000 K |
-| STEAM → WATER (FLUID) | T < 360 K | unchanged; mass rule below |
-| WATER boils | T > 373 K | unchanged; sets the spawn-gas flag and spawn.cu makes STEAM |
+| STEAM → WATER (FLUID) | T < WATER `temp_boil` - 13 K (360 K) | unchanged; mass rule below |
+| WATER boils | T > WATER `temp_boil` (373 K) | unchanged; sets the spawn-gas flag and spawn.cu makes STEAM |
+
+All thresholds come from `c_materials` (bd-r5-review-n28.89). STEAM has no
+`temp_boil` of its own, so condensation is keyed to WATER's. The 10 K and 13 K
+gaps are the defines `WATER_FREEZE_HYSTERESIS` and `STEAM_CONDENSE_HYSTERESIS`.
 
 Every material change also rescales mass by the spawn-mass rule (7.3):
 `m *= s(new) / s(old)` with `s = rest_density / 2500` for FLUID and GRANULAR and 1 for
@@ -2068,8 +2092,13 @@ different values for PBF vs WCSPH):
 
 | Parameter | PBF Default | WCSPH Default | Description |
 |-----------|-------------|---------------|-------------|
-| `tan_phi_f` | 0.50 | 0.781 (= tan(38°)) | Friction cone slope |
-| `cohesion` | 0.0 | 0.002 | Cohesive tangential allowance |
+| `tan_phi_f` | 0.50 | 0.781 (= tan(38°)) | Friction cone slope when the material's `friction_coeff` is 0 |
+| `cohesion` | 0.0 | 0.002 | Cohesive tangential allowance (metres per step) |
+
+The friction slope in K_PBF_Finalize is the material's `friction_coeff` (SAND 0.6,
+WET_SAND 0.75), with `tan_phi_f` as the fallback (bd-r5-review-n28.89). Cohesion
+stays global. In the 5.3 column test the PBF piles spread to one layer for every
+material, before and after this change, so the slope has no visible effect there.
 
 **Why PBF uses velocity-space friction**: Position-space friction (per-iteration)
 causes iteration-dependent behavior -- changing from 4 to 12 iterations would apply
