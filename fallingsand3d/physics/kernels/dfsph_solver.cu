@@ -29,7 +29,7 @@ struct DFSPHParams {
     float _pad_iters[2];  // unused (iteration counts live on the host)
     float warm_start;
     float omega;          // under-relaxation factor for corrections (0.3-1.0)
-    float alpha_limit;    // max alpha as fraction of dt^2 (default 1.0, higher = faster convergence)
+    float alpha_limit;    // alpha cap in units of h^2 (interior alpha ~ 0.67 h^2); safety bound only
     float _pad[3];        // pad to 32 bytes
 };
 
@@ -286,24 +286,26 @@ void K_DFSPH_ComputeDensityAlpha(
 
     density_out[i] = rho;
 
-    // Alpha = 1 / denom (inverse diagonal of pressure Poisson system)
-    // Cap alpha to prevent surface particles (few neighbors) from getting
-    // extreme correction values. Interior alpha ~ 1.1e-3 (denom ~ 915 at h=0.04, dx=0.02).
-    // alpha_cap = alpha_limit * dt^2 controls max correction per iteration:
-    //   alpha_limit=1.0 -> alpha_cap ~ 1.1e-5 at dt=1/300 (backward-compatible, conservative)
-    //   alpha_limit=5.0 -> alpha_cap ~ 5.6e-5 (faster convergence, needs lower omega)
+    // Alpha = 1 / denom (inverse diagonal of pressure Poisson system).
+    // The cap is a loose safety bound for particles with very few neighbours
+    // (small denom, huge alpha). It must never bind in the interior, where
+    // alpha ~ 1.07e-3 = 0.67 h^2 (denom ~ 930 at h = 0.04, spacing 0.02).
+    // alpha_cap = alpha_limit * h^2, independent of dt: the Jacobi displacement
+    // per iteration is residual * alpha * |gradW|, which does not depend on dt.
+    // Default alpha_limit = 1.0 puts the cap at about 1.5x the interior alpha.
+    // A cap far above that (3+) lets few-neighbour surface particles take
+    // full-size Jacobi steps and the free surface boils (bd-r5-review-n28.37).
     float denom = grad_sum.x * grad_sum.x + grad_sum.y * grad_sum.y + grad_sum.z * grad_sum.z
                 + grad_norm_sum;
     float alpha_threshold = 1e-6f;
-    float dt = c_sim.dt;
-    float alpha_cap = c_dfsph.alpha_limit * dt * dt;
+    float alpha_cap = c_dfsph.alpha_limit * c_sim.smoothing_length_sq;
+    float alpha_raw = (denom > alpha_threshold) ? fminf(1.0f / denom, alpha_cap) : 0.0f;
     if (is_granular) {
         // Compliance factor 0.7: reduce alpha to allow some compression in granular piles.
         // Must multiply alpha (not denom) so that alpha gets SMALLER (more compliant).
-        float alpha_raw = (denom > alpha_threshold) ? fminf(1.0f / denom, alpha_cap) : 0.0f;
         alpha_out[i] = alpha_raw * 0.7f;
     } else {
-        alpha_out[i] = (denom > alpha_threshold) ? fminf(1.0f / denom, alpha_cap) : 0.0f;
+        alpha_out[i] = alpha_raw;
     }
     // Heat diffusion: dTdt = kappa / (rho * cp) * viscosity_lap_coeff * sum_dTdt
     float cp_i = c_materials[mat_id_i].heat_capacity;
@@ -749,9 +751,15 @@ void K_DFSPH_ComputeKappaV(
 
     float alpha_i = alpha[i];
     // DFSPH: kv = (1/dt) * div_v * alpha
-    // div_v uses (v_i - v_j) . gradW which gives -drho/dt/rho (note the sign).
-    // For diverging particles: div_v < 0, so kv < 0 -> correction pushes inward.
-    // omega: under-relaxation to prevent overcorrection
+    // div_v = SUM V_j (v_i - v_j) . gradW is the relative density rate
+    // (1/rho) Drho/Dt, the same sign as drho in K_DFSPH_DensitySolverUpdate:
+    // div_v > 0 means the particle is being compressed.
+    // omega: under-relaxation to prevent overcorrection.
+    // Unilateral: only compressing flow is corrected. Pulling separating
+    // particles back together is artificial cohesion at free surfaces, and the
+    // bilateral Jacobi diverges once alpha is not capped far below 1/denom
+    // (bd-r5-review-n28.37). Same as SPlisHSPlasH densityAdv = max(densityAdv, 0).
+    div_v = fmaxf(div_v, 0.0f);
     kappa_v_out[i] = div_v * alpha_i * c_dfsph.omega / dt;
 }
 

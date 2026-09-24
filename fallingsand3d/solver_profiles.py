@@ -38,17 +38,25 @@ class SolverProfile:
     pbf_friction_cohesion: float = 0.0  # position-space cohesion for PBF granular (meters)
     pbf_neg_c_scale: float = 0.05  # scale factor for negative constraint (surface cohesion)
     pbf_warm_start: float = 0.5    # warm start factor for lambda (0.5 = carry 50% from prev frame)
-    # DFSPH params
-    dfsph_div_iters: int = 2       # divergence solver iterations
-    dfsph_dens_iters: int = 8      # density solver iterations (Jacobi on pressure)
-    dfsph_warm_start: float = 0.5  # warm start factor for kappa (0.5 optimal, >0.8 unstable)
+    # DFSPH params. Defaults are the Stable "DFSPH" profile values
+    # (bd-r5-review-n28.37), so a custom SolverProfile(solver_type=DFSPH) runs
+    # the tuned configuration. dt is shared with WCSPH and is not changed here.
+    dfsph_div_iters: int = 3       # divergence solver iterations (2 sweeps each)
+    dfsph_dens_iters: int = 4      # density solver iterations (Jacobi on p/rho^2, 2 sweeps each)
+    dfsph_warm_start: float = 0.5  # warm start factor for p/rho^2 (0.5 optimal, >0.8 unstable)
     dfsph_div_warm_start: float = 0.5  # warm start factor for kappa_v (divergence solver)
-    dfsph_omega: float = 1.0       # relaxation for Jacobi density update
-    dfsph_alpha_limit: float = 1.0  # max alpha = alpha_limit * dt^2 (higher = faster convergence)
-    # Velocity limit
-    velocity_limit_factor: float = 0.9  # v_limit = factor * h / dt (CFL-based velocity clamp)
+    dfsph_omega: float = 0.7       # Jacobi relaxation, shared by the divergence and density solvers
+    dfsph_alpha_limit: float = 1.0  # alpha cap in units of h^2; interior alpha ~ 0.67 h^2, so the cap
+                                    # only binds on particles with few neighbours
+    # Velocity limit: v_limit = factor * h / dt (CFL-based velocity clamp).
+    # None picks the solver default in __post_init__: 0.4 for DFSPH, 0.9 otherwise.
+    velocity_limit_factor: float | None = None
     # Micropolar params
     micropolar_nu_t: float = 0.1   # not read yet: kernels hardcode nu_t = 0.1f
+
+    def __post_init__(self) -> None:
+        if self.velocity_limit_factor is None:
+            self.velocity_limit_factor = 0.4 if self.solver_type == SolverType.DFSPH else 0.9
 
 
 PROFILES = {
@@ -66,11 +74,13 @@ PROFILES = {
         pbf_iterations=6, pbf_xsph_c=0.05,
     ),
     "DFSPH": SolverProfile(
+        # 3 div + 4 dens iterations at dt = 1/300: 18 neighbour sweeps per substep,
+        # 5400 per simulated second (was 34 and 10200 with 3 + 12 iterations).
         name="DFSPH",
         solver_type=SolverType.DFSPH,
         dt=1/300, max_substeps=10, fixed_dt=True,
-        dfsph_div_iters=3, dfsph_dens_iters=12, dfsph_omega=0.7,
-        dfsph_warm_start=0.5, dfsph_alpha_limit=10.0,
+        dfsph_div_iters=3, dfsph_dens_iters=4, dfsph_omega=0.7,
+        dfsph_warm_start=0.5, dfsph_alpha_limit=1.0,
         velocity_limit_factor=0.4,
     ),
     # --- Fast profiles -- fewer iterations, looser CFL ---
@@ -87,11 +97,13 @@ PROFILES = {
         pbf_iterations=4, pbf_xsph_c=0.05,
     ),
     "DFSPH (Fast)": SolverProfile(
+        # 2 div + 3 dens iterations at dt = 1/200: 14 sweeps per substep,
+        # 2800 per simulated second. Compression error about 1% instead of 0.35%.
         name="DFSPH (Fast)",
         solver_type=SolverType.DFSPH,
-        dt=1/300, max_substeps=10, fixed_dt=True,
-        dfsph_div_iters=2, dfsph_dens_iters=8, dfsph_omega=0.7,
-        dfsph_warm_start=0.5, dfsph_alpha_limit=5.0,
+        dt=1/200, max_substeps=7, fixed_dt=True,
+        dfsph_div_iters=2, dfsph_dens_iters=3, dfsph_omega=0.7,
+        dfsph_warm_start=0.5, dfsph_alpha_limit=1.0,
         velocity_limit_factor=0.4,
     ),
 }
