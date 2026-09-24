@@ -22,11 +22,11 @@ class SolverProfile:
     dt: float = 0.001
     max_substeps: int = 40
     fixed_dt: bool = False
-    accuracy: float = 0.4          # CFL number (WCSPH only)
-    # WCSPH params
+    accuracy: float = 0.4          # adaptive dt = 1 ms * accuracy / 0.4, capped at 1 ms (WCSPH only)
+    # WCSPH params, uploaded to step2's c_granular at init and on profile switch
     force_scale: float = 0.02
-    xsph_epsilon: float = 0.1
-    mu0: float = 1.0
+    xsph_epsilon: float = 0.8      # matches step2.DEFAULT_XSPH_EPSILON; lower values untested
+    mu0: float = 1.0               # GRANULAR base viscosity in c_granular
     # PBF params
     pbf_iterations: int = 4
     pbf_relaxation: float = 0.01   # epsilon for denominator stability
@@ -48,7 +48,7 @@ class SolverProfile:
     # Velocity limit
     velocity_limit_factor: float = 0.9  # v_limit = factor * h / dt (CFL-based velocity clamp)
     # Micropolar params
-    micropolar_nu_t: float = 0.1   # micropolar coupling viscosity (angular vel relaxation rate)
+    micropolar_nu_t: float = 0.1   # not read yet: kernels hardcode nu_t = 0.1f
 
 
 PROFILES = {
@@ -56,8 +56,8 @@ PROFILES = {
     "WCSPH": SolverProfile(
         name="WCSPH",
         solver_type=SolverType.WCSPH,
-        dt=0.001, max_substeps=40, accuracy=0.2,
-        force_scale=0.02, xsph_epsilon=0.1,
+        dt=0.001, max_substeps=40, accuracy=0.2,  # adaptive dt 0.5 ms
+        force_scale=0.02, xsph_epsilon=0.8,
     ),
     "PBF": SolverProfile(
         name="PBF",
@@ -77,8 +77,8 @@ PROFILES = {
     "WCSPH (Fast)": SolverProfile(
         name="WCSPH (Fast)",
         solver_type=SolverType.WCSPH,
-        dt=0.001, max_substeps=40, accuracy=0.4,
-        xsph_epsilon=0.05,
+        dt=0.001, max_substeps=40, accuracy=0.4,  # adaptive dt 1 ms
+        xsph_epsilon=0.8,
     ),
     "PBF (Fast)": SolverProfile(
         name="PBF (Fast)",

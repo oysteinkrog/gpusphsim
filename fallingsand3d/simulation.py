@@ -42,6 +42,8 @@ import implicit_st
 # Adaptive timestep limits
 DT_MIN = 1e-5
 DT_MAX = 0.001
+# Accuracy value that maps to DT_MAX; lower accuracy scales dt down linearly.
+ACCURACY_REF = 0.4
 
 
 def _no_mark(label: str) -> None:
@@ -74,8 +76,9 @@ class Simulation:
     speed : float
         Time scale: 1.0 = realtime, <1 = slow-mo, >1 = fast-forward.
     accuracy : float
-        CFL number for adaptive timestep (0.1-1.0, default 0.4).
-        Lower = smaller dt = more stable. Higher = larger dt = faster but riskier.
+        Timestep scale for adaptive dt (0.1-1.0, default 0.4).
+        dt = DT_MAX * accuracy / 0.4, so 0.4 gives 1 ms and 0.2 gives 0.5 ms.
+        Values above 0.4 are capped at DT_MAX. Ignored when fixed_dt is True.
     fixed_dt : bool
         If True, use fixed timestep (no CFL computation). Default False.
     max_substeps : int
@@ -251,18 +254,25 @@ class Simulation:
         return max_eta, rho_min
 
     def _compute_adaptive_dt(self, n: int) -> float:
-        """Compute adaptive dt from CFL constraints (CPU-only, no GPU sync).
+        """Compute adaptive dt from accuracy and CFL limits (CPU-only, no GPU sync).
 
-        Two constraints (precomputed from material properties):
+          dt_accuracy = DT_MAX * accuracy / ACCURACY_REF
           dt_acoustic = 0.25 * h / c_sound
           dt_viscous  = accuracy * rho_min * h^2 / max(max_eta, 1e-6)
-          dt = min(dt_acoustic, dt_viscous) clamped to [DT_MIN, DT_MAX]
+          dt = min(dt_accuracy, dt_acoustic, dt_viscous) clamped to [DT_MIN, DT_MAX]
+
+        With the current materials dt_acoustic is about 2.2 ms and dt_viscous
+        is about accuracy * 34 ms, so both sit above DT_MAX (1 ms) and
+        dt_accuracy is the bound that acts: accuracy 0.4 gives 1 ms, 0.2 gives
+        0.5 ms, 0.1 gives 0.25 ms. Accuracy above 0.4 is capped by DT_MAX.
 
         The advection CFL (velocity-based) is omitted because velocity_limit
-        and accel_max prevent particles from exceeding the speed of sound,
-        and the acoustic CFL (dt~0.05) is always well above DT_MAX (0.005).
+        and accel_max prevent particles from exceeding the speed of sound.
         """
         h = self._h
+
+        # Accuracy-scaled cap: the accuracy knob acts through this bound.
+        dt_accuracy = DT_MAX * self.accuracy / ACCURACY_REF
 
         # Acoustic CFL (fixed 0.25 coefficient, not scaled by accuracy)
         dt_acoustic = 0.25 * h / self._c_sound
@@ -270,7 +280,7 @@ class Simulation:
         # Viscous CFL (uses precomputed max_eta and rho_min)
         dt_viscous = self.accuracy * self._rho_min * h * h / max(self._max_eta, 1e-6)
 
-        dt = min(dt_acoustic, dt_viscous)
+        dt = min(dt_accuracy, dt_acoustic, dt_viscous)
         return max(DT_MIN, min(DT_MAX, dt))
 
     def _upload_dt(self, new_dt: float) -> None:
@@ -410,7 +420,7 @@ class Simulation:
             smoothing_length=0.04,
             viscosity=1.0,
         )
-        granular_params = step2.build_granular_params()
+        granular_params = self._wcsph_granular_params()
         materials_data = build_material_array()
         interactions_data = build_interaction_matrix()
 
@@ -527,6 +537,10 @@ class Simulation:
             dfsph_solver.upload_granular_params(step2.build_granular_params(
                 xsph_epsilon=0.1,
             ))
+        else:
+            # WCSPH: step2 reads xsph_epsilon, force_scale and mu0 from
+            # c_granular, so re-upload them from the new profile.
+            step2.upload_granular_params(self._wcsph_granular_params())
 
         # Invalidate CUDA graphs and reset grid reuse
         self._invalidate_graphs()
@@ -534,6 +548,15 @@ class Simulation:
         self._sort_skip_consecutive = 0
         # Reset spawn damping for new solver
         self._spawn_substep = 0
+
+    def _wcsph_granular_params(self):
+        """GranularParams for step2 built from the active WCSPH profile."""
+        profile = self._profile
+        return step2.build_granular_params(
+            xsph_epsilon=profile.xsph_epsilon,
+            force_scale=profile.force_scale,
+            mu0=profile.mu0,
+        )
 
     def _upload_solver_constants(self, solver_module) -> None:
         """Upload all shared constants (grid, sim, precalc, materials, interactions) to a solver module."""
@@ -1716,7 +1739,11 @@ class Simulation:
         self.speed = max(0.1, min(10.0, self.speed + delta))
 
     def adjust_accuracy(self, delta: float) -> None:
-        """Adjust accuracy (CFL number) by delta, clamping to [0.1, 1.0]."""
+        """Adjust accuracy by delta, clamping to [0.1, 1.0].
+
+        Takes effect on the next frame through _compute_adaptive_dt
+        (adaptive mode only).
+        """
         self.accuracy = max(0.1, min(1.0, self.accuracy + delta))
 
     def reset_spawn_damping(self) -> None:
