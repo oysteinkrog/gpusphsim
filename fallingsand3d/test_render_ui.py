@@ -339,3 +339,44 @@ def test_save_panel_scans_saves_once_then_on_refresh_and_save(monkeypatch):
 
     # No flags argument: 64 would be InputTextFlags_.enter_returns_true.
     assert all(args == ("Name", "scene") for args in stub.input_text_args)
+
+
+# ---------------------------------------------------------------------------
+# UI.sync_from_sim after a Simulation swap or save load (bd-r5-review-n28.86)
+# ---------------------------------------------------------------------------
+
+def test_sync_from_sim_reads_solver_world_size_and_clears_sdf_selection():
+    pytest.importorskip("imgui_bundle")
+    ui = pytest.importorskip("ui")
+    from solver_profiles import PROFILE_NAMES
+
+    u = ui.UI.__new__(ui.UI)
+    u._solver_idx = 0
+    u._pending_solver = "PBF"
+    u._world_half_size = 1.0
+    u._selected_sdf_id = 3
+    u._dragging_sdf = True
+    u._sdf_manager_ref = object()
+
+    new_manager = object()
+    sim = SimpleNamespace(
+        _profile=SimpleNamespace(name="DFSPH"),
+        world_half_size=2.0,
+        sdf_manager=new_manager,
+    )
+    u.sync_from_sim(sim)
+
+    assert u._solver_idx == PROFILE_NAMES.index("DFSPH")
+    assert u._pending_solver is None
+    assert u._world_half_size == 2.0
+    assert u._selected_sdf_id is None
+    assert u._dragging_sdf is False
+    assert u._sdf_manager_ref is new_manager
+
+    # A fresh Simulation after a Max particles change is WCSPH at 1.0.
+    u.sync_from_sim(SimpleNamespace(
+        _profile=SimpleNamespace(name="WCSPH"), world_half_size=1.0,
+        sdf_manager=new_manager,
+    ))
+    assert PROFILE_NAMES[u._solver_idx] == "WCSPH"
+    assert u._world_half_size == 1.0
