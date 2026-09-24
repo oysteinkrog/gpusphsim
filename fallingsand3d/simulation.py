@@ -247,6 +247,10 @@ class Simulation:
         # Rigid body manager (Akinci two-way coupling)
         self.rigid_body_manager = RigidBodyManager()
         world.rigid_body_manager = self.rigid_body_manager
+        # The manager keeps world.reserved_tail in step with its boundary
+        # block, so spawns leave room for it (bd-r5-review-n28.58).
+        self.rigid_body_manager.world = world
+        world.reserved_tail = 0
 
         # Compile all kernel modules and upload constant memory
         self._upload_constants()
@@ -1525,7 +1529,10 @@ class Simulation:
         """
         # Rigid body integration (outside graph -- forces vary per substep)
         rbm = self.rigid_body_manager
-        if rbm.num_bodies > 0:
+        # boundary_dropped: the block did not fit, so the fluid cannot push
+        # the bodies. Freeze them instead of letting gravity drop them through
+        # the fluid (bd-r5-review-n28.58). Host-side flag, no device sync.
+        if rbm.num_bodies > 0 and not rbm.boundary_dropped:
             integrate.integrate_rigid_bodies(
                 rbm.d_rigid_bodies,
                 rbm.rigid_forces,
@@ -1859,6 +1866,13 @@ class Simulation:
             w.compact(num_alive=num_alive)
             num_dead = 0
             changed = True
+            # A rigid boundary block that did not fit may fit now. Retry the
+            # injection on the next substep; the bodies stay frozen until it
+            # lands (bd-r5-review-n28.58). Host-side ints only.
+            rbm = self.rigid_body_manager
+            if (rbm.boundary_dropped
+                    and w._high_water + rbm.num_boundary_particles <= w.max_particles):
+                rbm.mark_for_reinjection()
 
         if num_dead < reserve:
             if w.add_dead_reserve(reserve - num_dead, spacing=self._h,

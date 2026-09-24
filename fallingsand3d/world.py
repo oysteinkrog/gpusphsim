@@ -158,6 +158,13 @@ class World:
         # Parked DEAD slots kept for the spawn freelist (see DEAD_RESERVE_DEFAULT).
         # 0 turns the reserve off.
         self.dead_reserve: int = DEAD_RESERVE_DEFAULT
+        # Slots kept free for a rigid boundary block that is not in the world
+        # yet. RigidBodyManager sets it: num_boundary_particles from
+        # finalize_boundary_data() until the block is injected, then 0 (the
+        # block is counted inside _high_water from then on). Every spawn path
+        # takes it off the free capacity, so fluid cannot fill the slots the
+        # block needs (bd-r5-review-n28.58).
+        self.reserved_tail: int = 0
         self._allocate()
 
     def _allocate(self) -> None:
@@ -331,10 +338,17 @@ class World:
         """
         self.max_particles = new_max
         self._high_water = 0
+        self.reserved_tail = 0
         self._spawned_material_ids = set()
         for name in self._LAZY_SOLVER_ARRAYS:
             self.__dict__.pop(name, None)
         self._allocate()
+
+    def free_capacity(self) -> int:
+        """Slots a spawn may still use: max_particles minus _high_water and
+        minus reserved_tail (the rigid boundary block waiting to be injected).
+        Host-only arithmetic, no device sync."""
+        return max(0, self.max_particles - self.reserved_tail - self._high_water)
 
     @property
     def num_active(self) -> int:
@@ -549,7 +563,7 @@ class World:
         Returns the number added (capped by max_particles). The caller must
         call Simulation.notify_scene_changed() so the sort is rebuilt.
         """
-        count = min(int(count), self.max_particles - self._high_water)
+        count = min(int(count), self.free_capacity())
         if count <= 0:
             return 0
         start = self._high_water
@@ -589,7 +603,7 @@ class World:
         if material_id not in MATERIALS:
             raise ValueError(f"Unknown material_id: {material_id}")
 
-        available = self.max_particles - self._high_water
+        available = self.free_capacity()
         actual = min(count, available)
         if actual <= 0:
             return 0
@@ -699,7 +713,7 @@ class World:
         if len(xs) == 0 or len(ys) == 0 or len(zs) == 0:
             return 0
 
-        available = self.max_particles - self._high_water
+        available = self.free_capacity()
         if available <= 0:
             self.last_spawn_truncated = True
             self.spawn_truncated_count += 1
@@ -838,7 +852,7 @@ class World:
             return 0
 
         pos_arr = np.array(positions, dtype=np.float32)
-        available = self.max_particles - self._high_water
+        available = self.free_capacity()
         actual = min(len(pos_arr), available)
         if actual <= 0:
             return 0
@@ -907,7 +921,7 @@ class World:
             return 0
 
         pos_arr = np.array(positions, dtype=np.float32)
-        available = self.max_particles - self._high_water
+        available = self.free_capacity()
         actual = min(len(pos_arr), available)
         if actual <= 0:
             return 0
@@ -1003,7 +1017,7 @@ class World:
             return 0
 
         pos_arr = np.array(positions, dtype=np.float32)
-        available = self.max_particles - self._high_water
+        available = self.free_capacity()
         actual = min(len(pos_arr), available)
         if actual <= 0:
             return 0

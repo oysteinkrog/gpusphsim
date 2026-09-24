@@ -381,6 +381,18 @@ class RigidBodyManager:
         # the world. The block is [boundary_offset, boundary_offset + N) and is
         # counted inside world._high_water. World.compact() keeps it current.
         self.boundary_offset: int = -1
+        # True when the last injection found no room for the block. The
+        # bodies then get no fluid forces, so Simulation freezes them instead
+        # of letting them fall through the fluid (bd-r5-review-n28.58).
+        self.boundary_dropped: bool = False
+        # World whose reserved_tail this manager keeps current. Simulation
+        # wires it; None leaves reservation off (standalone manager in tests).
+        self.world = None
+
+    def _set_reserved_tail(self, n: int) -> None:
+        """Tell the world how many slots to keep free for the boundary block."""
+        if self.world is not None:
+            self.world.reserved_tail = int(n)
 
     @property
     def num_bodies(self) -> int:
@@ -401,6 +413,9 @@ class RigidBodyManager:
         """
         self._boundary_injected = False
         self.boundary_offset = -1
+        self.boundary_dropped = False
+        # The block leaves _high_water accounting until it is injected again.
+        self._set_reserved_tail(self.num_boundary_particles)
 
     def add_rigid_body_with_particles(
         self,
@@ -458,10 +473,15 @@ class RigidBodyManager:
         if not self._boundary_data_list:
             self.boundary_data = None
             self.num_boundary_particles = 0
+            self._set_reserved_tail(0)
             return
         combined = np.concatenate(self._boundary_data_list, axis=0)
         self.boundary_data = cupy.asarray(combined)
         self.num_boundary_particles = len(combined)
+        # Keep room for the block until inject_boundary_particles() puts it
+        # inside _high_water (bd-r5-review-n28.58).
+        if not self._boundary_injected:
+            self._set_reserved_tail(self.num_boundary_particles)
 
     def add_rigid_body(
         self,
@@ -617,6 +637,8 @@ class RigidBodyManager:
                 world.compact()
 
         if self.boundary_data is None or self.num_boundary_particles == 0:
+            self.boundary_dropped = False
+            world.reserved_tail = 0
             return world._high_water
 
         n_fluid = world._high_water
@@ -624,9 +646,13 @@ class RigidBodyManager:
         total = n_fluid + n_boundary
 
         if total > world.max_particles:
+            # Printed once per injection attempt (a scene event), never per
+            # substep. The reservation stays, so fluid cannot take more of
+            # the slots before the next attempt.
             print(f"WARNING: no room for {n_boundary:,} rigid boundary particles "
                   f"({n_fluid:,} of {world.max_particles:,} slots used); "
-                  f"rigid bodies get no fluid coupling")
+                  f"rigid bodies are frozen and get no fluid coupling")
+            self.boundary_dropped = True
             return n_fluid
 
         # boundary_data columns: x_local, y_local, z_local, psi, body_id, nx, ny, nz
@@ -708,6 +734,9 @@ class RigidBodyManager:
 
         self.boundary_offset = n_fluid
         world._high_water = total
+        # The block now counts inside _high_water; no separate reservation.
+        world.reserved_tail = 0
+        self.boundary_dropped = False
         return total
 
     def reset(self) -> None:
@@ -724,6 +753,8 @@ class RigidBodyManager:
         # Next preset load injects a fresh block.
         self._boundary_injected = False
         self.boundary_offset = -1
+        self.boundary_dropped = False
+        self._set_reserved_tail(0)
 
 
 # ---------------------------------------------------------------------------
