@@ -88,12 +88,21 @@ def _model_matrix(sdf_type, pos, rot, size):
     return renderer.Renderer._build_sdf_model_matrix(sdf_type, pos, rot, size).astype(np.float64)
 
 
-@pytest.mark.xfail(
+_PLANE_XFAIL = pytest.mark.xfail(
     strict=True,
     reason="Renderer draws every plane with normal +Y; the kernel uses normalize(size). "
     "Fix bead (8-plane-normal) not landed yet. Remove this marker when it does.",
 )
-@pytest.mark.parametrize("size", [[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.2, -1.0]])
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        [0.0, 1.0, 0.0],
+        pytest.param([1.0, 1.0, 0.0], marks=_PLANE_XFAIL),
+        pytest.param([0.0, 0.2, -1.0], marks=_PLANE_XFAIL),
+    ],
+)
 def test_sdf_plane_model_matrix_matches_kernel_normal(size):
     m = _model_matrix(3, [0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 1.0], size)
     up = m[:3, :3] @ np.array([0.0, 1.0, 0.0])
