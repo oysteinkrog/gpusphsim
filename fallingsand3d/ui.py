@@ -277,6 +277,15 @@ def _quat_rotate_inv(qx, qy, qz, qw, v):
     ], dtype=np.float32)
 
 
+def _normalize_plane_normal(vals):
+    """Return vals as a unit-length [x, y, z] list, or None when its length is below 1e-6."""
+    v = np.asarray(vals[:3], dtype=np.float64)
+    vlen = float(np.linalg.norm(v))
+    if vlen < 1e-6:
+        return None
+    return [float(c) for c in v / vlen]
+
+
 def _raycast_sdf_objects(origin, direction, sdf_manager):
     """Raycast against all SDF objects. Returns (hit_id, hit_t) or (None, inf)."""
     objects = sdf_manager.get_sdf_objects()
@@ -1020,7 +1029,12 @@ class UI:
                     if imgui.begin_popup("add_sdf_popup"):
                         for type_idx, type_name in enumerate(_SDF_TYPE_NAMES):
                             if imgui.selectable(type_name)[0]:
-                                default_size = (0.2, 0.2, 0.2) if type_idx != SDF_SPHERE else (0.2, 0, 0)
+                                if type_idx == SDF_SPHERE:
+                                    default_size = (0.2, 0, 0)
+                                elif type_idx == SDF_PLANE:
+                                    default_size = (0.0, 1.0, 0.0)  # unit normal, +Y
+                                else:
+                                    default_size = (0.2, 0.2, 0.2)
                                 sdf_mgr.add_sdf_object(sdf_type=type_idx, position=(0, 0, 0), size=default_size)
                         imgui.end_popup()
 
@@ -1052,18 +1066,27 @@ class UI:
                             ch, val = imgui.slider_float(f"Radius##{oid}", sz[0], 0.01, 1.0, "%.2f")
                             if ch:
                                 sdf_mgr.update_sdf_object(oid, size=[val, 0, 0])
+                        elif obj["type"] == SDF_PLANE:
+                            # The plane kernel reads size.xyz as its normal and
+                            # ignores rotation, so edit the normal directly.
+                            ch, vals = imgui.slider_float3(f"Normal##{oid}", [sz[0], sz[1], sz[2]], -1.0, 1.0, "%.2f")
+                            if ch:
+                                n = _normalize_plane_normal(vals)
+                                if n is not None:
+                                    sdf_mgr.update_sdf_object(oid, size=n)
                         else:
                             ch, vals = imgui.slider_float3(f"Size##{oid}", [sz[0], sz[1], sz[2]], 0.01, 1.0, "%.2f")
                             if ch:
                                 sdf_mgr.update_sdf_object(oid, size=list(vals))
 
-                        # Rotation (euler angles)
-                        rot = obj["rotation"]
-                        euler = _quat_to_euler(rot[0], rot[1], rot[2], rot[3])
-                        ch, vals = imgui.slider_float3(f"Rot##{oid}", [euler[0], euler[1], euler[2]], -180.0, 180.0, "%.0f")
-                        if ch:
-                            q = _euler_to_quat(vals[0], vals[1], vals[2])
-                            sdf_mgr.update_sdf_object(oid, rotation=list(q))
+                        # Rotation (euler angles). Planes have no rotation.
+                        if obj["type"] != SDF_PLANE:
+                            rot = obj["rotation"]
+                            euler = _quat_to_euler(rot[0], rot[1], rot[2], rot[3])
+                            ch, vals = imgui.slider_float3(f"Rot##{oid}", [euler[0], euler[1], euler[2]], -180.0, 180.0, "%.0f")
+                            if ch:
+                                q = _euler_to_quat(vals[0], vals[1], vals[2])
+                                sdf_mgr.update_sdf_object(oid, rotation=list(q))
 
                         # Restitution & friction
                         ch, val = imgui.slider_float(f"Bounce##{oid}", obj["restitution"], 0.0, 1.0, "%.2f")

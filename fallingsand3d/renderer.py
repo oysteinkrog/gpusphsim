@@ -68,6 +68,66 @@ def _quat_to_mat4(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     return m
 
 
+def _plane_rotation_from_normal(size) -> np.ndarray:
+    """4x4 rotation that maps +Y onto normalize(size), the plane normal the SDF kernel uses."""
+    R = np.eye(4, dtype=np.float32)
+    n = np.asarray(size[:3], dtype=np.float64)
+    nlen = np.linalg.norm(n)
+    if nlen < 1e-8:
+        return R
+    n = n / nlen
+    c = float(np.clip(n[1], -1.0, 1.0))  # dot((0,1,0), n)
+    if c > 1.0 - 1e-7:
+        return R
+    if c < -1.0 + 1e-7:
+        R[1, 1] = -1.0  # 180 degrees about X
+        R[2, 2] = -1.0
+        return R
+    axis = np.array([n[2], 0.0, -n[0]])  # cross((0,1,0), n)
+    axis /= np.linalg.norm(axis)
+    s = np.sqrt(max(0.0, 1.0 - c * c))
+    K = np.array([[0.0, -axis[2], axis[1]],
+                  [axis[2], 0.0, -axis[0]],
+                  [-axis[1], axis[0], 0.0]])
+    R[:3, :3] = np.eye(3) + s * K + (1.0 - c) * (K @ K)
+    return R
+
+
+def _build_sdf_model_matrix(sdf_type: int, position, rotation, size) -> np.ndarray:
+    """Build the 4x4 model matrix (T @ R @ S) for an SDF object's debug mesh.
+
+    Planes (type 3) take their orientation from normalize(size), matching
+    eval_sdf in sph_shared.cuh, and ignore the quaternion. Other types use
+    the quaternion rotation (x, y, z, w).
+    """
+    T = np.eye(4, dtype=np.float32)
+    T[0, 3] = position[0]
+    T[1, 3] = position[1]
+    T[2, 3] = position[2]
+
+    if sdf_type == 3:
+        R = _plane_rotation_from_normal(size)
+    else:
+        R = _quat_to_mat4(*rotation)
+
+    # Scale based on SDF type
+    S = np.eye(4, dtype=np.float32)
+    if sdf_type == 0:  # BOX: half_extents map to unit cube [-1,1]
+        S[0, 0] = size[0]
+        S[1, 1] = size[1]
+        S[2, 2] = size[2]
+    elif sdf_type == 1:  # SPHERE: radius (uniform scale)
+        S[0, 0] = S[1, 1] = S[2, 2] = size[0]
+    elif sdf_type == 2:  # CYLINDER: radius for XZ, half_height for Y
+        S[0, 0] = size[0]  # radius
+        S[1, 1] = size[1]  # half_height (size.y, matching sdf_cylinder in sph_shared.cuh)
+        S[2, 2] = size[0]  # radius
+    elif sdf_type == 3:  # PLANE: large flat quad in local XZ, 10m across
+        S[0, 0] = S[2, 2] = 5.0
+
+    return T @ R @ S
+
+
 def _read_shader_source(filename: str) -> str:
     shader_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shaders")
     path = os.path.join(shader_dir, filename)
@@ -1146,42 +1206,8 @@ void main() {
 
     @staticmethod
     def _build_sdf_model_matrix(sdf_type: int, pos: list, rot: list, size: list) -> np.ndarray:
-        """Build 4x4 model matrix from position, quaternion rotation, and size."""
-        # Translation
-        T = np.eye(4, dtype=np.float32)
-        T[0, 3] = pos[0]
-        T[1, 3] = pos[1]
-        T[2, 3] = pos[2]
-
-        # Rotation from quaternion (x,y,z,w)
-        qx, qy, qz, qw = rot
-        R = np.eye(4, dtype=np.float32)
-        R[0,0] = 1 - 2*(qy*qy + qz*qz)
-        R[0,1] = 2*(qx*qy - qw*qz)
-        R[0,2] = 2*(qx*qz + qw*qy)
-        R[1,0] = 2*(qx*qy + qw*qz)
-        R[1,1] = 1 - 2*(qx*qx + qz*qz)
-        R[1,2] = 2*(qy*qz - qw*qx)
-        R[2,0] = 2*(qx*qz - qw*qy)
-        R[2,1] = 2*(qy*qz + qw*qx)
-        R[2,2] = 1 - 2*(qx*qx + qy*qy)
-
-        # Scale based on SDF type
-        S = np.eye(4, dtype=np.float32)
-        if sdf_type == 0:  # BOX: half_extents map to unit cube [-1,1]
-            S[0,0] = size[0]
-            S[1,1] = size[1]
-            S[2,2] = size[2]
-        elif sdf_type == 1:  # SPHERE: radius (uniform scale)
-            S[0,0] = S[1,1] = S[2,2] = size[0]
-        elif sdf_type == 2:  # CYLINDER: radius for XZ, half_height for Y
-            S[0,0] = size[0]  # radius
-            S[1,1] = size[1]  # half_height (size.y, matching sdf_cylinder in sph_shared.cuh)
-            S[2,2] = size[0]  # radius
-        elif sdf_type == 3:  # PLANE: large flat quad
-            S[0,0] = S[2,2] = 5.0  # 10m across
-
-        return T @ R @ S
+        """Build 4x4 model matrix. See module-level _build_sdf_model_matrix."""
+        return _build_sdf_model_matrix(sdf_type, pos, rot, size)
 
     # -----------------------------------------------------------------
     # Cleanup
