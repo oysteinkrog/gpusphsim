@@ -43,10 +43,14 @@ void K_MarkWakeCells(
 
     // Mark cells for two categories of particles:
     // 1. Particles that just woke up this frame (wake cascade)
-    // 2. Active non-sleeping, non-STATIC particles moving fast enough
-    //    (so flowing water wakes sleeping sand in adjacent cells)
+    // 2. Active non-sleeping particles moving fast enough (so flowing water
+    //    wakes sleeping sand in adjacent cells). STATIC never moves. GAS is
+    //    excluded because step1/step2 skip all forces between GAS and
+    //    non-GAS, so a woken pile under a smoke plume would get nothing,
+    //    re-sleep, and be woken again every few substeps.
     bool should_mark = HAS_JUST_WOKE(pi);
-    if (!should_mark && !IS_SLEEPING(pi) && GET_BEHAVIOR(pi) != STATIC) {
+    int beh = GET_BEHAVIOR(pi);
+    if (!should_mark && !IS_SLEEPING(pi) && beh != STATIC && beh != GAS) {
         float4 v = velocity[i];
         float v_sq = v.x*v.x + v.y*v.y + v.z*v.z;
         should_mark = (v_sq > V_WAKE_SQ);

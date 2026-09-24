@@ -67,8 +67,12 @@ def CLEAR_JUST_WOKE(p: int) -> int:
 def CLEAR_SLEEPING(p: int) -> int:
     return p & ~0x400
 
+FLUID = 0
 GRANULAR = 1
+GAS = 2
 SAND = 2
+WATER = 5
+SMOKE = 13
 
 # ---------------------------------------------------------------------------
 # Helper: upload grid params for wake module
@@ -588,6 +592,50 @@ def test_non_sleeping_unaffected() -> None:
     print("  Non-sleeping particles unaffected (correct)")
 
 
+def _moving_particle_above_sleeping_sand(mat_id: int, behavior: int) -> tuple[int, int]:
+    """Run wake propagation with a particle moving up at 2 m/s one cell above
+    a sleeping SAND particle. Returns (packed_info, sleep_counter) of the sand."""
+    setup_params()
+    n = 2
+    pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)
+    pi = cupy.zeros(n, dtype=cupy.uint32)
+    sc = cupy.zeros(n, dtype=cupy.uint8)
+
+    # cell_size = 0.04: mover at (0, 0.04, 0) is one cell above the sand.
+    pos[0] = cupy.array([0.0, 0.04, 0.0, 1.0], dtype=cupy.float32)
+    vel[0] = cupy.array([0.0, 2.0, 0.0, 0.0], dtype=cupy.float32)
+    pi[0] = cupy.uint32(MAKE_PACKED(mat_id, behavior))
+
+    pos[1] = cupy.array([0.0, 0.0, 0.0, 1.0], dtype=cupy.float32)
+    pi[1] = cupy.uint32(SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)))
+    sc[1] = cupy.uint8(200)
+
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=n)
+    return int(pi.get()[1]), int(sc.get()[1])
+
+
+def test_gas_does_not_wake() -> None:
+    """A fast GAS particle gets no forces across phases, so it must not wake
+    a sleeping GRANULAR particle next to it."""
+    print("--- GAS does not wake sleeping sand ---")
+    sand_pi, sand_sc = _moving_particle_above_sleeping_sand(SMOKE, GAS)
+    assert IS_SLEEPING(sand_pi) == 1, "SMOKE moving at 2 m/s woke sleeping SAND"
+    assert sand_sc == 200
+    print("  Sleeping sand stayed asleep under moving smoke (correct)")
+
+
+def test_fluid_wakes_sleeping_sand() -> None:
+    """Control for test_gas_does_not_wake: a FLUID particle in the same place
+    and at the same speed wakes the sand."""
+    print("--- FLUID wakes sleeping sand ---")
+    sand_pi, sand_sc = _moving_particle_above_sleeping_sand(WATER, FLUID)
+    assert IS_SLEEPING(sand_pi) == 0, "WATER moving at 2 m/s should wake SAND"
+    assert sand_sc == 0
+    print("  Sleeping sand woke under moving water (correct)")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -614,6 +662,8 @@ def main() -> None:
     test_diagonal_neighbor_wakes()
     test_two_cells_away_stays_sleeping()
     test_non_sleeping_unaffected()
+    test_gas_does_not_wake()
+    test_fluid_wakes_sleeping_sand()
 
     print()
     print("=" * 60)
