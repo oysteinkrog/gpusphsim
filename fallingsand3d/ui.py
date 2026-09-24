@@ -906,7 +906,12 @@ class UI:
             snaps = getattr(self, 'snapshots', None)
             if snaps is not None:
                 imgui.separator()
+                # max_snapshots is the slot count that fits the VRAM budget
+                # (bd-r5-review-n28.113), which can be below the 12 asked for.
                 imgui.text(f"Snapshots: {snaps.num_snapshots}/{snaps.max_snapshots}")
+                if snaps.max_snapshots < getattr(snaps, 'requested_snapshots', snaps.max_snapshots):
+                    imgui.same_line()
+                    imgui.text_disabled(f"({getattr(snaps, 'budget_bytes', 0) >> 20} MB cap)")
                 imgui.text("Ctrl+Z to undo")
                 if snaps.num_snapshots > 0:
                     old_steps = getattr(self, '_undo_steps', 1)

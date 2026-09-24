@@ -1,7 +1,9 @@
 """GPU-resident ring buffer for undo/replay snapshots.
 
 All copies are GPU-GPU (cupy.copyto), ~0.5ms at 500K particles.
-No CPU transfer in the hot path.
+No CPU transfer in the hot path. The ring is sized to a VRAM budget
+(256 MB by default) and all slots are allocated up front
+(bd-r5-review-n28.113).
 
 When a Simulation is passed in, each slot also holds the rigid body state
 (the GPU body array and the body count), so undo rewinds the bodies together
@@ -16,13 +18,53 @@ import cupy as cp
 import numpy as np
 
 
-class SnapshotRing:
-    """Fixed-size ring buffer of GPU snapshots for undo/replay."""
+# Bytes per particle held in one slot. position, velocity and particle_dye are
+# float4 (16 B each), packed_info and temperature are 4 B, and health,
+# lifetime and mass are stored as float16 (2 B each). Temperature stays
+# float32: fp16 has a 1 K step above 1024 K and 4 K near T_MAX = 5000 K, which
+# would break the 0.5 K round trip for lava and fire (bd-r5-review-n28.113).
+SLOT_BYTES_PER_PARTICLE = 16 + 16 + 16 + 4 + 4 + 2 + 2 + 2  # = 62
 
-    def __init__(self, max_snapshots: int = 12, max_particles: int = 500_000):
-        self.max_snapshots = max_snapshots
+# Per-slot allowance for state that does not scale with particle count: the
+# rigid body array (MAX_RIGID_BODIES = 8 bodies, well under 1 KB) and the CPU
+# SDF copy (not in VRAM). 64 KB is a safe upper bound.
+SLOT_FIXED_BYTES = 64 << 10
+
+# Default VRAM budget for the whole ring.
+DEFAULT_BUDGET_BYTES = 256 << 20
+
+
+def slots_for_budget(max_snapshots: int, max_particles: int,
+                     budget_bytes: int = DEFAULT_BUDGET_BYTES) -> int:
+    """Number of ring slots that fit in ``budget_bytes``.
+
+    Clamped to [2, max_snapshots] (or to max_snapshots when that is below 2),
+    so undo always has at least two slots even when one slot alone is over
+    budget. At 1M particles and 256 MB this gives 4 slots; at 250K, 12.
+    """
+    per_slot = SLOT_BYTES_PER_PARTICLE * max(int(max_particles), 0) + SLOT_FIXED_BYTES
+    fit = int(budget_bytes) // per_slot
+    lo = min(2, max_snapshots)
+    return max(lo, min(fit, max_snapshots))
+
+
+class SnapshotRing:
+    """Fixed-size ring buffer of GPU snapshots for undo/replay.
+
+    ``max_snapshots`` is the most slots wanted; the ring holds fewer when
+    ``budget_bytes`` of VRAM cannot fit that many at ``max_particles``. After
+    construction ``max_snapshots`` is the slot count actually used. All slots
+    are allocated in ``__init__``, so ``capture()`` never allocates particle
+    arrays inside the render loop.
+    """
+
+    def __init__(self, max_snapshots: int = 12, max_particles: int = 500_000,
+                 budget_bytes: int = DEFAULT_BUDGET_BYTES):
+        self.requested_snapshots = max_snapshots
+        self.budget_bytes = budget_bytes
+        self.max_snapshots = slots_for_budget(max_snapshots, max_particles, budget_bytes)
         self.max_particles = max_particles
-        self._slots: list[dict | None] = [None] * max_snapshots
+        self._slots: list[dict | None] = [self._alloc_slot() for _ in range(self.max_snapshots)]
         self._write_idx = 0  # next slot to write
         self._count = 0      # how many valid snapshots
         # Cadence. With a sim time, capture every snapshot_interval_s seconds
@@ -43,9 +85,11 @@ class SnapshotRing:
             "velocity": cp.empty((n, 4), dtype=cp.float32),
             "packed_info": cp.empty(n, dtype=cp.uint32),
             "temperature": cp.empty(n, dtype=cp.float32),
-            "health": cp.empty(n, dtype=cp.float32),
-            "lifetime": cp.empty(n, dtype=cp.float32),
-            "mass": cp.empty(n, dtype=cp.float32),
+            # float16: health is 0..1, lifetime a few seconds, mass about
+            # 0.01; fp16 keeps them within 0.05% (see SLOT_BYTES_PER_PARTICLE).
+            "health": cp.empty(n, dtype=cp.float16),
+            "lifetime": cp.empty(n, dtype=cp.float16),
+            "mass": cp.empty(n, dtype=cp.float16),
             "particle_dye": cp.empty((n, 4), dtype=cp.float32),
             "high_water": 0,
             # Rigid body state, filled when capture() gets a Simulation.

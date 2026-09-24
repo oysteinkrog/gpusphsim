@@ -59,6 +59,7 @@ _cupy_stub.zeros = _zeros
 _cupy_stub.copyto = _copyto
 _cupy_stub.unique = _unique
 _cupy_stub.float32 = np.float32
+_cupy_stub.float16 = np.float16
 _cupy_stub.uint32 = np.uint32
 
 # Import snapshot bound to whatever cupy is present. The tests patch
@@ -68,7 +69,7 @@ _cupy_stub.uint32 = np.uint32
 # `setdefault` was a no-op once the real cupy was loaded, leaving snapshot bound
 # to real cupy and `cp.copyto(numpy, numpy)` failing).
 import snapshot  # noqa: E402
-from snapshot import SnapshotRing  # noqa: E402
+from snapshot import SnapshotRing, slots_for_budget  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +330,111 @@ class TestSnapshotSDFUndo(unittest.TestCase):
         sim.sdf_manager.add_sdf_object(0)
         self.assertTrue(ring.restore(world, steps_back=1, sim=sim))
         self.assertEqual(sim.sdf_manager.count, 1)
+
+
+# ---------------------------------------------------------------------------
+# VRAM budget and fp16 slot fields (bd-r5-review-n28.113)
+# ---------------------------------------------------------------------------
+
+def test_slot_count_from_budget():
+    mb = 1 << 20
+    # 62 B per particle plus a 64 KB fixed part per slot.
+    assert snapshot.SLOT_BYTES_PER_PARTICLE == 62
+    assert slots_for_budget(12, 1_000_000, 256 * mb) == 4
+    assert slots_for_budget(12, 500_000, 256 * mb) == 8
+    assert slots_for_budget(12, 250_000, 256 * mb) == 12
+    assert slots_for_budget(12, 16, 256 * mb) == 12
+    # Never below 2, even when one slot is over budget.
+    assert slots_for_budget(12, 10_000_000, 256 * mb) == 2
+    # Never above the requested count, and a 1-slot request stays 1.
+    assert slots_for_budget(1, 16, 256 * mb) == 1
+    for n in (16, 250_000, 1_000_000, 4_000_000):
+        k = slots_for_budget(12, n, 256 * mb)
+        per_slot = snapshot.SLOT_BYTES_PER_PARTICLE * n + snapshot.SLOT_FIXED_BYTES
+        assert k == 2 or k * per_slot <= 256 * mb
+
+
+def test_ring_uses_budget_slot_count_and_preallocates():
+    real = snapshot.cp
+    snapshot.cp = _cupy_stub
+    try:
+        ring = SnapshotRing(max_snapshots=12, max_particles=MAX_P, budget_bytes=0)
+        assert ring.max_snapshots == 2
+        assert ring.requested_snapshots == 12
+        assert all(slot is not None for slot in ring._slots)
+        assert len(ring._slots) == 2
+        slot = ring._slots[0]
+        for key in ("health", "lifetime", "mass"):
+            assert slot[key].dtype == np.float16
+        for key in ("position", "velocity", "temperature", "particle_dye"):
+            assert slot[key].dtype == np.float32
+    finally:
+        snapshot.cp = real
+
+
+def _need_gpu():
+    try:
+        import cupy as cp
+        cp.cuda.runtime.getDeviceCount()
+        return cp
+    except Exception:
+        import pytest
+        pytest.skip("needs CuPy and a CUDA GPU")
+
+
+def test_ring_memory_at_1m_within_budget_on_gpu():
+    cp = _need_gpu()
+    pool = cp.get_default_memory_pool()
+    cp.cuda.Device().synchronize()
+    before = pool.used_bytes()
+    ring = SnapshotRing(max_snapshots=12, max_particles=1_000_000)
+    used = pool.used_bytes() - before
+    assert ring.max_snapshots == 4
+    assert used <= 256 << 20, f"ring uses {used >> 20} MB"
+    del ring
+
+
+def test_fp16_fields_round_trip_and_capture_does_not_allocate_on_gpu():
+    cp = _need_gpu()
+    from materials import WATER
+    from world import World
+
+    world = World(20_000)
+    world.spawn_cube((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2), WATER, 0.02)
+    n = world._high_water
+    assert n > 1000
+    rng = cp.random.default_rng(7)
+    world.temperature[:n] = rng.uniform(200.0, 5000.0, n).astype(cp.float32)
+    world.health[:n] = rng.uniform(0.01, 1.0, n).astype(cp.float32)
+    world.lifetime[:n] = rng.uniform(0.05, 10.0, n).astype(cp.float32)
+    world.mass[:n] = world.mass[:n] * rng.uniform(0.5, 2.0, n).astype(cp.float32)
+    ref = {k: getattr(world, k)[:n].get()
+           for k in ("temperature", "health", "lifetime", "mass", "position")}
+
+    ring = SnapshotRing(max_snapshots=3, max_particles=world.max_particles)
+    pool = cp.get_default_memory_pool()
+    cp.cuda.Device().synchronize()
+    used0 = pool.used_bytes()
+    total0 = pool.total_bytes()
+    for _ in range(5):  # wraps the ring
+        ring.capture(world)
+    cp.cuda.Device().synchronize()
+    assert pool.used_bytes() == used0, "capture() allocated GPU memory"
+    assert pool.total_bytes() == total0, "capture() grew the memory pool"
+
+    for k in ("temperature", "health", "lifetime", "mass"):
+        getattr(world, k)[:n] = 0
+    assert ring.restore(world, steps_back=1)
+    cp.cuda.Device().synchronize()
+
+    t = world.temperature[:n].get()
+    assert np.max(np.abs(t - ref["temperature"])) <= 0.5
+    for k in ("health", "lifetime", "mass"):
+        got = getattr(world, k)[:n].get().astype(np.float64)
+        want = ref[k].astype(np.float64)
+        rel = np.max(np.abs(got - want) / np.abs(want))
+        assert rel <= 1e-3, f"{k} relative error {rel}"
+    np.testing.assert_array_equal(world.position[:n].get(), ref["position"])
 
 
 if __name__ == "__main__":
