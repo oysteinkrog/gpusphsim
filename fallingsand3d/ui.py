@@ -1085,10 +1085,18 @@ class UI:
                         if obj["type"] != SDF_PLANE:
                             rot = obj["rotation"]
                             euler = _quat_to_euler(rot[0], rot[1], rot[2], rot[3])
+                            # rotate_y motion overwrites rotation every substep,
+                            # so the slider would fight the user. Grey it out.
+                            rot_driven = sdf_mgr._motions.get(oid, {}).get("type") == "rotate_y"
+                            if rot_driven:
+                                imgui.begin_disabled()
                             ch, vals = imgui.slider_float3(f"Rot##{oid}", [euler[0], euler[1], euler[2]], -180.0, 180.0, "%.0f")
-                            if ch:
+                            if ch and not rot_driven:
                                 q = _euler_to_quat(vals[0], vals[1], vals[2])
                                 sdf_mgr.update_sdf_object(oid, rotation=list(q))
+                            if rot_driven:
+                                imgui.end_disabled()
+                                imgui.text_disabled("Rotation driven by kinematic motion")
 
                         # Restitution & friction
                         ch, val = imgui.slider_float(f"Bounce##{oid}", obj["restitution"], 0.0, 1.0, "%.2f")

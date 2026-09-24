@@ -792,9 +792,26 @@ class SDFManager:
             self._dirty = True
 
     def update_sdf_object(self, obj_id: int, **kwargs) -> None:
-        """Update fields of an existing SDF object."""
+        """Update fields of an existing SDF object.
+
+        A position edit on an object with an oscillate_* motion also shifts
+        the motion center by the same amount. update_kinematics rebuilds the
+        position from the center every substep, so without this a drag or a
+        Pos slider edit would snap back on the next unpaused substep.
+        """
         if 0 <= obj_id < len(self._objects):
             obj = self._objects[obj_id]
+            motion = self._motions.get(obj_id)
+            if (
+                "position" in kwargs
+                and motion is not None
+                and motion["type"].startswith("oscillate_")
+            ):
+                new_pos = list(kwargs["position"])
+                old_pos = obj["position"]
+                motion["center"] = [
+                    c + (n - o) for c, n, o in zip(motion["center"], new_pos, old_pos)
+                ]
             for key, val in kwargs.items():
                 if key in obj:
                     obj[key] = list(val) if isinstance(val, (tuple, list)) else val
