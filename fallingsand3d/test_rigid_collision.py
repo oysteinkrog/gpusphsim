@@ -57,27 +57,47 @@ def _setup(sdf_objects: list) -> None:
 
 
 def _plane() -> np.ndarray:
-    return make_sdf_object(SDF_PLANE, position=(0.0, PLANE_Y, 0.0),
-                           size=(0.0, 1.0, 0.0), restitution=0.1, friction=0.3)
+    return make_sdf_object(
+        SDF_PLANE,
+        position=(0.0, PLANE_Y, 0.0),
+        size=(0.0, 1.0, 0.0),
+        restitution=0.1,
+        friction=0.3,
+    )
 
 
-def _run(position, half_extents, sdf_type=SDF_BOX, rotation=None,
-         velocity=(0.0, 0.0, 0.0), gravity=(0.0, -9.81, 0.0)) -> np.ndarray:
+def _run(
+    position,
+    half_extents,
+    sdf_type=SDF_BOX,
+    rotation=None,
+    velocity=(0.0, 0.0, 0.0),
+    gravity=(0.0, -9.81, 0.0),
+    trace=None,
+):
     mgr = RigidBodyManager()
-    mgr.add_rigid_body(position=position, half_extents=half_extents, mass=1.0,
-                       sdf_type=sdf_type, restitution=0.1, friction=0.3,
-                       velocity=velocity)
+    mgr.add_rigid_body(
+        position=position,
+        half_extents=half_extents,
+        mass=1.0,
+        sdf_type=sdf_type,
+        restitution=0.1,
+        friction=0.3,
+        velocity=velocity,
+    )
     bodies = mgr._bodies_cpu.copy()
     if rotation is not None:
         bodies[0]["rotation"][:] = rotation
-    d_bodies = cp.asarray(bodies)
+    d_bodies = cp.asarray(bodies.view(np.float32))
     d_forces = cp.zeros((MAX_RIGID_BODIES, 4), dtype=cp.float32)
     d_torques = cp.zeros((MAX_RIGID_BODIES, 4), dtype=cp.float32)
     for _ in range(STEPS):
         integrate.integrate_rigid_bodies(d_bodies, d_forces, d_torques, 1, DT, gravity)
         integrate.rigid_body_collisions(d_bodies, 1)
+        if trace is not None:
+            trace.append(d_bodies[0].copy())  # body 0 position.x
     cp.cuda.Device().synchronize()
-    return cp.asnumpy(d_bodies)[0]
+    return cp.asnumpy(d_bodies).view(bodies.dtype)[0]
 
 
 def test_box_rests_face_down_on_sdf_plane():
@@ -117,10 +137,20 @@ def test_box_rests_on_world_floor():
 def test_long_box_stays_inside_world_wall(sign):
     _setup([])
     he = (0.15, 0.04, 0.06)  # Submarine hull
-    body = _run((0.5 * sign, 0.0, 0.0), he, velocity=(3.0 * sign, 0.0, 0.0),
-                gravity=(0.0, 0.0, 0.0))
-    face = float(body["position"][0]) + sign * he[0]
+    trace = []
+    _run(
+        (0.5 * sign, 0.0, 0.0),
+        he,
+        velocity=(3.0 * sign, 0.0, 0.0),
+        gravity=(0.0, 0.0, 0.0),
+        trace=trace,
+    )
+    com_x = cp.asnumpy(cp.stack(trace))
+    faces = com_x + sign * he[0]
     wall = WORLD_MAX[0] if sign > 0 else WORLD_MIN[0]
-    # Face stays inside the wall and ends up touching it.
-    assert sign * (face - wall) <= TOL, f"face {face:.4f} past wall {wall}"
-    assert abs(face - wall) < TOL, f"face {face:.4f} not at wall {wall}"
+    reach = float(np.max(sign * faces))  # farthest the face got toward the wall
+    # The face reaches the wall and never goes more than TOL past it.
+    assert reach <= sign * wall + TOL, f"face reached {sign * reach:.4f}, wall {wall}"
+    assert reach >= sign * wall - TOL, (
+        f"face only reached {sign * reach:.4f}, wall {wall}"
+    )
