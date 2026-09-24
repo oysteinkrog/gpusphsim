@@ -98,6 +98,7 @@ void K_Step1(
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         dye_rate_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        position[index_i].w = 2500.0f;  // pack the placeholder density like other particles
         return;
     }
 
@@ -190,8 +191,12 @@ void K_Step1(
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float w_poly6_var = diff * diff * diff;
                             if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
-                            sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
-                            sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                            // A rigid wall dilutes gas exposure but never reacts with it
+                            // (same rule as the same-phase branch, bd-r5-review-n28.66).
+                            if (mat_id_j != MAT_RIGID) {
+                                sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                                sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                            }
                             continue;
                         }
 
@@ -455,6 +460,7 @@ void K_Step1_BuildNL(
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         dye_rate_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        position[index_i].w = 2500.0f;  // pack the placeholder density like other particles
         neighbor_count_out[index_i] = 0;
         return;
     }
@@ -520,8 +526,12 @@ void K_Step1_BuildNL(
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             float w_poly6_var = diff * diff * diff;
                             if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
-                            sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
-                            sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                            // A rigid wall dilutes gas exposure but never reacts with it
+                            // (same rule as the same-phase branch, bd-r5-review-n28.66).
+                            if (mat_id_j != MAT_RIGID) {
+                                sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                                sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                            }
                             // Still record as neighbor for step2
                             if (nl_count < max_nb && index_j != index_i) {
                                 neighbor_indices_out[nl_base + nl_count] = index_j;

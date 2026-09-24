@@ -855,7 +855,8 @@ void K_UpdateBoundaryParticles(
     // Write to main arrays
     int idx = offset + i;
     const float4 old_pos = position_out[idx];  // last substep's boundary position
-    position_out[idx] = make_float4(pos.x, pos.y, pos.z, 0.0f);
+    // .w = 2500: the same placeholder density K_Step1 writes for MAT_RIGID.
+    position_out[idx] = make_float4(pos.x, pos.y, pos.z, 2500.0f);
     velocity_out[idx] = make_float4(vel.x, vel.y, vel.z, 0.0f);
     mass_out[idx] = psi;  // boundary volume as mass
 

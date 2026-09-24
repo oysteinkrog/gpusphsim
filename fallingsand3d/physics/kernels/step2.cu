@@ -273,8 +273,14 @@ void K_Step2(
 
                     float rlen = sqrtf(rlen_sq);
 
-                    // Vorticity eta accumulation (FLUID only, all neighbors -- PERF-002)
-                    if (do_vort_eta) {
+                    int behavior_j = GET_BEHAVIOR(pi_j);
+
+                    // Vorticity eta accumulation (FLUID i, FLUID neighbours only -- PERF-002).
+                    // STATIC (incl. MAT_RIGID), GAS and GRANULAR neighbours carry
+                    // omega = 0 and a rho_j that is not a fluid density, so they
+                    // would point N at the body/phase boundary instead of along
+                    // grad|omega| (bd-r5-review-n28.66).
+                    if (do_vort_eta && behavior_j == FLUID) {
                         float h_rl = h - rlen;
                         float inv_rl = 1.0f / rlen;
                         float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
@@ -286,8 +292,6 @@ void K_Step2(
                         eta_vort.y += wt * omega_diff * gs * r.y;
                         eta_vort.z += wt * omega_diff * gs * r.z;
                     }
-
-                    int behavior_j = GET_BEHAVIOR(pi_j);
 
                     // GAS/non-GAS phase separation: no pressure/viscosity across phases
                     if (is_gas_i != (behavior_j == GAS)) continue;

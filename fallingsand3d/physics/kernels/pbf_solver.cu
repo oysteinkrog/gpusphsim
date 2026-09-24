@@ -946,9 +946,15 @@ void K_PBF_Finalize(
                         float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
                         if (r_sq > h_sq || r_sq < 1e-12f) continue;
 
-                        // Vorticity eta (all neighbors -- PERF-002)
-                        // Use difference form (omega_j - omega_mag_i) to match step2/neighbor_list.
-                        if (do_vort_eta) {
+                        uint pi_j = __ldg(&packed_info[j]);
+                        int bj = GET_BEHAVIOR(pi_j);
+
+                        // Vorticity eta (FLUID neighbours only -- PERF-002).
+                        // Use difference form (omega_j - omega_mag_i) to match step2.
+                        // STATIC (incl. MAT_RIGID), GAS and GRANULAR neighbours have
+                        // omega = 0 and would bias N toward the boundary
+                        // (bd-r5-review-n28.66).
+                        if (do_vort_eta && bj == FLUID) {
                             float rlv = sqrtf(r_sq);
                             float h_rl = h - rlv;
                             float inv_rl = 1.0f / rlv;
@@ -965,8 +971,6 @@ void K_PBF_Finalize(
 
                         if (!do_xsph) continue;
 
-                        uint pi_j = __ldg(&packed_info[j]);
-                        int bj = GET_BEHAVIOR(pi_j);
                         if (bj == GAS) continue;  // no XSPH across phases
 
                         float m_j = __ldg(&mass[j]);

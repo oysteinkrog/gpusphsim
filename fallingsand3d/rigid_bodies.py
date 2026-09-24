@@ -718,7 +718,7 @@ class RigidBodyManager:
             world.position[sl, 0] = wx
             world.position[sl, 1] = wy
             world.position[sl, 2] = wz
-            world.position[sl, 3] = 0.0
+            world.position[sl, 3] = 2500.0  # K_Step1 placeholder density for MAT_RIGID
 
             world.velocity[sl] = 0.0
             world.veleval[sl] = 0.0
