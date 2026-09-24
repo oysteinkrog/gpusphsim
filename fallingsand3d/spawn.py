@@ -127,6 +127,11 @@ def reset_freelist(dead_count: cupy.ndarray) -> None:
 BLOCK_SIZE = 256
 
 
+def _ptr(arr: cupy.ndarray | None):
+    """Array, or a NULL pointer for None."""
+    return arr if arr is not None else np.intp(0)
+
+
 def compute_spawn(
     sorted_packed_info: cupy.ndarray,
     sorted_position: cupy.ndarray,
@@ -143,6 +148,15 @@ def compute_spawn(
     dead_indices: cupy.ndarray,
     dead_count: cupy.ndarray,
     max_displacement: cupy.ndarray | None = None,
+    *,
+    predicted_position: cupy.ndarray | None = None,
+    velocity_h: cupy.ndarray | None = None,
+    pressure: cupy.ndarray | None = None,
+    particle_dye: cupy.ndarray | None = None,
+    angular_velocity: cupy.ndarray | None = None,
+    kappa: cupy.ndarray | None = None,
+    kappa_v: cupy.ndarray | None = None,
+    lambda_pbf: cupy.ndarray | None = None,
 ) -> None:
     """Launch K_SpawnGas kernel.
 
@@ -173,6 +187,21 @@ def compute_spawn(
         Grid reuse tracker. When given, a successful spawn writes the bits of
         +inf into it, so the next grid-reuse decision forces a full sort.
         None passes NULL and the kernel skips the write.
+    predicted_position : cupy.ndarray, (N, 4) float32, optional
+        PBF sorted_predicted_position. Each child gets pos + dt * vel so
+        K_PBF_Finalize does not move it to the dead slot's old position.
+        Pass it for PBF only: DFSPH reuses this buffer as a_press scratch.
+    velocity_h : cupy.ndarray, (N, 2) uint32, optional
+        FP16 velocity mirror that WCSPH step2 reads for neighbours.
+    pressure : cupy.ndarray, (N,) float32, optional
+        WCSPH pre-computed pressure; children get 0 (gas at rest density).
+    particle_dye, angular_velocity : cupy.ndarray, (N, 4) float32, optional
+    kappa, kappa_v, lambda_pbf : cupy.ndarray, (N,) float32, optional
+        Per-slot state the child must not inherit from the dead occupant.
+        Each is zeroed for the claimed slots.
+
+    Any optional array left as None passes NULL. Keep the pointer set fixed
+    per solver so a captured CUDA graph stays valid.
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
@@ -203,6 +232,14 @@ def compute_spawn(
             sorted_shear_rate,
             dead_indices,
             dead_count,
-            max_displacement if max_displacement is not None else np.intp(0),
+            _ptr(max_displacement),
+            _ptr(predicted_position),
+            _ptr(velocity_h),
+            _ptr(pressure),
+            _ptr(particle_dye),
+            _ptr(angular_velocity),
+            _ptr(kappa),
+            _ptr(kappa_v),
+            _ptr(lambda_pbf),
         ),
     )

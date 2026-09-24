@@ -795,11 +795,20 @@ class Simulation:
             sorted_dye_h=sorted_dye_h,
         )
 
-    def _run_reactions_spawn(self, n: int, mark: StageMark = _no_mark) -> None:
+    def _run_reactions_spawn(
+        self,
+        n: int,
+        mark: StageMark = _no_mark,
+        predicted_position: cupy.ndarray | None = None,
+    ) -> None:
         """Common reactions + spawn pass (used by all solvers after density).
 
         mark(label) is called after each stage ('reactions', 'blast', 'spawn');
         only the timed path passes a real callback.
+
+        predicted_position is PBF's sorted_predicted_position: K_PBF_Predict has
+        already run, so K_SpawnGas writes each steam child's prediction there.
+        WCSPH and DFSPH pass None (DFSPH reuses that buffer as a_press scratch).
         """
         w = self.world
         # Reset freelist counter (graph-safe memset)
@@ -836,6 +845,9 @@ class Simulation:
             mark("blast")
 
         # Spawn (always included — zero-cost when no SPAWN_GAS flags set)
+        solver = self._profile.solver_type
+        is_pbf = solver == SolverType.PBF
+        is_wcsph = solver not in (SolverType.PBF, SolverType.DFSPH)
         spawn.compute_spawn(
             w.sorted_packed_info[:n],
             w.sorted_position[:n],
@@ -852,6 +864,17 @@ class Simulation:
             self._dead_indices,
             self._dead_count,
             max_displacement=w.max_displacement,
+            # Per-slot state the child must not inherit from the dead slot. The
+            # pointer set depends only on the solver, so a captured CUDA graph
+            # always sees one fixed set (a solver switch recaptures it).
+            predicted_position=predicted_position,
+            velocity_h=w.sorted_velocity_h if is_wcsph else None,
+            pressure=w.sorted_pressure if is_wcsph else None,
+            particle_dye=w.sorted_particle_dye,
+            angular_velocity=w.sorted_angular_velocity,
+            kappa=None if is_pbf else w.sorted_kappa,
+            kappa_v=None if is_pbf else w.sorted_kappa_v,
+            lambda_pbf=w.sorted_lambda_pbf if is_pbf else None,
         )
         mark("spawn")
 
@@ -1058,8 +1081,10 @@ class Simulation:
         )
         mark("lambda0")
 
-        # 3. Reactions + Spawn
-        self._run_reactions_spawn(n, mark)
+        # 3. Reactions + Spawn (spawn writes the steam children's predictions)
+        self._run_reactions_spawn(
+            n, mark, predicted_position=w.sorted_predicted_position,
+        )
 
         # 4. Solver iterations (fixed count for CUDA graph)
         for i in range(self._profile.pbf_iterations):

@@ -38,6 +38,28 @@
 #define SPAWN_TEMP     373.0f     // steam temperature (K)
 #define SPAWN_LIFETIME   5.0f     // steam lifetime (seconds)
 #define SPAWN_UPKICK     2.0f     // upward velocity kick (m/s)
+#define SPAWN_OFFSET_FRAC 0.3f    // child offset radius / particle_spacing
+#define SPAWN_VEL_SPREAD 0.1f     // outward child velocity spread (m/s)
+#define SPAWN_PI_2_3     2.09439510f  // 2*pi/3
+#define SPAWN_BOUNDARY_MARGIN 1e-4f   // matches BOUNDARY_MARGIN in sph_shared.cuh
+
+/* Integer hash for the per-spawn rotation of the child ring. */
+__device__ inline uint spawn_hash(uint seed) {
+    seed = (seed ^ 61u) ^ (seed >> 16);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
+/* Axis-aligned clamp to the world box (same rule as clamp_boundary). */
+__device__ inline float3 spawn_clamp(float3 p) {
+    p.x = fmaxf(c_sim.world_min.x + SPAWN_BOUNDARY_MARGIN, fminf(p.x, c_sim.world_max.x - SPAWN_BOUNDARY_MARGIN));
+    p.y = fmaxf(c_sim.world_min.y + SPAWN_BOUNDARY_MARGIN, fminf(p.y, c_sim.world_max.y - SPAWN_BOUNDARY_MARGIN));
+    p.z = fmaxf(c_sim.world_min.z + SPAWN_BOUNDARY_MARGIN, fminf(p.z, c_sim.world_max.z - SPAWN_BOUNDARY_MARGIN));
+    return p;
+}
 
 /* ======================================================================
  * K_SpawnGas kernel
@@ -46,7 +68,15 @@
  *   1. Single atomicSub(&dead_count, N) to claim N freelist slots
  *      (all-or-nothing; no partial claims)
  *   2. If old value >= N, read dead_indices at the N claimed positions
- *   3. Write spawned steam particles to those slots
+ *   3. Write spawned steam particles to those slots. The children sit on a
+ *      horizontal ring of radius SPAWN_OFFSET_FRAC * particle_spacing around
+ *      the source, 120 degrees apart, with a hashed ring rotation. Each gets
+ *      src_vel + (0, SPAWN_UPKICK, 0) plus SPAWN_VEL_SPREAD along its ring
+ *      direction (the spreads sum to zero, so momentum is conserved).
+ *      Every per-slot field the solvers read is reset: position.w (steam rest
+ *      density), and when the pointers are non-NULL the PBF predicted
+ *      position, the FP16 velocity mirror, pressure, dye, angular velocity
+ *      and the kappa / kappa_v / lambda warm-start fields.
  *   4. Mark source water particle as DEAD
  *   5. Clear SPAWN_GAS flag
  *   6. Set max_displacement to +inf bits so the next frame does a full sort
@@ -75,7 +105,16 @@ void K_SpawnGas(
     uint*           __restrict__ dead_indices,   // array of dead particle indices
     uint*           __restrict__ dead_count,      // atomic counter
     // --- Grid reuse tracker (may be NULL) ---
-    uint*           __restrict__ max_displacement // float bits of max |dx|^2 since last sort
+    uint*           __restrict__ max_displacement, // float bits of max |dx|^2 since last sort
+    // --- Optional per-slot state (each may be NULL) ---
+    float4*         __restrict__ predicted,        // PBF sorted_predicted_position (PBF only)
+    uint2*          __restrict__ velocity_h,       // FP16 velocity mirror read by step2
+    float*          __restrict__ pressure,         // WCSPH pre-computed pressure read by step2
+    float4*         __restrict__ particle_dye,
+    float4*         __restrict__ angular_velocity,
+    float*          __restrict__ kappa,            // DFSPH density warm start
+    float*          __restrict__ kappa_v,          // DFSPH divergence warm start
+    float*          __restrict__ lambda_pbf        // PBF lambda
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -136,28 +175,64 @@ void K_SpawnGas(
     float cg = c_materials[MAT_STEAM].color_g;
     float cb = c_materials[MAT_STEAM].color_b;
 
+    // Ring rotation: hashed from the source index and position so repeated
+    // spawns do not all line up. The three directions sum to zero.
+    uint seed = spawn_hash(i ^ __float_as_uint(src_pos.x) ^ (__float_as_uint(src_pos.z) * 0x9E3779B9u));
+    float phi0 = (float)(seed & 0xFFFFu) * (SPAWN_PI_2_3 / 65536.0f);
+    float ring_r = SPAWN_OFFSET_FRAC * c_sim.particle_spacing;
+    float steam_rho0 = c_materials[MAT_STEAM].rest_density;
+    float dt = c_sim.dt;
+
     // Write spawned particles to the claimed freelist slots
     for (int k = 0; k < SPAWN_N; k++) {
         uint slot = claimed_slots[k];
 
-        // Position: same as source (they'll spread via SPH forces)
-        position[slot] = src_pos;
+        float s_k, c_k;
+        __sincosf(phi0 + (float)k * SPAWN_PI_2_3, &s_k, &c_k);
 
-        // Velocity: source velocity + upward kick
+        // Position: on the ring around the source. position.w carries the
+        // density WCSPH step2 reads as rho_i, so give it the steam rest
+        // density instead of the source water's ~1000.
+        float3 cpos = spawn_clamp(make_float3(src_pos.x + ring_r * c_k,
+                                              src_pos.y,
+                                              src_pos.z + ring_r * s_k));
+        position[slot] = make_float4(cpos.x, cpos.y, cpos.z, steam_rho0);
+
+        // Velocity: source velocity + upward kick + outward spread
         float4 child_vel;
-        child_vel.x = src_vel.x;
+        child_vel.x = src_vel.x + SPAWN_VEL_SPREAD * c_k;
         child_vel.y = src_vel.y + SPAWN_UPKICK;
-        child_vel.z = src_vel.z;
+        child_vel.z = src_vel.z + SPAWN_VEL_SPREAD * s_k;
         child_vel.w = 0.0f;
         velocity[slot] = child_vel;
         veleval[slot] = child_vel;
+
+        // PBF: K_PBF_Predict already ran and left the dead slot's old
+        // position here. Finalize derives velocity from pred - pos, so
+        // write the child's own prediction.
+        if (predicted != NULL) {
+            float3 pred = spawn_clamp(make_float3(cpos.x + dt * child_vel.x,
+                                                  cpos.y + dt * child_vel.y,
+                                                  cpos.z + dt * child_vel.z));
+            predicted[slot] = make_float4(pred.x, pred.y, pred.z, 1.0f);
+        }
+        // Step2 reads neighbour velocity from the FP16 mirror.
+        if (velocity_h != NULL) store_half4(&velocity_h[slot], child_vel);
+        // Gas EOS p = k * max(rho - rho0, 0) is 0 at rest density.
+        if (pressure != NULL) pressure[slot] = 0.0f;
+        // Do not inherit the dead occupant's dye, spin or warm starts.
+        if (particle_dye != NULL) particle_dye[slot] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (angular_velocity != NULL) angular_velocity[slot] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (kappa != NULL) kappa[slot] = 0.0f;
+        if (kappa_v != NULL) kappa_v[slot] = 0.0f;
+        if (lambda_pbf != NULL) lambda_pbf[slot] = 0.0f;
 
         // Scalar properties
         mass[slot] = child_mass;
         temperature[slot] = SPAWN_TEMP;
         health[slot] = 1.0f;
         lifetime[slot] = SPAWN_LIFETIME;
-        density[slot] = c_materials[MAT_STEAM].rest_density;
+        density[slot] = steam_rho0;
         shear_rate[slot] = 0.0f;
         sleep_counter[slot] = 0;
 
