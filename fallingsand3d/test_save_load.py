@@ -1,14 +1,14 @@
-"""Round-trip tests for save_load.py -- SDF + rigid body serialisation.
+"""Tests for save_load.py: SDF and rigid body serialisation, file validation.
 
-Tests the _serialize_sdf_manager / _restore_sdf_manager and
+The first part tests the _serialize_sdf_manager / _restore_sdf_manager and
 _serialize_rigid_body_manager helpers in isolation (no GPU required for the
-pure-Python parts), plus a JSON round-trip of the full header structure.
+pure-Python parts), plus a JSON round-trip of the full header structure. These
+cover the logic added by bd-mzc.26, bd-unl.13, bd-unl.14 and bd-unl.15.
 
-A full end-to-end test (save_scene / load_scene with a live CuPy world) is
-omitted here because it requires a CUDA GPU and a fully initialised World /
-Simulation / Camera -- integration coverage for that path comes from the app's
-existing preset reload paths.  The helpers tested here exercise the logic added
-by bd-mzc.26, bd-unl.13, bd-unl.14, and bd-unl.15.
+Tests marked with skipif(not _HAS_REAL_CUPY) run save_scene / load_scene on a
+real World and need a CUDA GPU. The full end-to-end round trip (every saved
+array bit-exact, _high_water, material ids, sim_time and camera) is in
+test_state_roundtrip.py.
 """
 
 from __future__ import annotations

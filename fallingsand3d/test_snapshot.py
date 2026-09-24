@@ -7,7 +7,10 @@ Verifies that:
 3. Restored _write_idx moves back so a second undo reads a different (older)
    slot rather than repeating the same slot.
 
-No CUDA GPU required -- stubs out the CuPy dependency with numpy arrays.
+Most tests stub out the CuPy dependency with numpy arrays and need no GPU.
+test_restore_rebuilds_color_on_gpu needs a CUDA GPU. The end-to-end
+capture/restore test on a real World and Simulation is in
+test_state_roundtrip.py.
 """
 
 import sys
