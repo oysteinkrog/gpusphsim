@@ -38,6 +38,50 @@ struct PBFParams {
 
 __constant__ PBFParams c_pbf;
 
+/* One wall plane of the PBF world box. `pn` is the position component along
+ * the wall normal, `vn` the velocity component, `vt1`/`vt2` the tangential
+ * components. `sign` is -1 for a min wall (inside is pn > wall) and +1 for a
+ * max wall. Contact is `pn <= wall` (min) or `pn >= wall` (max) with velocity
+ * into the wall. */
+__device__ inline void pbf_box_wall(
+    float& pn, float& vn, float& vt1, float& vt2,
+    float wall, float sign, float restitution, float mu_wall
+) {
+    if (sign * (pn - wall) < 0.0f) return;   // strictly inside
+    pn = wall;
+    if (sign * vn <= 0.0f) return;           // not moving into the wall
+    float v_in = vn;
+    vn = -restitution * v_in;
+    float ts = sqrtf(vt1 * vt1 + vt2 * vt2);
+    if (ts > 1e-8f) {
+        float red = fminf(mu_wall * fabsf(v_in) / ts, 1.0f);
+        vt1 *= (1.0f - red);
+        vt2 *= (1.0f - red);
+    }
+}
+
+/* World box collision for K_PBF_Finalize. Same impulse as sdf_box_boundary
+ * (restitution on the normal velocity, Coulomb wall friction on the
+ * tangential velocity), but contact includes a particle sitting exactly on
+ * the margin. K_PBF_Predict and K_PBF_ApplyDelta already clamp the predicted
+ * position to world_min + BOUNDARY_MARGIN, so with sdf_box_boundary's strict
+ * `<` test Finalize never saw the impact (bd-r5-review-n28.70). A resting
+ * particle has zero normal velocity, so the `<=` contact leaves it unchanged. */
+__device__ inline void pbf_box_boundary(
+    float3& pos, float3& vel,
+    float3 world_min, float3 world_max,
+    float restitution, float mu_wall
+) {
+    float3 wmin = make_float3(world_min.x + BOUNDARY_MARGIN, world_min.y + BOUNDARY_MARGIN, world_min.z + BOUNDARY_MARGIN);
+    float3 wmax = make_float3(world_max.x - BOUNDARY_MARGIN, world_max.y - BOUNDARY_MARGIN, world_max.z - BOUNDARY_MARGIN);
+    pbf_box_wall(pos.x, vel.x, vel.y, vel.z, wmin.x, -1.0f, restitution, mu_wall);
+    pbf_box_wall(pos.x, vel.x, vel.y, vel.z, wmax.x, +1.0f, restitution, mu_wall);
+    pbf_box_wall(pos.y, vel.y, vel.x, vel.z, wmin.y, -1.0f, restitution, mu_wall);
+    pbf_box_wall(pos.y, vel.y, vel.x, vel.z, wmax.y, +1.0f, restitution, mu_wall);
+    pbf_box_wall(pos.z, vel.z, vel.x, vel.y, wmin.z, -1.0f, restitution, mu_wall);
+    pbf_box_wall(pos.z, vel.z, vel.x, vel.y, wmax.z, +1.0f, restitution, mu_wall);
+}
+
 /* Add F_on_body and its torque about the body centre to the accumulators of
  * the body that owns boundary particle j. */
 __device__ inline void pbf_rigid_reaction(
@@ -986,9 +1030,10 @@ void K_PBF_Finalize(
         i, c_sim.restitution
     );
 
-    // World box boundary collision
+    // World box boundary collision: restitution + wall friction. Uses the
+    // PBF variant because pred is already clamped to the wall margin.
     float friction = (behavior == FLUID) ? 0.0f : c_sim.wall_friction;
-    sdf_box_boundary(final_pos, vel_new, c_sim.world_min, c_sim.world_max,
+    pbf_box_boundary(final_pos, vel_new, c_sim.world_min, c_sim.world_max,
                      c_sim.restitution, friction);
 
     // SDF object collision with velocity reflection
