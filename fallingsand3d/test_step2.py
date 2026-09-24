@@ -474,6 +474,38 @@ def test_xsph_not_for_granular() -> None:
     print("[OK] GRANULAR particles -> veleval unchanged (no XSPH)")
 
 
+@pytest.mark.parametrize("sleeping", [True, False], ids=["sleeping", "awake"])
+def test_xsph_skips_granular_neighbour(sleeping: bool) -> None:
+    """FLUID XSPH ignores GRANULAR neighbours (bd-r5-review-n28.104).
+
+    Water sliding over a sand bed must advect at its own velocity: the XSPH
+    sum over a single GRANULAR neighbour is 0, so veleval == v exactly.
+    """
+    _upload_all_params()
+
+    vel_a = [1.0, 0.0, 0.0]
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[H * 0.3, 0.0, 0.0],
+        vel_a=vel_a,
+        vel_b=[0.0, 0.0, 0.0],
+        density_a=2500.0,
+        density_b=2500.0,
+        mat_id_a=5,  # WATER
+        bclass_a=FLUID,
+        mat_id_b=2,  # SAND
+        bclass_b=GRANULAR,
+        sleeping_b=sleeping,
+    )
+
+    _, veleval_out = _step2_original_order(data)
+    vels = cupy.asnumpy(veleval_out)
+
+    assert np.array_equal(vels[0, :3], np.array(vel_a, dtype=np.float32)), (
+        f"FLUID veleval moved off v by GRANULAR neighbour: {vels[0, :3]}"
+    )
+
+
 def test_viscosity_force() -> None:
     """Viscosity force opposes relative motion between neighbors."""
     print("\n--- Viscosity force test ---")
@@ -998,6 +1030,8 @@ def main() -> None:
     test_sleeping_skipped()
     test_xsph_fluid_only()
     test_xsph_not_for_granular()
+    test_xsph_skips_granular_neighbour(True)
+    test_xsph_skips_granular_neighbour(False)
     test_viscosity_force()
     test_granular_pressure_clamp()
     test_granular_muI_viscosity()
