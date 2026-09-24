@@ -166,6 +166,21 @@ the kernel-sum density of a mass-0.02 cubic lattice at the target gas spacing, a
 
 **STATIC neighbors included** in force loop (Akinci boundary: pressure mirroring `2*p_i/rho_i^2` + viscous drag with vel_j=0).
 
+The two boundary types use different pressure mirrors:
+
+- Regular STATIC wall: `m_j * 2*p_i/rho_i^2 * grad_W`.
+- MAT_RIGID body particle: `psi_b * (p_i/rho_i^2 + p_i/rho0_i^2) * grad_W`, with
+  `psi_b = rho0_i * V_b` (22.3, 22.5).
+
+They agree only at `rho_i = rho0_i`. In the WCSPH Archimedes Pool the water sits
+at about 2.1 rho0 (median `rho/rho0` 2.11 after 8 s), where the rigid form is
+about 2.5x stronger. Switching rigid bodies to the wall form was measured and
+kept out (bd-r5-review-n28.106): over 8 s the medium (4.3 kg) body sank 4 cm
+deeper and the heavy (12 kg) body 2 cm deeper, and water inside the medium and
+heavy boxes went from 1 and 90 particles to 153 and 298. Unifying the two needs
+the WCSPH over-compression fixed first, or both boundary types moved to the
+rigid form and walls retuned.
+
 Standard SPH:
 ```
 a_pressure_i = -SUM_j m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_W_spiky(r_ij)
