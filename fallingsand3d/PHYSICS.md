@@ -1911,7 +1911,7 @@ some compression for granular packing without destabilizing the solver.
 Enforces divergence-free velocity field:
 ```
 div_v_i = SUM_j (m_j/rho_j) * (v*_i - v*_j) . grad_W_ij     [> 0 = compressing]
-kappa_v_i = max(div_v_i, 0) * omega * alpha_i / dt
+kappa_v_i = max(div_v_i, 0) * omega * alpha_i / dt      [0 if N_i < 20]
 dv_i = -dt * SUM_j m_j * (kappa_v_i/rho_i + kappa_v_j/rho_j) * grad_W_ij
 v*_i += dv_i
 ```
@@ -1931,8 +1931,18 @@ SPlisHSPlasH does (`densityAdv = max(densityAdv, 0)`). Only compressing flow is 
 separating particles (splashes, a thinning sheet, the free surface) are left alone.
 With the bilateral form and alpha at 1/denom the Jacobi iteration diverged: on a settling
 36K WATER block the mean |div_v| rose by 50 to 170 percent per substep and KE stayed above
-1400 (a boiling surface). The neighbour-count gate (`normal.w < 20`) that SPlisHSPlasH
-also applies is bead bd-r5-review-n28.71.
+1400 (a boiling surface).
+
+**Neighbour-count gate (bd-r5-review-n28.71).** `K_DFSPH_ComputeKappaV` takes
+`normal_in` (sorted_normal from 13.2) and sets `kappa_v = 0` when its `.w` neighbour count
+`N_i` is below 20 (`DFSPH_DIV_MIN_NEIGHBORS`), as SPlisHSPlasH does in 3D. With a truncated
+kernel the divergence estimate is biased, so the solve is skipped. `N_i` counts every
+non-GAS neighbour with mass, MAT_RIGID included (bd-r5-review-n28.68), so fluid pressed
+against a rigid body keeps its solve. At spacing 0.02 and h = 0.04 an interior particle has
+about 30 neighbours and a face particle about 19, so the outer layer of a block is gated;
+in an 11^3 block 566 of 1331 particles are below 20. `normal_in = None` turns the gate off,
+and `Simulation._run_dfsph_body` does not pass `normal_in` yet, so the gate is off in the running
+simulation until that call is wired. The density solver (13.4) is not gated.
 
 Iterations: 3 (Stable) or 2 (Fast). Each iteration requires two neighbor passes (compute
 kappa_v, then correct velocity). On a settling 36K block at the Stable profile the
