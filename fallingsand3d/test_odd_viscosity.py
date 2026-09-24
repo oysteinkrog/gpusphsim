@@ -159,10 +159,10 @@ def test_null_control_parity_symmetric():
 
 
 @pytest.mark.xfail(strict=False, reason=(
-    "First GPU run (2026-09-24): net L_z drift is huge but not monotone in eps "
-    "(5.7e-5 at 0, 1.92 at 0.05, 1.82 at 0.10), so F2 fails as written. The "
-    "size of the drift points at vorticity confinement injecting net angular "
-    "momentum; tracked as a bead."))
+    "Measured 2026-09-24 with correct density_in: net L_z drift is 2.9e-8, 1.1e-7 and "
+    "4.2e-7 at eps 0, 0.05 and 0.10, far below MIN_DRIFT. No measurable chiral spin-up, "
+    "so F2 fails. An earlier run showed drift ~1.9, caused by a density_in bug that "
+    "inflated vorticity about 2500x."))
 def test_chiral_spinup_scales_with_confinement():
     """F2: parity-broken confinement induces net L_z that grows with eta_o."""
     eps = [0.0, 0.05, 0.10]
@@ -180,6 +180,10 @@ def test_chiral_spinup_scales_with_confinement():
     )
 
 
+@pytest.mark.xfail(strict=False, reason=(
+    "Measured 2026-09-24 with correct density_in: transverse RMS v_x is 2.822e-3 with and "
+    "without confinement, so F3 fails. The earlier 0.366 vs 0.584 came from the density_in "
+    "bug that inflated vorticity about 2500x."))
 def test_transverse_shear_coupling():
     """
     F3 (SPH analogue of CPU-rig TEST 1): a pure shear (v_y varying in x) should,

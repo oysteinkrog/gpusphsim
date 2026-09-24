@@ -1059,3 +1059,25 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_wcsph_density_in_carries_previous_density(world, sim):
+    """Regression (round-5 bead 0-density-w-carry): WCSPH step1 reads neighbour
+    density from sorted_density_prev, which is copied from sorted_position.w.
+    K_Integrate used to write .w = 1.0 for every awake particle, so from the
+    second substep every awake neighbour had rho_j = 1 instead of ~1000-2500,
+    inflating heat, vorticity, normals and strain rate by that factor."""
+    n = spawn_scene(world)
+    sim.set_solver_profile(PROFILES["WCSPH"])
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+    for _ in range(3):
+        sim._sim_step(n)
+    # One more substep: density_in for it is the density computed last substep.
+    sim._sim_step(n)
+    prev = cp.asnumpy(world.sorted_density_prev[:n])
+    info = cp.asnumpy(world.sorted_packed_info[:n])
+    live = (info & 0xFF) != 0  # not MAT_DEAD
+    frac_unit = float(np.mean(np.abs(prev[live] - 1.0) < 1e-3))
+    assert frac_unit < 0.01, f"{frac_unit:.1%} of density_in entries are 1.0"
+    assert np.median(prev[live]) > 100.0, f"median density_in {np.median(prev[live]):.2f}"

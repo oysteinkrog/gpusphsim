@@ -101,10 +101,14 @@ drives `_sim_step` directly.
 
 | Test | Result |
 |---|---|
-| F1 null control (`eps = 0`) | Holds. Drift 2.5e-6 and 5.7e-5 across two runs. |
-| F2 spin-up scales with `eps` | Fails as written. Drift is 1.92 at `eps = 0.05` and -1.82 at `eps = 0.10`: very large, but not monotone. |
-| F3 transverse shear coupling | Holds. Transverse RMS `v_x` is 0.366 symmetric and 0.584 parity-broken. |
+| F1 null control (`eps = 0`) | Holds. Drift 2.9e-8 to 1.2e-7. |
+| F2 spin-up scales with `eps` | Fails. Drift is 1.1e-7 at `eps = 0.05` and 4.2e-7 at `eps = 0.10`. It grows with `eps` but stays near the noise floor, far below the 5e-5 the theory needs. |
+| F3 transverse shear coupling | Fails. Transverse RMS `v_x` is 2.822e-3 with and without confinement. |
 
-A starting net `L_z` of about 2e-9 grows to about 1.9 once confinement is on.
-Whatever the theory says, that is a momentum-conservation bug in the vorticity
-confinement force (see PROBLEMS.md G3 and PHYSICS.md section 16).
+On this code, at these flow amplitudes, the theory is falsified: the
+parity-broken confinement term produces no measurable odd-viscosity signature.
+
+A first pass the same day reported drift of about 1.9 and a transverse response
+of 0.366 vs 0.584. Both came from a `density_in` bug on master at the time
+(`K_Integrate` wrote `position.w = 1.0`, so step1 used `rho_j = 1` and vorticity
+was about 2500x too large). They are not evidence for the theory.

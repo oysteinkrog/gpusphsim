@@ -965,6 +965,12 @@ Each item names its bead (`bd-r4fix-uup.N`).
   - `density_in` is a separate buffer, `sorted_density_prev`.
   - WCSPH fills it from `position.w`, which holds the previous density and is
     re-ordered with the position, so the values match the current sort order.
+    K_Step1 writes the density into sorted `.w`, and `K_Integrate` carries it to
+    the unsorted `position.w` for awake particles (STATIC and sleeping particles
+    pass `.w` through unchanged). Until 2026-09-24 `K_Integrate` wrote `.w = 1.0`
+    for awake particles, so from the second substep every awake neighbour had
+    `rho_j = 1` and every `m_j / rho_j` term in step1 was about 1000 to 2500
+    times too large. `test_wcsph_density_in_carries_previous_density` covers it.
   - PBF and DFSPH fill it from `sorted_density`. This removes the race, but the
     values are still in the previous sort order after a full re-sort. The
     effect is bounded noise in the weighting, not a blow-up.
