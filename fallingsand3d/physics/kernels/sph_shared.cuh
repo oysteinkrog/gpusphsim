@@ -553,6 +553,7 @@ __device__ inline void static_particle_boundary(
                     uint pi_j = __ldg(&packed_info[j]);
                     if (GET_BEHAVIOR(pi_j) != STATIC) continue;
                     if (GET_MATERIAL_ID(pi_j) == MAT_RIGID) continue; // Akinci handled by pressure coupling
+                    if (GET_MATERIAL_ID(pi_j) == MAT_DEAD) continue;  // free slot, not a wall
                     float4 pos4_j = __ldg(&position[j]);
                     float3 r = make_float3(
                         pos.x - pos4_j.x,

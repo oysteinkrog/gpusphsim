@@ -24,7 +24,6 @@
  * Material IDs (must match materials.py)
  * ====================================================================== */
 
-#define MAT_DEAD       0
 #define MAT_STONE      1
 #define MAT_SAND       2
 #define MAT_DIRT       3
@@ -107,7 +106,11 @@ void K_Reactions(
     const float*    __restrict__ exposure_corrode,  // corrosion exposure accumulator
     // --- Freelist output (for spawn system) ---
     uint*           __restrict__ dead_indices,      // array of dead particle indices
-    uint*           __restrict__ dead_count          // atomic counter
+    uint*           __restrict__ dead_count,         // atomic counter
+    // --- Sorted mass (write-only on death; NULL skips the write) ---
+    // Dead slots must have mass 0, or they act as invisible boundary
+    // particles in every m_j-weighted neighbour sum (bd-r5-review-n28.23).
+    float*          __restrict__ mass
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -123,6 +126,7 @@ void K_Reactions(
     // almost never finds a slot to spawn steam into (bd-r4fix-uup.15).
     // Capacity: dead_indices holds max_particles >= numParticles entries.
     if (mat_id == MAT_DEAD) {
+        if (mass != 0) mass[i] = 0.0f;  // defensive: every dead slot is massless
         if (dead_indices != 0 && dead_count != 0) {
             uint idx = atomicAdd(dead_count, 1u);
             dead_indices[idx] = i;
@@ -291,6 +295,7 @@ void K_Reactions(
         if (hlth <= 0.0f) {
             packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
             health[i] = 0.0f;
+            if (mass != 0) mass[i] = 0.0f;
             if (dead_indices != 0 && dead_count != 0) {
                 uint idx = atomicAdd(dead_count, 1u);
                 dead_indices[idx] = i;
@@ -315,6 +320,7 @@ void K_Reactions(
                 packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
                 lifetime[i] = 0.0f;
                 health[i] = 0.0f;
+                if (mass != 0) mass[i] = 0.0f;
                 if (dead_indices != 0 && dead_count != 0) {
                     uint idx = atomicAdd(dead_count, 1u);
                     dead_indices[idx] = i;

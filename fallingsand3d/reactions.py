@@ -124,6 +124,7 @@ def compute_reactions(
     dead_indices: Optional[cupy.ndarray] = None,
     dead_count: Optional[cupy.ndarray] = None,
     frame: Optional[int] = None,
+    sorted_mass: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_Reactions kernel.
 
@@ -158,6 +159,10 @@ def compute_reactions(
     frame : int, optional
         Legacy scalar frame counter. If provided and ``frame_d`` is None,
         a temporary device buffer is created (not graph-safe).
+    sorted_mass : cupy.ndarray, optional
+        (N,) float32 sorted mass. Set to 0 for every DEAD slot, including
+        particles that die this call (consumed acid, expired gas). The
+        simulation always passes it; None skips the write (unit tests).
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
@@ -177,6 +182,7 @@ def compute_reactions(
     # Pass null (0) pointers when freelist not provided
     d_dead_indices = dead_indices if dead_indices is not None else np.intp(0)
     d_dead_count = dead_count if dead_count is not None else np.intp(0)
+    d_mass = sorted_mass if sorted_mass is not None else np.intp(0)
 
     kernel(
         grid,
@@ -193,6 +199,7 @@ def compute_reactions(
             sorted_exposure_corrode,
             d_dead_indices,
             d_dead_count,
+            d_mass,
         ),
     )
 

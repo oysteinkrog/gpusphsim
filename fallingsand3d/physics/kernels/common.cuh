@@ -212,6 +212,11 @@ __constant__ PrecalcParams c_precalc;
 /* MAT_RIGID material ID -- Akinci boundary particles (must match materials.py) */
 #define MAT_RIGID 18
 
+/* MAT_DEAD material ID -- free slot (must match materials.DEAD).  Dead slots are
+ * STATIC with mass 0, so every m_j-weighted neighbour term is zero, and
+ * static_particle_boundary skips them (bd-r5-review-n28.23). */
+#define MAT_DEAD 0
+
 /* ======================================================================
  * Array type conventions (documented per acceptance criteria)
  *

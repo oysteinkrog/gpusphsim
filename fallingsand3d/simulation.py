@@ -761,6 +761,7 @@ class Simulation:
             frame_d=self._frame_counter_d,
             dead_indices=self._dead_indices,
             dead_count=self._dead_count,
+            sorted_mass=w.sorted_mass[:n],
         )
         mark("reactions")
 
