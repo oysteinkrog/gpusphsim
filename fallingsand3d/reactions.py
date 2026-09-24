@@ -3,7 +3,7 @@
 Compiles physics/kernels/reactions.cu via CuPy RawModule and provides
 a function to launch K_Reactions which performs:
   - ICE -> WATER (temp > 273K)
-  - LAVA -> STONE (temp < 900K)
+  - LAVA -> GRAVEL (GRANULAR, temp < LAVA temp_melt = 1000K)
   - WATER -> SPAWN_GAS flag (temp > 373K)
   - STEAM -> WATER (temp < 373K)
   - WOOD/OIL/GUNPOWDER -> FIRE (exposure_heat threshold)

@@ -9,7 +9,7 @@ Acceptance criteria:
   - Sand: drops and forms a pile (doesn't flatten completely due to mu(I))
   - Water: flows, pools at bottom
   - Oil: lower density than water (floats if placed on top of water)
-  - Lava: very viscous, cools to stone when temperature drops below 900K
+  - Lava: very viscous, cools to gravel when temperature drops below 1000K
   - Acid: reduces health of nearby metal/stone/wood particles
   - Wood: transitions to FIRE when exposure_heat exceeds threshold
   - Ice: melts to water when temperature > 273K
@@ -690,10 +690,12 @@ def test_lava_cools_to_stone():
     temp_h = w["temperature"].get()
     counts = count_materials(pi_h)
 
-    stone_count = counts.get(STONE, 0)
+    # Cooled lava becomes GRAVEL (GRANULAR), so it keeps falling until
+    # supported (bd-r5-review-n28.112).
+    stone_count = counts.get(GRAVEL, 0)
     lava_count = counts.get(LAVA, 0)
 
-    # Most lava should have turned to stone after cooling below temp_melt=1000K
+    # Most lava should have solidified after cooling below temp_melt=1000K
     assert stone_count > 0, \
         f"No lava solidified to stone (lava={lava_count}, stone={stone_count})"
 

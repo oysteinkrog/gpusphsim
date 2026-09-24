@@ -3,7 +3,7 @@
 Acceptance criteria:
   - ICE (mat=11, temp > 273K) -> WATER (mat=5, FLUID)
   - WATER (mat=5, temp < 263K, sleeping or |v| < 0.02 m/s) -> ICE (mat=11, STATIC)
-  - LAVA (mat=7, temp < 900K) -> STONE (mat=1, STATIC)
+  - LAVA (mat=7, temp < 1000K) -> GRAVEL (mat=4, GRANULAR)
   - WATER (mat=5, temp > 373K) -> set SPAWN_GAS flag
   - WOOD (mat=9, exposure_heat > 500 K) -> FIRE (mat=14, GAS, T=1200K, lifetime=1.0s)
   - OIL (mat=6, exposure_heat > 300 K) -> FIRE (mat=14, GAS, T=1200K, lifetime=1.5s)
@@ -40,7 +40,7 @@ from step1 import (
 )
 from materials import (
     FLUID, GRANULAR, GAS, STATIC,
-    DEAD, STONE, SAND, DIRT, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER,
+    DEAD, STONE, SAND, DIRT, GRAVEL, WATER, OIL, LAVA, WOOD, METAL, ICE, STEAM, FIRE, GUNPOWDER,
     MUD, WET_SAND,
     build_material_array,
 )
@@ -222,16 +222,79 @@ def test_moving_water_does_not_freeze():
 
 
 def test_lava_solidifies_to_stone():
-    """LAVA at temp < 900K transitions to STONE (STATIC)."""
+    """LAVA below its temp_melt (1000 K) becomes GRAVEL (GRANULAR), not STATIC
+    STONE, so cooled lava still falls until supported (bd-r5-review-n28.112)."""
     setup_params()
     d = make_particles(100, LAVA, FLUID, temp=800.0)
     compute_reactions(**d)
 
     pi = d["sorted_packed_info"].get()
     for i in range(100):
-        assert GET_MATERIAL_ID(int(pi[i])) == STONE, f"Particle {i}: expected STONE"
-        assert GET_BEHAVIOR(int(pi[i])) == STATIC, f"Particle {i}: expected STATIC"
+        assert GET_MATERIAL_ID(int(pi[i])) == GRAVEL, f"Particle {i}: expected GRAVEL"
+        assert GET_BEHAVIOR(int(pi[i])) == GRANULAR, f"Particle {i}: expected GRANULAR"
     print("PASS: test_lava_solidifies_to_stone")
+
+
+def test_cooled_lava_falls_to_floor_and_sleeps():
+    """A cooled lava particle 0.5 m above the floor falls, lands and sleeps.
+
+    Full pipeline (step1, reactions, step2, integrate). The particle starts
+    as LAVA at 990 K, below temp_melt, so the first substep turns it into
+    GRAVEL. It must reach the floor (y = -1.0) and sleep within 1 s of
+    landing (bd-r5-review-n28.112). Before the fix it became STATIC STONE
+    and stayed at y = -0.5.
+    """
+    from test_integration_15mat import (
+        setup_all_modules, run_full_pipeline_step, MATERIALS as _MATS,
+    )
+    from build_grid import allocate_cell_tables
+    from hash_sort import build_grid_params
+
+    setup_all_modules()
+    grid_params = build_grid_params()
+    cell_start, cell_end = allocate_cell_tables()
+
+    n = 1
+    pos = np.array([[0.0, -0.5, 0.0, 1.0]], dtype=np.float32)
+    w = {
+        "position": cupy.asarray(pos),
+        "velocity": cupy.zeros((n, 4), dtype=cupy.float32),
+        "veleval": cupy.zeros((n, 4), dtype=cupy.float32),
+        "mass": cupy.full(n, _MATS[LAVA].rest_density * SPACING**3, dtype=cupy.float32),
+        "packed_info": cupy.full(n, MAKE_PACKED(LAVA, FLUID), dtype=cupy.uint32),
+        "temperature": cupy.full(n, 990.0, dtype=cupy.float32),
+        "health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "lifetime": cupy.zeros(n, dtype=cupy.float32),
+        "sleep_counter": cupy.zeros(n, dtype=cupy.uint8),
+        "shear_rate": cupy.zeros(n, dtype=cupy.float32),
+        "color": cupy.zeros((n, 4), dtype=cupy.float32),
+    }
+
+    # Free fall of 0.5 m takes about 0.32 s at g = 9.8. Stop at the first
+    # substep the particle is within 2 spacings of the floor.
+    landed_step = None
+    for step in range(1000):
+        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        if float(w["position"][0, 1].get()) < -1.0 + 2 * SPACING:
+            landed_step = step
+            break
+    pi = int(w["packed_info"].get()[0])
+    assert GET_MATERIAL_ID(pi) == GRAVEL, f"expected GRAVEL, got material {GET_MATERIAL_ID(pi)}"
+    assert GET_BEHAVIOR(pi) == GRANULAR
+    assert landed_step is not None, (
+        f"cooled lava did not reach the floor, y = {float(w['position'][0, 1].get()):.3f}")
+
+    # Sleep within 1 s (1000 substeps at dt = 1 ms) after landing.
+    slept = False
+    for step in range(1000):
+        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end,
+                                   frame=landed_step + 1 + step)
+        if (int(w["packed_info"].get()[0]) >> 10) & 1:
+            slept = True
+            break
+    y = float(w["position"][0, 1].get())
+    assert slept, f"cooled lava on the floor did not sleep within 1 s (y = {y:.4f})"
+    assert y < -1.0 + 2 * SPACING, f"sleeping particle left the floor, y = {y:.4f}"
 
 
 def test_lava_stays_liquid():
@@ -451,7 +514,7 @@ def test_dead_particles_unchanged():
 
 
 def test_ice_lava_together():
-    """Ice and lava together: ice melts to water, lava solidifies to stone."""
+    """Ice and lava together: ice melts to water, lava solidifies to gravel."""
     setup_params()
     n = 200
     packed_info = np.zeros(n, dtype=np.uint32)
@@ -489,10 +552,10 @@ def test_ice_lava_together():
         assert GET_MATERIAL_ID(int(pi[i])) == WATER, f"ICE particle {i}: expected WATER"
         assert GET_BEHAVIOR(int(pi[i])) == FLUID
 
-    # Next 100: LAVA -> STONE
+    # Next 100: LAVA -> GRAVEL
     for i in range(100, 200):
-        assert GET_MATERIAL_ID(int(pi[i])) == STONE, f"LAVA particle {i}: expected STONE"
-        assert GET_BEHAVIOR(int(pi[i])) == STATIC
+        assert GET_MATERIAL_ID(int(pi[i])) == GRAVEL, f"LAVA particle {i}: expected GRAVEL"
+        assert GET_BEHAVIOR(int(pi[i])) == GRANULAR
 
     print("PASS: test_ice_lava_together")
 
@@ -972,7 +1035,7 @@ def test_ice_melt_clamps_temperature():
 
 
 def test_lava_solidify_clamps_temperature():
-    """LAVA 10 K below temp_melt becomes STONE at exactly temp_melt."""
+    """LAVA 10 K below temp_melt becomes GRAVEL at exactly temp_melt."""
     setup_params()
     t_melt = _temp_melt(LAVA)
     d = make_particles(1, LAVA, FLUID, temp=t_melt - 10.0)
@@ -980,7 +1043,7 @@ def test_lava_solidify_clamps_temperature():
 
     pi = int(d["sorted_packed_info"].get()[0])
     temp = float(d["sorted_temperature"].get()[0])
-    assert GET_MATERIAL_ID(pi) == STONE
+    assert GET_MATERIAL_ID(pi) == GRAVEL
     assert temp == np.float32(t_melt), f"expected {t_melt} K after solidifying, got {temp}"
 
 
@@ -1006,6 +1069,7 @@ if __name__ == "__main__":
         test_ice_melts_to_water,
         test_ice_stays_frozen,
         test_lava_solidifies_to_stone,
+        test_cooled_lava_falls_to_floor_and_sleeps,
         test_lava_stays_liquid,
         test_water_boils_sets_spawn_flag,
         test_water_cool_no_spawn,
@@ -1064,7 +1128,7 @@ if __name__ == "__main__":
     (WET_SAND, GRANULAR, SAND, {"exposure_corrode": 0.01}),
     (DIRT, GRANULAR, MUD, {"exposure_corrode": 0.3}),
     (STONE, STATIC, LAVA, {"temp": 1600.0}),
-    (LAVA, FLUID, STONE, {"temp": 900.0}),
+    (LAVA, FLUID, GRAVEL, {"temp": 900.0}),
     (ICE, STATIC, WATER, {"temp": 280.0}),
     (OIL, FLUID, FIRE, {"exposure_heat": 400.0}),
     (GUNPOWDER, GRANULAR, FIRE, {"exposure_heat": 200.0}),

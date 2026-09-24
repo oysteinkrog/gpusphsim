@@ -102,7 +102,7 @@
  * changes material has its mass rescaled by the ratio of the two scale
  * factors, so it keeps resting at the new material's rho0:
  *   SAND -> WET_SAND x1.125, DIRT -> MUD x1.2, STONE -> LAVA x2.6,
- *   LAVA -> STONE /2.6, OIL -> FIRE back to PARTICLE_MASS.
+ *   LAVA -> GRAVEL x(4250/6500), OIL -> FIRE back to PARTICLE_MASS.
  * Mass is not conserved across these transitions; the rest volume is.
  * MASS_REF_DENSITY must match world.MASS_REF_DENSITY.
  * ====================================================================== */
@@ -233,11 +233,14 @@ void K_Reactions(
         return;
     }
 
-    // LAVA (mat=7, temp < temp_melt) -> STONE (in-place)
+    // LAVA (mat=7, temp < temp_melt) -> GRAVEL (GRANULAR, in-place).
+    // Not STATIC STONE: a STATIC particle never moves, so lava that cooled in
+    // flight or in a water pool would hang in mid-air.  GRAVEL falls until it
+    // is supported and then the sleep system pins it (bd-r5-review-n28.112).
     if (mat_id == MAT_LAVA && temp < c_materials[MAT_LAVA].temp_melt) {
-        pi = MAKE_PACKED(MAT_STONE, STATIC);
+        pi = MAKE_PACKED(MAT_GRAVEL, GRANULAR);
         packed_info[i] = pi;
-        rescale_mass(mass, i, MAT_LAVA, MAT_STONE);
+        rescale_mass(mass, i, MAT_LAVA, MAT_GRAVEL);
         temperature[i] = c_materials[MAT_LAVA].temp_melt;
         return;
     }

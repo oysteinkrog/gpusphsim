@@ -385,7 +385,7 @@ assert len(MATERIALS) == NUM_DEFINED
 #   fire  + wood   -> burning
 #   fire  + oil    -> fast burning
 #   fire  + gunpowder -> explosion
-#   lava  + ice    -> steam + stone
+#   lava  + ice    -> steam + gravel
 #   lava  + wood   -> burning
 #   water + ice    -> melting
 # ---------------------------------------------------------------------------
