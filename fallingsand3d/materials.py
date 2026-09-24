@@ -371,16 +371,22 @@ assert len(MATERIALS) == NUM_DEFINED
 # ---------------------------------------------------------------------------
 
 # (mat_a, mat_b): (reaction_rate, heat_exchange)
+#
+# reaction_rate feeds exposure_corrode, which K_Reactions reads as acid damage
+# (corrosion whitelist), SAND/DIRT/MUD wetting and ACID self-consumption. Keep it
+# non-zero only for pairs with ACID, WATER, MUD or a combustible on one side.
+# Heat-only pairs (ICE, LAVA/METAL, WATER/ACID) use rate 0 and a heat_exchange
+# (bd-r5-review-n28.38; checked by test_reactions.py).
 _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     # water interactions
     (WATER, LAVA, 0.5, 50.0),        # water + lava -> steam, cools lava (high heat xfer)
-    (WATER, ICE, 0.1, 20.0),         # water near ice -> freezing/melting
+    (WATER, ICE, 0.0, 20.0),         # water warms ice (heat only; ICE melts by temperature)
     (WATER, FIRE, 0.8, 30.0),        # water extinguishes fire
-    (WATER, ACID, 0.05, 5.0),        # water dilutes acid slowly
+    (WATER, ACID, 0.0, 5.0),         # water and acid mix (heat only; acid is not consumed by water)
     # lava interactions
-    (LAVA, ICE, 0.6, 60.0),          # lava melts ice rapidly
+    (LAVA, ICE, 0.0, 60.0),          # lava melts ice rapidly (heat only)
     (LAVA, WOOD, 0.7, 40.0),         # lava ignites wood
-    (LAVA, METAL, 0.05, 30.0),       # lava heats metal
+    (LAVA, METAL, 0.0, 30.0),        # lava heats metal (heat only)
     (LAVA, STONE, 0.0, 20.0),        # lava heats stone (no reaction, just heat)
     (LAVA, OIL, 0.8, 50.0),          # lava ignites oil
     (LAVA, GUNPOWDER, 0.9, 50.0),    # lava detonates gunpowder
@@ -397,12 +403,12 @@ _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     (FIRE, WOOD, 0.9, 25.0),         # fire burns wood (faster spread)
     (FIRE, OIL, 1.0, 35.0),          # fire burns oil quickly (instant)
     (FIRE, GUNPOWDER, 0.9, 60.0),    # fire detonates gunpowder (higher heat)
-    (FIRE, ICE, 0.3, 25.0),          # fire melts ice
+    (FIRE, ICE, 0.0, 25.0),          # fire melts ice (heat only)
     (FIRE, SMOKE, 0.0, 5.0),         # fire produces smoke (heat only)
     # oil interactions
     (OIL, WATER, 0.0, 3.0),          # oil floats on water (no reaction, low heat)
     # ice + steam
-    (ICE, STEAM, 0.2, 15.0),         # steam melts ice
+    (ICE, STEAM, 0.0, 15.0),         # steam melts ice (heat only)
     # metal + fire
     (FIRE, METAL, 0.0, 20.0),        # fire heats metal (no reaction, heat only)
     # stone + fire

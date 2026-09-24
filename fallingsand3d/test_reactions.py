@@ -321,25 +321,18 @@ def test_corrosion_reduces_health():
 
 
 def test_corrosion_kills_particle():
-    """Corrosion brings health to 0 -- particle becomes a brief FIRE spark (corrosion flash)."""
+    """Corrosion brings health to 0 -- the particle becomes DEAD (no FIRE spark)."""
     setup_params(dt=0.1)
     d = make_particles(100, METAL, STATIC, health=0.05, exposure_corrode=1.0)
     compute_reactions(**d)
 
     hlth = d["sorted_health"].get()
     pi = d["sorted_packed_info"].get()
-    temp = d["sorted_temperature"].get()
-    lt = d["sorted_lifetime"].get()
-    # health = 0.05 - 1.0 * 0.1 = -0.05 -> corrosion flash: brief FIRE spark
-    # Kernel sets: packed_info=FIRE|GAS, health=1.0, temp=400K, lifetime=0.08s
-    from materials import FIRE, GAS
+    # health = 0.05 - 1.0 * 0.1 = -0.05 -> DEAD|STATIC, health 0
     for i in range(100):
-        assert GET_MATERIAL_ID(int(pi[i])) == FIRE, \
-            f"Particle {i}: expected FIRE spark, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
-        assert GET_BEHAVIOR(int(pi[i])) == GAS, f"Particle {i}: expected GAS"
-        assert abs(hlth[i] - 1.0) < 1e-6, f"Particle {i}: health={hlth[i]}, expected 1.0"
-        assert abs(temp[i] - 400.0) < 1.0, f"Particle {i}: temp={temp[i]}, expected 400K"
-        assert abs(lt[i] - 0.08) < 0.01, f"Particle {i}: lifetime={lt[i]}, expected 0.08s"
+        assert int(pi[i]) == MAKE_PACKED(DEAD, STATIC), \
+            f"Particle {i}: expected DEAD, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
+        assert hlth[i] == 0.0, f"Particle {i}: health={hlth[i]}, expected 0"
     print("PASS: test_corrosion_kills_particle")
 
 
@@ -441,27 +434,20 @@ def test_ice_lava_together():
 
 
 def test_acid_metal_corrosion():
-    """Acid near metal: after enough corrosion steps the particle becomes a FIRE spark."""
+    """Acid near metal: after enough corrosion steps the metal particle is DEAD."""
     setup_params(dt=0.001)
     d = make_particles(100, METAL, STATIC, health=1.0, exposure_corrode=10.0)
 
-    # Run 110 steps of reactions (100 steps to kill METAL, 10 more as FIRE spark)
-    # At dt=0.001 and exp_corrode=10.0, damage=0.01/step -> health=0 at step 100
+    # At dt=0.001 and exp_corrode=10.0, damage=0.01/step -> health=0 near step 100
     for step in range(110):
         # Re-apply exposure each step (simulating continuous acid contact)
         d["sorted_exposure_corrode"] = cupy.full(100, 10.0, dtype=cupy.float32)
         compute_reactions(**d, frame=step)
 
     pi = d["sorted_packed_info"].get()
-    lt = d["sorted_lifetime"].get()
-    # After step 100: METAL -> FIRE spark (health=1.0, temp=400K, lifetime=0.08s)
-    # Steps 101-110: FIRE spark loses lifetime: 0.08 - 10*0.001 = 0.07s -- still FIRE
-    from materials import FIRE, GAS
     for i in range(100):
-        assert GET_MATERIAL_ID(int(pi[i])) == FIRE, \
-            f"Particle {i}: expected FIRE spark after corrosion, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
-        assert GET_BEHAVIOR(int(pi[i])) == GAS, f"Particle {i}: expected GAS"
-        assert lt[i] > 0.0, f"Particle {i}: lifetime={lt[i]}, spark should still be alive"
+        assert int(pi[i]) == MAKE_PACKED(DEAD, STATIC), \
+            f"Particle {i}: expected DEAD after corrosion, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
     print("PASS: test_acid_metal_corrosion")
 
 
@@ -530,7 +516,7 @@ def test_500k_stress():
 
 def test_dirt_water_becomes_mud():
     """bd-mzc.27 regression: DIRT with WATER corrode exposure transitions to MUD,
-    not to a corrosion (crumble/FIRE spark) state.
+    not to a corrosion (crumble) state.
 
     The DIRT wetting check fires before the corrosion whitelist, so DIRT with
     exp_corrode > SAND_WET_THRESHOLD (0.2) becomes MAKE_PACKED(MAT_MUD, FLUID).
@@ -712,6 +698,150 @@ def test_expired_gas_mass_stays_zero_in_simulation():
     assert np.all(m[~dead] > 0.0), "live particle lost its mass"
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.38: corrosion is acid damage only, and a corroded
+# particle is removed instead of becoming a 400 K FIRE spark.
+# ---------------------------------------------------------------------------
+
+# Materials that burn (ignite on exposure_heat) and may take fire/lava damage.
+_COMBUSTIBLES = (WOOD, OIL, GUNPOWDER)
+
+
+def test_ice_ignores_corrode_exposure():
+    """(a) ICE below 273 K keeps full health even with a large corrode exposure.
+    ICE only melts by temperature; it is not on the corrosion whitelist."""
+    setup_params(dt=0.001)
+    d = make_particles(64, ICE, STATIC, temp=253.0, exposure_corrode=1e4)
+    for step in range(10):
+        compute_reactions(**d, frame=step)
+    pi = d["sorted_packed_info"].get()
+    hlth = d["sorted_health"].get()
+    assert all(GET_MATERIAL_ID(int(p)) == ICE for p in pi), "ICE changed material"
+    assert np.all(hlth == 1.0), f"ICE lost health: min={hlth.min()}"
+
+
+def test_metal_ignores_corrode_exposure_from_non_acid_pairs():
+    """METAL is not on the whitelist either: a non-zero exposure (as lava used
+    to produce) does not damage it. Acid damage on metal is tested elsewhere
+    through the table (ACID, METAL) plus the step1 test below."""
+    setup_params(dt=0.001)
+    d = make_particles(64, METAL, STATIC, exposure_corrode=1e4)
+    compute_reactions(**d)
+    assert np.all(d["sorted_health"].get() == 1.0)
+    assert all(GET_MATERIAL_ID(int(p)) == METAL for p in d["sorted_packed_info"].get())
+
+
+def test_corroded_stone_becomes_dead_not_fire():
+    """(b) A fully corroded STONE particle becomes DEAD/STATIC with mass 0 and
+    joins the spawn freelist. It never becomes FIRE."""
+    from materials import STONE
+    setup_params(dt=0.001)
+    n = 32
+    d = make_particles(n, STONE, STATIC, health=0.0005, exposure_corrode=1.0)
+    mass = cupy.full(n, 0.02, dtype=cupy.float32)
+    dead_indices = cupy.zeros(n, dtype=cupy.uint32)
+    dead_count = cupy.zeros(1, dtype=cupy.uint32)
+    compute_reactions(**d, sorted_mass=mass, dead_indices=dead_indices,
+                      dead_count=dead_count)
+    pi = d["sorted_packed_info"].get()
+    for p in pi:
+        assert int(p) == MAKE_PACKED(DEAD, STATIC), f"packed {int(p):#x}, expected DEAD|STATIC"
+    assert np.all(mass.get() == 0.0), "corroded slot kept its mass"
+    assert np.all(d["sorted_health"].get() == 0.0)
+    assert int(dead_count.get()[0]) == n
+    assert sorted(dead_indices.get().tolist()) == list(range(n))
+
+
+def test_non_zero_reaction_rate_pairs_are_acid_water_mud_or_combustible():
+    """(c) Every pair with a non-zero reaction_rate has ACID, WATER, MUD or a
+    combustible on one side. Heat-only pairs (ICE, LAVA/METAL, WATER/ACID)
+    must have rate 0 so they never feed the corrosion branch."""
+    from materials import ACID, MUD, MAX_MATERIALS, build_interaction_matrix
+    m = build_interaction_matrix()
+    allowed = {ACID, WATER, MUD, *_COMBUSTIBLES}
+    for a in range(MAX_MATERIALS):
+        for b in range(MAX_MATERIALS):
+            if m[a][b]["reaction_rate"] != 0.0:
+                assert a in allowed or b in allowed, \
+                    f"pair ({a}, {b}) has reaction_rate {m[a][b]['reaction_rate']}"
+    for a, b in ((WATER, ICE), (LAVA, ICE), (FIRE, ICE), (ICE, STEAM),
+                 (LAVA, METAL), (WATER, ACID)):
+        assert m[a][b]["reaction_rate"] == 0.0, f"({a}, {b}) should be heat-only"
+        assert m[a][b]["heat_exchange"] > 0.0, f"({a}, {b}) lost its heat exchange"
+
+
+def _step1_exposure(packed, temps, masses, offsets):
+    """Run the grid build + K_Step1 for particles at H*offsets (x axis) and
+    return (exposure_heat, exposure_corrode) for particle 0, found by its
+    unique mass in the sorted output."""
+    from test_step1 import _run_full_pipeline, _upload_all_params
+    _upload_all_params()
+    n = len(packed)
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 3] = 1.0
+    for k, (dx, dy, dz) in enumerate(offsets):
+        pos[k, :3] = (0.005 + dx * H, 0.005 + dy * H, 0.005 + dz * H)
+    mass = np.asarray(masses, dtype=np.float32)
+    _, _, _, exp_h, exp_c, _, s_mass = _run_full_pipeline(
+        pos, mass, None, np.asarray(packed, np.uint32), None,
+        np.asarray(temps, np.float32))
+    k0 = int(np.argmin(np.abs(s_mass - mass[0])))
+    assert abs(s_mass[k0] - mass[0]) < 1e-9
+    return float(exp_h[k0]), float(exp_c[k0])
+
+
+_RING = [(0.0, 0.0, 0.0), (0.5, 0, 0), (-0.5, 0, 0), (0, 0.5, 0), (0, -0.5, 0),
+         (0, 0, 0.5), (0, 0, -0.5)]
+
+
+def _ring_masses(centre):
+    return [centre] + [0.008] * (len(_RING) - 1)
+
+
+def test_step1_ice_in_water_has_no_corrode_exposure():
+    """ICE at 253 K surrounded by 293 K WATER: step1 gives zero corrode
+    exposure and positive heat exposure, and ten reaction substeps leave it ICE."""
+    packed = [MAKE_PACKED(ICE, STATIC)] + [MAKE_PACKED(WATER, FLUID)] * 6
+    temps = [253.0] + [293.0] * 6
+    exp_h, exp_c = _step1_exposure(packed, temps, _ring_masses(0.00734), _RING)
+    assert exp_c == 0.0, f"ICE exposure_corrode {exp_c}"
+    assert exp_h > 0.0, "ICE should still receive heat exposure from warm water"
+    setup_params(dt=0.001)
+    d = make_particles(1, ICE, STATIC, temp=253.0, exposure_heat=exp_h,
+                       exposure_corrode=exp_c)
+    for step in range(10):
+        compute_reactions(**d, frame=step)
+    assert GET_MATERIAL_ID(int(d["sorted_packed_info"].get()[0])) == ICE
+    assert float(d["sorted_health"].get()[0]) == 1.0
+
+
+def test_step1_metal_by_lava_and_acid_in_water_have_no_corrode_exposure():
+    """METAL next to LAVA and ACID inside WATER get zero corrode exposure.
+    ACID next to STONE still does (positive control)."""
+    from materials import ACID
+    packed = [MAKE_PACKED(METAL, STATIC)] + [MAKE_PACKED(LAVA, FLUID)] * 6
+    _, exp_c = _step1_exposure(packed, [293.0] + [1400.0] * 6,
+                               _ring_masses(0.0624), _RING)
+    assert exp_c == 0.0, f"METAL next to LAVA exposure_corrode {exp_c}"
+
+    packed = [MAKE_PACKED(ACID, FLUID)] + [MAKE_PACKED(WATER, FLUID)] * 6
+    _, exp_c = _step1_exposure(packed, [293.0] * 7, _ring_masses(0.0096), _RING)
+    assert exp_c == 0.0, f"ACID in WATER exposure_corrode {exp_c}"
+
+    packed = [MAKE_PACKED(STONE, STATIC)] + [MAKE_PACKED(ACID, FLUID)] * 6
+    _, exp_c = _step1_exposure(packed, [293.0] * 7, _ring_masses(0.0208), _RING)
+    assert exp_c > 0.0, "ACID must still corrode STONE"
+
+
+def test_wood_next_to_dead_slot_gets_no_heat_exposure():
+    """A dead slot left by corrosion (even if its temperature is 400 K)
+    gives a WOOD neighbour no heat exposure, so it cannot ignite it."""
+    packed = [MAKE_PACKED(WOOD, STATIC)] + [MAKE_PACKED(DEAD, STATIC)] * 6
+    exp_h, _ = _step1_exposure(packed, [293.0] + [400.0] * 6,
+                               [0.0048] + [0.0] * 6, _RING)
+    assert exp_h == 0.0, f"WOOD exposure_heat {exp_h} from dead slots"
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,
@@ -742,6 +872,13 @@ if __name__ == "__main__":
         test_death_without_mass_buffer_still_works,
         test_static_boundary_skips_dead_slot,
         test_expired_gas_mass_stays_zero_in_simulation,
+        test_ice_ignores_corrode_exposure,
+        test_metal_ignores_corrode_exposure_from_non_acid_pairs,
+        test_corroded_stone_becomes_dead_not_fire,
+        test_non_zero_reaction_rate_pairs_are_acid_water_mud_or_combustible,
+        test_step1_ice_in_water_has_no_corrode_exposure,
+        test_step1_metal_by_lava_and_acid_in_water_have_no_corrode_exposure,
+        test_wood_next_to_dead_slot_gets_no_heat_exposure,
     ]
 
     passed = 0

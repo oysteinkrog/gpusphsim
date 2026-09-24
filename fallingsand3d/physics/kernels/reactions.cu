@@ -272,18 +272,29 @@ void K_Reactions(
     // Whitelist: only these materials can be corroded by acid.
     // MAT_DIRT is excluded: DIRT+WATER is handled above as DIRT->MUD wetting,
     // so DIRT should never reach this corrosion path via water exposure.
-    if (exp_corrode > 0.0f && (mat_id == MAT_STONE || mat_id == MAT_METAL ||
+    // MAT_ICE and MAT_METAL are excluded: ICE melts by temperature only and
+    // METAL is only eaten by acid. exposure_corrode sums every pair with a
+    // non-zero reaction_rate, so a heat-only pair (LAVA/METAL, WATER/ICE) must
+    // not reach this branch (bd-r5-review-n28.38).
+    // TODO: a separate acid exposure channel would remove the dependence on
+    // the table having rate 0 for every non-acid pair on the whitelist.
+    if (exp_corrode > 0.0f && (mat_id == MAT_STONE ||
         mat_id == MAT_WOOD || mat_id == MAT_GRAVEL ||
-        mat_id == MAT_ICE || mat_id == MAT_OIL || mat_id == MAT_GUNPOWDER)) {
+        mat_id == MAT_OIL || mat_id == MAT_GUNPOWDER)) {
         float damage = exp_corrode * dt;
         hlth -= damage;
         if (hlth <= 0.0f) {
-            // Corrosion flash: brief orange spark instead of instant death
-            // Low temp (400K) prevents chain ignition of nearby combustibles
-            packed_info[i] = MAKE_PACKED(MAT_FIRE, GAS);
-            health[i] = 1.0f;
-            temperature[i] = 400.0f;
-            lifetime[i] = 0.08f;  // very short-lived spark
+            // Fully corroded: the particle is removed. It does not become a
+            // FIRE spark: heat exposure has no temperature threshold, so a
+            // 400 K spark ignited neighbouring wood, oil and gunpowder.
+            packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+            health[i] = 0.0f;
+            lifetime[i] = 0.0f;
+            if (mass != 0) mass[i] = 0.0f;
+            if (dead_indices != 0 && dead_count != 0) {
+                uint idx = atomicAdd(dead_count, 1u);
+                dead_indices[idx] = i;
+            }
             return;
         }
         health[i] = hlth;
