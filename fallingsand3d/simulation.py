@@ -192,12 +192,20 @@ class Simulation:
         self._h = 0.04
 
         # --- Grid reuse state ---
-        # When max displacement since last sort < threshold, skip full counting
-        # sort and use gather_reorder (reuse cell_start/cell_end).
+        # When the predicted drift since the last full sort stays under the
+        # threshold, skip the full counting sort and use gather_reorder
+        # (reuse cell_start/cell_end). max_displacement holds the largest
+        # |x - x_at_last_full_sort|^2 (drift anchor, bd-r5-review-n28.54).
         # Safety: force sort after MAX_SORT_SKIP_FRAMES consecutive skipped frames.
         self._sort_skip_next = False
-        # Threshold: (0.25 * h)^2 -- max displacement since last sort
+        # Threshold: (0.25 * h)^2 on the drift since the last full sort,
+        # predicted to the end of the next frame.
         self._sort_skip_threshold_sq = (0.25 * 0.04) ** 2  # 0.0001
+        # Host-side substep counts for the drift prediction. Counted on the
+        # host from the skip flag, so graph replays need no device state.
+        self._substeps_since_sort = 0   # substeps since the last full sort
+        self._frame_substeps = 0        # substeps since the last decision
+        self._last_disp_substeps = 0    # substeps since sort when the latched copy was taken
         # PBF/DFSPH: tighter threshold (0.15*h) and lower max skip count
         self._sort_skip_threshold_sq_tight = (0.15 * 0.04) ** 2  # 0.000036
         self._sort_skipped_count = 0  # stats for UI
@@ -1425,6 +1433,7 @@ class Simulation:
         to direct kernel launches (no graph capture overhead).
         """
         n = self._substep_prologue(n)
+        self._count_substep_sort(n)
         # Rigid bodies active: always run directly, no graph
         graphs_disabled = self.rigid_body_manager.num_bodies > 0
 
@@ -1458,6 +1467,18 @@ class Simulation:
             graph.launch()
 
         self._substep_epilogue(n)
+
+    def _count_substep_sort(self, n: int) -> None:
+        """Count this substep for the grid-reuse drift prediction.
+
+        Mirrors the branch _run_grid_setup takes: a full sort unless the skip
+        flag is set and n still matches the last full sort. Host-only, so it
+        also holds for graph replays.
+        """
+        full_sort = (not self._sort_skip_next
+                     or n != getattr(self, '_last_full_sort_n', -1))
+        self._substeps_since_sort = 1 if full_sort else self._substeps_since_sort + 1
+        self._frame_substeps += 1
 
     def _substep_prologue(self, n: int) -> int:
         """Per-substep host-side setup shared by _sim_step and _sim_step_timed.
@@ -1578,6 +1599,7 @@ class Simulation:
 
         mark("start")
         n = self._substep_prologue(n)
+        self._count_substep_sort(n)
         self._run_graph_body(n, mark)
         self._substep_epilogue(n, mark)
         self._read_deferred_timings()
@@ -1638,8 +1660,9 @@ class Simulation:
 
         # --- 1. Latch the newest landed copy from the current scene ---
         landed_epoch = None
+        landed_substeps = 0
         while self._readback_pending and self._readback_pending[0][0].done:
-            ev, landed_epoch = self._readback_pending.popleft()
+            ev, landed_epoch, landed_substeps = self._readback_pending.popleft()
             self._readback_free_events.append(ev)
         if landed_epoch is not None:
             if self._readback_pending:
@@ -1651,13 +1674,14 @@ class Simulation:
             if landed_epoch == self._readback_epoch:
                 self._last_max_disp_uint = _ctypes.c_uint32.from_address(
                     self._pinned_displacement.ptr).value
+                self._last_disp_substeps = landed_substeps
         elif self._readback_pending:
             self._readback_not_ready += 1
 
         # --- 2. Grid reuse decision for the next frame ---
-        # max_displacement holds the float bits of the largest squared
-        # per-substep displacement since the last full sort (K_Integrate
-        # atomicMax over all substeps).
+        # max_displacement holds the float bits of the largest squared drift
+        # |x - x_anchor|^2 since the last full sort (atomicMax in the finalize
+        # kernels against sorted_anchor, bd-r5-review-n28.54).
         # Positive float bits order like uints; anything at or above the +inf
         # bits (K_SpawnGas teleport, or the unknown sentinel) never skips.
         max_disp_sq_uint = self._last_max_disp_uint
@@ -1673,7 +1697,18 @@ class Simulation:
         else:
             threshold = self._sort_skip_threshold_sq_tight
             max_consec = self._MAX_SORT_SKIP_FRAMES_TIGHT
-        can_skip = (max_disp_sq < threshold
+        # The latched drift is up to two frames old: it was copied at the end
+        # of the previous frame, and the decision covers the next frame. Turn
+        # it into a drift rate per substep (drift / substeps since the sort
+        # when it was copied) and predict the drift at the end of the next
+        # frame: substeps since the last sort now, plus one more frame of the
+        # size just run. A settled scene keeps a near-zero rate and skips; a
+        # moving front sorts every frame.
+        k_copy = max(self._last_disp_substeps, 1)
+        k_next = max(self._substeps_since_sort + self._frame_substeps, 1)
+        predicted_sq = max_disp_sq * (k_next / k_copy) ** 2
+        self._frame_substeps = 0
+        can_skip = (predicted_sq < threshold
                     and self._sort_skip_consecutive < max_consec)
         if can_skip:
             self._sort_skip_next = True
@@ -1702,7 +1737,8 @@ class Simulation:
         ev = (self._readback_free_events.pop() if self._readback_free_events
               else cupy.cuda.Event(disable_timing=True))
         ev.record(self._readback_stream)
-        self._readback_pending.append((ev, self._readback_epoch))
+        self._readback_pending.append(
+            (ev, self._readback_epoch, self._substeps_since_sort))
         self._readback_done = ev
 
     def step_frame(self) -> int:
