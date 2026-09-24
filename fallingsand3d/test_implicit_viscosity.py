@@ -3,8 +3,9 @@
 The viscous accel of particle i is fs_i * sum_j c_j (v_j - v_i). With
 explicit Euler, dt * fs_i * c_tot above 2 makes a velocity mode that
 alternates between neighbours grow every substep. At dt = 1 ms that
-number is 18.75 for LAVA, 9.4 for MUD and about 1.9 for resting SAND at
-mu_max. Step2 now scales the viscous sum by 1 / (1 + dt * fs_i * c_tot),
+number was 18.75 for LAVA and 9.4 for MUD with the old force_scale
+viscosity form (before bd-r5-review-n28.79), and is about 1.9 for
+resting SAND at mu_max. Step2 now scales the viscous sum by 1 / (1 + dt * fs_i * c_tot),
 which is backward Euler on the self-term and stable for any value.
 
 Check: a lattice block at uniform density with an alternating velocity
@@ -57,7 +58,10 @@ CASES = [
     # (material, behaviour, max |v'/v|, sign must hold)
     (LAVA, FLUID, 0.95, False),
     (MUD, FLUID, 0.95, False),
-    (OIL, FLUID, 0.95, True),
+    # OIL and WATER use the dynamic form mu / (rho_i rho_j) since
+    # bd-r5-review-n28.79 (nu = mu / rho0, 50x below the old force_scale
+    # form), so one substep only removes about 2% and 0.4% of the mode.
+    (OIL, FLUID, 0.99, True),
     (WATER, FLUID, 0.999, True),
     (SAND, GRANULAR, 0.95, True),
 ]
