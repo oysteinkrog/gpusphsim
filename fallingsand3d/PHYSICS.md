@@ -1883,6 +1883,12 @@ viscous fluids (OIL=5.0, LAVA=10.0) get proportionally more XSPH smoothing than
 WATER (1.0). GRANULAR additionally multiplies by 10x for strong artificial viscosity.
 Applied in K_PBF_Finalize.
 
+GAS neighbours are skipped. A STONE (fixed wall) neighbour has `v_j = 0`, which
+gives wall friction. A MAT_RIGID neighbour uses the body surface velocity
+`v_b = v_body + omega x r` stored in the sorted velocity, with weight
+`psi_b / rho_i` in place of `m_j / rho_avg`; the body gets the reaction
+(22.5, PBF fluid-rigid drag).
+
 **Source**: `pbf_solver.cu:K_PBF_Finalize`
 
 ### 12.5 PBF Multi-Material Handling
@@ -3188,7 +3194,8 @@ particle i that sees the boundary, so it differs per material.
 `m_b = RIGID_PSI_RHO0 * V_b` with `RIGID_PSI_RHO0 = 2500` (`common.cuh`,
 `rigid_bodies.py`), and MAT_RIGID particles read density `RIGID_PSI_RHO0`. So:
 
-- volume terms `m_b / rho_b` give `V_b` directly (DFSPH, PBF XSPH, Jacobi).
+- volume terms `m_b / rho_b` give `V_b` directly (DFSPH, Jacobi).
+- the PBF rigid XSPH drag (22.5) uses `psi_b / rho_i = V_b * rho0_i / rho_i`.
 - density sums and the Akinci coupling use
   `psi_b = m_b * (rho0_i / RIGID_PSI_RHO0) = rho0_i * V_b`.
 - the colour-field normal uses `V_b = m_b / RIGID_PSI_RHO0`.
@@ -3274,9 +3281,33 @@ The PBF position correction over a substep is an impulse `m_i * dx / dt` and a
 force `m_i * dx / dt^2`, summed over the iterations. The DFSPH density solver
 runs ComputePressureAccel `dens_iters + 1` times but only the last `a_press` is
 applied (ApplyPressureVelocity), so `simulation.py` passes the rigid buffers on
-that call only. Torque is `(r_b - COM) x F` in every case. Finalize in both
-solvers no longer computes a rigid force; it only skips XSPH for rigid
-neighbours.
+that call only. Torque is `(r_b - COM) x F` in every case. DFSPH Finalize computes no rigid
+force. PBF Finalize adds the drag below.
+
+**PBF fluid-rigid drag** (bd-r5-review-n28.97). K_PBF_Finalize runs XSPH
+against MAT_RIGID neighbours with the body surface velocity, which
+K_UpdateBoundaryParticles writes into the velocity array and the sort carries
+into `original_vel`:
+
+```
+factor_ib = (psi_b / rho_i) * W_poly6(r_ib),   psi_b = m_b * rho0_i / RIGID_PSI_RHO0
+dv_i     += c_scaled * factor_ib * (v_b - v_i)     // c_scaled as in 12.5
+F_on_body = -m_i * c_scaled * factor_ib * (v_b - v_i) / dt
+tau       = (r_b - COM) x F_on_body
+```
+
+`v_i` is the post-constraint velocity before XSPH, the same value the
+fluid-fluid terms use, so the fluid momentum change and the body impulse cancel
+exactly. Cost is one extra 16 B load per fluid-rigid pair. This is the only
+shear coupling between PBF fluid and a body: without it a moving or spinning
+body slid through PBF water with no drag. Measured (`test_rigid_coupling.py`,
+dt = 1 ms): fluid within h of the side faces of a kinematic box with surface
+velocity 0.5 m/s reaches 0.046 m/s after 100 substeps (0 before); a 6 cm WATER
+layer on a plate moving at 0.5 m/s reaches 0.126 m/s mean after 60 substeps; a
+free 6 cm sphere spinning at 5 rad/s drops to 0.64 rad/s after 200 substeps
+(4.33 rad/s before, 4.60 from body damping alone); with zero gravity the fluid
+momentum gain equals minus the body impulse. A kinematic body is not moved by
+K_IntegrateRigidBodies, so its velocity acts as a moving surface in place.
 
 The reaction is taken before the per-particle clamps (PBF `|dx| <= 0.5h`, DFSPH
 `|dv_div| <= h/dt`, `|a_press| <= h/dt^2` and the velocity limit). When a clamp
