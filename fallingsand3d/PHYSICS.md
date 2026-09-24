@@ -1101,9 +1101,8 @@ Each item names its bead (`bd-r4fix-uup.N`).
 - **Gravity kept on resize (.15).** `set_world_size` rebuilt the sim constants
   with gravity `(0,-4,0)` and dropped the user's setting.
 
-**Still open:** the vorticity confinement sign (§16) needs a visual A/B test
-before any change. Step1 adds up `-curl(v)`, which may damp swirl instead of
-amplifying it.
+The vorticity sign is fixed (bd-r5-review-n28.36). All three solvers now add
+up `+curl(v)`, see §16.1.
 
 ### 10.18 Rigid Body System Limitations
 
@@ -1815,14 +1814,27 @@ Affected kernels: K_Step1, K_Step2, K_Integrate, all K_PBF_* (5), all K_DFSPH_* 
 
 Curl of velocity computed in the Step1 neighbor loop for FLUID particles:
 ```
-omega_i = SUM_j (m_j / rho_j) * (v_j - v_i) × grad_W_spiky(r_ij)
+omega_i = SUM_j (m_j / rho_j) * grad_i W_spiky(r_ij) × (v_j - v_i)
 ```
+
+`r_ij = pos_i - pos_j` and `spiky_grad_coeff < 0`, so `grad_i W` is the true
+gradient with respect to `pos_i` and points toward the neighbour. The operand
+order matters: `(v_j - v_i) × grad_i W` is `-curl(v)`. For rigid rotation
+`v = Omega × r` the result is `omega = 2 * Omega`. `test_vorticity_sign.py`
+checks this on a 7^3 lattice (spacing 0.02, h 0.04): interior `omega_z` is
+1.90 to 1.91 (WCSPH), 1.92 to 2.31 (PBF) and 1.91 to 2.03 (DFSPH) for
+`Omega_z = 1`.
+
+PBF and DFSPH use `dv = v_i - v_j` in their loops, so they compute the same sum
+as `dv × grad_i W`.
 
 Output: `vorticity_out[i] = float4(omega_x, omega_y, omega_z, |omega|)`
 
 The magnitude `|omega|` is stored in `.w` for use by the Step2 confinement force.
 
-**Source**: `step1.cu` (neighbor loop, FLUID branch)
+**Source**: `step1.cu` (K_Step1 and K_Step1_BuildNL, FLUID branch),
+`pbf_solver.cu` (K_PBF_ComputeLambda), `dfsph_solver.cu`
+(K_DFSPH_ComputeDensityAlpha).
 
 ### 16.2 Confinement Force (Step2)
 
@@ -1856,6 +1868,13 @@ creating spurious rotation.
   WCSPH) because PBF's fixed dt=1/120 lacks CFL safety; higher values inject energy.
 - **DFSPH**: Vorticity computed in K_DFSPH_ComputeDensityAlpha, confinement applied in
   K_DFSPH_NonPressureForces as acceleration. Uses same epsilon as WCSPH (0.05).
+
+The epsilon values were kept when the vorticity sign was fixed. Before the fix
+the force pointed against the flow and drained vortex cores. With the right sign
+it amplifies them. A Taylor-Green run over 300 substeps showed net L_z drift of
+2.9e-8 (eps 0), 1.1e-7 (eps 0.05) and 4.2e-7 (eps 0.10), so these values do not
+inject measurable angular momentum. A visual A/B at eps 0.01 and 0.05 has not
+been done yet.
 
 ---
 
