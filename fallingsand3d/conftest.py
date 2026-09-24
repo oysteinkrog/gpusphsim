@@ -14,6 +14,12 @@ contains an ``nvrtc-builtins`` DLL to the DLL search path at import time.
 import glob
 import os
 
+# CuPy's on-disk kernel cache is keyed on the .cu source text only, not on the
+# headers it #includes (common.cuh, sph_shared.cuh). After a header change, a
+# module whose .cu file is unchanged would load a stale binary. Keep the cache
+# in memory for test runs so every pytest process compiles from current headers.
+os.environ.setdefault("CUPY_CACHE_IN_MEMORY", "1")
+
 
 def _add_cuda_nvrtc_dirs():
     if os.name != "nt" or not hasattr(os, "add_dll_directory"):
