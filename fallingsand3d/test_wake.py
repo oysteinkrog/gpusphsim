@@ -657,7 +657,7 @@ def _rigid_body_over_sleeping_sand(lin_vel, ang_vel=(0.0, 0.0, 0.0),
     body["lin_vel"][0] = (*lin_vel, 0.5)
     body["ang_vel"][0] = (*ang_vel, 0.3)
     body["half_extents"][0] = (0.05, 0.05, 0.05, 0.0)
-    d_bodies = cupy.asarray(body)
+    d_bodies = cupy.asarray(body.view(np.float32))  # raw 96-byte struct
 
     flags = allocate_cell_wake_flags(NUM_CELLS)
     run_wake_propagation(pos, vel, pi, sc, flags, num_particles=1,

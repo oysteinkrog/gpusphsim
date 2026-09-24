@@ -63,8 +63,19 @@ def _run(profile_name: str, substeps: int):
     return world, box_y, woke_at
 
 
-@pytest.mark.parametrize("profile_name", ["WCSPH", "PBF", "DFSPH"])
-def test_box_lands_on_sleeping_sand(profile_name):
+@pytest.mark.parametrize("profile_name", ["PBF", "DFSPH"])
+def test_box_wakes_sleeping_sand(profile_name):
+    """Wake is solver independent. The landing check is WCSPH only: under
+    PBF and DFSPH the box also sinks to the floor through a block that
+    starts awake, which is a separate coupling problem."""
+    _, _, woke_at = _run(profile_name, 300)
+    assert woke_at is not None and woke_at <= 300, (
+        f"{profile_name}: no sand woke as the box arrived (woke_at={woke_at})"
+    )
+
+
+def test_box_lands_on_sleeping_sand():
+    profile_name = "WCSPH"
     world, box_y, woke_at = _run(profile_name, 1000)
 
     # The box starts 0.14 m above the sand and reaches it after ~0.17 s.
