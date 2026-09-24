@@ -528,6 +528,11 @@ class RigidBodyManager:
 
         Automatically computes the inertia tensor for box or sphere primitives.
 
+        A kinematic body (is_kinematic=True) ignores gravity, fluid forces
+        and collisions, but K_IntegrateRigidBodies still moves it every step
+        by its stored lin_vel (``velocity``) and ang_vel, so the surface
+        velocity the fluid sees matches how the body moves.
+
         Returns
         -------
         int

@@ -1738,6 +1738,53 @@ def test_body_body_restitution():
           f"e=1: vx_a={vx_a:.4f}, vx_b={vx_b:.4f})")
 
 
+def test_kinematic_body_moves_with_its_velocity():
+    """A kinematic body integrates its pose from lin_vel / ang_vel.
+
+    bd-r5-review-n28.105: the kernel used to return before the pose update,
+    so a kinematic body with lin_vel (1, 0, 0) stayed put while the fluid
+    coupling used that velocity as its surface velocity. Gravity, forces and
+    damping must still not act on it.
+    """
+    from integrate import integrate_rigid_bodies
+    from rigid_bodies import RigidBodyManager, MAX_RIGID_BODIES
+
+    mgr = RigidBodyManager()
+    mgr.add_rigid_body(
+        position=(-0.5, 0.0, 0.0), half_extents=(0.05, 0.05, 0.05), mass=1.0,
+        is_kinematic=True, velocity=(1.0, 0.0, 0.0),
+    )
+    bodies = mgr._bodies_cpu.copy()
+    bodies[0]["ang_vel"][:3] = [0.0, math.pi / 2.0, 0.0]  # 90 deg in 1 s
+    d_bodies = cupy.asarray(bodies.view(np.float32))
+    d_forces = cupy.zeros((MAX_RIGID_BODIES, 4), dtype=cupy.float32)
+    d_torques = cupy.zeros((MAX_RIGID_BODIES, 4), dtype=cupy.float32)
+    d_forces[0, :3] = cupy.asarray([0.0, 50.0, 0.0], dtype=cupy.float32)
+    d_torques[0, :3] = cupy.asarray([5.0, 0.0, 0.0], dtype=cupy.float32)
+
+    dt = 1.0 / 500.0
+    for _ in range(500):  # 1 s
+        integrate_rigid_bodies(d_bodies, d_forces, d_torques, 1, dt,
+                               gravity=(0.0, -9.81, 0.0))
+    cupy.cuda.Device().synchronize()
+    b = cupy.asnumpy(d_bodies).view(bodies.dtype)[0]
+
+    pos = b["position"]
+    assert abs(pos[0] - 0.5) < 1e-3, f"x after 1 s = {pos[0]}, expected 0.5"
+    assert abs(pos[1]) < 1e-6 and abs(pos[2]) < 1e-6, pos
+    assert pos[3] == 0.0, "inv_mass must stay 0"
+    lv = b["lin_vel"]
+    assert tuple(lv[:3]) == (1.0, 0.0, 0.0), f"velocity changed: {lv}"
+    assert abs(b["ang_vel"][1] - math.pi / 2.0) < 1e-6, b["ang_vel"]
+    # 90 degrees about y: q = (0, sin 45, 0, cos 45)
+    q = b["rotation"]
+    s45 = math.sqrt(0.5)
+    assert abs(abs(q[1]) - s45) < 2e-3 and abs(abs(q[3]) - s45) < 2e-3, q
+    assert abs(q[0]) < 1e-5 and abs(q[2]) < 1e-5, q
+    # Forces are ignored but left in the accumulator for readout.
+    assert float(d_forces[0, 1]) == 50.0
+
+
 def test_fallback_alloc_no_gpu_cpu_sync():
     """integrate() fallback alloc path uses max_idx=n, not int(sort_indexes.max()).
 

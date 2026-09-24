@@ -505,6 +505,45 @@ __device__ inline float rigid_support_distance(const RigidBody& body, float3 n) 
 }
 
 /* ======================================================================
+ * rigid_integrate_pose -- advance a rigid body pose by one step.
+ *
+ * pos += v * dt; q += 0.5 * dt * (omega, 0) * q, then renormalize q.
+ * Shared by dynamic bodies (after the velocity update) and kinematic
+ * bodies (prescribed velocity). (bd-r5-review-n28.105)
+ * ====================================================================== */
+__device__ __forceinline__
+void rigid_integrate_pose(float3& pos, float4& q, float3 lin_vel, float3 ang_vel, float dt) {
+    pos.x += lin_vel.x * dt;
+    pos.y += lin_vel.y * dt;
+    pos.z += lin_vel.z * dt;
+
+    // quat_mult(omega_q, q) = (s1*v2 + s2*v1 + cross(v1,v2), s1*s2 - dot(v1,v2))
+    // where omega_q has s1=0, v1=omega; q has s2=q.w, v2=(q.x,q.y,q.z)
+    float3 qv = make_float3(q.x, q.y, q.z);
+    float qs = q.w;
+    float3 cr = make_float3(
+        ang_vel.y * qv.z - ang_vel.z * qv.y,
+        ang_vel.z * qv.x - ang_vel.x * qv.z,
+        ang_vel.x * qv.y - ang_vel.y * qv.x
+    );
+    float dot_ov = ang_vel.x * qv.x + ang_vel.y * qv.y + ang_vel.z * qv.z;
+    float4 dq = make_float4(
+        qs * ang_vel.x + cr.x,
+        qs * ang_vel.y + cr.y,
+        qs * ang_vel.z + cr.z,
+        -dot_ov
+    );
+    q.x += 0.5f * dt * dq.x;
+    q.y += 0.5f * dt * dq.y;
+    q.z += 0.5f * dt * dq.z;
+    q.w += 0.5f * dt * dq.w;
+
+    float q_len = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    float q_inv = 1.0f / fmaxf(q_len, 1e-8f);
+    q.x *= q_inv; q.y *= q_inv; q.z *= q_inv; q.w *= q_inv;
+}
+
+/* ======================================================================
  * K_IntegrateRigidBodies -- US-017: Rigid body integration kernel.
  *
  * One thread per rigid body. Reads accumulated forces/torques, integrates
@@ -515,6 +554,9 @@ __device__ inline float rigid_support_distance(const RigidBody& body, float3 n) 
  *   I_world_inv = R * diag(I_body_inv) * R^T
  *
  * Zeroes force/torque accumulators after reading.
+ *
+ * Kinematic bodies skip forces, damping and clamps but still move by
+ * their stored lin_vel / ang_vel.
  * ====================================================================== */
 
 extern "C" __global__
@@ -534,12 +576,26 @@ void K_IntegrateRigidBodies(
 
     RigidBody body = d_rigid_bodies[bid];
 
-    // Skip kinematic bodies
     int is_kinematic = __float_as_int(body.inertia_inv.w);
-    if (is_kinematic) return;
-
     float inv_mass = body.position.w;
-    if (inv_mass <= 0.0f) return;  // infinite mass = kinematic
+
+    // Kinematic (or infinite-mass) bodies: no forces, torque, damping,
+    // clamps or wall bounce, but the pose still follows the prescribed
+    // lin_vel / ang_vel. The boundary particles and the fluid coupling use
+    // lin_vel as the surface velocity, so the body must actually move at
+    // that velocity. The force/torque accumulators are left as they are so
+    // the fluid reaction on the body stays readable; the substep prologue
+    // clears them. (bd-r5-review-n28.105)
+    if (is_kinematic || inv_mass <= 0.0f) {
+        float3 pos_k = make_float3(body.position.x, body.position.y, body.position.z);
+        float4 q_k = body.rotation;
+        rigid_integrate_pose(pos_k, q_k,
+            make_float3(body.lin_vel.x, body.lin_vel.y, body.lin_vel.z),
+            make_float3(body.ang_vel.x, body.ang_vel.y, body.ang_vel.z), dt);
+        d_rigid_bodies[bid].position = make_float4(pos_k.x, pos_k.y, pos_k.z, inv_mass);
+        d_rigid_bodies[bid].rotation = q_k;
+        return;
+    }
 
     float mass = 1.0f / inv_mass;
 
@@ -621,41 +677,9 @@ void K_IntegrateRigidBodies(
         ang_vel.x *= s; ang_vel.y *= s; ang_vel.z *= s;
     }
 
-    // --- Position update: pos += v * dt ---
+    // --- Pose update: pos += v * dt, q += 0.5 * dt * omega_q * q ---
     float3 pos = make_float3(body.position.x, body.position.y, body.position.z);
-    pos.x += lin_vel.x * dt;
-    pos.y += lin_vel.y * dt;
-    pos.z += lin_vel.z * dt;
-
-    // --- Quaternion update: q += 0.5 * dt * omega_q * q ---
-    // omega_q = (omega.x, omega.y, omega.z, 0)
-    // quat_mult(omega_q, q) = (s1*v2 + s2*v1 + cross(v1,v2), s1*s2 - dot(v1,v2))
-    // where omega_q has s1=0, v1=omega; q has s2=q.w, v2=(q.x,q.y,q.z)
-    float3 qv = make_float3(q.x, q.y, q.z);
-    float qs = q.w;
-    // cross(omega, qv)
-    float3 cr = make_float3(
-        ang_vel.y * qv.z - ang_vel.z * qv.y,
-        ang_vel.z * qv.x - ang_vel.x * qv.z,
-        ang_vel.x * qv.y - ang_vel.y * qv.x
-    );
-    float dot_ov = ang_vel.x * qv.x + ang_vel.y * qv.y + ang_vel.z * qv.z;
-    // result = (0*qv + qs*omega + cross(omega,qv), 0*qs - dot(omega,qv))
-    float4 dq = make_float4(
-        qs * ang_vel.x + cr.x,
-        qs * ang_vel.y + cr.y,
-        qs * ang_vel.z + cr.z,
-        -dot_ov
-    );
-    q.x += 0.5f * dt * dq.x;
-    q.y += 0.5f * dt * dq.y;
-    q.z += 0.5f * dt * dq.z;
-    q.w += 0.5f * dt * dq.w;
-
-    // Normalize quaternion
-    float q_len = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    float q_inv = 1.0f / fmaxf(q_len, 1e-8f);
-    q.x *= q_inv; q.y *= q_inv; q.z *= q_inv; q.w *= q_inv;
+    rigid_integrate_pose(pos, q, lin_vel, ang_vel, dt);
 
     // --- World boundary clamp for rigid body COM ---
     float3 wmin = c_sim.world_min;
