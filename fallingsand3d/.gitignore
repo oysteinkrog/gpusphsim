@@ -1,0 +1,23 @@
+# bv (beads viewer) local config and caches
+.bv/
+
+# ntm session state
+.ntm/
+
+# Beads local state (issues.jsonl is the tracked source)
+.beads/.br_history/
+.beads/daemon.log
+.beads/*.db*
+
+# Python bytecode
+__pycache__/
+
+# One-off probe scripts and their outputs
+_*.py
+_*.txt
+
+# Written into the cwd by imgui on every run
+imgui.ini
+
+# Benchmark output
+bench_results/

@@ -1,0 +1,15 @@
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Lock files
+*.lock
+
+# Temporary
+last-touched
+*.tmp
+
+# History snapshots and daemon log
+.br_history/
+daemon.log
