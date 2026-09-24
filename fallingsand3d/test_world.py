@@ -168,6 +168,41 @@ def test_resize():
     print("PASS: resize")
 
 
+def test_resize_reallocates_solver_arrays():
+    """resize() must re-create lazy PBF/DFSPH arrays at the new size (grow and shrink)."""
+    names = ('predicted_position', 'sorted_predicted_position',
+             'delta_position', 'sorted_delta_position', 'sorted_pressure_normal',
+             'alpha_dfsph', 'sorted_alpha_dfsph')
+    for old_n, new_n in ((1000, 2000), (2000, 1000)):
+        w = World(old_n)
+        w.allocate_pbf_arrays()
+        w.allocate_dfsph_arrays()
+        for name in names:
+            assert getattr(w, name).shape[0] == old_n, name
+        w.resize(new_n)
+        w.allocate_pbf_arrays()
+        w.allocate_dfsph_arrays()
+        for name in names:
+            assert getattr(w, name).shape[0] == new_n, (name, old_n, new_n)
+
+    # Solver arrays are only created by the solver that needs them.
+    w = World(1000)
+    w.allocate_dfsph_arrays()
+    w.resize(3000)
+    assert not hasattr(w, 'alpha_dfsph')
+    w.allocate_pbf_arrays()
+    for name in names[:5]:
+        assert getattr(w, name).shape[0] == 3000, name
+
+    # A size mismatch reallocates even without resize().
+    w = World(1000)
+    w.allocate_pbf_arrays()
+    w.max_particles = 1500
+    w.allocate_pbf_arrays()
+    assert w.predicted_position.shape[0] == 1500
+    print("PASS: resize reallocates solver arrays")
+
+
 def test_contiguous_arrays():
     """All arrays are contiguous CuPy arrays on GPU."""
     w = World(1000)

@@ -157,38 +157,64 @@ class World:
         # --- Grid reuse: max displacement tracking ---
         self.max_displacement = cp.zeros(1, dtype=cp.uint32)
 
+    # Solver arrays created on demand by allocate_pbf_arrays /
+    # allocate_dfsph_arrays. resize() drops them so they are re-created at
+    # the new max_particles.
+    _LAZY_SOLVER_ARRAYS = (
+        'predicted_position', 'sorted_predicted_position',
+        'delta_position', 'sorted_delta_position',
+        'sorted_pressure_normal',
+        'alpha_dfsph', 'sorted_alpha_dfsph',
+    )
+
+    def _needs_alloc(self, *names: str) -> bool:
+        """True if any named array is missing or not sized to max_particles."""
+        n = self.max_particles
+        for name in names:
+            arr = getattr(self, name, None)
+            if arr is None or arr.shape[0] != n:
+                return True
+        return False
+
     def allocate_pbf_arrays(self) -> None:
         """Lazily allocate PBF-specific arrays."""
         n = self.max_particles
-        # Shared with DFSPH -- allocate only if missing
-        if not hasattr(self, 'predicted_position'):
+        # Shared with DFSPH -- allocate only if missing or wrong size
+        if self._needs_alloc('predicted_position', 'sorted_predicted_position'):
             self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
         # PBF-specific arrays -- lambda_pbf now in _allocate (PERF-008)
-        if not hasattr(self, 'delta_position'):
+        if self._needs_alloc('delta_position', 'sorted_delta_position'):
             self.delta_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_delta_position = cp.zeros((n, 4), dtype=cp.float32)
         # Pressure normal for Drucker-Prager friction (only used within PBF iterations)
-        if not hasattr(self, 'sorted_pressure_normal'):
+        if self._needs_alloc('sorted_pressure_normal'):
             self.sorted_pressure_normal = cp.zeros((n, 4), dtype=cp.float32)
 
     def allocate_dfsph_arrays(self) -> None:
         """Lazily allocate DFSPH-specific arrays."""
         n = self.max_particles
         # DFSPH also needs predicted_position
-        if not hasattr(self, 'predicted_position'):
+        if self._needs_alloc('predicted_position', 'sorted_predicted_position'):
             self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
         # kappa_v now in _allocate (PERF-008); alpha still lazy
-        if not hasattr(self, 'alpha_dfsph'):
+        if self._needs_alloc('alpha_dfsph', 'sorted_alpha_dfsph'):
             self.alpha_dfsph = cp.zeros(n, dtype=cp.float32)
             self.sorted_alpha_dfsph = cp.zeros(n, dtype=cp.float32)
 
     def resize(self, new_max: int) -> None:
-        """Reallocate all arrays for a new max_particles. Kills all particles."""
+        """Reallocate all arrays for a new max_particles. Kills all particles.
+
+        Lazily allocated solver arrays are dropped; the next
+        allocate_pbf_arrays / allocate_dfsph_arrays call re-creates them
+        at the new size.
+        """
         self.max_particles = new_max
         self._high_water = 0
         self._spawned_material_ids = set()
+        for name in self._LAZY_SOLVER_ARRAYS:
+            self.__dict__.pop(name, None)
         self._allocate()
 
     @property
