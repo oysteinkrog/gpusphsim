@@ -831,6 +831,11 @@ times the share of the kernel support held by reacting neighbours, so it lies in
 [0, max reaction_rate] = [0, 1.0]. `exposure_heat` is `heat_exchange` times a
 temperature difference, weighted the same way.
 
+PBF (`K_PBF_ComputeLambda`, first call of the substep) and DFSPH
+(`K_DFSPH_ComputeDensityAlpha`) compute the same two values with the same `S_i`,
+so all three solvers give the same exposure for the same particle configuration
+(`test_solvers.py::test_exposure_matches_across_solvers`).
+
 Magnitudes at `h = 0.04`, spacing `0.5h` (26 neighbours, `S = 4.16 W(0)`):
 - one nearest neighbour holds about 10% of the support; a neighbour at 0.85h
   holds about 0.5%.
