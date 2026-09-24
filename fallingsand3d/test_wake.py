@@ -36,6 +36,7 @@ from wake import (
     allocate_cell_wake_flags,
     get_module,
     mark_wake_cells,
+    mark_wake_cells_rigid,
     run_wake_propagation,
     upload_grid_params as upload_wake_grid_params,
     wake_sleepers_and_clear_just_woke,
@@ -636,6 +637,74 @@ def test_fluid_wakes_sleeping_sand() -> None:
     print("  Sleeping sand woke under moving water (correct)")
 
 
+def _rigid_body_over_sleeping_sand(lin_vel, ang_vel=(0.0, 0.0, 0.0),
+                                   body_pos=(0.0, 0.05, 0.0)) -> tuple[int, int]:
+    """Run wake propagation with one sleeping SAND particle at the origin and
+    one 0.1 m box whose bounding cube (grown by one cell) covers the origin.
+    Returns (packed_info, sleep_counter) of the sand (bd-r5-review-n28.87)."""
+    from rigid_bodies import RIGID_BODY_DTYPE
+
+    setup_params()
+    pos = cupy.zeros((1, 4), dtype=cupy.float32)
+    pos[0, 3] = 1.0
+    vel = cupy.zeros((1, 4), dtype=cupy.float32)
+    pi = cupy.array([SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR))], dtype=cupy.uint32)
+    sc = cupy.array([200], dtype=cupy.uint8)
+
+    body = np.zeros(1, dtype=RIGID_BODY_DTYPE)
+    body["position"][0] = (*body_pos, 1.0)
+    body["rotation"][0] = (0.0, 0.0, 0.0, 1.0)
+    body["lin_vel"][0] = (*lin_vel, 0.5)
+    body["ang_vel"][0] = (*ang_vel, 0.3)
+    body["half_extents"][0] = (0.05, 0.05, 0.05, 0.0)
+    d_bodies = cupy.asarray(body)
+
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=1,
+                         rigid_bodies=d_bodies, num_bodies=1)
+    return int(pi.get()[0]), int(sc.get()[0])
+
+
+def test_moving_rigid_body_wakes_sleeping_sand() -> None:
+    """A falling rigid body wakes the sleeping sand under it. Its boundary
+    particles are STATIC, so without K_MarkWakeCellsRigid the sand stays
+    asleep and the body falls through the pile."""
+    sand_pi, sand_sc = _rigid_body_over_sleeping_sand((0.0, -1.0, 0.0))
+    assert IS_SLEEPING(sand_pi) == 0, "falling rigid body did not wake sand"
+    assert sand_sc == 0
+
+
+def test_spinning_rigid_body_wakes_sleeping_sand() -> None:
+    """A body spinning in place (|omega| * r > V_WAKE) also wakes sand."""
+    sand_pi, _ = _rigid_body_over_sleeping_sand((0.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+    assert IS_SLEEPING(sand_pi) == 0, "spinning rigid body did not wake sand"
+
+
+def test_resting_rigid_body_does_not_wake() -> None:
+    """A body at rest marks no cells, so the sand stays asleep."""
+    sand_pi, sand_sc = _rigid_body_over_sleeping_sand((0.0, 0.0, 0.0))
+    assert IS_SLEEPING(sand_pi) == 1, "resting rigid body woke sand"
+    assert sand_sc == 200
+    # Below V_WAKE (0.02 m/s) also counts as resting.
+    sand_pi, _ = _rigid_body_over_sleeping_sand((0.0, -0.01, 0.0))
+    assert IS_SLEEPING(sand_pi) == 1, "body below V_WAKE woke sand"
+
+
+def test_far_rigid_body_does_not_wake() -> None:
+    """A moving body far from the sand leaves it asleep."""
+    sand_pi, _ = _rigid_body_over_sleeping_sand((0.0, -1.0, 0.0),
+                                                body_pos=(0.0, 0.5, 0.0))
+    assert IS_SLEEPING(sand_pi) == 1, "far rigid body woke sand"
+
+
+def test_mark_wake_cells_rigid_zero_bodies() -> None:
+    """num_bodies = 0 launches nothing and marks nothing."""
+    setup_params()
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    mark_wake_cells_rigid(cupy.zeros(1, dtype=cupy.float32), 0, flags)
+    assert int(cupy.count_nonzero(flags)) == 0
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -664,6 +733,11 @@ def main() -> None:
     test_non_sleeping_unaffected()
     test_gas_does_not_wake()
     test_fluid_wakes_sleeping_sand()
+    test_moving_rigid_body_wakes_sleeping_sand()
+    test_spinning_rigid_body_wakes_sleeping_sand()
+    test_resting_rigid_body_does_not_wake()
+    test_far_rigid_body_does_not_wake()
+    test_mark_wake_cells_rigid_zero_bodies()
 
     print()
     print("=" * 60)
