@@ -488,7 +488,11 @@ void K_Step2(
                     // GRANULAR position is advected with vel_new (integrate.cu:265-268),
                     // not veleval_xsph, so XSPH for GRANULAR would be computed then
                     // discarded — wasted inner-loop work.  Skip it here (bd-mzc.34).
-                    if (is_fluid_i) {
+                    // Only FLUID neighbours count: a GRANULAR neighbour (often
+                    // sleeping at v = 0) would drag water's advection velocity
+                    // toward 0 while its velocity stays, so water crawled over
+                    // sand beds (bd-r5-review-n28.104).
+                    if (is_fluid_i && behavior_j == FLUID) {
                         float w = W_poly6(rlen_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
                         float xsph_factor = (m_j / rho_avg) * w;
