@@ -621,6 +621,24 @@ and a heavy particle among light ones reads low. The number-density form of
 Solenthaler and Pajarola 2008, `rho_i = rho0_i * sum_j V_j W_ij` with `V_j = m_j / rho0_j`,
 would remove that; it is the follow-up.
 
+### 7.4 Spawn spacing versus rest density
+
+`spawn_mass` puts a FLUID or GRANULAR particle at its rho0 only on the 0.02 lattice.
+The mass is not scaled with spacing, so particle size stays the same across a scene,
+and the kernel sum scales as `(0.02 / s)^3`: a liquid box at spacing 0.022 spawns at
+0.74 rho0 and one at 0.025 at 0.49 rho0 (measured median, poly6, 0.4 m cube).
+`compute_pressure` clamps `p >= 0`, so such a block has no pressure until it has
+compressed back to rho0, and PBF/DFSPH apply large first-frame corrections.
+
+Every preset FLUID spawn box therefore uses spacing 0.02. Where a preset used to spawn
+at 0.022 to 0.025, the box height shrinks (Sandbox: the whole cube) so the particle
+count stays within 11% of before. GRANULAR and STATIC spawns keep their own spacings.
+The one exception is the Acid Rain drop layer at spacing 0.04 = h, which is separate
+drops, not a liquid block. `presets._check_fluid_spacing` finds FLUID spawns above
+`DEFAULT_SPACING`, and `test_presets.py` runs it on every preset. One substep after
+loading Lava Lamp and Multi-Fluid, every liquid reads a median of 1.01 rho0 (0.74 with
+the old 0.022 spacing).
+
 ---
 
 ## 8. Sleep/Wake System
