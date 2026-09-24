@@ -168,3 +168,29 @@ def test_old_flag_names_are_gone():
             src = fh.read()
         assert "_rigid_boundary_initialized" not in src, name
         assert "_boundary_particles_injected" not in src, name
+
+
+def test_load_scene_rebuilds_block(tmp_path, monkeypatch):
+    """bd-r5-review-n28.35: save with bodies active, load, step: one intact block."""
+    import types
+
+    import save_load
+
+    monkeypatch.setattr(save_load, "SAVE_DIR", str(tmp_path))
+    world, sim, rbm = _make_sim()
+    _step(sim, 2)
+    n_fluid = world._high_water - rbm.num_boundary_particles
+    camera = types.SimpleNamespace(
+        target=np.zeros(3, dtype=np.float32), distance=2.0,
+        azimuth=0.0, elevation=0.0,
+    )
+    save_load.save_scene(world, sim, camera, "rigid_block")
+    # Move _high_water before loading so a stale offset would be wrong.
+    world.spawn_sphere((0.0, 0.4, 0.0), 0.05, WATER, 300)
+    n = save_load.load_scene(world, sim, camera, "rigid_block")
+    assert n == n_fluid  # the saved block was dropped, fluid kept
+    assert not rbm.boundary_injected
+    sim.notify_scene_changed()
+    _step(sim)
+    assert rbm.boundary_offset == n_fluid
+    _check_block(world, rbm)
