@@ -8,7 +8,8 @@ World domain: (-1,-1,-1) to (1,1,1). Spacing default=0.02.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import functools
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from world import World
 import math
@@ -26,31 +27,68 @@ def _clear_world(world: World) -> None:
     world._high_water = 0
 
 
-SpawnBox = Tuple[Tuple[float, float, float], Tuple[float, float, float], int]
+Vec3 = Tuple[float, float, float]
+# (min_corner, max_corner, material_id), optionally followed by the
+# spawn_cube exclude_box as a (min_corner, max_corner) pair or None.
+SpawnBox = Tuple[Any, ...]
+
+
+def _box_contains(outer: Tuple[Vec3, Vec3], lo: Vec3, hi: Vec3) -> bool:
+    return all(outer[0][a] <= lo[a] and hi[a] <= outer[1][a] for a in range(3))
 
 
 def _check_no_overlap(boxes: List[SpawnBox]) -> List[Tuple[int, int]]:
     """Find spawn boxes of different materials that share volume.
 
     CPU-only. `boxes` is a list of (min_corner, max_corner, material_id), one
-    per `spawn_cube` call. Returns the index pairs (i, j), i < j, of boxes with
+    per `spawn_cube` call, with an optional 4th element holding that call's
+    `exclude_box`. Returns the index pairs (i, j), i < j, of boxes with
     different materials whose intersection has positive volume. Boxes that only
-    touch on a face do not count. Two overlapping lattices put particles on or
-    near each other, which roughly doubles the local SPH density.
+    touch on a face do not count, and neither does an intersection that lies
+    inside the exclude_box of one of the two boxes. Two overlapping lattices
+    put particles on or near each other, which roughly doubles the local SPH
+    density.
     """
     pairs: List[Tuple[int, int]] = []
     for i in range(len(boxes)):
-        lo_i, hi_i, mat_i = boxes[i]
+        lo_i, hi_i, mat_i = boxes[i][:3]
+        ex_i = boxes[i][3] if len(boxes[i]) > 3 else None
         for j in range(i + 1, len(boxes)):
-            lo_j, hi_j, mat_j = boxes[j]
+            lo_j, hi_j, mat_j = boxes[j][:3]
+            ex_j = boxes[j][3] if len(boxes[j]) > 3 else None
             if mat_i == mat_j:
                 continue
-            if all(
+            if not all(
                 min(hi_i[a], hi_j[a]) - max(lo_i[a], lo_j[a]) > 1e-9
                 for a in range(3)
             ):
-                pairs.append((i, j))
+                continue
+            lo = tuple(max(lo_i[a], lo_j[a]) for a in range(3))
+            hi = tuple(min(hi_i[a], hi_j[a]) for a in range(3))
+            if any(ex is not None and _box_contains(ex, lo, hi)
+                   for ex in (ex_i, ex_j)):
+                continue
+            pairs.append((i, j))
     return pairs
+
+
+def _warn_on_truncation(
+    name: str, load_fn: Callable[[World], Tuple[int, Optional[Dict[str, Any]]]],
+) -> Callable[[World], Tuple[int, Optional[Dict[str, Any]]]]:
+    """Wrap a preset loader so it prints one line when any spawn_cube call hit
+    the particle budget and lost its top layers."""
+
+    @functools.wraps(load_fn)
+    def wrapped(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
+        before = getattr(world, "spawn_truncated_count", 0)
+        result = load_fn(world)
+        if getattr(world, "spawn_truncated_count", 0) > before:
+            print(f"  {name}: particle budget reached, top layers of a "
+                  f"spawn box were dropped (max_particles="
+                  f"{world.max_particles:,})")
+        return result
+
+    return wrapped
 
 
 def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
@@ -600,19 +638,22 @@ def load_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     _clear_world(world)
     total = 0
 
-    # Water filling most of the domain
+    lava_box = ((-0.25, -0.85, -0.25), (0.25, -0.5, 0.25))
+
+    # Water filling most of the domain, with a hole where the lava goes
     n = world.spawn_cube(
         min_corner=(-0.7, -0.9, -0.7),
         max_corner=(0.7, 0.6, 0.7),
         material_id=WATER,
         spacing=0.022,
+        exclude_box=lava_box,
     )
     total += n
 
     # Lava blob at the bottom center
     n = world.spawn_cube(
-        min_corner=(-0.25, -0.85, -0.25),
-        max_corner=(0.25, -0.5, 0.25),
+        min_corner=lava_box[0],
+        max_corner=lava_box[1],
         material_id=LAVA,
         spacing=0.022,
     )
@@ -975,19 +1016,23 @@ def load_debris_flow(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     _clear_world(world)
     total = 0
 
-    # MUD mass (larger volume for better visual coverage)
+    gravel_box = ((-0.85, 0.5, -0.3), (-0.4, 0.85, 0.3))
+
+    # MUD mass (larger volume for better visual coverage), with a hole for
+    # the gravel
     n = world.spawn_cube(
         min_corner=(-0.9, 0.2, -0.5),
         max_corner=(-0.2, 0.9, 0.5),
         material_id=MUD,
         spacing=0.022,
+        exclude_box=gravel_box,
     )
     total += n
 
     # Mixed GRAVEL debris in the flow
     n = world.spawn_cube(
-        min_corner=(-0.85, 0.5, -0.3),
-        max_corner=(-0.4, 0.85, 0.3),
+        min_corner=gravel_box[0],
+        max_corner=gravel_box[1],
         material_id=GRAVEL,
         spacing=0.025,
     )
@@ -1081,19 +1126,23 @@ def load_sdf_hourglass(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         friction=0.7,
     )
 
-    # Sand in upper chamber (capped at y=0.42 to stay below wall tops at y=0.45)
+    gravel_box = ((-0.06, 0.25, -0.3), (0.06, 0.40, 0.3))
+
+    # Sand in upper chamber (capped at y=0.42 to stay below wall tops at
+    # y=0.45), with a hole for the gravel
     n = world.spawn_cube(
         min_corner=(-0.08, 0.15, -0.4),
         max_corner=(0.08, 0.42, 0.4),
         material_id=SAND,
         spacing=0.02,
+        exclude_box=gravel_box,
     )
     total += n
 
     # Gravel mixed in (visual variety vs particle Hourglass)
     n = world.spawn_cube(
-        min_corner=(-0.06, 0.25, -0.3),
-        max_corner=(0.06, 0.40, 0.3),
+        min_corner=gravel_box[0],
+        max_corner=gravel_box[1],
         material_id=GRAVEL,
         spacing=0.025,
     )
@@ -1500,13 +1549,18 @@ def load_whirlpool(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Water filling the bowl with tangential velocity
+    # Water filling the bowl with tangential velocity. The bowl is a sphere
+    # shell with inner radius 0.62, so keep water inside radius 0.60 (one
+    # spacing clear of the shell).
+    water_r = 0.60
     n = world.spawn_cube(
-        min_corner=(-0.5, -0.6, -0.5),
-        max_corner=(0.5, -0.1, 0.5),
+        min_corner=(-water_r, -water_r, -water_r),
+        max_corner=(water_r, -0.1, water_r),
         material_id=WATER,
         spacing=0.02,
         velocity=(2.0, 0.0, 0.0),
+        inside_fn=lambda p: (p[:, 0] ** 2 + p[:, 1] ** 2 + p[:, 2] ** 2
+                             < water_r ** 2),
     )
     total += n
 
@@ -1596,3 +1650,4 @@ PRESETS = {
     "Whirlpool": load_whirlpool,
     "Avalanche Ramp": load_avalanche_ramp,
 }
+PRESETS = {name: _warn_on_truncation(name, fn) for name, fn in PRESETS.items()}

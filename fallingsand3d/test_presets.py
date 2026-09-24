@@ -18,12 +18,7 @@ import numpy as np
 import pytest
 
 from presets import PRESETS, _check_no_overlap
-from materials import MATERIALS, SAND, STONE, WATER
-
-# Presets that still nest one spawn box inside another. Bead
-# bd-r5-review-n28.47 (spawn_cube exclude_box filter) fixes these and must
-# remove them from this set.
-KNOWN_NESTED_SPAWNS = {"Lava Lamp", "Debris Flow", "SDF Hourglass"}
+from materials import MATERIALS, MUD, SAND, STONE, WATER
 
 
 class RecordingWorld:
@@ -37,8 +32,10 @@ class RecordingWorld:
         self.rigid_body_manager = MagicMock()
 
     def spawn_cube(self, min_corner, max_corner, material_id, spacing=0.02,
-                   velocity=(0.0, 0.0, 0.0)) -> int:
-        self.boxes.append((tuple(min_corner), tuple(max_corner), material_id))
+                   velocity=(0.0, 0.0, 0.0), exclude_box=None,
+                   inside_fn=None) -> int:
+        self.boxes.append((tuple(min_corner), tuple(max_corner), material_id,
+                           exclude_box))
         return 0
 
     # Non-box spawners (bowl, ramp, wall with gap) are not axis-aligned boxes.
@@ -87,6 +84,24 @@ def test_check_no_overlap_ignores_same_material():
     assert _check_no_overlap(boxes) == []
 
 
+def test_check_no_overlap_allows_nested_box_in_exclude_box():
+    inner = ((0.25, 0.25, 0.25), (0.75, 0.75, 0.75))
+    boxes = [
+        ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), WATER, inner),
+        (inner[0], inner[1], SAND),
+    ]
+    assert _check_no_overlap(boxes) == []
+
+
+def test_check_no_overlap_flags_box_larger_than_exclude_box():
+    boxes = [
+        ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), WATER,
+         ((0.25, 0.25, 0.25), (0.75, 0.75, 0.75))),
+        ((0.25, 0.25, 0.25), (0.9, 0.75, 0.75), SAND),
+    ]
+    assert _check_no_overlap(boxes) == [(0, 1)]
+
+
 def test_check_no_overlap_needs_overlap_on_all_axes():
     boxes = [
         ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), STONE),
@@ -101,8 +116,6 @@ def test_check_no_overlap_needs_overlap_on_all_axes():
 
 @pytest.mark.parametrize("name", sorted(PRESETS))
 def test_preset_spawn_boxes_do_not_overlap(name):
-    if name in KNOWN_NESTED_SPAWNS:
-        pytest.skip("nested spawn fixed by bd-r5-review-n28.47")
     boxes = _record(name)
     pairs = _check_no_overlap(boxes)
     assert pairs == [], (
@@ -117,13 +130,14 @@ def test_fixed_presets_record_boxes(name):
     assert len(_record(name)) >= 5
 
 
-def test_known_nested_list_is_still_needed():
-    """Fails once bd-r5-review-n28.47 lands, as a reminder to empty the set."""
-    for name in KNOWN_NESTED_SPAWNS:
-        assert name in PRESETS
-        assert _check_no_overlap(_record(name)) != [], (
-            f"{name} no longer overlaps: remove it from KNOWN_NESTED_SPAWNS"
-        )
+@pytest.mark.parametrize("name", ["Lava Lamp", "Debris Flow", "SDF Hourglass"])
+def test_nested_presets_use_exclude_box(name):
+    """These presets put one box inside another and rely on exclude_box
+    (bd-r5-review-n28.47). Without it the overlap check would flag them."""
+    boxes = _record(name)
+    assert any(len(b) > 3 and b[3] is not None for b in boxes)
+    stripped = [b[:3] for b in boxes]
+    assert _check_no_overlap(stripped) != []
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +157,16 @@ def gpu_sim():
     sim.close()
 
 
-@pytest.mark.parametrize("name", ["Sand Castle", "Waterfall"])
-def test_fixed_preset_water_density_after_one_substep(gpu_sim, name):
+@pytest.mark.parametrize("name,material,min_count", [
+    ("Sand Castle", WATER, 10_000),
+    ("Waterfall", WATER, 10_000),
+    # Nested spawns fixed by bd-r5-review-n28.47 (exclude_box).
+    ("Lava Lamp", WATER, 10_000),
+    ("Debris Flow", MUD, 10_000),
+    ("SDF Hourglass", SAND, 1_000),
+])
+def test_fixed_preset_density_after_one_substep(gpu_sim, name, material,
+                                                min_count):
     cp, world, sim = gpu_sim
     PRESETS[name](world)
     sim.notify_scene_changed()
@@ -154,8 +176,9 @@ def test_fixed_preset_water_density_after_one_substep(gpu_sim, name):
 
     mat = world.sorted_packed_info[:n].get() & 0xFF
     rho = world.sorted_density[:n].get()
-    water = mat == WATER
-    assert water.sum() > 10_000
-    rho0 = MATERIALS[WATER].rest_density
-    ratio = float(rho[water].max()) / rho0
-    assert ratio < 1.3, f"{name}: max water density {ratio:.3f}x rest density"
+    sel = mat == material
+    assert sel.sum() > min_count
+    rho0 = MATERIALS[material].rest_density
+    ratio = float(rho[sel].max()) / rho0
+    assert ratio < 1.3, (
+        f"{name}: max {MATERIALS[material].name} density {ratio:.3f}x rest")

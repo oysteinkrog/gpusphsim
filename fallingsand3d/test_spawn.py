@@ -1133,6 +1133,98 @@ def test_dead_reserve_parked_bucket_load():
                 assert worst <= 8, (max_p, start, ts, worst)
 
 
+# ---------------------------------------------------------------------------
+# World.spawn_cube filters and truncation (bd-r5-review-n28.47)
+# ---------------------------------------------------------------------------
+
+def _spawned_positions(world, n):
+    return world.position[world._high_water - n:world._high_water, :3].get()
+
+
+def test_spawn_cube_exclude_box_removes_inner_points():
+    from world import World
+    w = World(100_000)
+    lo, hi = (-0.2, -0.2, -0.2), (0.2, 0.2, 0.2)
+    inner = ((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1))
+    # Lattice points at -0.19, -0.17, ..., 0.19: 20 per axis, 10 inside inner.
+    n = w.spawn_cube(lo, hi, WATER, spacing=0.02, exclude_box=inner)
+    assert n == 20 ** 3 - 10 ** 3
+    pos = _spawned_positions(w, n)
+    in_box = np.all((pos >= -0.1) & (pos <= 0.1), axis=1)
+    assert not in_box.any()
+    # Filling the hole with a second lattice at the same spacing gives the
+    # full block with no point shared.
+    n2 = w.spawn_cube(inner[0], inner[1], SAND, spacing=0.02)
+    assert n2 == 10 ** 3
+    allpos = w.position[:w._high_water, :3].get()
+    keys = np.round(allpos / 0.01).astype(np.int64)
+    assert len(np.unique(keys, axis=0)) == 20 ** 3
+    assert not w.last_spawn_truncated
+
+
+def test_spawn_cube_inside_fn_radial_filter():
+    from world import World
+    w = World(100_000)
+    r = 0.15
+    fn = lambda p: p[:, 0] ** 2 + p[:, 2] ** 2 < r * r
+    n = w.spawn_cube((-0.2, 0.0, -0.2), (0.2, 0.1, 0.2), WATER,
+                     spacing=0.02, inside_fn=fn)
+    xs = np.arange(-0.2 + 0.01, 0.2, 0.02, dtype=np.float32)
+    ys = np.arange(0.0 + 0.01, 0.1, 0.02, dtype=np.float32)
+    gx, gz = np.meshgrid(xs, xs, indexing='ij')
+    per_layer = int((gx ** 2 + gz ** 2 < r * r).sum())
+    assert n == per_layer * len(ys)
+    pos = _spawned_positions(w, n)
+    assert np.all(pos[:, 0] ** 2 + pos[:, 2] ** 2 < r * r)
+
+
+def test_spawn_cube_truncation_keeps_footprint():
+    """A 90^3 lattice into a 500K world keeps full x and z and drops top
+    layers (y slowest). Before the fix x was slowest, so the block kept full
+    height and lost its +x side."""
+    from world import World
+    w = World(500_000)
+    w.dead_reserve = 0
+    n = w.spawn_cube((-0.9, -0.9, -0.9), (0.9, 0.9, 0.9), WATER, spacing=0.02)
+    assert n == 500_000
+    assert w.last_spawn_truncated
+    pos = w.position[:n, :3].get()
+    assert pos[:, 0].min() < -0.88 and pos[:, 0].max() > 0.88
+    assert pos[:, 2].min() < -0.88 and pos[:, 2].max() > 0.88
+    layers = len(np.unique(np.round(pos[:, 1], 4)))
+    # 500000 / 8100 = 61.7, so 61 full layers plus one partial one.
+    assert layers == 62, layers
+    # Every full layer below the top covers the whole footprint.
+    top = pos[:, 1].max()
+    below = pos[pos[:, 1] < top - 0.01]
+    assert len(below) == 61 * 90 * 90
+
+
+def test_spawn_cube_not_truncated_flag():
+    from world import World
+    w = World(10_000)
+    w.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), WATER, spacing=0.02)
+    assert not w.last_spawn_truncated
+    assert w.spawn_truncated_count == 0
+
+
+def test_whirlpool_water_inside_bowl():
+    """Whirlpool water must start inside the bowl's inner radius 0.62."""
+    from world import World
+    from presets import PRESETS
+    w = World(500_000)
+    PRESETS["Whirlpool"](w)
+    n = w._high_water
+    pos = w.position[:n, :3].get()
+    mat = w.packed_info[:n].get() & 0xFF
+    water = pos[mat == WATER]
+    assert len(water) > 30_000
+    r2 = (water ** 2).sum(axis=1)
+    assert np.all(r2 < 0.62 ** 2)
+    horiz = water[:, 0] ** 2 + water[:, 2] ** 2
+    assert np.mean(horiz < 0.62 ** 2) >= 0.99
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,

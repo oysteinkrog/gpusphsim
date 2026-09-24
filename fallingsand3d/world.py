@@ -12,7 +12,7 @@ test is always material_id != 0, so a bare packed_info of 0 also counts as dead.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 import cupy as cp
 import numpy as np
@@ -115,6 +115,11 @@ class World:
         self.max_particles: int = max_particles
         self._high_water: int = 0  # one past last allocated slot
         self._spawned_material_ids: set = set()  # CPU-side tracking for conditional skip
+        # Set by every spawn_cube call: True when the particle budget cut the
+        # lattice short. spawn_truncated_count counts such calls over the
+        # world's lifetime, so a caller can check a whole batch of spawns.
+        self.last_spawn_truncated: bool = False
+        self.spawn_truncated_count: int = 0
         # Parked DEAD slots kept for the spawn freelist (see DEAD_RESERVE_DEFAULT).
         # 0 turns the reserve off.
         self.dead_reserve: int = DEAD_RESERVE_DEFAULT
@@ -584,13 +589,27 @@ class World:
         material_id: int,
         spacing: float = DEFAULT_SPACING,
         velocity: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        exclude_box: Optional[Tuple[Tuple[float, float, float],
+                                    Tuple[float, float, float]]] = None,
+        inside_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> int:
         """Spawn particles on a regular grid within a cube.
+
+        exclude_box: optional (min_corner, max_corner). Lattice points inside
+            it (bounds included) are dropped, so another material can fill
+            that box without two lattices sharing volume.
+        inside_fn: optional filter. Called with the (N, 3) float32 CPU
+            positions, it returns a boolean mask of the points to keep.
+
+        The lattice is ordered with y slowest, so when the particle budget
+        runs out the top layers are dropped and the footprint stays whole.
+        `last_spawn_truncated` says whether that happened.
 
         Returns the number of particles actually spawned.
         """
         if material_id not in MATERIALS:
             raise ValueError(f"Unknown material_id: {material_id}")
+        self.last_spawn_truncated = False
 
         # Build grid positions on CPU (small overhead, predictable count)
         x0, y0, z0 = min_corner
@@ -602,19 +621,31 @@ class World:
         if len(xs) == 0 or len(ys) == 0 or len(zs) == 0:
             return 0
 
-        total = len(xs) * len(ys) * len(zs)
         available = self.max_particles - self._high_water
-        actual = min(total, available)
-        if actual <= 0:
+        if available <= 0:
+            self.last_spawn_truncated = True
+            self.spawn_truncated_count += 1
             return 0
 
-        # Generate meshgrid positions
-        gx, gy, gz = np.meshgrid(xs, ys, zs, indexing='ij')
+        # y is the slowest axis, so truncation removes whole top layers.
+        gy, gx, gz = np.meshgrid(ys, xs, zs, indexing='ij')
         positions = np.column_stack([
-            gx.ravel()[:actual],
-            gy.ravel()[:actual],
-            gz.ravel()[:actual],
+            gx.ravel(), gy.ravel(), gz.ravel(),
         ]).astype(np.float32)
+
+        keep = np.ones(len(positions), dtype=bool)
+        if exclude_box is not None:
+            lo = np.asarray(exclude_box[0], dtype=np.float32)
+            hi = np.asarray(exclude_box[1], dtype=np.float32)
+            keep &= ~np.all((positions >= lo) & (positions <= hi), axis=1)
+        if inside_fn is not None:
+            keep &= np.asarray(inside_fn(positions), dtype=bool)
+        positions = positions[keep]
+
+        if len(positions) > available:
+            positions = positions[:available]
+            self.last_spawn_truncated = True
+            self.spawn_truncated_count += 1
 
         actual = len(positions)
         if actual == 0:
