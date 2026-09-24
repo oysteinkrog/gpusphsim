@@ -248,9 +248,10 @@ void K_DFSPH_ComputeDensityAlpha(
 
                                 if (is_fluid) {
                                     float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
-                                    omega.x += vol_j * (gW.y * dvz - gW.z * dvy);
-                                    omega.y += vol_j * (gW.z * dvx - gW.x * dvz);
-                                    omega.z += vol_j * (gW.x * dvy - gW.y * dvx);
+                                    // dv = v_i - v_j, so gradW x (v_j - v_i) = dv x gradW
+                                    omega.x += vol_j * (dvy * gW.z - dvz * gW.y);
+                                    omega.y += vol_j * (dvz * gW.x - dvx * gW.z);
+                                    omega.z += vol_j * (dvx * gW.y - dvy * gW.x);
                                 }
                             }
                         } // !is_rigid_j

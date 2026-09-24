@@ -322,10 +322,10 @@ void K_PBF_ComputeLambda(
                                 float dvx = vel_i_vort.x - vj4.x;
                                 float dvy = vel_i_vort.y - vj4.y;
                                 float dvz = vel_i_vort.z - vj4.z;
-                                // dv = v_i - v_j, (v_j-v_i)xgW = -dvxgW = gWxdv
-                                omega.x += vol_jv * (gW.y * dvz - gW.z * dvy);
-                                omega.y += vol_jv * (gW.z * dvx - gW.x * dvz);
-                                omega.z += vol_jv * (gW.x * dvy - gW.y * dvx);
+                                // curl_i = sum_j V_j gradW x (v_j - v_i); dv = v_i - v_j, so this is dv x gradW
+                                omega.x += vol_jv * (dvy * gW.z - dvz * gW.y);
+                                omega.y += vol_jv * (dvz * gW.x - dvx * gW.z);
+                                omega.z += vol_jv * (dvx * gW.y - dvy * gW.x);
                             }
                             if (do_normal) {
                                 normal.x += vol_jv * gW.x;

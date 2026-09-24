@@ -108,7 +108,8 @@ __device__ inline float W_poly6(float rlen_sq, float h_sq) {
 }
 
 /* Spiky gradient WITH coefficient baked in.
- * Points away from neighbor (r = pos_i - pos_j).
+ * With r = pos_i - pos_j and spiky_grad_coeff < 0 this is the true grad_i W,
+ * which points toward the neighbor.
  * grad_W = spiky_grad_coeff * (h-|r|)^2 / |r| * r */
 __device__ inline float3 grad_spiky(float3 r, float rlen, float h) {
     float h_rlen = h - rlen;
@@ -518,7 +519,19 @@ __device__ inline void sdf_box_boundary(
  *
  * After position integration, scan for nearby STATIC particles and push
  * the fluid/granular particle away to prevent leaking through solid
- * boundaries. Applies velocity reflection with restitution.
+ * boundaries.
+ *
+ * The band is min_dist = 0.5h, one rest spacing (dx = 0.02 m at
+ * h = 0.04 m).  That is the Akinci equilibrium distance, so a particle
+ * resting one spacing from the wall is not touched; Akinci density and
+ * pressure in step2 hold it there.
+ *
+ * The push is one correction, not a sum over walls: direction
+ * n = normalise(sum_j deficit_j * r_hat_j), length max_j deficit_j.
+ * So a particle over a flat floor moves by at most its deepest
+ * penetration, however many floor particles are in the band.
+ * Velocity is reflected with restitution along n only, and only when
+ * the particle moves into the wall.
  *
  * Requires: cell_start, cell_end, packed_info, position arrays in sorted
  * order (same grid as the current step).
@@ -534,12 +547,12 @@ __device__ inline void static_particle_boundary(
     float restitution
 ) {
     float h = c_sim.smoothing_length;
-    float min_dist = 0.8f * h;
+    float min_dist = 0.5f * h;
     float min_dist_sq = min_dist * min_dist;
 
     int3 cell = calcGridCell(pos);
-    float3 push = make_float3(0.0f, 0.0f, 0.0f);
-    float push_count = 0.0f;
+    float3 dir_sum = make_float3(0.0f, 0.0f, 0.0f);
+    float max_deficit = 0.0f;
 
     for (int dz = -1; dz <= 1; dz++) {
         for (int dy = -1; dy <= 1; dy++) {
@@ -564,25 +577,24 @@ __device__ inline void static_particle_boundary(
                     if (r_sq < min_dist_sq && r_sq > 1e-12f) {
                         float rlen = sqrtf(r_sq);
                         float deficit = min_dist - rlen;
-                        float weight = deficit / min_dist;
-                        float inv_r = 1.0f / rlen;
-                        push.x += deficit * (1.0f + weight) * r.x * inv_r;
-                        push.y += deficit * (1.0f + weight) * r.y * inv_r;
-                        push.z += deficit * (1.0f + weight) * r.z * inv_r;
-                        push_count += 1.0f;
+                        float w = deficit / rlen;
+                        dir_sum.x += w * r.x;
+                        dir_sum.y += w * r.y;
+                        dir_sum.z += w * r.z;
+                        max_deficit = fmaxf(max_deficit, deficit);
                     }
                 }
             }
         }
     }
 
-    if (push_count > 0.0f) {
-        pos.x += push.x;
-        pos.y += push.y;
-        pos.z += push.z;
-        float push_len = sqrtf(push.x*push.x + push.y*push.y + push.z*push.z);
-        if (push_len > 1e-8f) {
-            float3 n = make_float3(push.x/push_len, push.y/push_len, push.z/push_len);
+    if (max_deficit > 0.0f) {
+        float dir_len = sqrtf(dir_sum.x*dir_sum.x + dir_sum.y*dir_sum.y + dir_sum.z*dir_sum.z);
+        if (dir_len > 1e-8f) {
+            float3 n = make_float3(dir_sum.x/dir_len, dir_sum.y/dir_len, dir_sum.z/dir_len);
+            pos.x += max_deficit * n.x;
+            pos.y += max_deficit * n.y;
+            pos.z += max_deficit * n.z;
             float v_dot_n = vel.x*n.x + vel.y*n.y + vel.z*n.z;
             if (v_dot_n < 0.0f) {
                 vel.x -= (1.0f + restitution) * v_dot_n * n.x;

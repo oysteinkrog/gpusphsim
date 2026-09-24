@@ -223,9 +223,10 @@ void K_Step1(
                                         float dvx_v = vel4_j_v.x - vel_i.x;
                                         float dvy_v = vel4_j_v.y - vel_i.y;
                                         float dvz_v = vel4_j_v.z - vel_i.z;
-                                        omega.x += vol_j * (dvy_v * gWz - dvz_v * gWy);
-                                        omega.y += vol_j * (dvz_v * gWx - dvx_v * gWz);
-                                        omega.z += vol_j * (dvx_v * gWy - dvy_v * gWx);
+                                        // curl_i = sum_j V_j gradW x (v_j - v_i)
+                                        omega.x += vol_j * (gWy * dvz_v - gWz * dvy_v);
+                                        omega.y += vol_j * (gWz * dvx_v - gWx * dvz_v);
+                                        omega.z += vol_j * (gWx * dvy_v - gWy * dvx_v);
 
                                         normal.x += vol_j * gWx;
                                         normal.y += vol_j * gWy;
@@ -517,9 +518,10 @@ void K_Step1_BuildNL(
                                         float dvx_v = vel4_j_v.x - vel_i.x;
                                         float dvy_v = vel4_j_v.y - vel_i.y;
                                         float dvz_v = vel4_j_v.z - vel_i.z;
-                                        omega.x += vol_j * (dvy_v * gWz - dvz_v * gWy);
-                                        omega.y += vol_j * (dvz_v * gWx - dvx_v * gWz);
-                                        omega.z += vol_j * (dvx_v * gWy - dvy_v * gWx);
+                                        // curl_i = sum_j V_j gradW x (v_j - v_i)
+                                        omega.x += vol_j * (gWy * dvz_v - gWz * dvy_v);
+                                        omega.y += vol_j * (gWz * dvx_v - gWx * dvz_v);
+                                        omega.z += vol_j * (gWx * dvy_v - gWy * dvx_v);
 
                                         normal.x += vol_j * gWx;
                                         normal.y += vol_j * gWy;
