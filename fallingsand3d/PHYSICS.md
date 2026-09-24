@@ -323,6 +323,8 @@ if pos outside plane:
 ```
 
 Wall friction: `mu = 0` for FLUID (prevents wall sticking), `c_sim.wall_friction` for others.
+All three solvers use this rule: WCSPH in `K_Integrate`, PBF in `K_PBF_Finalize`,
+DFSPH in `K_DFSPH_Finalize`.
 
 **Source**: `integrate.cu:70-174`, `integrate.cu:395-400`
 
@@ -1624,7 +1626,18 @@ Velocity updated: `v*_i = v_i + dt * a_i`
 
 ### 13.7 DFSPH Sleep System
 
-Same velocity-based activity metric as PBF (§12.6).
+Same velocity-based activity metric as PBF (§12.6). Only GRANULAR particles can
+sleep, matching WCSPH and PBF. FLUID and GAS reset their counter every substep.
+A FLUID or GAS particle that arrives with the SLEEPING bit set (older build or
+loaded snapshot) wakes in the same substep; a sleeping GRANULAR particle stays
+asleep while `|v| <= V_WAKE`.
+
+Box-wall friction is 0 for FLUID and `c_sim.wall_friction` for other behaviours,
+as in the other two solvers (§4.5).
+
+Before 2026-09-24 the DFSPH sleep block had no behavior gate and FLUID used the
+full wall friction. A 2 s resting pool of 19200 water particles was then fully
+asleep; now none are. Dam Break COM_y is unchanged (-0.603).
 
 **Source**: `dfsph_solver.cu:K_DFSPH_Finalize`
 
