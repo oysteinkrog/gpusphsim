@@ -478,7 +478,13 @@ if |v| > 0.02:
 Hysteresis: 4x ratio between sleep (0.005) and wake (0.02) velocity thresholds.
 
 Wake propagation (`wake.run_wake_propagation`, a memset and 2 kernels on the
-unsorted arrays) runs at the end of every substep for all three solvers. Until
+unsorted arrays) runs at the end of every substep for all three solvers.
+`K_MarkWakeCells` flags the 3x3x3 cells around each particle that has
+JUST_WOKE set, and around each awake particle faster than 0.02 m/s. The
+velocity trigger skips STATIC and GAS particles. GAS is skipped because step1
+and step2 apply no forces between GAS and non-GAS, so smoke or fire over a
+sleeping pile would only wake it, let it re-sleep 10 substeps later, and wake
+it again. A GAS particle that has JUST_WOKE set still marks its cells. Until
 2026-07-11 it ran only for WCSPH, so a sleeping PBF or DFSPH pile never woke
 when something hit it.
 
