@@ -47,6 +47,11 @@
  * ====================================================================== */
 
 #define ICE_MELT_TEMP         273.0f   // ICE -> WATER above this
+#define WATER_FREEZE_TEMP     263.0f   // WATER -> ICE below this (10K hysteresis below melt)
+/* ICE is STATIC, so only slow water freezes; a particle in a moving stream
+ * would otherwise stop dead in mid-air.  Same speed as V_WAKE in
+ * sph_shared.cuh (this file includes only common.cuh). */
+#define WATER_FREEZE_MAX_SPEED 0.02f
 // LAVA solidify uses c_materials[MAT_LAVA].temp_melt at runtime
 #define WATER_BOIL_TEMP       373.0f   // WATER -> SPAWN_GAS flag above this
 #define STEAM_CONDENSE_TEMP   360.0f   // STEAM -> WATER below this (13K hysteresis below boil)
@@ -242,6 +247,23 @@ void K_Reactions(
         pi = SET_SPAWN_FLAG(pi);
         packed_info[i] = pi;
         return;
+    }
+
+    // WATER (mat=5, temp < 263K, sleeping or |v| < 0.02 m/s) -> ICE (STATIC)
+    // Temperature is set to the freeze point: the deficit below it is taken
+    // as released latent heat, as for the other melt/solidify transitions.
+    if (mat_id == MAT_WATER && temp < WATER_FREEZE_TEMP) {
+        float4 v = velocity[i];
+        float v_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+        if (IS_SLEEPING(pi) ||
+                v_sq < WATER_FREEZE_MAX_SPEED * WATER_FREEZE_MAX_SPEED) {
+            pi = MAKE_PACKED(MAT_ICE, STATIC);
+            packed_info[i] = pi;
+            rescale_mass(mass, i, MAT_WATER, MAT_ICE);
+            temperature[i] = WATER_FREEZE_TEMP;
+            velocity[i] = make_float4(0.0f, 0.0f, 0.0f, v.w);
+            return;
+        }
     }
 
     // STEAM (mat=12, temp < 373K) -> WATER (in-place)
