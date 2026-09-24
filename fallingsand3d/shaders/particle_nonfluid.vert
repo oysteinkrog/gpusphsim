@@ -14,6 +14,15 @@ uniform float uPointScale;
 out vec4 vColor;
 
 void main() {
+    // DEAD slot (color.w < 0): drop the vertex so killed particles vanish
+    // before compaction.
+    if (aColor.w < 0.0) {
+        vColor = aColor;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+    }
+
     float behavior = aColor.w;
 
     vec4 eyePos = uMV * vec4(aPos.xyz, 1.0);

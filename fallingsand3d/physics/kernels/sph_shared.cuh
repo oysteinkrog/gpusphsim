@@ -610,12 +610,19 @@ __device__ inline void static_particle_boundary(
  * ====================================================================== */
 
 /* Encode behavior class into color.w for SSFR material filtering.
- * FLUID=0.0, GRANULAR=0.25, GAS=0.5, STATIC=0.75 */
+ * FLUID=0.0, GRANULAR=0.25, GAS=0.5, STATIC=0.75. DEAD slots get -1.0. */
 __device__ inline float behavior_to_alpha(int behavior) {
     return behavior * 0.25f;
 }
 
+/* color.w value for a DEAD slot. Every particle vertex shader drops a vertex
+ * with color.w < 0, so a dead slot is invisible from the next substep on,
+ * without waiting for compaction. position.w is not free for this: step1
+ * stores density there. */
+#define DEAD_COLOR_ALPHA (-1.0f)
+
 __device__ inline float4 compute_color(uint mat_id, float temperature, float health, int behavior) {
+    if (mat_id == MAT_DEAD) return make_float4(0.0f, 0.0f, 0.0f, DEAD_COLOR_ALPHA);
     float r = c_materials[mat_id].color_r;
     float g = c_materials[mat_id].color_g;
     float b = c_materials[mat_id].color_b;
@@ -660,6 +667,7 @@ __device__ inline float4 compute_fluid_color(
     uint mat_id, float temperature, float health,
     float pos_y, float vel_sq, float density
 ) {
+    if (mat_id == MAT_DEAD) return make_float4(0.0f, 0.0f, 0.0f, DEAD_COLOR_ALPHA);
     float rho0 = c_materials[mat_id].rest_density;
     float base_r = c_materials[mat_id].color_r;
     float base_g = c_materials[mat_id].color_g;

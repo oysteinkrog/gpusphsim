@@ -28,8 +28,9 @@ DEAD_PACKED = _MAKE_PACKED(0, STATIC)
 
 # Kill every live, non-rigid particle inside a sphere (bd-r5-review-n28.34).
 # One launch and no host sync. A killed slot becomes DEAD_PACKED with zero
-# mass, health, velocity and color, so no solver sees it as fluid, it adds
-# nothing to neighbour density and it cannot move.
+# mass, health and velocity, so no solver sees it as fluid, it adds nothing
+# to neighbour density and it cannot move. Its color is (0, 0, 0, -1): the
+# negative w makes every particle vertex shader cull it.
 _KILL_SPHERE_SRC = r"""
 extern "C" __global__
 void K_KillSphere(const float4* __restrict__ position,
@@ -52,7 +53,9 @@ void K_KillSphere(const float4* __restrict__ position,
     mass[i] = 0.0f;
     health[i] = 0.0f;
     velocity[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    color[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    // color.w = -1 marks the slot DEAD for the vertex shaders, which cull it
+    // (matches DEAD_COLOR_ALPHA in sph_shared.cuh).
+    color[i] = make_float4(0.0f, 0.0f, 0.0f, -1.0f);
 }
 """
 _kill_sphere_kernel = None
@@ -490,6 +493,9 @@ class World:
         # DEAD with behavior STATIC. Plain 0 would read as behavior FLUID
         # (FLUID = 0), and K_Integrate would drop the parked slot under gravity.
         self.packed_info[sl] = cp.uint32(_MAKE_PACKED(0, STATIC))
+        # color.w = -1 marks the slot DEAD, so the vertex shaders cull it
+        # (DEAD_COLOR_ALPHA in sph_shared.cuh).
+        self.color[sl, 3] = -1.0
         self.sleep_counter[sl] = 0
         self._high_water += count
         return count
@@ -971,9 +977,10 @@ class World:
     ) -> int:
         """Mark live particles within a sphere as DEAD.
 
-        Killed slots get DEAD_PACKED (material DEAD, behavior STATIC) and zero
-        mass, health, velocity and color, the same state K_SpawnGas and
-        K_Reactions leave behind. Rigid boundary particles are never killed:
+        Killed slots get DEAD_PACKED (material DEAD, behavior STATIC), zero
+        mass, health and velocity, and color (0, 0, 0, -1), the same state
+        K_SpawnGas and K_Reactions leave behind once a solver writes their
+        color. The vertex shaders cull any slot with color.w < 0. Rigid boundary particles are never killed:
         the rigid body manager owns that block (bd-r5-review-n28.22).
 
         Runs as one kernel with no GPU to host sync. Returns 0 because the

@@ -12,6 +12,16 @@ out float vEyeZ;      // eye-space Z (negative, closer = less negative)
 out float vPointSize;  // for sphere impostor depth correction
 
 void main() {
+    // DEAD slot (color.w < 0): drop the vertex so killed particles vanish
+    // before compaction.
+    if (aColor.w < 0.0) {
+        vEyeZ = 0.0;
+        vPointSize = 0.0;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+    }
+
     vec4 eyePos = uMV * vec4(aPos.xyz, 1.0);
     vEyeZ = eyePos.z;
 
