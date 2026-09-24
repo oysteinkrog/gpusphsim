@@ -890,7 +890,7 @@ class UI:
                         self._undo_steps = new_steps
                     if imgui.button("Restore##undo", imgui.ImVec2(100, 28)):
                         steps = getattr(self, '_undo_steps', 1)
-                        if snaps.restore(world, steps_back=steps):
+                        if snaps.restore(world, steps_back=steps, sim=sim):
                             changes['_scene_loaded'] = True
 
             # Solver dropdown

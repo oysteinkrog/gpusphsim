@@ -170,7 +170,7 @@ def main():
             return
         # Ctrl+Z = undo (restore previous snapshot)
         if key == glfw.KEY_Z and (_mods & glfw.MOD_CONTROL):
-            if snapshots.restore(world):
+            if snapshots.restore(world, sim=sim):
                 # The restored arrays may hold the boundary block at an old
                 # offset; rebuild it next substep (bd-r5-review-n28.22).
                 sim.rigid_body_manager.mark_for_reinjection()
@@ -193,9 +193,11 @@ def main():
             world.packed_info[:] = 0
             world._high_water = 0
             world.foam_count.fill(0)  # reset foam pool
-            # The boundary block was wiped with the rest; rebuild it next
-            # substep so its offset never points into new fluid (bd-r5-review-n28.22).
-            sim.rigid_body_manager.mark_for_reinjection()
+            # R respawns the default scene, which has no rigid bodies or SDF
+            # objects, so drop the ones a preset added. reset() also clears the
+            # boundary block state, so nothing writes into the zeroed slots
+            # (bd-r5-review-n28.39).
+            sim.reset_scene_objects()
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.sim_time = 0.0
@@ -309,7 +311,7 @@ def main():
         substeps = sim.step_frame()
 
         # --- Snapshot tick (auto-capture every N frames) ---
-        snapshots.tick(world)
+        snapshots.tick(world, sim=sim)
 
         # --- Copy to VBOs (once per frame) ---
         vel_ctx = renderer.cuda_vel if renderer.motion_blur_enabled else None
@@ -365,7 +367,9 @@ def main():
             world.packed_info[:] = 0
             world._high_water = 0
             world.foam_count.fill(0)  # reset foam pool
-            sim.rigid_body_manager.reset()
+            # Same scene reset as the R key: the default scene has no rigid
+            # bodies or SDF objects (bd-r5-review-n28.39).
+            sim.reset_scene_objects()
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.set_solver_profile(profile)
@@ -387,8 +391,7 @@ def main():
             from presets import PRESETS
             load_fn = PRESETS[preset_name]
             print(f"Loading preset: {preset_name}")
-            sim.sdf_manager.clear()  # reset SDF objects before preset
-            sim.rigid_body_manager.reset()  # reset rigid bodies before preset
+            sim.reset_scene_objects()  # drop SDF objects and rigid bodies before preset
             n_spawned, spawner_cfg = load_fn(world)
             sim.rigid_body_manager.finalize_boundary_data()  # wire up rigid body pipeline
             sim.rigid_body_manager.upload(sim.get_all_modules())  # upload body data + count to GPU constant memory

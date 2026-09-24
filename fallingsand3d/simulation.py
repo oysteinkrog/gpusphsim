@@ -616,6 +616,23 @@ class Simulation:
             )
         return w._high_water
 
+    def reset_scene_objects(self) -> None:
+        """Remove all SDF objects and rigid bodies (bd-r5-review-n28.39).
+
+        Shared by every path that replaces the scene with a new one: the R
+        reset, the solver switch and the preset load. Using one helper keeps
+        the three paths from drifting apart. reset() also clears the boundary
+        injection state, so no stale boundary block is written into slots the
+        caller has just zeroed. The zero body count is uploaded to every
+        compiled module so the kernels stop reading the old bodies.
+
+        Runs on scene events only; it uploads to constant memory and is not
+        meant for the per-substep path.
+        """
+        self.sdf_manager.clear()
+        self.rigid_body_manager.reset()
+        self.rigid_body_manager.upload(self.get_all_modules())
+
     def notify_scene_changed(self) -> None:
         """Signal that the particle set was mutated outside the substep loop
         (brush/gas spawn, R reset, preset load, Ctrl+Z undo, timeline restore).
