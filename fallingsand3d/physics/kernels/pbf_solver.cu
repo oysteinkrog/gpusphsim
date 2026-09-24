@@ -260,7 +260,7 @@ void K_PBF_ComputeLambda(
     // Floor at 1: DEAD has rest_density 0, and C = rho / rho0 - 1 would be inf.
     float rho0 = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
     // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
-    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
+    float rigid_dens_scale = __fdiv_rn(c_materials[mat_id_i].rest_density, RIGID_PSI_RHO0);
 
     // Density accumulator (Poly6)
     float sum_density = 0.0f;

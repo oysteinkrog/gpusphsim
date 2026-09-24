@@ -87,7 +87,7 @@ void K_Step1(
     bool is_fluid = (behavior_i == FLUID);
     bool is_rigid_i = (mat_id_i == MAT_RIGID);
     // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
-    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
+    float rigid_dens_scale = __fdiv_rn(c_materials[mat_id_i].rest_density, RIGID_PSI_RHO0);
 
     // Boundary particles don't need density computation -- early out
     if (is_rigid_i) {
@@ -451,7 +451,7 @@ void K_Step1_BuildNL(
     bool is_fluid = (behavior_i == FLUID);
     bool is_rigid_i = (mat_id_i == MAT_RIGID);
     // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
-    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
+    float rigid_dens_scale = __fdiv_rn(c_materials[mat_id_i].rest_density, RIGID_PSI_RHO0);
 
     // Neighbor list write position
     uint nl_base = index_i * max_nb;

@@ -108,7 +108,7 @@ void K_DFSPH_ComputeDensityAlpha(
     bool is_fluid = (behavior_i == FLUID);
 
     // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
-    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
+    float rigid_dens_scale = __fdiv_rn(c_materials[mat_id_i].rest_density, RIGID_PSI_RHO0);
 
     // MAT_RIGID boundary particles: early-return, no density/alpha needed
     if (mat_id_i == MAT_RIGID) {
@@ -536,7 +536,7 @@ void K_DFSPH_NonPressureForces(
                             );
                             // psi_b = rho0_i * V_b; the mass slot holds
                             // RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
-                            float psi_b = m_j * (c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0));
+                            float psi_b = m_j * (__fdiv_rn(c_materials[mat_id_i].rest_density, RIGID_PSI_RHO0));
                             float visc_factor = mu_b * psi_b * lap_v / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_visc = make_float3(
                                 (vel_boundary.x - vel_i.x) * visc_factor,

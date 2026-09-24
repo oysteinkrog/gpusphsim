@@ -310,7 +310,7 @@ void K_Step2(
                             // psi_b = rho0_i * V_b with the fluid's own rest density.
                             // The mass slot holds RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
                             float rho0 = c_materials[mat_id_i].rest_density;
-                            float psi_b = m_j * (rho0 * (1.0f / RIGID_PSI_RHO0));
+                            float psi_b = m_j * __fdiv_rn(rho0, RIGID_PSI_RHO0);
                             float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0 * rho0));
                             float3 F_on_fluid = make_float3(
                                 psi_b * press_akinci * grad_s.x,

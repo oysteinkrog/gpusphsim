@@ -218,7 +218,8 @@ __constant__ PrecalcParams c_precalc;
  * terms m_j / rho_j give V_b. Akinci's boundary weight is psi_b = rho0_i * V_b
  * with the fluid's own rest density, so density sums and Akinci coupling
  * terms scale a rigid neighbour's mass by rho0_i / RIGID_PSI_RHO0
- * (bd-r5-review-n28.77). */
+ * (bd-r5-review-n28.77). The scale uses __fdiv_rn, which rounds exactly
+ * under --use_fast_math, so WATER (2500) gets exactly 1 and is unchanged. */
 #define RIGID_PSI_RHO0 2500.0f
 
 /* MAT_DEAD material ID -- free slot (must match materials.DEAD).  Dead slots are
