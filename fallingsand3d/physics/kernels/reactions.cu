@@ -69,6 +69,14 @@
 
 #define EXPLOSION_SPEED       25.0f    // velocity magnitude for gunpowder burst
 
+/* FIRE -> SMOKE when wet. FIRE's exposure_corrode comes only from WATER
+ * (0.8 * water support fraction; materials.py zeroes the FIRE row for WOOD,
+ * OIL, GUNPOWDER and ICE), so 0.3 means more than 37.5% of the support is
+ * water. Fire sitting on wood with no water keeps burning. */
+#define FIRE_EXTINGUISH_EXPOSURE 0.3f
+#define EXTINGUISHED_SMOKE_LIFETIME 1.0f   // seconds
+#define EXTINGUISHED_SMOKE_TEMP   373.0f   // K
+
 /* Sand wetting/drying thresholds on exposure_corrode = rate * water fraction.
  * With SAND/WATER 0.4, WET_SAND/WATER 0.6, MUD/WATER 0.3, DIRT/WATER 0.5:
  *   SAND -> WET_SAND above 50% water, WET_SAND -> MUD above 83%,
@@ -388,6 +396,15 @@ void K_Reactions(
             return;
         }
         health[i] = hlth;
+    }
+
+    // ---- Fire extinguished by water: FIRE -> SMOKE (bd-r5-review-n28.73) ----
+    if (mat_id == MAT_FIRE && exp_corrode > FIRE_EXTINGUISH_EXPOSURE) {
+        packed_info[i] = MAKE_PACKED(MAT_SMOKE, GAS);
+        rescale_mass(mass, i, MAT_FIRE, MAT_SMOKE);
+        lifetime[i] = EXTINGUISHED_SMOKE_LIFETIME;
+        temperature[i] = EXTINGUISHED_SMOKE_TEMP;
+        return;
     }
 
     // ---- GAS lifetime decay ----

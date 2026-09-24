@@ -386,7 +386,7 @@ _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     # water interactions
     (WATER, LAVA, 0.5, 50.0),        # water + lava -> steam, cools lava (high heat xfer)
     (WATER, ICE, 0.0, 20.0),         # water warms ice (heat only; ICE melts by temperature)
-    (WATER, FIRE, 0.8, 30.0),        # water extinguishes fire
+    (WATER, FIRE, 0.8, 30.0),        # water extinguishes fire (FIRE -> SMOKE)
     (WATER, ACID, 0.0, 5.0),         # water and acid mix (heat only; acid is not consumed by water)
     # lava interactions
     (LAVA, ICE, 0.0, 60.0),          # lava melts ice rapidly (heat only)
@@ -435,12 +435,27 @@ _INTERACTION_PAIRS: List[Tuple[int, int, float, float]] = [
     (LAVA, GRAVEL, 0.0, 20.0),       # lava heats gravel
 ]
 
+# One-way reaction_rate overrides: (receiver, source, rate), applied after the
+# symmetric pairs above. Row `receiver` is what the receiving particle reads in
+# Step1. FIRE's exposure_corrode is its wetness: K_Reactions turns FIRE into
+# SMOKE above FIRE_EXTINGUISH_EXPOSURE, so only WATER may feed it. The reverse
+# direction (WOOD, OIL, GUNPOWDER, ICE reading FIRE) keeps the pair's rate, and
+# heat_exchange stays symmetric, so combustion is unchanged
+# (bd-r5-review-n28.73).
+_ONE_WAY_RATE_OVERRIDES: List[Tuple[int, int, float]] = [
+    (FIRE, WOOD, 0.0),
+    (FIRE, OIL, 0.0),
+    (FIRE, GUNPOWDER, 0.0),
+    (FIRE, ICE, 0.0),
+]
+
 
 def build_interaction_matrix() -> np.ndarray:
     """Build the 32x32 interaction matrix as a numpy structured array.
 
-    Returns a (32, 32) array of Interaction structs. Interactions are
-    symmetric: setting (a, b) also sets (b, a).
+    Returns a (32, 32) array of Interaction structs. Pairs in
+    _INTERACTION_PAIRS are symmetric: setting (a, b) also sets (b, a).
+    _ONE_WAY_RATE_OVERRIDES then sets reaction_rate for one direction only.
     """
     matrix = np.zeros((MAX_MATERIALS, MAX_MATERIALS), dtype=INTERACTION_DTYPE)
     for a, b, rate, heat in _INTERACTION_PAIRS:
@@ -448,6 +463,8 @@ def build_interaction_matrix() -> np.ndarray:
         matrix[a][b]["heat_exchange"] = heat
         matrix[b][a]["reaction_rate"] = rate
         matrix[b][a]["heat_exchange"] = heat
+    for receiver, source, rate in _ONE_WAY_RATE_OVERRIDES:
+        matrix[receiver][source]["reaction_rate"] = rate
     return matrix
 
 
