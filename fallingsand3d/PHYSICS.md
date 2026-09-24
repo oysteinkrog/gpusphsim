@@ -542,14 +542,16 @@ I = gamma_dot * d / sqrt(p_eff / rho)
 
 where `d = particle_spacing = 0.02`, `p_eff = max(p, rho0 * |g| * particle_spacing)`
 
-**Note**: `p_eff` uses Tait EOS pressure (from `compute_pressure()`), not the
+**Note**: under WCSPH, `p_eff` uses Tait EOS pressure (from `compute_pressure()`),
+not the
 lithostatic pressure `p = rho * g * depth` assumed by the original mu(I) model.
 At h=0.04 with Tait gamma=7, Tait pressure is much higher than lithostatic for
 typical grain depths, making the inertial number I artificially large. This pushes
 mu(I) toward mu_2/mu_max everywhere, effectively making friction coefficient
 nearly constant. The practical effect is minor since mu(I) rheology mainly
 controls flow initiation, and the simulation uses explicit Drucker-Prager friction
-as the primary granular mechanism.
+as the primary granular mechanism. Under DFSPH, `p` is the density solver's
+own pressure instead (13.5).
 
 ### 5.3 Friction Coefficient
 
@@ -2345,14 +2347,38 @@ final KE with the peak over the first 0.3 s, before the block lands).
 FLUID:    a_i = gravity + (1/rho_i) * [45/(pi*h^6)] * SUM_j mu_ij * m_j*(v_j-v_i)/rho_j*(h-|r|)
           mu_ij = 2*mu_i*mu_j/(mu_i+mu_j)   (per-material base_viscosity)
 GRANULAR: a_i = gravity + (1/rho_i) * [45/(pi*h^6)] * SUM_j eta_ij * m_j*(v_j-v_i)/rho_j*(h-|r|)
-          GRANULAR neighbor:     eta_ij = harmonic mean of mu(I) eta_i, eta_j
-                                 (compute_muI_eta from shear_rate, pressure, density)
-          non-GRANULAR neighbor: eta_ij = mu_0
+          GRANULAR neighbor:     eta_ij = 2*eta_i*eta_j/(eta_i+eta_j)
+                                 eta_k = compute_muI_eta(shear_rate[k], p_eff_k, rho_k)
+                                 p_eff_k = max(p_prev[k] * rho_k, rho0_k * |g| * spacing)
+          non-GRANULAR neighbor: eta_ij = mu_0   (c_precalc.viscosity_precalc)
 GAS:      a_i = gravity + buoyancy - drag * v_i + viscosity (same as FLUID)
           - fs * SUM_j(GAS) m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky(r_ij)
           p = k * max(rho - rho0, 0)   (gas EOS, compute_pressure)
           fs = c_granular.force_scale = 0.02
 ```
+
+**GRANULAR confining pressure** (bd-r5-review-n28.92). `p_prev` is
+`sorted_kappa`: the density solver's converged value from the previous
+substep, read before the warm-start scale. The solver stores p/rho, not
+p/rho^2: ComputePressureAccel uses `V_j * (p_i + p_j)` with `V_j = m_j/rho_j`,
+which matches `m_j * (p_i/rho_i^2 + p_j/rho_j^2)` when the stored value is
+p/rho. So `p = p_prev * rho` (Pa); `p_prev * rho^2` would be about 4000x too
+large and pin eta at mu_max. Tait EOS is not used here, because the density
+solver drives rho to rho0 and Tait pressure would then measure solver error
+instead of load. The floor is the WCSPH step2 one-layer lithostatic pressure
+(SAND at g = 4: 320 Pa). It also covers the first substep and woken
+particles, where `p_prev = 0`. The current substep's pressure is not known
+yet when this kernel runs.
+
+Each particle's eta uses its own stored shear rate (from ComputeDensityAlpha)
+and its own pressure, so eta_ij computed by i equals eta_ji computed by j and
+the GRANULAR pair force is antisymmetric (`test_dfsph_mui_friction.py`).
+
+Sand Castle, 5 s, g = 4 (`eval_dfsph_mui.py`): mean GRANULAR eta rises with
+depth, 300 Pa.s in the top 0.14 m to 450 Pa.s at 0.64 m depth, with mean
+p_eff 970 Pa to 8.4 kPa. The pile height is 0.71 m (0.73 m with the Tait
+feed). WCSPH spreads the same preset to 0.17 m height in 5 s at eta = mu_max,
+so the DFSPH and WCSPH piles do not match; that gap is outside this term.
 
 The GAS pressure term is the WCSPH step2 gas pressure (bd-r5-review-n28.91).
 `grad_spiky` carries the negative coefficient, so `-grad_spiky` points away
@@ -2375,7 +2401,9 @@ Velocity updated: `v*_i = v_i + dt * a_i`
 
 - **FLUID**: Full DFSPH (divergence + density solvers)
 - **GRANULAR**: Participates in both solvers. Alpha multiplied by 0.7 compliance factor.
-  mu(I) viscosity in non-pressure forces. Shear_rate computed in ComputeDensityAlpha.
+  mu(I) viscosity against GRANULAR neighbours in non-pressure forces, with the
+  solver pressure as confining pressure (13.5). Shear_rate computed in
+  ComputeDensityAlpha.
 - **GAS**: Skips the divergence and density solvers. Non-pressure forces
   include buoyancy, drag and the WCSPH gas EOS pressure from GAS neighbours
   (13.5). A 1000-particle SMOKE cloud at zero gravity reaches the same density
