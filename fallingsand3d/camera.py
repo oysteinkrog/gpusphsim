@@ -60,8 +60,14 @@ class OrbitCamera:
         self.elevation = max(self.min_elevation, min(self.max_elevation, self.elevation))
 
     def zoom(self, delta: float):
-        """Zoom in/out. Positive delta = zoom in."""
+        """Zoom in/out. Positive delta = zoom in.
+
+        One call changes the distance by at most 2x. A large scroll delta
+        (trackpads can send 50) would otherwise make the factor negative
+        and snap the camera to min_distance.
+        """
         factor = 1.0 - delta * self.zoom_sensitivity
+        factor = max(0.5, min(2.0, factor))
         self.distance *= factor
         self.distance = max(self.min_distance, min(self.max_distance, self.distance))
 
