@@ -5,7 +5,9 @@ No CPU transfer in the hot path.
 
 When a Simulation is passed in, each slot also holds the rigid body state
 (the GPU body array and the body count), so undo rewinds the bodies together
-with the fluid (bd-r5-review-n28.39).
+with the fluid (bd-r5-review-n28.39). It also holds a CPU copy of the SDF
+object list and its kinematic motions, so undo removes SDF objects added
+after the capture and puts back moved ones (bd-r5-review-n28.61).
 """
 
 from __future__ import annotations
@@ -42,13 +44,16 @@ class SnapshotRing:
             # num_bodies < 0 means the slot holds no rigid state.
             "rigid_bodies": None,
             "num_bodies": -1,
+            # SDF objects and motions (CPU deep copy), None without a sim.
+            "sdf_state": None,
         }
 
     def capture(self, world, sim=None) -> None:
         """GPU-GPU snapshot of current world state into next ring slot.
 
-        With ``sim``, also copies the rigid body array on the GPU. No host
-        sync: the body count is a Python int and the copy is device to device.
+        With ``sim``, also copies the rigid body array on the GPU and deep
+        copies the SDF object list on the CPU. No host sync: the body count is
+        a Python int and the rigid copy is device to device.
         """
         n = world._high_water
         if n == 0:
@@ -69,6 +74,8 @@ class SnapshotRing:
         cp.copyto(slot["particle_dye"][:n], world.particle_dye[:n])
         slot["high_water"] = n
         _capture_rigid(slot, sim)
+        sdf = getattr(sim, "sdf_manager", None)
+        slot["sdf_state"] = sdf.snapshot_state() if sdf is not None else None
 
         self._write_idx = (self._write_idx + 1) % self.max_snapshots
         self._count = min(self._count + 1, self.max_snapshots)
@@ -87,7 +94,9 @@ class SnapshotRing:
     def restore(self, world, steps_back: int = 1, sim=None) -> bool:
         """Restore world state from `steps_back` snapshots ago.
 
-        With ``sim``, also restores the rigid body state captured in the slot.
+        With ``sim``, also restores the rigid body state and the SDF objects
+        captured in the slot. The SDF list is marked dirty and uploads before
+        the next frame step.
         The caller must still call ``rigid_body_manager.mark_for_reinjection()``
         so the boundary block is rebuilt at the restored poses.
 
@@ -141,6 +150,9 @@ class SnapshotRing:
         world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)
 
         _restore_rigid(slot, sim)
+        sdf = getattr(sim, "sdf_manager", None)
+        if sdf is not None and slot.get("sdf_state") is not None:
+            sdf.restore_state(slot["sdf_state"])
 
         # Rewind ring buffer so future snapshots don't contain stale "future" state
         # Drop the +1: without it, each successive undo steps back one more slot.

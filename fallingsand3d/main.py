@@ -178,6 +178,10 @@ def main():
                 sim._invalidate_graphs()
                 sim.notify_scene_changed()  # stale sort perm after restore (CRIT-5)
                 sim.reset_spawn_damping()
+                # Foam is not in the snapshot; clear it so no stale spray
+                # floats over the rewound scene (bd-r5-review-n28.61).
+                world.foam_count.fill(0)
+                sim._last_foam_count = 0
                 active_spawner = None
                 spawner_frame_counter = 0
                 with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
@@ -442,6 +446,7 @@ def main():
             active_spawner = None
             spawner_frame_counter = 0
             world.foam_count.fill(0)
+            sim._last_foam_count = 0
             snapshots.clear()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)

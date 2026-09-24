@@ -924,6 +924,25 @@ class SDFManager:
         if changed:
             self._dirty = True
 
+    def snapshot_state(self) -> dict:
+        """Return a deep copy of the object list and motions for undo."""
+        import copy
+        return {
+            "objects": copy.deepcopy(self._objects),
+            "motions": copy.deepcopy(self._motions),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        """Put back a state from snapshot_state() and mark it for upload.
+
+        The upload happens before the next frame step (upload_if_dirty), so
+        this needs no GPU work here.
+        """
+        import copy
+        self._objects = copy.deepcopy(state["objects"])
+        self._motions = copy.deepcopy(state["motions"])
+        self._dirty = True
+
     def clear(self) -> None:
         """Remove all SDF objects and upload empty state."""
         self._objects.clear()
