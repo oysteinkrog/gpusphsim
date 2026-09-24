@@ -124,6 +124,7 @@ def main():
 
     # Create world and spawn initial scene
     from world import World
+    from presets import run_spawner
     from simulation import Simulation
     from ui import UI
 
@@ -295,17 +296,7 @@ def main():
             spawner_frame_counter += 1
             if spawner_frame_counter >= active_spawner["interval_frames"]:
                 spawner_frame_counter = 0
-                # Stop at the spawner budget (host-side slot count, no GPU sync),
-                # so a source cannot fill the whole particle pool.
-                budget = active_spawner.get("budget", 0.9 * world.max_particles)
-                if world._high_water <= budget:
-                    world.spawn_cube(
-                        min_corner=tuple(active_spawner["min_corner"]),
-                        max_corner=tuple(active_spawner["max_corner"]),
-                        material_id=active_spawner["material_id"],
-                        spacing=active_spawner["spacing"],
-                        lifetime=active_spawner.get("lifetime"),
-                    )
+                if run_spawner(world, active_spawner) > 0:
                     renderer.num_active = world._high_water
                     sim.notify_scene_changed()  # spawner grew particle set (CRIT-5)
 

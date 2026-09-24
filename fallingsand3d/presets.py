@@ -36,6 +36,27 @@ def _clear_world(world: World) -> None:
     world._high_water = 0
 
 
+def run_spawner(world: World, spawner: Dict[str, Any]) -> int:
+    """Run one tick of a preset's periodic spawner and return the count spawned.
+
+    Skips the spawn once world._high_water is above spawner["budget"]
+    (default 0.9 * max_particles), so a source cannot fill the particle pool.
+    The last batch may pass the budget by at most its own size.
+    _high_water is a host int, so the check costs no GPU sync. An optional
+    spawner["lifetime"] overrides the per-material GAS lifetime.
+    """
+    budget = spawner.get("budget", 0.9 * world.max_particles)
+    if world._high_water > budget:
+        return 0
+    return world.spawn_cube(
+        min_corner=tuple(spawner["min_corner"]),
+        max_corner=tuple(spawner["max_corner"]),
+        material_id=spawner["material_id"],
+        spacing=spawner["spacing"],
+        lifetime=spawner.get("lifetime"),
+    )
+
+
 Vec3 = Tuple[float, float, float]
 # (min_corner, max_corner, material_id), optionally followed by the
 # spawn_cube exclude_box as a (min_corner, max_corner) pair or None.

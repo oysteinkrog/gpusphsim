@@ -358,6 +358,139 @@ def test_spawn_sphere_no_loop_sync():
     print("PASS: test_spawn_sphere_no_loop_sync")
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.96: shared spawn slot init
+# ---------------------------------------------------------------------------
+
+def _dirty_world(n=20_000):
+    """World whose per-particle arrays hold 1.0, as if a previous scene used them."""
+    w = World(n)
+    for arr in (w.position, w.velocity, w.veleval, w.sph_force, w.angular_velocity,
+                w.kappa, w.kappa_v, w.lifetime, w.shear_rate, w.exposure_heat,
+                w.exposure_corrode, w.sorted_lambda_pbf):
+        arr[:] = 1.0
+    return w
+
+
+_SPAWNERS = {
+    "sphere": lambda w, m, **kw: w.spawn_sphere((0.0, 0.0, 0.0), 0.2, m, 300, **kw),
+    "cube": lambda w, m, **kw: w.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), m, **kw),
+    "ramp": lambda w, m, **kw: w.spawn_ramp((-0.2, 0.2, 0.0), (0.2, 0.0, 0.0), 0.1, 0.04, m, **kw),
+    "bowl": lambda w, m, **kw: w.spawn_bowl((0.0, 0.0, 0.0), 0.15, 0.04, m, **kw),
+    "cylinder_shell": lambda w, m, **kw: w.spawn_cylinder_shell((0.0, 0.0, 0.0), 0.1, 0.1, 0.04, m, **kw),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SPAWNERS))
+@pytest.mark.parametrize("material_id", [WATER, STONE, FIRE])
+def test_spawn_clears_stale_slot_state(shape, material_id):
+    """Every spawn_* zeroes warm-start and spin state and packs rest density in position.w."""
+    w = _dirty_world()
+    n = _SPAWNERS[shape](w, material_id)
+    assert n > 0 and w._high_water == n
+    sl = slice(0, n)
+    mat = MATERIALS[material_id]
+    for name in ("kappa", "kappa_v", "angular_velocity", "sph_force", "shear_rate",
+                 "exposure_heat", "exposure_corrode"):
+        vals = getattr(w, name)[sl].get()
+        assert np.all(vals == 0.0), f"{shape}: {name} kept stale values"
+    assert np.all(w.velocity[sl, 3].get() == 0.0)
+    assert np.all(w.veleval[sl, 3].get() == 0.0)
+    np.testing.assert_array_equal(w.position[sl, 3].get(), np.float32(mat.rest_density))
+    np.testing.assert_array_equal(w.density[sl].get(), np.float32(mat.rest_density))
+    expected_lt = 1.5 if material_id == FIRE else 0.0
+    np.testing.assert_allclose(w.lifetime[sl].get(), expected_lt)
+    # Slots past the spawn are untouched
+    assert float(w.kappa[n].get()) == 1.0
+
+
+def test_spawn_gas_default_lifetime():
+    """GAS spawns get the per-material lifetime, other materials 0, explicit values win."""
+    for mat_id, expected in ((FIRE, 1.5), (SMOKE, 3.0), (STEAM, 5.0), (SAND, 0.0), (WATER, 0.0)):
+        w = World(10_000)
+        n = w.spawn_sphere((0.0, 0.0, 0.0), 0.2, mat_id, 200)
+        np.testing.assert_allclose(w.lifetime[:n].get(), expected,
+                                   err_msg=f"material {mat_id}")
+    w = World(10_000)
+    n = w.spawn_sphere((0.0, 0.0, 0.0), 0.2, FIRE, 200, lifetime=0.0)
+    assert np.all(w.lifetime[:n].get() == 0.0), "explicit lifetime=0 not honoured"
+    n2 = w.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), FIRE, lifetime=0.7)
+    np.testing.assert_allclose(w.lifetime[n:n + n2].get(), 0.7)
+
+
+def test_spawned_fire_turns_to_smoke_then_dies():
+    """Brush-spawned FIRE becomes SMOKE by 1.5 s and DEAD by 4.5 s of K_Reactions time."""
+    from reactions import compute_reactions, upload_sim_params, upload_materials
+    from step1 import build_sim_params
+    from materials import build_material_array
+
+    dt = 0.01
+    upload_sim_params(build_sim_params(
+        smoothing_length=0.04, particle_mass=PARTICLE_MASS, particle_spacing=DEFAULT_SPACING,
+        gravity=(0.0, 0.0, 0.0), dt=dt, restitution=0.3, wall_friction=0.5,
+        world_min=(-1.0, -1.0, -1.0), world_max=(1.0, 1.0, 1.0)))
+    upload_materials(build_material_array())
+
+    w = World(10_000)
+    n = w.spawn_sphere((0.0, 0.0, 0.0), 0.2, FIRE, 200)
+    sl = slice(0, n)
+    args = dict(
+        sorted_packed_info=w.packed_info[sl], sorted_temperature=w.temperature[sl],
+        sorted_health=w.health[sl], sorted_lifetime=w.lifetime[sl],
+        sorted_velocity=w.velocity[sl], sorted_exposure_heat=w.exposure_heat[sl],
+        sorted_exposure_corrode=w.exposure_corrode[sl], sorted_mass=w.mass[sl],
+    )
+
+    def mats():
+        return w.packed_info[sl].get() & 0xFF
+
+    for _ in range(152):  # 1.52 s
+        compute_reactions(**args, frame=0)
+    assert np.all(mats() == SMOKE), f"FIRE did not turn to SMOKE: {np.unique(mats())}"
+    for _ in range(300):  # 3.0 s more, 4.52 s total
+        compute_reactions(**args, frame=0)
+    assert np.all(mats() == 0), f"SMOKE did not die: {np.unique(mats())}"
+
+
+def test_clear_world_zeroes_warm_start():
+    """presets._clear_world wipes kappa, kappa_v and the PBF lambda scratch."""
+    from presets import _clear_world
+    w = _dirty_world(5_000)
+    w.spawn_sphere((0.0, 0.0, 0.0), 0.2, WATER, 100)
+    w.kappa[:] = 1.0
+    _clear_world(w)
+    assert w._high_water == 0
+    for name in ("kappa", "kappa_v", "sorted_lambda_pbf"):
+        assert not bool(cp.any(getattr(w, name) != 0.0)), f"{name} not zeroed"
+
+
+def test_run_spawner_respects_budget():
+    """The periodic spawner stops once _high_water passes the budget."""
+    from presets import run_spawner
+    w = World(20_000)
+    spawner = {"material_id": WATER, "min_corner": (-0.1, 0.0, -0.1),
+               "max_corner": (0.1, 0.1, 0.1), "spacing": 0.02,
+               "interval_frames": 1, "budget": 3_000}
+    batch = run_spawner(w, spawner)
+    assert batch > 0
+    for _ in range(50):
+        run_spawner(w, spawner)
+    assert w._high_water <= spawner["budget"] + batch
+    before = w._high_water
+    assert run_spawner(w, spawner) == 0
+    assert w._high_water == before
+
+
+@pytest.mark.parametrize("loader", ["load_fire_and_ice", "load_water_mill"])
+def test_source_presets_set_spawner_budget(loader):
+    """Fire and Ice and Water Mill give their spawner a budget below max_particles."""
+    import presets
+    w = World(500_000)
+    _, spawner = getattr(presets, loader)(w)
+    assert spawner is not None
+    assert 0 < spawner["budget"] < w.max_particles
+
+
 if __name__ == "__main__":
     test_constructor()
     test_array_shapes_dtypes()
