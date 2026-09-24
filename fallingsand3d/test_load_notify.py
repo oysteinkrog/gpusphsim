@@ -134,7 +134,8 @@ def test_corrupt_rigid_block_loads_particles_and_notifies(tmp_path, monkeypatch)
     assert sim.notify_calls == 1
     assert sim.invalidate_calls == 1
     assert int(world.foam_count.get().sum()) == 0
-    assert sim.rigid_body_manager.resets == 1  # half-built manager cleared
+    # One reset starts the rebuild, the second clears the half-built manager.
+    assert sim.rigid_body_manager.resets == 2
     assert cam.distance == 9.0  # broken camera left alone
 
 
