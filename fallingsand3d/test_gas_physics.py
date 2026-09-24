@@ -82,6 +82,11 @@ H = 0.04
 SPACING = 0.02
 DT = 0.001
 
+# The app's gas particle mass: world.spawn_mass gives every GAS material
+# PARTICLE_MASS (0.02); K_SpawnGas children get 0.02 / 3 (bd-r5-review-n28.80).
+GAS_MASS = 0.02
+STEAM_CHILD_MASS = GAS_MASS / 3.0
+
 # packed_info helpers
 def MAKE_PACKED(mat_id: int, behavior: int) -> int:
     return (mat_id & 0xFF) | ((behavior & 0x3) << 8)
@@ -162,11 +167,8 @@ def make_gas_particles(n, mat_id, pos_center=(0.0, 0.0, 0.0), spread=0.03,
 
     vel = np.zeros((n, 4), dtype=np.float32)
 
-    # Gas mass: rest_density * spacing^3
-    # STEAM rho0=0.6, SMOKE rho0=0.3, FIRE rho0=0.2
-    rho0_map = {STEAM: 0.6, SMOKE: 0.3, FIRE: 0.2}
-    rho0 = rho0_map.get(mat_id, 0.5)
-    mass_val = rho0 * SPACING**3
+    # The app's gas mass (world.spawn_mass)
+    mass_val = GAS_MASS
 
     mass = np.full(n, mass_val, dtype=np.float32)
     packed_info = np.full(n, MAKE_PACKED(mat_id, GAS), dtype=np.uint32)
@@ -299,11 +301,11 @@ def test_gas_linear_eos():
     """Gas pressure uses linear EOS: p = k_gas * max(rho - rho0, 0).
 
     A 3x3x3 cloud of 27 STEAM particles packed at 0.01 spacing (< h=0.04)
-    produces SPH density >> rho0_steam=0.6 at the interior.  The linear EOS
-    then gives p > 0 and outward repulsive forces.
+    produces SPH density above the STEAM rest density at the interior.  The
+    linear EOS then gives p > 0 and outward repulsive forces.
 
     Key assertions:
-    - Interior (center) particle density exceeds rho0_steam=0.6
+    - Interior (center) particle density exceeds the STEAM rest density
     - Net force on the cloud is near zero (Newton's 3rd law over whole system)
     - At least one particle has a non-zero SPH force (EOS is active)
     """
@@ -312,8 +314,9 @@ def test_gas_linear_eos():
     # 3x3x3 = 27 STEAM particles tightly packed
     GRID_N = 3
     DENSE_SEP = 0.01  # << h=0.04, forces all 27 within each other's kernel support
-    rho0 = 0.6        # STEAM rest density
-    mass_val = rho0 * SPACING**3  # 0.6 * 0.02^3 = 4.8e-6 kg
+    from materials import MATERIALS
+    rho0 = float(MATERIALS[STEAM].rest_density)
+    mass_val = GAS_MASS
 
     coords = [(ix, iy, iz)
               for ix in range(GRID_N)
@@ -359,7 +362,7 @@ def test_gas_linear_eos():
 
     density_h = density.get()
 
-    # Interior particles should have density > rho0 = 0.6
+    # Interior particles should have density > rho0
     max_density = float(density_h.max())
     assert max_density > rho0, (
         f"Max density {max_density:.4f} should exceed rho0_steam={rho0} "
@@ -744,7 +747,7 @@ def test_mixed_gas_fluid_granular_no_nan():
             np.random.uniform(-0.1, 0.1),
             1.0,
         ]
-        mass[idx] = 0.2 * SPACING**3
+        mass[idx] = GAS_MASS
         packed_info[idx] = MAKE_PACKED(FIRE, GAS)
         temperature[idx] = 1200.0
         lifetime[idx] = 1.0
@@ -758,7 +761,7 @@ def test_mixed_gas_fluid_granular_no_nan():
             np.random.uniform(-0.1, 0.1),
             1.0,
         ]
-        mass[idx] = 0.3 * SPACING**3
+        mass[idx] = GAS_MASS
         packed_info[idx] = MAKE_PACKED(SMOKE, GAS)
         temperature[idx] = 500.0
         lifetime[idx] = 3.0
@@ -772,7 +775,7 @@ def test_mixed_gas_fluid_granular_no_nan():
             np.random.uniform(-0.1, 0.1),
             1.0,
         ]
-        mass[idx] = 0.6 * SPACING**3
+        mass[idx] = GAS_MASS
         packed_info[idx] = MAKE_PACKED(STEAM, GAS)
         temperature[idx] = 373.0
         lifetime[idx] = 5.0
@@ -934,6 +937,79 @@ def test_steam_rise_and_condense():
     print(f"PASS: test_steam_rise_and_condense (water={water_count}, steam={steam_count}, dead={dead_count})")
 
 
+def _gas_lattice_step1(mat_id, spacing, mass_val, n_side):
+    """One K_Step1 pass over an n_side^3 cubic gas lattice at `spacing`.
+
+    Returns (density, pressure) of the particle nearest the lattice centre.
+    """
+    setup_all_modules(gravity=(0.0, 0.0, 0.0))
+    ax = (np.arange(n_side, dtype=np.float32) - (n_side - 1) / 2.0) * spacing
+    gx, gy, gz = np.meshgrid(ax, ax, ax, indexing="ij")
+    n = gx.size
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = gx.ravel()
+    pos[:, 1] = gy.ravel()
+    pos[:, 2] = gz.ravel()
+    pos[:, 3] = 1.0
+    scene = counting_sort_scene(
+        cupy.asarray(pos),
+        velocity=cupy.zeros((n, 4), dtype=cupy.float32),
+        mass=cupy.full(n, mass_val, dtype=cupy.float32),
+        packed_info=cupy.full(n, MAKE_PACKED(mat_id, GAS), dtype=cupy.uint32),
+        grid_params=default_grid_params(),
+    )
+    s_temp = cupy.full(n, 373.0, dtype=cupy.float32)
+    density, _, _, _, _, pressure = compute_step1(
+        scene["position"], scene["velocity"], scene["mass"], None,
+        scene["packed_info"], s_temp, scene["cell_start"], scene["cell_end"],
+    )
+    s_pos = scene["position"].get()[:, :3]
+    centre = int(np.argmin((s_pos ** 2).sum(axis=1)))
+    return float(density.get()[centre]), float(pressure.get()[centre])
+
+
+@pytest.mark.parametrize("mat_id", [STEAM, SMOKE, FIRE])
+def test_gas_rest_density_reachable(mat_id):
+    """bd-r5-review-n28.80: GAS rest_density is in kernel-sum units.
+
+    With a real-world rho0 (0.2-0.6) the Poly6 self term (490 for mass 0.02,
+    163 for a boiling child) kept p = k * (rho - rho0) always on. Now:
+    - an isolated gas particle (either mass) has rho < rho0 and p = 0;
+    - a cloud at the spawn spacing reads rho / rho0 in [1, 3] with p > 0,
+      both for brush gas (mass 0.02 at spacing 0.02) and for boiling
+      children (mass 0.02/3 at three per water particle);
+    - STEAM at its target spacing 0.025 sits near rho0 with p about 0.
+    """
+    from materials import MATERIALS
+    rho0 = float(MATERIALS[mat_id].rest_density)
+    k = float(MATERIALS[mat_id].eos_stiffness)
+    self_term = 315.0 / (64.0 * math.pi * H ** 3)  # W_poly6(0) per unit mass
+
+    for m in (GAS_MASS, STEAM_CHILD_MASS):
+        rho_iso, p_iso = _gas_lattice_step1(mat_id, SPACING, m, 1)
+        assert rho_iso == pytest.approx(m * self_term, rel=1e-3)
+        assert rho_iso < 0.5 * rho0, (
+            f"isolated particle mass {m:.4f}: rho {rho_iso:.1f} not below "
+            f"rho0/2 = {0.5 * rho0:.1f}")
+        assert p_iso == 0.0, f"isolated particle mass {m:.4f} has p = {p_iso:.3f}"
+
+    cases = [
+        ("brush", SPACING, GAS_MASS),
+        ("boiling children", SPACING / 3.0 ** (1.0 / 3.0), STEAM_CHILD_MASS),
+    ]
+    for name, spacing, m in cases:
+        rho, p = _gas_lattice_step1(mat_id, spacing, m, 9)
+        ratio = rho / rho0
+        assert 1.0 <= ratio <= 3.0, f"{name}: rho/rho0 = {ratio:.3f} outside [1, 3]"
+        assert p == pytest.approx(k * (rho - rho0), rel=1e-4), f"{name}: p = {p:.3f}"
+        assert p > 0.0
+
+    if mat_id == STEAM:
+        rho, p = _gas_lattice_step1(mat_id, 0.025, GAS_MASS, 9)
+        assert abs(rho / rho0 - 1.0) < 0.05, f"target spacing rho/rho0 = {rho / rho0:.3f}"
+        assert p < 0.05 * k * rho0, f"target spacing p = {p:.3f}"
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -941,9 +1017,10 @@ def test_steam_rise_and_condense():
 def test_pbf_gas_density_survives_iterations():
     """bd-r5-review-n28.62: PBF computes GAS density once per substep (first
     ComputeLambda call). Later iterations used to overwrite it with
-    rest_density (0.6 for STEAM), so heat and dye terms next substep saw
-    vol_j = m_j / 0.6 instead of m_j / rho. An isolated STEAM particle has
-    rho = m * W(0), about 163, so the surviving density must be above 100."""
+    rest_density, so heat and dye terms next substep saw vol_j = m_j / rho0
+    instead of m_j / rho. An isolated STEAM particle of mass 0.02 has
+    rho = m * W(0), about 490, well below its rest density 1200, so the
+    surviving density must match the self term."""
     import dataclasses
     import cupy as cp
     from world import World
@@ -963,7 +1040,9 @@ def test_pbf_gas_density_survives_iterations():
     info = cp.asnumpy(world.sorted_packed_info[:n])
     assert (info[0] & 0xFF) == STEAM, "particle is no longer STEAM"
     rho = float(cp.asnumpy(world.sorted_density[:n])[0])
-    assert rho > 100.0, f"GAS density after 6 PBF iterations is {rho:.3f}"
+    rho_self = GAS_MASS * 315.0 / (64.0 * math.pi * H ** 3)
+    assert rho == pytest.approx(rho_self, rel=0.05), (
+        f"GAS density after 6 PBF iterations is {rho:.3f}, self term {rho_self:.1f}")
 
 
 if __name__ == "__main__":
