@@ -4,7 +4,8 @@ Supports two modes:
 - Point sprites (default): simple round point sprites for all particles
 - SSFR (Screen-Space Fluid Rendering): multi-pass fluid surface rendering
   with Beer-Lambert absorption, Fresnel reflections, and specular highlights.
-  Non-FLUID particles still rendered as point sprites on top.
+  All behavior classes go through the SSFR passes; GRANULAR and STATIC get a
+  higher thickness weight so they read as opaque.
 """
 
 from __future__ import annotations
@@ -279,12 +280,6 @@ class Renderer:
         self._u_points_mv = glGetUniformLocation(self._prog_points, "uMV")
         self._u_points_ps = glGetUniformLocation(self._prog_points, "uPointScale")
         self._u_points_trail = glGetUniformLocation(self._prog_points, "uTrailScale")
-
-        # Non-FLUID point sprite (SSFR on): culls FLUID particles
-        self._prog_nonfluid = _build_program("particle_nonfluid.vert", "particle.frag")
-        self._u_nf_mvp = glGetUniformLocation(self._prog_nonfluid, "uMVP")
-        self._u_nf_mv = glGetUniformLocation(self._prog_nonfluid, "uMV")
-        self._u_nf_ps = glGetUniformLocation(self._prog_nonfluid, "uPointScale")
 
         # SSFR depth pass
         self._prog_depth = _build_program("ssfr_depth.vert", "ssfr_depth.frag")
@@ -852,31 +847,23 @@ void main() {
         except np.linalg.LinAlgError:
             proj_inv = np.eye(4, dtype=np.float32)
 
-        # ---- Pass 0: Capture background (skybox + non-fluid particles) ----
+        # Every particle (all behavior classes) goes through passes 1 and 2
+        # only. ssfr_thickness.frag gives GRANULAR and STATIC 10x opacity so
+        # they read as solid; the composite shades all of them.
+
+        # ---- Pass 0: Background (skybox only) into the scene FBO ----
+        # The composite samples this texture at background pixels and for
+        # the refraction offset.
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo_scene)
         glViewport(0, 0, w, h)
         glClearColor(0.15, 0.15, 0.15, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
-
-        # Draw skybox into scene FBO (background for refraction)
         self._draw_skybox(view, proj)
-
-        # Draw non-fluid particles (sand, rock, rigid boundary) into scene FBO.
-        # _prog_nonfluid culls FLUID by clipping to NDC > 1, so only
-        # non-FLUID particles are rasterized here.
         glEnable(GL_PROGRAM_POINT_SIZE)
-        glUseProgram(self._prog_nonfluid)
-        glUniformMatrix4fv(self._u_nf_mvp, 1, GL_TRUE, mvp)
-        glUniformMatrix4fv(self._u_nf_mv, 1, GL_TRUE, view)
-        glUniform1f(self._u_nf_ps, self.point_scale)
-        glBindVertexArray(self._vao)
-        glDrawArrays(GL_POINTS, 0, self.num_active)
-        glBindVertexArray(0)
-        glUseProgram(0)
 
-        # ---- Pass 1: SSFR Depth (FLUID only) ----
+        # ---- Pass 1: SSFR Depth (all particles) ----
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo_depth)
         glViewport(0, 0, w, h)
         glClearColor(0.0, 0.0, 0.0, 0.0)
@@ -896,7 +883,7 @@ void main() {
         glBindVertexArray(0)
         glUseProgram(0)
 
-        # ---- Pass 2: Thickness (FLUID, additive blend) ----
+        # ---- Pass 2: Thickness (all particles, additive blend) ----
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo_thickness)
         glViewport(0, 0, w, h)
         glClearColor(0.0, 0.0, 0.0, 0.0)
@@ -966,14 +953,14 @@ void main() {
         glUseProgram(0)
 
         # ---- Pass 6: Composite (to default framebuffer) ----
+        # The fullscreen composite writes every pixel (background pixels
+        # return the scene texture, which already holds the skybox), so no
+        # color clear or second skybox draw is needed. Depth is cleared for
+        # the depth-write pass and the SDF objects drawn after it.
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         glViewport(0, 0, w, h)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
-
-        # Draw skybox as background (non-fluid pixels pass through in composite)
-        self._draw_skybox(view, proj)
+        glClear(GL_DEPTH_BUFFER_BIT)
 
         glDisable(GL_DEPTH_TEST)
         glDepthMask(GL_FALSE)
@@ -990,7 +977,7 @@ void main() {
         glBindTexture(GL_TEXTURE_2D, self._tex_thickness)
 
         glActiveTexture(GL_TEXTURE3)
-        glBindTexture(GL_TEXTURE_2D, self._tex_scene)  # background with non-fluid particles + skybox
+        glBindTexture(GL_TEXTURE_2D, self._tex_scene)  # background: skybox or clear color
 
         glActiveTexture(GL_TEXTURE4)
         glBindTexture(GL_TEXTURE_CUBE_MAP, self._tex_skybox)
@@ -1013,7 +1000,7 @@ void main() {
 
         # ---- Depth-write pass: reconstruct fluid depth into the hardware depth buffer ----
         # The composite draw above ran with GL_DEPTH_TEST disabled / GL_DEPTH_MASK(FALSE),
-        # so the depth buffer still only has skybox depth.  _draw_sdf_objects (called by
+        # so the depth buffer still only has the cleared depth.  _draw_sdf_objects (called by
         # the outer draw() after _draw_ssfr) uses GL_DEPTH_TEST, meaning SDF geometry
         # always passed the depth test and appeared on top of fluid.
         #
@@ -1235,7 +1222,7 @@ void main() {
             glDeleteBuffers(1, [vbo])
         self._sdf_meshes.clear()
 
-        for prog in (self._prog_points, self._prog_nonfluid, self._prog_depth,
+        for prog in (self._prog_points, self._prog_depth,
                       self._prog_thick, self._prog_blur, self._prog_normal,
                       self._prog_composite, self._prog_depth_write,
                       self._prog_foam, self._prog_cursor,
