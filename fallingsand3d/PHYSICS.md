@@ -463,7 +463,8 @@ if pos outside plane:
 
 Wall friction: `mu = 0` for FLUID (prevents wall sticking), `c_sim.wall_friction` for others.
 All three solvers use this rule: WCSPH in `K_Integrate`, PBF in `K_PBF_Finalize`,
-DFSPH in `K_DFSPH_Finalize`.
+DFSPH in `K_DFSPH_Finalize`. PBF uses its own copy, `pbf_box_boundary`, where a
+particle exactly on the margin plane counts as contact (see 12.4).
 
 **Source**: `integrate.cu:70-174`, `integrate.cu:395-400`
 
@@ -1674,6 +1675,16 @@ correction. WCSPH and DFSPH pass NULL and are unchanged. Two limits:
 - A kicked x\* can move several cells from where the grid put it, so the
   iterations of that substep miss some of its neighbours. The next full sort
   fixes it.
+
+**World box walls in Finalize.** `K_PBF_Predict` and `K_PBF_ApplyDelta` clamp
+x\* to `world_min + BOUNDARY_MARGIN` (and `world_max - BOUNDARY_MARGIN`), so a
+particle that hits a wall arrives in `K_PBF_Finalize` sitting exactly on the
+margin plane with `v_new` pointing into the wall. `pbf_box_boundary` applies the
+4.5 impulse (restitution 0.3 on the normal velocity, Coulomb `wall_friction` 0.5
+on the tangential velocity, 0 for FLUID) when `pos <= margin` and the velocity
+points into the wall. Example: WATER arriving at the floor with
+`v_new.y = -1.8 m/s` leaves with `+0.54 m/s`. A resting particle has
+`v_new = 0` along the normal, so it is unchanged.
 
 **No lambda warm start:** K_PBF_ComputeLambda computes lambda in closed form
 from the current predicted positions every iteration and never reads a previous
