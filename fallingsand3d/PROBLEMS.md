@@ -79,6 +79,13 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 | ICE      | 917     | 2300      | 0.37 (rockets out!)      | 0.92                     |
 | WOOD     | 600     | 1250-1500 | 0.24 (rockets out!)      | 0.50-0.60                |
 
+- **Fix:** rest densities now follow the "Should Be" column. Particle mass follows
+  them too: FLUID and GRANULAR particles spawn with `0.02 * rest_density / 2500`
+  (`world.spawn_mass`, bd-r5-review-n28.53), so each material starts at its own
+  rho0 instead of at 2500 (SAND had spawned at 0.63 rho0, LAVA at 0.39). STATIC and
+  GAS keep 0.02. The remaining gap is at interfaces: a light particle among heavy
+  ones still reads the heavy kernel density (PHYSICS.md 7.3).
+
 ### B2. FIXED: LAVA EOS stiffness too low
 - **File:** `materials.py`
 - **Problem:** LAVA k=30 vs WATER k=500 — lava is 16x more compressible, collapses under own weight

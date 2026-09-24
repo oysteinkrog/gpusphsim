@@ -88,10 +88,12 @@ Both are mathematically equivalent when all particles have the same mass.
 
 ### 2.3 Expected density at rest
 
-For cubic lattice at spacing `dx = 0.02`, mass `m = 0.02`, h=0.04:
-- ~30+ neighbors within h (all at distance <= h from particle i)
-- SPH kernel-sum density ≈ 2500 kg/m³ (with m=0.02, Poly6 at h=0.04)
-- rest_density is set to 2500 to match, giving rho/rho0 ≈ 1.0 at rest
+For cubic lattice at spacing `dx = 0.02`, h=0.04:
+- 26 neighbours strictly inside h (32 at distance <= h); a settled pile has about 27-35
+- SPH kernel-sum density ≈ 1.01 * 2500 * (m / 0.02) kg/m³ (Poly6 at h=0.04)
+- FLUID and GRANULAR particles spawn with `m = 0.02 * rest_density / 2500`
+  (`world.spawn_mass`), so every such material starts at rho/rho0 ≈ 1.01 (see 7.3)
+- STATIC and GAS particles spawn with `m = 0.02`
 
 ---
 
@@ -116,14 +118,21 @@ GAS:      p = k * max(rho - rho_0, 0)
 
 All FLUID and GRANULAR pressure clamped >= 0 (no tensile pressure).
 
-| Material | rho_0 | k | gamma | EOS |
-|----------|-------|-----|-------|------|
-| WATER | 2500.0 | 500.0 | 7.0 | Tait |
-| OIL | 2125.0 | 400.0 | 7.0 | Tait |
-| ACID | 2500.0 | 450.0 | 7.0 | Tait |
-| LAVA | 6500.0 | 800.0 | 7.0 | Tait |
-| SAND | 4000.0 | 5000.0 | 7.0 | Tait |
-| DIRT | 3750.0 | 3000.0 | 7.0 | Tait |
+| Material | rho_0 | k | gamma | EOS | spawn mass |
+|----------|-------|-----|-------|------|-----------|
+| WATER | 2500.0 | 500.0 | 7.0 | Tait | 0.020 |
+| OIL | 2125.0 | 400.0 | 7.0 | Tait | 0.017 |
+| ACID | 2500.0 | 450.0 | 7.0 | Tait | 0.020 |
+| LAVA | 6500.0 | 1300.0 | 7.0 | Tait | 0.052 |
+| SAND | 4000.0 | 5000.0 | 7.0 | Tait | 0.032 |
+| DIRT | 3750.0 | 3000.0 | 7.0 | Tait | 0.030 |
+| GRAVEL | 4250.0 | 4000.0 | 7.0 | Tait | 0.034 |
+| WET_SAND, MUD, GUNPOWDER | 4500.0 | 5000 / 300 / 3000 | 7.0 | Tait | 0.036 |
+
+LAVA k = 500 * 6500 / 2500 gives it WATER's sound speed `sqrt(gamma * k / rho_0)` (1.18),
+so under the same head both compress by the same fraction. The GRANULAR k values are
+unchanged: at the spawn mass a settled 0.4 m WCSPH pile sits 2-4% above rho_0 with
+v_rms about 0.01 m/s.
 
 **Source**: `sph_shared.cuh:compute_pressure`
 
@@ -507,9 +516,9 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | Parameter | fallingsand3d | Parent | Notes |
 |-----------|--------------|--------|-------|
 | h (smoothing length) | 0.04 | 0.04 | Same |
-| m (particle mass) | 0.02 | 0.02 | Matched to parent (was 0.008 = rho0*dx^3) |
+| m (particle mass) | 0.02 * rho_0 / 2500 (FLUID, GRANULAR); 0.02 (STATIC, GAS) | 0.02 | WATER 0.02, SAND 0.032, LAVA 0.052, OIL 0.017 (see 7.3) |
 | dx (particle spacing) | 0.02 | ~0.02 | Same |
-| rho_0 (rest density) | 2500 | 1000 | Matches actual SPH kernel-sum density at rest (see §7) |
+| rho_0 (rest density) | 2500 (WATER), per material | 1000 | Each material rests at its own rho_0 at spacing 0.02 (see 7.3) |
 | k (EOS stiffness) | 500.0 (Water) | 3.0 | High k needed to resist gravity with force_scale=0.02 |
 | gamma (EOS exponent) | 7.0 (all) | 7 | Tait EOS for all materials |
 | mu_0 (viscosity) | 1.0 | 3.5 | Lowered; effective viscosity = mu0 * force_scale |
@@ -573,18 +582,44 @@ Parent SPH scaling    = m_j * m_j         = 0.02 * 0.02 = 0.0004  (identical)
 This holds for FLUID and GAS pairs. GRANULAR pairs use scale 1.0, and FLUID-GRANULAR
 pairs use one shared value on both sides (3.2, 3.3).
 
-### 7.3 Why mass = 0.02 and rest_density = 2500
+### 7.3 Particle mass and rest density
 
-With m = rho0 * dx^3 = 0.008, the SPH density at rest ≈ 1000 (physical).
-With m = 0.02, the SPH density at rest ≈ 2500 (inflated by particle mass choice).
+With m = 0.02 at spacing 0.02 the SPH kernel-sum density at rest is about 2525
+(m = rho0 * dx^3 = 0.008 would give the physical 1000). WATER and ACID use
+`rest_density = 2500` to match, so they rest at rho/rho0 ≈ 1.0 with p ≈ 0 and the Tait
+EOS pushes back only under compression. A rest_density of 1000 with m = 0.02 would
+start every particle at ratio 2.5, p = k * (2.5^7 - 1) ≈ 610*k, and explode.
 
-Setting `rest_density = 2500` to MATCH the actual SPH kernel-sum density means:
-- At rest: rho/rho0 ≈ 1.0 → p ≈ 0 (correct zero pressure in equilibrium)
-- Under compression: rho/rho0 > 1.0 → Tait EOS provides restoring force
+Other FLUID and GRANULAR materials have their own rest_density (SAND 4000, LAVA 6500,
+OIL 2125). Each spawns with `m = 0.02 * rest_density / 2500` (`world.spawn_mass`), so
+the kernel sum at spacing 0.02 is its own rho0 and it starts at p ≈ 0 too. With one
+mass for everything, SAND spawned at 0.63 rho0 and LAVA at 0.39 with zero pressure
+until gravity compacted them 1.6x and 2.6x, and OIL spawned at 1.19 and puffed up.
 
-If rest_density were left at 1000 (physical), the ratio rho/rho0 ≈ 2.5 at rest,
-causing massive baseline pressure even in equilibrium. With gamma=7:
-p = k * (2.5^7 - 1) ≈ 610*k, leading to immediate explosion.
+Measured on 0.6 m cubes after 300 substeps (mean rho/rho0 over full-support particles,
+`test_rest_density.py`):
+
+| Solver | WATER | OIL | SAND | LAVA |
+|--------|-------|-----|------|------|
+| WCSPH, one mass | 1.08 | 1.26 | 0.67 | 0.40 |
+| WCSPH, spawn mass | 1.08 | 1.07 | 1.02 | 1.04 |
+| PBF, spawn mass | 1.00 | 1.00 | 0.99 | 1.00 |
+| DFSPH, spawn mass | 0.94 | 0.95 | 0.97 | 0.99 |
+
+With one mass the LAVA piles packed to 55-59 neighbours and DFSPH SAND to 45; with the
+spawn mass every pile keeps 27-33. DFSPH at 300 substeps is 1 s, when the unconfined
+WATER and OIL cubes are splashing off the walls, so they read 0.94-0.95.
+
+STATIC keeps m = 0.02: STONE (6500) or METAL (19500) at their own rho0 would make
+wall-adjacent fluid read far above its rho0. GAS keeps m = 0.02 (its units are a
+separate issue). MAT_RIGID boundary particles keep their psi_b. K_Reactions applies the
+same rule when a particle changes material (9.5).
+
+Interfaces: density is `rho_i = sum_j m_j W_ij`, so a light particle among heavy
+neighbours measures the heavy density. OIL inside WATER reads about 1.19 * its rho0,
+and a heavy particle among light ones reads low. The number-density form of
+Solenthaler and Pajarola 2008, `rho_i = rho0_i * sum_j V_j W_ij` with `V_j = m_j / rho0_j`,
+would remove that; it is the follow-up.
 
 ---
 
@@ -750,6 +785,12 @@ the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
 | STEAM → WATER (FLUID) | T < 373 K | unchanged |
 | WATER boils | T > 373 K | unchanged; sets the spawn-gas flag and spawn.cu makes STEAM |
 
+Every material change also rescales mass by the spawn-mass rule (7.3):
+`m *= s(new) / s(old)` with `s = rest_density / 2500` for FLUID and GRANULAR and 1 for
+STATIC and GAS. STONE → LAVA multiplies by 2.6, LAVA → STONE divides by 2.6,
+SAND → WET_SAND multiplies by 1.125, DIRT → MUD by 1.2, and WOOD, OIL or GUNPOWDER →
+FIRE go back to 0.02. Mass is not conserved across a transition; the rest volume is.
+
 Melt and solidify set the temperature to the threshold. The heat above it (or
 missing below it) is taken as consumed latent heat, so melted ice starts as
 273 K water rather than at the overshoot temperature. The particle has to gain or lose heat
@@ -771,11 +812,12 @@ Step2 outputs acceleration. Previous code divided by mass again (125x amplificat
 ### 10.2 FIXED: SPH force scaling and particle mass
 The parent multiplies step2 output by `m_j = 0.02` and uses mass=0.02 for density.
 **Fixed** in two parts:
-1. Particle mass changed from 0.008 (rho0*dx^3) to 0.02 (matching parent).
-   This puts the Tait EOS in the same inflated-density regime (rho≈2500, p≈1828).
+1. Particle mass changed from 0.008 (rho0*dx^3) to 0.02 (matching parent) for a
+   rest_density of 2500. Other FLUID and GRANULAR materials scale it by
+   rest_density / 2500 (7.3).
 2. Added `force_scale = 0.02` in GranularParams, applied at step2 output.
    This matches the parent's `output * m_j` convention.
-**Source**: `world.py:27`, `step2.cu:48,393`, `step2.py:49,101`
+**Source**: `world.py` (`PARTICLE_MASS`, `spawn_mass`), `step2.cu:48,393`, `step2.py:49,101`
 
 ### 10.3 CHANGED: XSPH in the FLUID position update (Game SPH)
 The parent advects with the new velocity only. Here FLUID adds the XSPH delta:
