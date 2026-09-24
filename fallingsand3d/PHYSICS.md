@@ -347,7 +347,7 @@ pair value equals the formula above, K_Step2 and K_Step2_NL), `test_implicit_vis
 ### 3.4 XSPH Velocity Correction (FLUID only)
 
 ```
-xsph_sum_i = SUM_j (m_j / rho_avg_ij) * (v_j - v_i) * W_poly6(|r_ij|)
+xsph_sum_i = SUM_j (m_j / rho_avg_ij) * (v_j - v_i) * W_poly6(|r_ij|)   [j FLUID only]
 
 where rho_avg_ij = 0.5 * (rho_i + rho_j)
 
@@ -369,7 +369,16 @@ with plain `vel_new`, so computing XSPH for GRANULAR would produce a correction 
 immediately discarded.
 Non-FLUID particles write plain velocity to `veleval_out`.
 
-**Source**: `step2.cu:370-381` (accumulation, FLUID guard), `step2.cu:448-461` (output)
+**FLUID neighbours only**: the sum runs over FLUID neighbours only (`behavior_j == FLUID`,
+bd-r5-review-n28.104). STATIC and GAS neighbours are skipped earlier in the loop.
+GRANULAR neighbours are skipped too: a settled sand bed is asleep at v = 0, so counting it
+pulled water's advection velocity toward 0 while its stored velocity stayed, and water
+crawled over sand. Water over sand or stone now advects at its own velocity plus the
+average over nearby water. Test: `test_step2.py::test_xsph_skips_granular_neighbour`.
+`neighbor_list.cu` K_Step2_NL still sums over every non-STATIC neighbour.
+
+**Source**: `step2.cu` K_Step2 XSPH block in the neighbour loop (accumulation, FLUID guards),
+`veleval_out` write after the loop (output)
 
 ### 3.5 Step2 Output
 
