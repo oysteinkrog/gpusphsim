@@ -3000,8 +3000,26 @@ Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
   the solver switch spawn has no rigid bodies.
 - Boundary particles are drawn, because they sit inside `_high_water`.
 
+**Capacity**: from `finalize_boundary_data()` until the block is injected,
+`world.reserved_tail = N_b`. `mark_for_reinjection()` sets it again. Every
+spawn path and the DEAD reserve top-up use
+`world.free_capacity() = max_particles - reserved_tail - _high_water`, so fluid
+spawned while the block waits cannot take its slots. A successful injection
+sets `reserved_tail = 0`, because the block now counts inside `_high_water`.
+`reset()` also sets it to 0.
+
+If the block still does not fit (presets spawn their fluid before adding the
+bodies, so a preset at the cap can hit this), injection prints one warning and
+sets `rbm.boundary_dropped`. While the flag is set, the substep skips
+`integrate_rigid_bodies` and `rigid_body_collisions`, so the bodies stay frozen
+instead of falling through fluid that cannot push them. After a compaction
+that leaves room for `N_b` slots, `_maybe_compact` calls
+`mark_for_reinjection()`, and the next substep injects the block and clears
+the flag.
+
 **Source**: `integrate.cu:K_UpdateBoundaryParticles`, `rigid_bodies.py:inject_boundary_particles`,
-`simulation.py:_update_rigid_boundary`, `world.py:_shift_rigid_boundary_block`
+`simulation.py:_update_rigid_boundary`, `simulation.py:_maybe_compact`,
+`world.py:_shift_rigid_boundary_block`, `world.py:free_capacity`
 
 ### 22.10 Design Decisions
 
