@@ -71,7 +71,11 @@ rho_i = max(rho_i, 1.0)
 - Per-particle mass `m_j` from sorted mass array (supports multi-material)
 - Density clamped to minimum 1.0
 - Heat diffusion and exposure skip MAT_RIGID neighbors (exposure still counts
-  them in its normalising weight, see §9.4)
+  them in its normalising weight, see §9.4). This holds in the cross-phase
+  branch too: a GAS particle gets no exposure from a MAT_RIGID neighbour.
+- The MAT_RIGID early-out writes density 2500 into both `density_out` and
+  `position.w`, like every other particle. `K_UpdateBoundaryParticles` and
+  `inject_boundary_particles` also write `.w = 2500`, so no reader sees 0.
 
 **Source**: `step1.cu:138-150` (inner loop), `step1.cu:224-225` (PostCalc)
 
@@ -2364,6 +2368,15 @@ f_conf = epsilon * (N_i × omega_i)              [confinement force]
 
 Where `epsilon = c_granular.vorticity_epsilon` (default 0.05).
 
+The sum for eta runs over FLUID neighbours only, in WCSPH (K_Step2) and PBF
+(K_PBF_Finalize). STATIC (including MAT_RIGID), GAS and GRANULAR neighbours
+have `omega_j = 0` and a `rho_j` that is not a fluid density: a MAT_RIGID
+neighbour had weight `psi_b / 0.01` (about 5e4 times a water neighbour) and a
+GAS neighbour about 2500 times. Included, they point N at the body or gas and
+turn the force into a tangential push along the boundary.
+`test_vorticity_eta_fluid_only.py` checks that an extra rigid, gas or sand
+neighbour leaves the force unchanged.
+
 The gradient uses the **difference form** `(omega_j - omega_i)` (not `omega_j`
 alone). This is the SPH approximation of the gradient of a scalar field, which
 vanishes identically when the vorticity field is uniform -- preventing spurious
@@ -2374,7 +2387,8 @@ The confinement force is perpendicular to the vorticity axis and aligned with th
 gradient of vorticity magnitude, amplifying existing rotational structures without
 creating spurious rotation.
 
-**Source**: `step2.cu` (second neighbor loop after main force computation)
+**Source**: `step2.cu` (K_Step2 main neighbour loop, after the behaviour
+read), `pbf_solver.cu` (K_PBF_Finalize XSPH loop)
 
 ### 16.3 Solver Support
 
