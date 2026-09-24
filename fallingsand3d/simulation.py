@@ -245,6 +245,12 @@ class Simulation:
         # Compile all kernel modules and upload constant memory
         self._upload_constants()
 
+        # The SDF constant memory lives in the compiled modules, which outlive
+        # any one Simulation. Upload the new, empty SDF list now so a previous
+        # Simulation's objects cannot act on this scene before the first
+        # upload_if_dirty(). Runs once at construction, not per frame.
+        self.sdf_manager.force_upload()
+
     def _compute_c_sound(self) -> float:
         """Compute acoustic speed: max over active materials of sqrt(k * gamma / rho0)."""
         c_sound = 0.0
