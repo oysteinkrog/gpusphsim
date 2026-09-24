@@ -2,7 +2,8 @@
 
 - The alpha cap (alpha_limit * h^2) must not bind on interior particles at the
   shipped profiles: interior alpha equals 1/denom.
-- K_DFSPH_ComputeKappaV corrects only compressing flow (div_v > 0).
+- K_DFSPH_ComputeKappaV corrects only compressing flow (div_v > 0) and skips
+  particles with fewer than 20 neighbours (bd-r5-review-n28.71).
 - SolverProfile(solver_type=DFSPH) carries the Stable DFSPH values.
 - A settling WATER block at the Stable profile keeps the compression error
   under 1% and does not boil (the bilateral solver with the full diagonal did).
@@ -191,3 +192,38 @@ def test_dfsph_stable_profile_settles_without_boiling(world):
     assert comp < 0.01, f"compression error {comp * 100:.2f}% >= 1%"
     # Boiling free surface (bilateral solver with the full diagonal) gave KE > 1000.
     assert ke < 200.0, f"KE {ke:.1f} at 2 s: the free surface is not settling"
+
+
+def test_dfsph_divergence_solver_skips_sparse_neighbourhoods(world, sim):
+    """Particles with fewer than 20 neighbours get kappa_v = 0 (bd-r5-review-n28.71)."""
+    import dfsph_solver
+    w = world
+    profile = PROFILES["DFSPH"]
+    n = _block(w, sim, profile)
+    dt = float(profile.dt)
+    pos = w.sorted_position[:n, :3].get()
+    centre = pos.mean(axis=0)
+    nc = w.sorted_normal[:n, 3].get()
+    vel = cp.zeros((n, 4), dtype=cp.float32)
+    vel[:, :3] = cp.asarray((-0.1 / (3.0 * dt) * (pos - centre)).astype(np.float32))
+
+    def kappa(normal_in):
+        kv = cp.zeros(n, dtype=cp.float32)
+        dfsph_solver.compute_kappa_v(
+            vel, w.sorted_density[:n], w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+            w.sorted_packed_info[:n], w.sorted_position[:n],
+            sim._cell_start, sim._cell_end, kv, normal_in=normal_in,
+        )
+        return kv.get()
+
+    ungated = kappa(None)
+    gated = kappa(w.sorted_normal[:n])
+    sparse = nc < 20.0
+    print(f"  neighbour count min={nc.min():.0f} max={nc.max():.0f}, "
+          f"{sparse.sum()} of {n} below 20")
+    assert 0 < sparse.sum() < n
+    assert np.all(gated >= 0.0)
+    assert np.all(gated[sparse] == 0.0)
+    assert np.count_nonzero(ungated[sparse]) > 0, "test needs compressing sparse particles"
+    np.testing.assert_array_equal(gated[~sparse], ungated[~sparse])
+    assert np.count_nonzero(gated[~sparse]) > 0
