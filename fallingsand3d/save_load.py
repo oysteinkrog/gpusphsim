@@ -404,6 +404,11 @@ def load_scene(world, sim, camera, filename: str) -> int:
 
     world._high_water = n
 
+    # The save holds no color, so rebuild it from the material table; a
+    # paused load would otherwise show the slots' old colors
+    # (bd-r5-review-n28.63).
+    world.refresh_color(n)
+
     # Rebuild _spawned_material_ids from loaded packed_info
     unique_mats = cp.unique(world.packed_info[:n] & 0xFF).get()
     world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)

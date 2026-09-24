@@ -118,6 +118,11 @@ class SnapshotRing:
         cp.copyto(world.veleval[:n], world.velocity[:n])
         world._high_water = n
 
+        # The slot holds no color, so rebuild it from the material table; a
+        # paused undo would otherwise show the current colors
+        # (bd-r5-review-n28.63).
+        world.refresh_color(n)
+
         # bd-r4-epic-x2j.6: zero warm-start fields so restored particles start fresh
         # (matches load_scene in save_load.py lines ~272-276).
         # Guard with hasattr for optional arrays that may not exist in all world configs.

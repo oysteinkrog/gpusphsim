@@ -241,7 +241,7 @@ void K_SpawnGas(
         child_color.x = cr;
         child_color.y = cg;
         child_color.z = cb;
-        child_color.w = 1.0f;
+        child_color.w = (float)GAS * 0.25f;  // behavior code, as behavior_to_alpha
         color[slot] = child_color;
 
         // Material info

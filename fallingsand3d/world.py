@@ -17,7 +17,7 @@ from typing import Callable, Optional, Tuple
 import cupy as cp
 import numpy as np
 
-from materials import MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER, ICE
+from materials import MATERIALS, MAX_MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER, ICE
 
 # packed_info bitfield macros (mirrors common.cuh)
 _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
@@ -25,6 +25,21 @@ _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
 # Encoding of a dead slot: material DEAD (0), behavior STATIC. Matches
 # MAKE_PACKED(MAT_DEAD, STATIC) in spawn.cu and reactions.cu.
 DEAD_PACKED = _MAKE_PACKED(0, STATIC)
+
+# (MAX_MATERIALS, 3) float32 table of base material colors, indexed by
+# material id. Built once on first use by World.refresh_color.
+_rgb_table = None
+
+
+def _material_rgb_table():
+    """Return the cached GPU lookup of base material colors (r, g, b)."""
+    global _rgb_table
+    if _rgb_table is None:
+        host = np.zeros((MAX_MATERIALS, 3), dtype=np.float32)
+        for mat_id, mat in MATERIALS.items():
+            host[mat_id] = (mat.color_r, mat.color_g, mat.color_b)
+        _rgb_table = cp.asarray(host)
+    return _rgb_table
 
 # Kill every live, non-rigid particle inside a sphere (bd-r5-review-n28.34).
 # One launch and no host sync. A killed slot becomes DEAD_PACKED with zero
@@ -302,6 +317,30 @@ class World:
             return 0
         return int(cp.count_nonzero(self.packed_info[:n] & cp.uint32(0xFF)))
 
+    def refresh_color(self, n: int | None = None) -> None:
+        """Rebuild ``color[:n]`` from the material table and ``packed_info``.
+
+        Writes the base material color (r, g, b) and ``behavior * 0.25`` in w,
+        the same encoding as ``compute_color`` in sph_shared.cuh. DEAD slots
+        get (0, 0, 0, -1) so the shaders cull them. Temperature glow is left
+        out; the next substep adds it. One gather on the GPU, no host sync.
+
+        Call after anything that rewrites ``packed_info`` outside a substep
+        (load_scene, snapshot restore), so a paused scene shows the right
+        colors (bd-r5-review-n28.63).
+        """
+        if n is None:
+            n = self._high_water
+        if n <= 0:
+            return
+        pi = self.packed_info[:n]
+        mat = (pi & cp.uint32(0xFF)).astype(cp.int32)
+        rgb = _material_rgb_table()
+        self.color[:n, :3] = rgb[mat]
+        behavior = ((pi >> cp.uint32(8)) & cp.uint32(0x3)).astype(cp.float32)
+        self.color[:n, 3] = cp.where(mat == 0, cp.float32(-1.0),
+                                     behavior * cp.float32(0.25))
+
     def compact(self, num_alive: int = -1) -> int:
         """Compact particle arrays by moving alive particles to the front.
 
@@ -572,7 +611,7 @@ class World:
         self.color[sl, 0] = mat.color_r
         self.color[sl, 1] = mat.color_g
         self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = 1.0
+        self.color[sl, 3] = mat.behavior_class * 0.25
 
         # Initialize particle dye from material color
         self.particle_dye[sl, 0] = mat.color_r
@@ -693,7 +732,7 @@ class World:
         self.color[sl, 0] = mat.color_r
         self.color[sl, 1] = mat.color_g
         self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = 1.0
+        self.color[sl, 3] = mat.behavior_class * 0.25
 
         # Initialize particle dye from material color
         self.particle_dye[sl, 0] = mat.color_r
@@ -794,7 +833,7 @@ class World:
         self.color[sl, 0] = mat.color_r
         self.color[sl, 1] = mat.color_g
         self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = 1.0
+        self.color[sl, 3] = mat.behavior_class * 0.25
         self.particle_dye[sl, 0] = mat.color_r
         self.particle_dye[sl, 1] = mat.color_g
         self.particle_dye[sl, 2] = mat.color_b
@@ -863,7 +902,7 @@ class World:
         self.color[sl, 0] = mat.color_r
         self.color[sl, 1] = mat.color_g
         self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = 1.0
+        self.color[sl, 3] = mat.behavior_class * 0.25
         self.particle_dye[sl, 0] = mat.color_r
         self.particle_dye[sl, 1] = mat.color_g
         self.particle_dye[sl, 2] = mat.color_b
@@ -959,7 +998,7 @@ class World:
         self.color[sl, 0] = mat.color_r
         self.color[sl, 1] = mat.color_g
         self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = 1.0
+        self.color[sl, 3] = mat.behavior_class * 0.25
         self.particle_dye[sl, 0] = mat.color_r
         self.particle_dye[sl, 1] = mat.color_g
         self.particle_dye[sl, 2] = mat.color_b
