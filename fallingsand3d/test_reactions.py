@@ -575,6 +575,143 @@ def test_dirt_no_corrode_below_threshold():
 # Main
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.23: dead slots are massless and not walls
+# ---------------------------------------------------------------------------
+
+def test_death_zeroes_mass():
+    """Consumed acid, expired gas and existing DEAD slots all end with mass 0.
+    Live particles keep their mass."""
+    from materials import ACID, SMOKE
+    setup_params(dt=0.001)
+    n = 4
+    d = make_particles(n, WATER, FLUID)
+    pi = np.array([
+        MAKE_PACKED(ACID, FLUID),     # consumed this call
+        MAKE_PACKED(SMOKE, GAS),      # expires this call
+        MAKE_PACKED(DEAD, FLUID),     # already dead (brush-kill encoding)
+        MAKE_PACKED(WATER, FLUID),    # stays alive
+    ], dtype=np.uint32)
+    d["sorted_packed_info"] = cupy.asarray(pi)
+    d["sorted_health"] = cupy.asarray(np.array([0.001, 1.0, 0.0, 1.0], np.float32))
+    d["sorted_lifetime"] = cupy.asarray(np.array([0.0, 0.0005, 0.0, 0.0], np.float32))
+    d["sorted_exposure_corrode"] = cupy.asarray(np.array([10.0, 0.0, 0.0, 0.0], np.float32))
+    mass = cupy.full(n, 0.02, dtype=cupy.float32)
+    compute_reactions(**d, sorted_mass=mass)
+    out_pi = d["sorted_packed_info"].get()
+    out_m = mass.get()
+    for i in (0, 1):
+        assert int(out_pi[i]) == MAKE_PACKED(DEAD, STATIC), f"slot {i}: packed {int(out_pi[i]):#x}"
+    for i in (0, 1, 2):
+        assert out_m[i] == 0.0, f"slot {i}: mass {out_m[i]} after death"
+    assert out_m[3] == np.float32(0.02), "live WATER mass changed"
+
+
+def test_death_without_mass_buffer_still_works():
+    """sorted_mass is optional: the kernel skips the write on a null pointer."""
+    from materials import SMOKE
+    setup_params(dt=0.001)
+    d = make_particles(8, SMOKE, GAS, lifetime=0.0005)
+    compute_reactions(**d)
+    pi = d["sorted_packed_info"].get()
+    assert all(int(p) == MAKE_PACKED(DEAD, STATIC) for p in pi)
+
+
+def _boundary_push(neighbor_packed: int) -> tuple:
+    """Integrate one FLUID particle 0.5h from one STATIC neighbour with mass 0.02.
+    Return the fluid particle's (position, velocity) after one K_Integrate."""
+    import integrate as integ
+    from grid_params import build_grid_params, CELL_SIZE, TABLE_MASK
+
+    sim_params = build_sim_params(
+        smoothing_length=H, particle_mass=0.008, particle_spacing=SPACING,
+        gravity=(0.0, 0.0, 0.0), dt=DT, restitution=0.3, wall_friction=0.5,
+        world_min=(-1.0, -1.0, -1.0), world_max=(1.0, 1.0, 1.0),
+    )
+    integ.upload_sim_params(sim_params)
+    integ.upload_materials(build_material_array())
+    gp = build_grid_params()
+    mod = integ.get_module()
+    ptr = mod.get_global("c_grid")
+    ptr.copy_from_host(gp.ctypes.data, gp.nbytes)
+
+    # Both particles in the same grid cell; the fluid moves toward the neighbour.
+    pos = np.array([[0.005, 0.005, 0.005, 1.0],
+                    [0.005 + 0.5 * H, 0.005, 0.005, 1.0]], dtype=np.float32)
+    vel = np.array([[0.1, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    cell = np.floor((pos[0, :3] + 1.0) / float(CELL_SIZE)).astype(np.int64)
+    assert np.array_equal(cell, np.floor((pos[1, :3] + 1.0) / float(CELL_SIZE)).astype(np.int64))
+    hsh = int((int(cell[0]) * 73856093 + int(cell[1]) * 19349669
+               + int(cell[2]) * 83492791) & 0xFFFFFFFF) & TABLE_MASK
+    table = int(gp[0]["table_size"])
+    cell_start = np.full(table, 0xFFFFFFFF, dtype=np.uint32)
+    cell_end = np.zeros(table, dtype=np.uint32)
+    cell_start[hsh] = 0
+    cell_end[hsh] = 2
+
+    packed = np.array([MAKE_PACKED(WATER, FLUID), neighbor_packed], dtype=np.uint32)
+    pos_out, vel_out, *_ = integ.integrate(
+        sorted_position=cupy.asarray(pos),
+        sorted_velocity=cupy.asarray(vel),
+        sorted_veleval=cupy.asarray(vel),
+        sorted_sph_force=cupy.zeros((2, 4), dtype=cupy.float32),
+        sorted_mass=cupy.asarray(np.array([0.008, 0.02], np.float32)),
+        sorted_packed_info=cupy.asarray(packed),
+        sorted_temperature=cupy.full(2, 293.0, dtype=cupy.float32),
+        sorted_health=cupy.ones(2, dtype=cupy.float32),
+        sort_indexes=cupy.arange(2, dtype=cupy.uint32),
+        cell_start=cupy.asarray(cell_start),
+        cell_end=cupy.asarray(cell_end),
+    )
+    return pos_out.get()[0, :3], vel_out.get()[0, :3], pos[0, :3], vel[0, :3]
+
+
+def test_static_boundary_skips_dead_slot():
+    """A MAT_DEAD/STATIC neighbour with mass 0.02 at 0.5h gives zero push and
+    no velocity reflection. A STONE neighbour at the same place does push
+    (control, proves the test reaches static_particle_boundary)."""
+    p_dead, v_dead, p0, v0 = _boundary_push(MAKE_PACKED(DEAD, STATIC))
+    free_pos = p0 + DT * v0
+    assert np.allclose(p_dead, free_pos, atol=1e-6), f"dead slot pushed fluid: {p_dead} vs {free_pos}"
+    assert np.allclose(v_dead, v0, atol=1e-6), f"dead slot changed velocity: {v_dead}"
+
+    p_stone, v_stone, _, _ = _boundary_push(MAKE_PACKED(STONE, STATIC))
+    assert p_stone[0] < free_pos[0] - 1e-3, f"STONE control did not push: {p_stone}"
+    assert v_stone[0] < 0.0, f"STONE control did not reflect velocity: {v_stone}"
+
+
+def test_expired_gas_mass_stays_zero_in_simulation():
+    """End to end: gas that expires inside Simulation keeps mass 0 in the
+    unsorted buffer over 10 substeps (sort, reuse and scatter-back paths)."""
+    from materials import SMOKE, MATERIALS
+    from world import World
+    from simulation import Simulation
+
+    world = World(max_particles=20_000)
+    world.packed_info[:] = 0
+    world._high_water = 0
+    n_water = world.spawn_cube((-0.1, 0.3, -0.1), (0.1, 0.4, 0.1), WATER, spacing=0.02)
+    n_smoke = world.spawn_cube((-0.05, 0.42, -0.05), (0.05, 0.46, 0.05), SMOKE, spacing=0.02)
+    n = n_water + n_smoke
+    assert n_smoke > 0
+    world.lifetime[n_water:n] = 0.0005
+    sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
+                     fixed_dt=False, max_substeps=20)
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+    for _ in range(10):
+        sim._sim_step(n)
+    cupy.cuda.Device().synchronize()
+    pi = world.packed_info[:n].get()
+    m = world.mass[:n].get()
+    dead = (pi & 0xFF) == DEAD
+    assert dead[n_water:].all(), "expired SMOKE slots not all DEAD"
+    assert not dead[:n_water].any(), "water died unexpectedly"
+    assert np.all(m[dead] == 0.0), f"dead slot mass {m[dead].max()}"
+    assert np.all(m[~dead] > 0.0), "live particle lost its mass"
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,
@@ -601,6 +738,10 @@ if __name__ == "__main__":
         test_500k_stress,
         test_dirt_water_becomes_mud,
         test_dirt_no_corrode_below_threshold,
+        test_death_zeroes_mass,
+        test_death_without_mass_buffer_still_works,
+        test_static_boundary_skips_dead_slot,
+        test_expired_gas_mass_stays_zero_in_simulation,
     ]
 
     passed = 0
