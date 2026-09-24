@@ -296,7 +296,7 @@ def test_header_json_with_sdf_and_camera() -> None:
 # ---------------------------------------------------------------------------
 
 def test_header_includes_warm_start_fields_zeroed_on_load() -> None:
-    """load_scene must zero kappa, kappa_v, lambda_pbf, sleep_counter, angular_velocity.
+    """load_scene must zero kappa, kappa_v, sleep_counter, angular_velocity.
 
     Verified by inspecting save_load source: the load path explicitly assigns 0
     to each field over the [:n] slice immediately after writing the particle arrays.
@@ -307,7 +307,6 @@ def test_header_includes_warm_start_fields_zeroed_on_load() -> None:
     expected_zeroed = {
         "kappa",          # DFSPH warm-start pressure
         "kappa_v",        # DFSPH warm-start divergence
-        "lambda_pbf",     # PBF lambda
         "sleep_counter",  # rigid sleep timer (uint8, max 255 frames asleep)
         "angular_velocity",  # micropolar spin
     }

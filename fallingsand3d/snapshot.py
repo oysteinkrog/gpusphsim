@@ -125,8 +125,6 @@ class SnapshotRing:
             world.kappa[:n] = 0
         if hasattr(world, 'kappa_v'):
             world.kappa_v[:n] = 0
-        if hasattr(world, 'lambda_pbf'):
-            world.lambda_pbf[:n] = 0
         if hasattr(world, 'sleep_counter'):
             world.sleep_counter[:n] = 0
         if hasattr(world, 'angular_velocity'):

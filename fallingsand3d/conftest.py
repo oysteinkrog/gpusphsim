@@ -168,7 +168,6 @@ def counting_sort_scene(
     sc = _arr(sleep_counter, (n,), cupy.uint8, 0)
     kappa = cupy.zeros(n, dtype=cupy.float32)
     kappa_v = cupy.zeros(n, dtype=cupy.float32)
-    lambda_pbf = cupy.zeros(n, dtype=cupy.float32)
     dye = cupy.zeros((n, 4), dtype=cupy.float32)
     omega = cupy.zeros((n, 4), dtype=cupy.float32)
 
@@ -198,7 +197,6 @@ def counting_sort_scene(
         "particle_dye": cupy.empty_like(dye),
         "angular_velocity": cupy.empty_like(omega),
         "kappa_v": cupy.empty_like(kappa_v),
-        "lambda_pbf": cupy.empty_like(lambda_pbf),
         "velocity_h": cupy.zeros((n, 2), dtype=cupy.uint32),
         "temperature_h": cupy.zeros(n, dtype=cupy.float16),
         "dye_h": cupy.zeros((n, 2), dtype=cupy.uint32),
@@ -234,7 +232,6 @@ def counting_sort_scene(
         particle_dye=dye,
         angular_velocity=omega,
         kappa_v=kappa_v,
-        lambda_pbf=lambda_pbf,
         sorted_position=out["position"],
         sorted_velocity=out["velocity"],
         sorted_mass=out["mass"],
@@ -247,7 +244,6 @@ def counting_sort_scene(
         sorted_particle_dye=out["particle_dye"],
         sorted_angular_velocity=out["angular_velocity"],
         sorted_kappa_v=out["kappa_v"],
-        sorted_lambda_pbf=out["lambda_pbf"],
         sorted_velocity_h=out["velocity_h"],
         sorted_temperature_h=out["temperature_h"],
         sorted_dye_h=out["dye_h"],

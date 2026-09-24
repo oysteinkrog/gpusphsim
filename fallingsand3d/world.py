@@ -176,10 +176,12 @@ class World:
         # Warm-start pressure (DFSPH uses this; always allocated for reorder kernel)
         self.kappa = cp.zeros(n, dtype=cp.float32)
         self.sorted_kappa = cp.zeros(n, dtype=cp.float32)
-        # Warm-start divergence (DFSPH) and lambda (PBF) -- PERF-008
+        # Warm-start divergence (DFSPH) -- PERF-008
         self.kappa_v = cp.zeros(n, dtype=cp.float32)
         self.sorted_kappa_v = cp.zeros(n, dtype=cp.float32)
-        self.lambda_pbf = cp.zeros(n, dtype=cp.float32)
+        # PBF lambda scratch: written by K_PBF_ComputeLambda and read by
+        # K_PBF_ComputeDelta within one iteration. Never reordered or scattered
+        # back; PBF recomputes lambda from scratch every iteration.
         self.sorted_lambda_pbf = cp.zeros(n, dtype=cp.float32)
         # Pre-computed pressure (WCSPH PERF-007: eliminates compute_pressure per neighbor)
         self.sorted_pressure = cp.zeros(n, dtype=cp.float32)
@@ -248,7 +250,7 @@ class World:
         if self._needs_alloc('predicted_position', 'sorted_predicted_position'):
             self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
-        # PBF-specific arrays -- lambda_pbf now in _allocate (PERF-008)
+        # PBF-specific arrays (the lambda scratch is allocated in _allocate)
         if self._needs_alloc('delta_position', 'sorted_delta_position'):
             self.delta_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_delta_position = cp.zeros((n, 4), dtype=cp.float32)
@@ -364,12 +366,11 @@ class World:
         self.sorted_packed_info[:num_alive] = self.packed_info[:n][alive_idx]
         # uint8 arrays
         self.sorted_sleep_counter[:num_alive] = self.sleep_counter[:n][alive_idx]
-        # Persistent per-particle state (kappa, dye, angular_velocity, kappa_v, lambda_pbf)
+        # Persistent per-particle state (kappa, dye, angular_velocity, kappa_v)
         self.sorted_kappa[:num_alive] = self.kappa[:n][alive_idx]
         self.sorted_particle_dye[:num_alive] = self.particle_dye[:n][alive_idx]
         self.sorted_angular_velocity[:num_alive] = self.angular_velocity[:n][alive_idx]
         self.sorted_kappa_v[:num_alive] = self.kappa_v[:n][alive_idx]
-        self.sorted_lambda_pbf[:num_alive] = self.lambda_pbf[:n][alive_idx]
 
         # Copy back from scratch to primary arrays
         self.position[:num_alive] = self.sorted_position[:num_alive]
@@ -391,7 +392,6 @@ class World:
         self.particle_dye[:num_alive] = self.sorted_particle_dye[:num_alive]
         self.angular_velocity[:num_alive] = self.sorted_angular_velocity[:num_alive]
         self.kappa_v[:num_alive] = self.sorted_kappa_v[:num_alive]
-        self.lambda_pbf[:num_alive] = self.sorted_lambda_pbf[:num_alive]
 
         # Zero out the dead tail to prevent stale data
         if num_alive < n:
@@ -485,8 +485,7 @@ class World:
             arr[sl] = 0.0
         self.temperature[sl] = T_AMBIENT
         for arr in (self.density, self.mass, self.health, self.lifetime, self.shear_rate, self.exposure_heat,
-                    self.exposure_corrode, self.kappa, self.kappa_v,
-                    self.lambda_pbf):
+                    self.exposure_corrode, self.kappa, self.kappa_v):
             arr[sl] = 0.0
         # DEAD with behavior STATIC. Plain 0 would read as behavior FLUID
         # (FLUID = 0), and K_Integrate would drop the parked slot under gravity.

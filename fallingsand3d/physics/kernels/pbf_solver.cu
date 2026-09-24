@@ -426,7 +426,7 @@ extern "C" __global__ __launch_bounds__(256, 4)
 void K_PBF_ComputeDelta(
     uint            numParticles,
     const float4*   __restrict__ predicted_pos,
-    const float*    __restrict__ lambda_pbf,
+    const float*    __restrict__ lambda_in,     // this iteration's lambda from K_PBF_ComputeLambda (sorted)
     const float*    __restrict__ mass,
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
@@ -457,7 +457,7 @@ void K_PBF_ComputeDelta(
     float h_sq = c_sim.smoothing_length_sq;
     // Floor at 1: DEAD has rest_density 0, and C = rho / rho0 - 1 would be inf.
     float rho0 = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
-    float lambda_i = lambda_pbf[i];
+    float lambda_i = lambda_in[i];
 
     float3 delta = make_float3(0.0f, 0.0f, 0.0f);
 
@@ -480,7 +480,7 @@ void K_PBF_ComputeDelta(
                     // Speculative ILP: issue all loads before distance check (OPT-4.2)
                     float4 pos4_j = __ldg(&predicted_pos[j]);
                     uint pi_j = __ldg(&packed_info[j]);
-                    float lambda_j = __ldg(&lambda_pbf[j]);
+                    float lambda_j = __ldg(&lambda_in[j]);
                     float m_j = __ldg(&mass[j]);
 
                     int bj_delta = GET_BEHAVIOR(pi_j);
@@ -610,8 +610,6 @@ void K_PBF_Finalize(
     const float4*   __restrict__ vorticity_in,     // (omega_x,y,z, |omega|) from ComputeLambda, or NULL
     const float4*   __restrict__ normal_in,         // (n_x,n_y,n_z, neighbor_count) from ComputeLambda, or NULL
     const float4*   __restrict__ pressure_normal_in, // density gradient normal for GRANULAR friction, or NULL
-    const float*    __restrict__ sorted_lambda_pbf,  // converged lambda for warm-start writeback
-    float*          __restrict__ lambda_pbf_out,     // unsorted lambda output (warm-start next frame)
     const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,     // force accumulator (NULL if no bodies)
     float*          __restrict__ d_rigid_torques,    // torque accumulator (NULL if no bodies)
@@ -655,7 +653,6 @@ void K_PBF_Finalize(
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sleep_counter_in[i];
         temperature_out[orig_idx] = temp;
-        if (lambda_pbf_out) lambda_pbf_out[orig_idx] = 0.0f;
         particle_dye_out[orig_idx] = sorted_particle_dye[i];
         angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
         return;
@@ -690,7 +687,6 @@ void K_PBF_Finalize(
             packed_info_out[orig_idx] = pi;
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
-            if (lambda_pbf_out) lambda_pbf_out[orig_idx] = sorted_lambda_pbf[i];
             particle_dye_out[orig_idx] = sorted_particle_dye[i];
             angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
             return;
@@ -1111,7 +1107,6 @@ void K_PBF_Finalize(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
-    if (lambda_pbf_out) lambda_pbf_out[orig_idx] = sorted_lambda_pbf[i];
     particle_dye_out[orig_idx] = dye;
     // Micropolar angular velocity: relax toward 0.5 * curl_v (FLUID only)
     float4 ang_vel = sorted_angular_velocity[i];

@@ -135,7 +135,6 @@ def counting_sort_full(
     particle_dye: cupy.ndarray,
     angular_velocity: cupy.ndarray,
     kappa_v: cupy.ndarray,
-    lambda_pbf: cupy.ndarray,
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
@@ -149,7 +148,6 @@ def counting_sort_full(
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
     sorted_kappa_v: cupy.ndarray,
-    sorted_lambda_pbf: cupy.ndarray,
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
     # FP16 temperature + dye outputs (PERF-011)
@@ -236,7 +234,6 @@ def counting_sort_full(
         particle_dye,
         angular_velocity,
         kappa_v,
-        lambda_pbf,
         # Sorted outputs
         sorted_hashes,
         sorted_position,
@@ -251,7 +248,6 @@ def counting_sort_full(
         sorted_particle_dye,
         sorted_angular_velocity,
         sorted_kappa_v,
-        sorted_lambda_pbf,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,
         # FP16 temperature + dye (PERF-011)
@@ -285,7 +281,6 @@ def gather_reorder(
     particle_dye: cupy.ndarray,
     angular_velocity: cupy.ndarray,
     kappa_v: cupy.ndarray,
-    lambda_pbf: cupy.ndarray,
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
@@ -299,7 +294,6 @@ def gather_reorder(
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
     sorted_kappa_v: cupy.ndarray,
-    sorted_lambda_pbf: cupy.ndarray,
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
     # FP16 temperature + dye outputs (PERF-011)
@@ -339,7 +333,6 @@ def gather_reorder(
         particle_dye,
         angular_velocity,
         kappa_v,
-        lambda_pbf,
         # Sorted outputs
         sorted_position,
         sorted_velocity,
@@ -353,7 +346,6 @@ def gather_reorder(
         sorted_particle_dye,
         sorted_angular_velocity,
         sorted_kappa_v,
-        sorted_lambda_pbf,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,
         # FP16 temperature + dye (PERF-011)

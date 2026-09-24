@@ -345,12 +345,11 @@ def load_scene(world, sim, camera, filename: str) -> int:
     world.veleval[:n] = world.velocity[:n]
 
     # bd-unl.13: zero warm-start and sleep fields so loaded particles start
-    # fresh -- stale kappa/kappa_v/lambda_pbf produce wrong first-frame forces;
+    # fresh -- stale kappa/kappa_v produce wrong first-frame forces;
     # stale sleep_counter (up to 255) keeps particles asleep for ~255 frames;
     # stale angular_velocity carries micropolar spin from the saved session.
     world.kappa[:n] = 0.0
     world.kappa_v[:n] = 0.0
-    world.lambda_pbf[:n] = 0.0
     world.sleep_counter[:n] = 0
     world.angular_velocity[:n] = 0.0
 
