@@ -1515,7 +1515,7 @@ def test_pbf_lambda_sees_trailing_neighbour(world, sim):
     world._high_water = 0
     sim.set_solver_profile(PROFILES["PBF"])
     spawned = world.spawn_cube(
-        min_corner=(-0.01, -0.01, -0.01), max_corner=(0.01, 0.01, 0.01),
+        min_corner=(-0.02, -0.02, -0.02), max_corner=(0.02, 0.02, 0.02),
         material_id=WATER, spacing=0.02,
     )
     assert spawned >= 2
