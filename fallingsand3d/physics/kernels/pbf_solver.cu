@@ -10,7 +10,9 @@
  *
  * All particles participate in density constraints (FLUID + GRANULAR + GAS).
  * GRANULAR gets velocity-space Drucker-Prager friction in Finalize (iteration-independent).
- * GAS gets linear drag instead of PBF constraints.
+ * GAS gets no density constraint. It gets buoyancy and linear drag in Predict
+ * and the WCSPH gas EOS pressure inside its own phase as a position delta in
+ * ComputeDelta (lambda slot holds p/rho^2 for GAS).
  * STATIC particles are skipped but contribute to neighbor density sums.
  *
  * Constant memory:
@@ -245,9 +247,12 @@ void K_PBF_ComputeLambda(
         // STATIC floor at 1: DEAD has rest_density 0. GAS keeps the density the
         // first (do_heat) call computed this substep; heat and dye read it as rho_j
         // next substep, so overwriting it with rest_density would be wrong.
-        if (behavior_i == STATIC)
+        // GAS also keeps its lambda slot, which holds the p/rho^2 term the first
+        // call wrote for the gas pressure delta (bd-r5-review-n28.91).
+        if (behavior_i == STATIC) {
             density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
-        lambda_out[i] = 0.0f;
+            lambda_out[i] = 0.0f;
+        }
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
@@ -489,12 +494,19 @@ void K_PBF_ComputeLambda(
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    // STATIC and GAS: always lambda=0 (Akinci one-way boundary / compressible phase).
-    // They may reach here on the do_heat path to accumulate exposure/heat, but must not
-    // participate in PBF constraint solving.
+    // STATIC and GAS: no density constraint (Akinci one-way boundary / compressible
+    // phase). They may reach here on the do_heat path to accumulate exposure/heat.
+    // STATIC gets lambda = 0. GAS gets the EOS term p_i / rho_i^2 in its lambda
+    // slot instead; K_PBF_ComputeDelta turns it into the WCSPH gas pressure
+    // between GAS pairs (bd-r5-review-n28.91). Later iterations keep it.
     if (behavior_i == STATIC || behavior_i == GAS) {
-        density_out[i] = (behavior_i == STATIC) ? fmaxf(c_materials[mat_id_i].rest_density, 1.0f) : rho;
-        lambda_out[i] = 0.0f;
+        if (behavior_i == STATIC) {
+            density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
+            lambda_out[i] = 0.0f;
+        } else {
+            density_out[i] = rho;
+            lambda_out[i] = compute_pressure(rho, GAS, mat_id_i) / (rho * rho);
+        }
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
@@ -553,13 +565,22 @@ void K_PBF_ComputeDelta(
         rigid_scale = mass[i] / (dt_r * dt_r);
     }
 
-    // GAS skips PBF constraints (compressible phase, not position-corrected).
-    // STATIC and sleeping particles also skip.
-    // GAS skips PBF constraints (compressible phase). STATIC skips too.
-    // Sleeping particles still participate so density corrections can wake them.
-    if (behavior_i == STATIC || behavior_i == GAS) {
+    // STATIC skips. Sleeping particles still participate so density
+    // corrections can wake them. GAS has no density constraint; it takes the
+    // gas EOS pressure from GAS neighbours below (bd-r5-review-n28.91).
+    if (behavior_i == STATIC) {
         delta_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
+    }
+    // GAS: the lambda slot holds p/rho^2. The WCSPH acceleration
+    // a_i = -fs * sum_j m_j (p_i/rho_i^2 + p_j/rho_j^2) grad_i W is spread over
+    // the iterations as a position delta dt^2 * a_i / num_iterations, so
+    // Finalize's (x* - x) / dt adds dt * a_i to the velocity.
+    float gas_scale = 0.0f;
+    if (is_gas_i) {
+        float dt_g = c_sim.dt;
+        gas_scale = c_granular.force_scale * dt_g * dt_g
+                  / (float)max(c_pbf.num_iterations, 1);
     }
 
     float4 pos4_i = predicted_pos[i];
@@ -609,6 +630,17 @@ void K_PBF_ComputeDelta(
                     if (r_sq > h_sq || r_sq < 1e-12f) continue;
 
                     float rlen = sqrtf(r_sq);
+
+                    if (is_gas_i) {
+                        // GAS-GAS pair (phase separation above leaves only GAS j).
+                        // grad_spiky points toward j, so -coeff * gW pushes i away.
+                        float3 gW_g = grad_spiky(r, rlen, h);
+                        float coeff_g = -gas_scale * m_j * (lambda_i + lambda_j);
+                        delta.x += coeff_g * gW_g.x;
+                        delta.y += coeff_g * gW_g.y;
+                        delta.z += coeff_g * gW_g.z;
+                        continue;
+                    }
 
                     // Artificial pressure (tensile instability fix)
                     // NOTE: Exponent is hardcoded n=4 for performance (avoids powf).

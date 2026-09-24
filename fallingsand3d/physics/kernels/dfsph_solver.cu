@@ -455,6 +455,16 @@ void K_DFSPH_NonPressureForces(
         eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
     }
 
+    // GAS skips the DFSPH pressure solvers, so it gets the WCSPH gas EOS
+    // pressure inside its own phase here (bd-r5-review-n28.91). The GAS EOS
+    // is linear, p = k * max(rho - rho0, 0), no powf.
+    float p_term_i = 0.0f;
+    float3 f_gas_press = make_float3(0.0f, 0.0f, 0.0f);
+    if (is_gas_i) {
+        float rho_i_safe = fmaxf(rho_i, RHO_EPSILON);
+        p_term_i = compute_pressure(rho_i, GAS, mat_id_i) / (rho_i_safe * rho_i_safe);
+    }
+
     // Vorticity eta accumulator (FLUID only, folded into viscosity loop -- PERF-002)
     bool do_vort_eta = (behavior_i == FLUID && vorticity_in != 0 && c_granular.vorticity_epsilon > 0.0f);
     float4 vort_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -609,6 +619,17 @@ void K_DFSPH_NonPressureForces(
                     } else {
                         // FLUID/GAS: per-material viscosity via harmonic mean
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
+                        if (is_gas_i) {
+                            // GAS-GAS pressure: sum m_j (p_i/rho_i^2 + p_j/rho_j^2) grad_i W.
+                            // grad_spiky points toward j, so subtracting it pushes i away.
+                            float rho_j_safe = fmaxf(rho_j, RHO_EPSILON);
+                            float p_term_j = compute_pressure(rho_j, GAS, mat_id_j) / (rho_j_safe * rho_j_safe);
+                            float3 gW = grad_spiky(r, rlen, h);
+                            float c_p = m_j * (p_term_i + p_term_j);
+                            f_gas_press.x -= c_p * gW.x;
+                            f_gas_press.y -= c_p * gW.y;
+                            f_gas_press.z -= c_p * gW.z;
+                        }
                         float mu_i = c_materials[mat_id_i].base_viscosity;
                         float mu_j = c_materials[mat_id_j].base_viscosity;
                         float mu_ij = 2.0f * mu_i * mu_j / (mu_i + mu_j + 1e-8f);
@@ -639,8 +660,13 @@ void K_DFSPH_NonPressureForces(
         a_visc.z + c_sim.gravity.z
     );
 
-    // GAS buoyancy + drag
+    // GAS pressure + buoyancy + drag. The pressure term carries force_scale
+    // (0.02) so it has the same size as the WCSPH step2 gas pressure.
     if (behavior_i == GAS) {
+        float fs = c_granular.force_scale;
+        accel.x += fs * f_gas_press.x;
+        accel.y += fs * f_gas_press.y;
+        accel.z += fs * f_gas_press.z;
         float temp = __ldg(&temperature[i]);
         accel.y += GAS_BUOYANCY_BETA * (temp - GAS_AMBIENT_TEMP) * GAS_BUOYANCY_G;
     }
