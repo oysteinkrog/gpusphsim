@@ -702,7 +702,11 @@ def test_lava_cools_to_stone():
 
 def test_acid_corrodes():
     """Acid reduces health of nearby metal/stone/wood particles."""
-    setup_all_modules()
+    # Zero gravity: the acid sits beside a floating metal block, so under
+    # gravity it falls off the block. It only stayed in contact while the
+    # WCSPH FLUID-STATIC viscous drag was about 50x too strong (fixed in
+    # bd-r5-review-n28.79). This test checks the reaction, not the flow.
+    setup_all_modules(gravity=(0.0, 0.0, 0.0))
 
     grid_params = build_grid_params()
     cell_start, cell_end = allocate_cell_tables()
@@ -849,7 +853,9 @@ def test_wood_ignites():
 
 def test_ice_melts():
     """Ice melts to water when temperature > 273K."""
-    setup_all_modules()
+    # Zero gravity keeps the water against the floating ice block (see
+    # test_acid_corrodes). This test checks heat transfer, not the flow.
+    setup_all_modules(gravity=(0.0, 0.0, 0.0))
 
     grid_params = build_grid_params()
     cell_start, cell_end = allocate_cell_tables()
