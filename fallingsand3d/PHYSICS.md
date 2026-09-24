@@ -2660,8 +2660,8 @@ neighbours.
 
 The reaction is taken before the per-particle clamps (PBF `|dx| <= 0.5h`, DFSPH
 `|dv_div| <= h/dt`, `|a_press| <= h/dt^2` and the velocity limit). When a clamp
-is hit, the body gets slightly more than the fluid lost. These clamps are
-safety nets and are not hit in a settled pool.
+is hit, the body gets slightly more than the fluid lost. The clamps are meant
+as safety nets; the momentum test below stays within 2%.
 
 Measured (`test_rigid_coupling.py`): with zero gravity, the fluid momentum gained
 equals minus the body impulse exactly in PBF and within 2% in DFSPH (DFSPH
@@ -2670,9 +2670,10 @@ fluid-fluid pairs use `V_j = m_j/rho_j`, which is only symmetric when
 (g = 4) gets F_y of about 29.9 N (PBF) and 27.3 N (DFSPH). The expected
 `rho0 * V_eff * g` is 27.4 N, where `V_eff = (0.12 + 0.02)^3` because fluid
 particle centres keep about one spacing from the boundary particles, so the
-displaced volume reaches half a spacing past each face. With V_eff, the 4.32 kg
-"neutral" body in Archimedes Pool (sized for the bare 0.12 m cube) floats in PBF
-and DFSPH.
+displaced volume reaches half a spacing past each face. So the 4.32 kg
+"neutral" body in Archimedes Pool (sized for the bare 0.12 m cube, 17.3 N weight)
+gets about 27 N of support and should float in PBF and DFSPH (inferred from the
+force, not run as a preset).
 
 ### 22.6 Force Accumulation with Warp-Level Reduction
 
