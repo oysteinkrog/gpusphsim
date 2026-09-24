@@ -914,7 +914,7 @@ the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
 | STONE → LAVA (FLUID) | T > STONE `temp_melt` (1500 K) | 1500 K |
 | SAND → LAVA (FLUID) | T > SAND `temp_melt` (1700 K) | 1700 K |
 | LAVA → GRAVEL (GRANULAR) | T < LAVA `temp_melt` (1000 K) | 1000 K |
-| STEAM → WATER (FLUID) | T < 373 K | unchanged |
+| STEAM → WATER (FLUID) | T < 360 K | unchanged; mass rule below |
 | WATER boils | T > 373 K | unchanged; sets the spawn-gas flag and spawn.cu makes STEAM |
 
 Every material change also rescales mass by the spawn-mass rule (7.3):
@@ -922,6 +922,21 @@ Every material change also rescales mass by the spawn-mass rule (7.3):
 STATIC and GAS. STONE → LAVA multiplies by 2.6, LAVA → GRAVEL multiplies by 4250/6500 (0.65),
 SAND → WET_SAND multiplies by 1.125, DIRT → MUD by 1.2, and WOOD, OIL or GUNPOWDER →
 FIRE go back to 0.02. Mass is not conserved across a transition; the rest volume is.
+
+STEAM → WATER is the exception: it conserves mass in expectation
+(bd-r5-review-n28.95). Boiled steam carries `m_src / 3`, and water at that mass
+sits at 1/3 of rho0, where Tait pressure clamps to 0 and the drops clump. So a
+condensing particle survives as WATER with the full water spawn mass
+`m_w = particle_mass * s(WATER)` (0.02) with probability `m_steam / m_w`, drawn
+from `wang_hash(i, frame)`. Otherwise it becomes DEAD (STATIC, mass 0, lifetime 0)
+and goes on the spawn freelist. Boiled steam survives with probability 1/3, so
+3 children give one water particle on average. Brush steam has mass 0.02 and
+always survives. With no mass buffer the particle simply becomes WATER.
+
+Condensation is at 360 K, 13 K below boiling. Steam in still air cools only by
+ambient relaxation, `T(t) = 293 + 80 exp(-0.02 t)`, so boiled steam (373 K)
+reaches 360 K after 8.9 s. `K_SpawnGas` gives it a 12 s lifetime so it
+condenses before it expires. Steam kept hot by its neighbours can still expire.
 
 WATER freezes 10 K below the ICE melt point, so water between 263 K and 273 K
 stays liquid and ice at 273 K does not flip back and forth. ICE is STATIC, so
@@ -979,6 +994,9 @@ particle gets a default lifetime from `_DEFAULT_LIFETIMES` in `world.py`:
 | FIRE | 1.5 s | becomes SMOKE with lifetime 3.0 s |
 | SMOKE | 3.0 s | becomes DEAD |
 | STEAM | 5.0 s | becomes DEAD |
+
+Steam from boiling (`K_SpawnGas`) gets 12 s instead (§9.5). Brush STEAM at
+373 K with 5.0 s only cools to 365 K, so it expires before it can condense.
 
 So brush and preset FIRE turns to SMOKE after 1.5 s and dies after 4.5 s,
 like fire from combustion. A caller can pass `lifetime=` to any `spawn_*`;
@@ -1595,6 +1613,8 @@ dead occupant's values. (bd-r5-review-n28.42)
 - **Velocity.** Each child gets `v_src + (0, 2, 0) m/s` plus `0.1 m/s` along its
   ring direction. The three spreads sum to zero, so total momentum is
   `m_src * (v_src + (0, 2, 0))`. Mass is `m_src / 3` each.
+- **Temperature and lifetime.** 373 K and 12 s, long enough to cool to the
+  360 K condensation point in still air (§9.5).
 - **Density.** `position.w` and `density` get the steam rest density. WCSPH
   step2 reads `position.w` as `rho_i`; before, it held the source water density.
 - **WCSPH.** `pressure[slot] = 0` (gas EOS `k * max(rho - rho0, 0)` at rest
