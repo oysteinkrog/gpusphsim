@@ -98,7 +98,8 @@ def test_spawn_cube_water():
     assert abs(float(w.color[0, 0]) - mat.color_r) < 1e-6
     assert abs(float(w.color[0, 1]) - mat.color_g) < 1e-6
     assert abs(float(w.color[0, 2]) - mat.color_b) < 1e-6
-    assert abs(float(w.color[0, 3]) - 1.0) < 1e-6
+    # color.w = behavior_class * 0.25 (FLUID = 0) for the SSFR shaders (bd-r5-review-n28.63)
+    assert abs(float(w.color[0, 3]) - FLUID * 0.25) < 1e-6
     print(f"PASS: spawn_cube water ({n} particles)")
 
 
@@ -155,7 +156,8 @@ def test_kill_in_sphere():
     # kill_in_sphere returns 0 (count is unused by all callers; bd-mzc.39 removes the sync)
     w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
     # Killed slots are MAKE_PACKED(DEAD, STATIC) with zero mass, health,
-    # velocity and color (bd-r5-review-n28.34).
+    # velocity and rgb, and color.w = -1 so the vertex shaders cull them
+    # (bd-r5-review-n28.34, bd-r5-review-n28.60).
     n = w._high_water
     dead_mask = (w.packed_info[:n] & 0xFF) == 0
     dead_count = int(cp.sum(dead_mask))
@@ -164,7 +166,8 @@ def test_kill_in_sphere():
     assert bool(cp.all(w.mass[:n][dead_mask] == 0.0))
     assert bool(cp.all(w.health[:n][dead_mask] == 0.0))
     assert bool(cp.all(w.velocity[:n][dead_mask] == 0.0))
-    assert bool(cp.all(w.color[:n][dead_mask] == 0.0))
+    assert bool(cp.all(w.color[:n, :3][dead_mask] == 0.0))
+    assert bool(cp.all(w.color[:n, 3][dead_mask] == -1.0))
     # Particles outside the sphere are untouched.
     r2 = cp.sum(w.position[:n, :3] ** 2, axis=1)
     assert bool(cp.all(dead_mask == (r2 <= 0.25 * 0.25)))
