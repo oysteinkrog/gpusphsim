@@ -1792,11 +1792,16 @@ Jacobi iteration (read from old, write to new).
 ### Pipeline Position
 
 Runs between Step2 (force computation) and Integrate in the WCSPH pipeline.
-Modifies `sorted_velocity` in-place before integration uses it. Uses
-`sorted_veleval` as scratch buffer for ping-pong. Known issue: K_Integrate reads
-`sorted_veleval - sorted_velocity` as the FLUID XSPH delta (4.3), so with IST on the
-XSPH delta is lost (odd iteration count, the default 5) or replaced by the difference
-of the last two IST iterates (even count). IST needs its own scratch buffer.
+Modifies `sorted_velocity` before integration uses it. The Jacobi ping-pong
+uses its own buffer, `World.sorted_ist_scratch` (min(100K, max_particles) x float4,
+allocated in the substep prologue when IST is on, outside any CUDA graph capture).
+With an odd iteration count the result is copied back into `sorted_velocity`.
+`sorted_veleval` is left as step2 wrote it (`v_pre + eps * xsph_sum`, from the
+pre-IST velocity). K_Integrate (4.3) advects FLUID with
+`vel_new + (veleval - vel)`, where `vel` is the post-IST velocity, so the IST
+change cancels out of this substep's position update: positions move by
+`v_pre + a*dt + eps * xsph_sum`. The IST change is kept in the velocity and
+reaches positions from the next substep. With `sigma = 0`, IST on matches IST off.
 
 **Source**: `implicit_st.cu:K_IST_Iterate`, `implicit_st.py`, `simulation.py`
 
