@@ -177,6 +177,14 @@ __device__ inline float compute_pressure(float rho_i, int behavior, uint mat_id)
  * Requires c_granular to be uploaded by the host.
  * ====================================================================== */
 
+/* Strain-rate floor (1/s) for the mu(I) viscosity denominator. Below it
+ * eta = mu0 + mu(I) * p_eff / MUI_GAMMA_DOT_FLOOR, so eta stays finite and
+ * scales with pressure instead of growing as 1 / gamma_dot. With the current
+ * p_floor (rho0 * g * spacing = 490 Pa for SAND) and mu_max = 500 this value
+ * is still above mu_max, so resting sand stays at the cap
+ * (bd-r5-review-n28.107). */
+#define MUI_GAMMA_DOT_FLOOR 0.1f
+
 __device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho) {
     float spacing = c_granular.particle_spacing;
     float I_number = gamma_dot * spacing / sqrtf(p_eff / rho);
@@ -184,7 +192,8 @@ __device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho)
                + (c_granular.mu_2 - c_granular.mu_s)
                  / (1.0f + c_granular.I0 / fmaxf(I_number, 1e-8f));
     return fminf(c_granular.mu_max,
-                 c_granular.mu0 + mu_I * p_eff / (gamma_dot + 1e-6f));
+                 c_granular.mu0
+                 + mu_I * p_eff / fmaxf(gamma_dot, MUI_GAMMA_DOT_FLOOR));
 }
 
 /* ======================================================================
