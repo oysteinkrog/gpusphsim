@@ -1,7 +1,18 @@
 """Falling Sand 3D - Main entry point with GLFW window, orbit camera, and ImGui UI."""
 
+import os
 import time
-import glfw
+
+# PyOpenGL runs glGetError after every GL call by default. Turn that off
+# (it must happen before the first OpenGL.GL import); the main loop still
+# checks glGetError once per frame. Set FS3D_GL_DEBUG=1 to keep per-call checks.
+import OpenGL
+
+_GL_DEBUG = os.environ.get("FS3D_GL_DEBUG", "") not in ("", "0")
+OpenGL.ERROR_CHECKING = _GL_DEBUG
+OpenGL.ERROR_LOGGING = _GL_DEBUG
+
+import glfw  # noqa: E402
 import numpy as np
 from OpenGL.GL import (
     glClearColor, glClear, glGetString, glGetError, glViewport,

@@ -616,6 +616,42 @@ void main() {
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         glBindRenderbuffer(GL_RENDERBUFFER, 0)
         self._ssfr_fbos_valid = True
+        self._set_static_uniforms()
+
+    def _set_static_uniforms(self) -> None:
+        """Upload uniforms that only change on program link or FBO resize.
+
+        Uniform values are per-program state and persist across glUseProgram,
+        so sampler unit indices and the texel size are set here once instead
+        of every frame.  Called from _create_ssfr_fbos (init and resize).
+        UI-driven values (blur radius, fresnel, specular) stay per frame:
+        ui.py writes them as plain attributes, and they are only a few calls.
+        """
+        tx, ty = 1.0 / self._width, 1.0 / self._height
+
+        glUseProgram(self._prog_skybox)
+        glUniform1i(self._u_sky_tex, 0)
+
+        glUseProgram(self._prog_blur)
+        glUniform1i(self._u_blur_depth, 0)
+        glUniform2f(self._u_blur_texel, tx, ty)
+
+        glUseProgram(self._prog_normal)
+        glUniform1i(self._u_norm_depth, 0)
+        glUniform2f(self._u_norm_texel, tx, ty)
+
+        glUseProgram(self._prog_composite)
+        glUniform1i(self._u_comp_depth, 0)
+        glUniform1i(self._u_comp_normal, 1)
+        glUniform1i(self._u_comp_thickness, 2)
+        glUniform1i(self._u_comp_scene, 3)
+        glUniform1i(self._u_comp_skybox, 4)
+        glUniform2f(self._u_comp_texel, tx, ty)
+
+        glUseProgram(self._prog_depth_write)
+        glUniform1i(self._u_dw_depth_tex, 0)
+
+        glUseProgram(0)
 
     def _destroy_ssfr_fbos(self) -> None:
         """Delete all SSFR FBO resources."""
@@ -737,7 +773,6 @@ void main() {
 
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_CUBE_MAP, self._tex_skybox)
-        glUniform1i(self._u_sky_tex, 0)
 
         glBindVertexArray(self._vao_skybox)
         glDrawArrays(GL_TRIANGLES, 0, 36)
@@ -751,7 +786,6 @@ void main() {
         """Multi-pass SSFR rendering pipeline."""
         w, h = self._width, self._height
         mvp = proj @ view
-        texel = np.array([1.0 / w, 1.0 / h], dtype=np.float32)
 
         try:
             proj_inv = np.linalg.inv(proj)
@@ -833,8 +867,6 @@ void main() {
         glUseProgram(self._prog_blur)
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self._tex_depth)
-        glUniform1i(self._u_blur_depth, 0)
-        glUniform2f(self._u_blur_texel, texel[0], texel[1])
         glUniform2f(self._u_blur_dir, 1.0, 0.0)  # horizontal
         glUniform1f(self._u_blur_radius, self.ssfr_blur_radius)
         glUniform1f(self._u_blur_range, self.ssfr_depth_range)
@@ -851,8 +883,6 @@ void main() {
         glUseProgram(self._prog_blur)
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self._tex_blur1)
-        glUniform1i(self._u_blur_depth, 0)
-        glUniform2f(self._u_blur_texel, texel[0], texel[1])
         glUniform2f(self._u_blur_dir, 0.0, 1.0)  # vertical
         glUniform1f(self._u_blur_radius, self.ssfr_blur_radius)
         glUniform1f(self._u_blur_range, self.ssfr_depth_range)
@@ -869,8 +899,6 @@ void main() {
         glUseProgram(self._prog_normal)
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self._tex_blur2)  # smoothed depth
-        glUniform1i(self._u_norm_depth, 0)
-        glUniform2f(self._u_norm_texel, texel[0], texel[1])
         glUniformMatrix4fv(self._u_norm_proj_inv, 1, GL_TRUE, proj_inv)
         glBindVertexArray(self._vao_fs)
         glDrawArrays(GL_TRIANGLES, 0, 3)
@@ -894,26 +922,20 @@ void main() {
 
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self._tex_blur2)  # smoothed depth
-        glUniform1i(self._u_comp_depth, 0)
 
         glActiveTexture(GL_TEXTURE1)
         glBindTexture(GL_TEXTURE_2D, self._tex_normal)
-        glUniform1i(self._u_comp_normal, 1)
 
         glActiveTexture(GL_TEXTURE2)
         glBindTexture(GL_TEXTURE_2D, self._tex_thickness)
-        glUniform1i(self._u_comp_thickness, 2)
 
         glActiveTexture(GL_TEXTURE3)
         glBindTexture(GL_TEXTURE_2D, self._tex_scene)  # background with non-fluid particles + skybox
-        glUniform1i(self._u_comp_scene, 3)
 
         glActiveTexture(GL_TEXTURE4)
         glBindTexture(GL_TEXTURE_CUBE_MAP, self._tex_skybox)
-        glUniform1i(self._u_comp_skybox, 4)
 
         glUniformMatrix4fv(self._u_comp_proj_inv, 1, GL_TRUE, proj_inv)
-        glUniform2f(self._u_comp_texel, texel[0], texel[1])
         glUniform1f(self._u_comp_abs_scale, self.ssfr_absorption_scale)
         glUniform1f(self._u_comp_fresnel_pow, self.ssfr_fresnel_power)
         glUniform1f(self._u_comp_fresnel_bias, self.ssfr_fresnel_bias)
@@ -945,7 +967,6 @@ void main() {
             glUseProgram(self._prog_depth_write)
             glActiveTexture(GL_TEXTURE0)
             glBindTexture(GL_TEXTURE_2D, self._tex_blur2)
-            glUniform1i(self._u_dw_depth_tex, 0)
             glUniformMatrix4fv(self._u_dw_proj, 1, GL_TRUE, proj)
 
             glBindVertexArray(self._vao_fs)
