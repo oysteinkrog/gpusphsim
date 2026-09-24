@@ -825,6 +825,14 @@ def _granular_drag_x(mat_id_b: int, bclass_b: int, density_b: float,
     _upload_all_params()
     rho0_sand = float(MATERIALS[SAND].rest_density)
     mass = float(MASS)
+    # A rigid particle stores mass = RIGID_PSI_RHO0 * V_b and the kernel
+    # weights it by rho0_i / RIGID_PSI_RHO0 (bd-r5-review-n28.77). Give it the
+    # mass that makes its psi_b for SAND equal MASS, the same weight as the
+    # pair reference neighbour.
+    mass_b = mass
+    if rigid:
+        from rigid_bodies import RIGID_PSI_RHO0
+        mass_b = mass * RIGID_PSI_RHO0 / rho0_sand
     data = _make_two_particle_setup(
         pos_a=[0.0, 0.0, 0.0],
         pos_b=[0.0, H * 0.5, 0.0],
@@ -833,7 +841,7 @@ def _granular_drag_x(mat_id_b: int, bclass_b: int, density_b: float,
         density_a=rho0_sand,
         density_b=density_b,
         mass_a=mass,
-        mass_b=mass,
+        mass_b=mass_b,
         mat_id_a=SAND,
         mat_id_b=mat_id_b,
         bclass_a=GRANULAR,
