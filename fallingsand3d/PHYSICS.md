@@ -2634,7 +2634,45 @@ This ensures `K_IntegrateRigidBodies` correctly computes `a_body = F_total / M_b
 
 Forces accumulated via `warp_reduce_accumulate()` then `atomicAdd` to per-body accumulators.
 
-**Source**: `step2.cu:K_Step2` (WCSPH), `dfsph_solver.cu:K_DFSPH_NonPressureForces` (DFSPH)
+**Source**: `step2.cu:K_Step2` (WCSPH), `dfsph_solver.cu:K_DFSPH_NonPressureForces` (DFSPH viscous part)
+
+The pressure form above is WCSPH only. PBF and DFSPH do not push the fluid off a
+rigid body with Tait pressure, so they do not give the body a Tait force either.
+
+**PBF and DFSPH pressure reaction.** The body gets exactly minus what each
+fluid-rigid pair gives the fluid, in the kernel that applies that push. Here
+`gW = grad_i W(r_i - r_b)` (spiky, points from i toward b), `V_b = psi_b / rho_b`
+with `rho_b = 2500`, and `m_b = psi_b`.
+
+| Solver | Kernel | Push on fluid i from b | Force on body |
+|---|---|---|---|
+| PBF | `K_PBF_ComputeDelta`, every iteration | `dx_i += (m_b/rho0_i) * (2*lambda_i + s_corr) * gW` | `F = -m_i * dx_ib / dt^2` |
+| DFSPH divergence | `K_DFSPH_CorrectVelocityDiv`, every pass incl. warm start | `dv_i = -dt * V_b * kv_i * gW` | `F = +m_i * V_b * kv_i * gW` |
+| DFSPH density | `K_DFSPH_ComputePressureAccel`, final call only | `a_i += -V_b * p_i * gW` (p = p_rho2) | `F = +m_i * V_b * p_i * gW` |
+
+The PBF position correction over a substep is an impulse `m_i * dx / dt` and a
+force `m_i * dx / dt^2`, summed over the iterations. The DFSPH density solver
+runs ComputePressureAccel `dens_iters + 1` times but only the last `a_press` is
+applied (ApplyPressureVelocity), so `simulation.py` passes the rigid buffers on
+that call only. Torque is `(r_b - COM) x F` in every case. Finalize in both
+solvers no longer computes a rigid force; it only skips XSPH for rigid
+neighbours.
+
+The reaction is taken before the per-particle clamps (PBF `|dx| <= 0.5h`, DFSPH
+`|dv_div| <= h/dt`, `|a_press| <= h/dt^2` and the velocity limit). When a clamp
+is hit, the body gets slightly more than the fluid lost. These clamps are
+safety nets and are not hit in a settled pool.
+
+Measured (`test_rigid_coupling.py`): with zero gravity, the fluid momentum gained
+equals minus the body impulse exactly in PBF and within 2% in DFSPH (DFSPH
+fluid-fluid pairs use `V_j = m_j/rho_j`, which is only symmetric when
+`rho_i = rho_j`). A kinematic 12 cm box 0.25 m deep in a settled WATER pool
+(g = 4) gets F_y of about 29.9 N (PBF) and 27.3 N (DFSPH). The expected
+`rho0 * V_eff * g` is 27.4 N, where `V_eff = (0.12 + 0.02)^3` because fluid
+particle centres keep about one spacing from the boundary particles, so the
+displaced volume reaches half a spacing past each face. With V_eff, the 4.32 kg
+"neutral" body in Archimedes Pool (sized for the bare 0.12 m cube) floats in PBF
+and DFSPH.
 
 ### 22.6 Force Accumulation with Warp-Level Reduction
 
