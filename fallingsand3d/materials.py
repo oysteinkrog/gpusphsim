@@ -163,7 +163,9 @@ MAT_RIGID = 18
 # Material definitions (19 entries, IDs 0-18)
 #
 # Property values chosen for a falling-sand / multi-material SPH game:
-#   - rest_density in kg/m^3 (approximate real-world)
+#   - rest_density in kg/m^3 (approximate real-world). FLUID and GRANULAR
+#     particles spawn with mass 0.02 * rest_density / 2500 (world.spawn_mass),
+#     so they rest at rest_density at spacing 0.02.
 #   - eos_stiffness: Tait EOS pressure coefficient (game-tuned)
 #   - eos_gamma: 7 for FLUID/GRANULAR, 1 for GAS, 0 for STATIC/DEAD
 #   - base_viscosity in Pa*s (scaled for game feel)
@@ -238,7 +240,10 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     LAVA: MaterialDef(
         id=LAVA, name="LAVA",
-        rest_density=6500.0, eos_stiffness=800.0, eos_gamma=7.0,
+        # k = 500 * 6500 / 2500: same sound speed sqrt(7k/rho0) as WATER, so
+        # at its per-material spawn mass LAVA compresses like WATER under the
+        # same head (bd-r5-review-n28.53).
+        rest_density=6500.0, eos_stiffness=1300.0, eos_gamma=7.0,
         base_viscosity=100.0, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.0, thermal_conductivity=500.0, heat_capacity=1000.0,
         temp_melt=1000.0, temp_boil=2500.0, temp_ignite=0.0,

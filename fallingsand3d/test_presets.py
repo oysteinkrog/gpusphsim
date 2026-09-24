@@ -207,7 +207,7 @@ def test_nested_preset_spawn_density(name, material):
     """
     pytest.importorskip("scipy")
     pytest.importorskip("cupy")
-    from world import World, PARTICLE_MASS
+    from world import World, spawn_mass
     world = World(max_particles=500_000)
     world.sdf_manager = MagicMock()
     world.rigid_body_manager = MagicMock()
@@ -215,7 +215,7 @@ def test_nested_preset_spawn_density(name, material):
     n = world._high_water
     pos = world.position[:n, :3].get().astype(np.float64)
     mat = world.packed_info[:n].get() & 0xFF
-    rho = _poly6_density(pos, PARTICLE_MASS, 0.04)[mat == material]
+    rho = _poly6_density(pos, spawn_mass(material), 0.04)[mat == material]
     assert len(rho) > 1_000
     peak = float(rho.max())
     assert peak / float(np.median(rho)) < 1.4, (

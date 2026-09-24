@@ -7,13 +7,14 @@ sys.path.insert(0, os.path.dirname(__file__))
 import cupy as cp
 import cupy.cuda.compiler as _compiler
 import numpy as np
+import pytest
 
 # Blackwell (sm_120) PTX workaround
 _compiler._use_ptx = True
 for _fn in (_compiler._get_arch, _compiler._get_arch_for_options_for_nvrtc):
     if hasattr(_fn, '_cache'):
         _fn._cache = {}
-from world import World, DEFAULT_SPACING, T_AMBIENT, _MAKE_PACKED, PARTICLE_MASS, _DEFAULT_TEMPS
+from world import World, DEFAULT_SPACING, T_AMBIENT, _MAKE_PACKED, PARTICLE_MASS, _DEFAULT_TEMPS, spawn_mass
 from materials import (
     MATERIALS, WATER, SAND, LAVA, FIRE, STEAM, SMOKE, ICE, STONE, DIRT, MUD,
     FLUID, GRANULAR, GAS, STATIC,
@@ -61,14 +62,29 @@ def test_array_shapes_dtypes():
     print("PASS: array shapes, dtypes, and GPU residency")
 
 
+@pytest.mark.parametrize("mat_id,expected", [
+    (WATER, 0.02), (SAND, 0.032), (LAVA, 0.052), (MUD, 0.036),
+    (STONE, 0.02), (ICE, 0.02), (STEAM, 0.02), (FIRE, 0.02),
+])
+def test_spawn_mass_per_material(mat_id, expected):
+    """FLUID and GRANULAR spawn at 0.02 * rho0 / 2500; STATIC and GAS keep 0.02 (bd-r5-review-n28.53)."""
+    assert spawn_mass(mat_id) == pytest.approx(expected, rel=1e-6)
+    w = World(10_000)
+    n = w.spawn_cube((-0.05, -0.05, -0.05), (0.05, 0.05, 0.05), mat_id, spacing=0.02)
+    assert n > 0
+    m = w.mass[:n].get()
+    np.testing.assert_allclose(m, expected, rtol=1e-6)
+
+
 def test_spawn_cube_water():
     w = World(500_000)
     n = w.spawn_cube((-0.5, -0.5, -0.5), (0.5, 0.5, 0.5), WATER, spacing=0.02)
     assert n > 0
     assert w.num_active == n
-    # mass = PARTICLE_MASS = 0.02 (game-tuned constant, not rho0*dx^3)
+    # WATER (rho0 2500) spawns with the reference mass PARTICLE_MASS = 0.02
     mass_val = float(w.mass[0])
     assert abs(mass_val - PARTICLE_MASS) < 1e-6, f"mass={mass_val}, expected PARTICLE_MASS={PARTICLE_MASS}"
+    assert spawn_mass(WATER) == PARTICLE_MASS
     # packed_info = MAKE_PACKED(WATER, FLUID)
     pi_val = int(w.packed_info[0])
     expected = _MAKE_PACKED(WATER, FLUID)

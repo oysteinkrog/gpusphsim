@@ -40,7 +40,10 @@ from materials import (
 )
 from presets import load_sand_castle, load_volcano
 
-REST_DENSITY = 2500.0
+# Per-material rest density lookup. Every FLUID and GRANULAR material spawns
+# at its own rho0 (world.spawn_mass), so density error is measured against it.
+_RHO0 = np.array([MATERIALS[i].rest_density if i in MATERIALS else 0.0
+                  for i in range(256)], dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -94,14 +97,15 @@ def collect(world: World) -> Dict[str, Any]:
     v_mean = float(speeds.mean()) if len(speeds) > 0 else 0.0
     v_max = float(speeds.max()) if len(speeds) > 0 else 0.0
 
-    # Density
+    # Density (sorted arrays, so pair it with the sorted material ids)
     try:
         dens = world.sorted_density[:n].get()
-        dens_active = dens[active]
-        nonzero = dens_active > 1.0
+        s_mat = world.sorted_packed_info[:n].get() & 0xFF
+        rho0 = _RHO0[s_mat]
+        nonzero = (dens > 1.0) & (rho0 > 1.0)
         if nonzero.sum() > 0:
-            d = dens_active[nonzero]
-            rel_err = np.abs(d - REST_DENSITY) / REST_DENSITY
+            d = dens[nonzero]
+            rel_err = np.abs(d - rho0[nonzero]) / rho0[nonzero]
             density_err_mean = float(rel_err.mean())
         else:
             density_err_mean = 0.0
@@ -203,8 +207,8 @@ def test_water() -> Tuple[bool, str]:
     m = collect(world)
     if m['has_nan'] or m['has_inf']:
         return False, f"NaN/Inf detected (nan={m['has_nan']}, inf={m['has_inf']})"
-    # WCSPH with mass=0.02 at spacing=0.02 gives density ~2.5x rest_density.
-    # Density error of ~12% is normal for this configuration.
+    # WATER spawns at rho0 (mass 0.02 at spacing 0.02); after 0.3 s of
+    # sloshing the WCSPH density error is about 12%.
     if m['density_err_mean'] > 0.20:
         return False, f"Density error {m['density_err_mean']:.4f} > 20%"
     if m['com_y'] >= m0['com_y']:

@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import cupy
 import numpy as np
+import pytest
 
 from step1 import (
     SIM_PARAMS_DTYPE,
@@ -1003,3 +1004,24 @@ if __name__ == "__main__":
     print(f"\n{passed}/{passed+failed} tests passed.")
     if failed:
         sys.exit(1)
+
+
+@pytest.mark.parametrize("old_mat,old_beh,new_mat,kw", [
+    (SAND, GRANULAR, WET_SAND, {"exposure_corrode": 0.3}),
+    (WET_SAND, GRANULAR, SAND, {"exposure_corrode": 0.01}),
+    (DIRT, GRANULAR, MUD, {"exposure_corrode": 0.3}),
+    (STONE, STATIC, LAVA, {"temp": 1600.0}),
+    (LAVA, FLUID, STONE, {"temp": 900.0}),
+    (ICE, STATIC, WATER, {"temp": 280.0}),
+    (OIL, FLUID, FIRE, {"exposure_heat": 400.0}),
+    (GUNPOWDER, GRANULAR, FIRE, {"exposure_heat": 200.0}),
+])
+def test_material_change_rescales_mass(old_mat, old_beh, new_mat, kw):
+    """A material change moves mass from the old spawn mass to the new one (bd-r5-review-n28.53)."""
+    from world import spawn_mass
+    setup_params(dt=0.001)
+    d = make_particles(1, old_mat, old_beh, **kw)
+    mass = cupy.full(1, spawn_mass(old_mat), dtype=cupy.float32)
+    compute_reactions(**d, sorted_mass=mass)
+    assert GET_MATERIAL_ID(int(d["sorted_packed_info"].get()[0])) == new_mat
+    np.testing.assert_allclose(mass.get()[0], spawn_mass(new_mat), rtol=1e-5)
