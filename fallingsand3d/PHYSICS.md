@@ -623,7 +623,7 @@ Cross-material pairs get boost=heat_exchange (e.g., WATER+LAVA=50.0).
 
 This is bidirectional: `T_j - T_i` can be positive or negative, so lava
 near water both cools the lava AND heats the water. This enables visible
-phase transitions: lava→stone (T<900K), water→steam (T>373K).
+phase transitions: lava→stone (T<1000K), water→steam (T>373K). See §9.5.
 
 ### 9.2 Key Heat Exchange Values
 
@@ -698,6 +698,27 @@ kernels and the benchmark-only `K_Step1_NL` (`neighbor_list.cu`) still output
 the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
 
 **Source**: `step1.cu` (K_Step1, K_Step1_BuildNL PostCalc), `reactions.cu` thresholds
+
+### 9.5 Temperature Phase Transitions (K_Reactions)
+
+| Transition | Condition | Temperature after |
+|------------|-----------|-------------------|
+| ICE → WATER (FLUID) | T > 273 K | 273 K |
+| STONE → LAVA (FLUID) | T > STONE `temp_melt` (1500 K) | 1500 K |
+| SAND → LAVA (FLUID) | T > SAND `temp_melt` (1700 K) | 1700 K |
+| LAVA → STONE (STATIC) | T < LAVA `temp_melt` (1000 K) | 1000 K |
+| STEAM → WATER (FLUID) | T < 373 K | unchanged |
+| WATER boils | T > 373 K | unchanged; sets the spawn-gas flag and spawn.cu makes STEAM |
+
+Melt and solidify set the temperature to the threshold. The heat above it (or
+missing below it) is taken as consumed latent heat, so melted ice starts as
+273 K water rather than at the overshoot temperature. The particle has to gain or lose heat
+again before any reverse transition. The removed heat is not stored, so a
+particle does not sit at the threshold while it absorbs a full latent heat. A
+per-particle latent-energy accumulator (4 B per particle) for that
+is not worth it here (PROBLEMS.md J4).
+
+**Source**: `reactions.cu` (K_Reactions, phase transitions block)
 
 ---
 

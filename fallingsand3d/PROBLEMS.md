@@ -353,14 +353,18 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
   a water-only scene, pre-heated water can never boil into steam.
 - **Fix:** Add WATER to the set.
 
-### J4. CONFIRMED: No latent heat at phase transitions
-- **File:** `reactions.cu:123-171`
+### J4. FIXED: No latent heat at phase transitions
+- **File:** `reactions.cu` (K_Reactions phase transitions)
 - **Severity:** HIGH
-- **Problem:** Phase transitions copy temperature unchanged. ICE at 280K → WATER at 280K, but
-  cp doubles (2090→4186), so internal energy jumps 2x. Combustion hard-sets 1200K regardless.
-  No latent heat modeled.
-- **Fix (minimal):** Clamp temperature to transition point on phase change (e.g., ICE→WATER
-  clamps to 273K). Excess heat treated as consumed latent heat.
+- **Problem:** Phase transitions copied temperature unchanged. ICE at 280K became WATER at
+  280K, but cp doubles (2090→4186), so internal energy jumped 2x. Combustion hard-sets 1200K
+  regardless.
+- **Fix (bd-r5-review-n28.64):** ICE→WATER, STONE/SAND→LAVA and LAVA→STONE now set the
+  temperature to the threshold (273K for ICE, `c_materials[mat].temp_melt` otherwise). The
+  excess is treated as consumed latent heat. STEAM→WATER and combustion are unchanged.
+- **Decision:** No per-particle latent-energy accumulator (4 B per particle). A real melt
+  plateau is not worth the memory and bandwidth in a sandbox; the clamp gives a visible melt
+  front at no cost.
 
 ### J5. INVESTIGATE: Acid+mud interaction defined but cannot fire (dead code)
 - **File:** `materials.py:413`, `reactions.cu:223`
