@@ -1244,6 +1244,17 @@ class Simulation:
         )
         mark("wake")
 
+    def _ensure_kappa_v_delta(self) -> None:
+        """Allocate the DFSPH per-iteration kappa_v increment buffer.
+
+        Called outside the graph body so a capture never allocates. Host-only
+        shape check, no device sync (bd-r5-review-n28.83).
+        """
+        n = self.world.max_particles
+        buf = getattr(self, '_kappa_v_delta', None)
+        if buf is None or buf.shape[0] != n:
+            self._kappa_v_delta = cupy.zeros(n, dtype=cupy.float32)
+
     def _run_dfsph_body(self, n: int, mark: StageMark = _no_mark) -> None:
         """DFSPH pipeline: Grid -> DensityAlpha -> NonPressure -> DivSolve -> PredictPos -> DensAdv -> DensSolve -> Finalize.
 
@@ -1307,27 +1318,36 @@ class Simulation:
         # Every correction pass (warm start included) is applied to the fluid,
         # so each one adds its rigid reaction.
         rigid_kw = self._rigid_kwargs()
-        # Apply warm-started kappa_v from previous substep (scaled during sort reorder writeback)
+        # sorted_kappa_v is the running total: the scaled warm start from the
+        # previous substep plus every iteration's increment. Finalize writes it
+        # back as the next warm start. Each iteration applies only its own
+        # increment, held in _kappa_v_delta (bd-r5-review-n28.83).
+        self._ensure_kappa_v_delta()  # no-op here: _sim_step allocated it
+        kv_total = w.sorted_kappa_v[:n]
+        kv_delta = self._kappa_v_delta[:n]
         if self._profile.dfsph_div_warm_start > 0.0:
-            w.sorted_kappa_v[:n] *= self._profile.dfsph_div_warm_start
+            kv_total *= self._profile.dfsph_div_warm_start
             dfsph_solver.correct_velocity_div(
                 w.sorted_velocity[:n], w.sorted_density[:n],
-                w.sorted_mass[:n], w.sorted_kappa_v[:n],
+                w.sorted_mass[:n], kv_total,
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
                 **rigid_kw,
             )
+        else:
+            kv_total.fill(0)
         for _ in range(self._profile.dfsph_div_iters):
             dfsph_solver.compute_kappa_v(
                 w.sorted_velocity[:n], w.sorted_density[:n],
                 w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
-                w.sorted_kappa_v,
+                kv_delta,
+                kappa_v_total=kv_total,
             )
             dfsph_solver.correct_velocity_div(
                 w.sorted_velocity[:n], w.sorted_density[:n],
-                w.sorted_mass[:n], w.sorted_kappa_v[:n],
+                w.sorted_mass[:n], kv_delta,
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
                 **rigid_kw,
@@ -1574,6 +1594,8 @@ class Simulation:
         # capture never allocates (bd-r5-review-n28.56).
         if self.ist_enabled:
             self.world.ensure_ist_scratch(self._IST_MAX_PARTICLES)
+        if self._profile.solver_type == SolverType.DFSPH:
+            self._ensure_kappa_v_delta()
 
         # --- Rigid body: update boundary particles in unsorted arrays ---
         rbm = self.rigid_body_manager

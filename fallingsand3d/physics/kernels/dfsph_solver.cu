@@ -705,6 +705,12 @@ void K_DFSPH_NonPressureForces(
  * K_DFSPH_ComputeKappaV -- Divergence correction factor
  * div_v = SUM_j m_j/rho_j * (v*_i - v*_j) . gradW_ij
  * kappa_v_i = (1/dt) * div_v / max(alpha_i, eps)
+ *
+ * kappa_v_out gets this iteration's increment, which CorrectVelocityDiv
+ * applies. kappa_v_total (optional) is the running sum over the warm-start
+ * value and every iteration's increment; Finalize writes it back as next
+ * substep's warm start, as in SPlisHSPlasH (bd-r5-review-n28.83).
+ * Each thread touches only its own index, so there is no race.
  * ====================================================================== */
 
 #define DFSPH_DIV_MIN_NEIGHBORS 20.0f
@@ -720,8 +726,9 @@ void K_DFSPH_ComputeKappaV(
     const float4*   __restrict__ position,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float*          __restrict__ kappa_v_out,
-    const float4*   __restrict__ normal_in     // (n_x,n_y,n_z, neighbor_count) from DensityAlpha, or NULL
+    float*          __restrict__ kappa_v_out,    // this iteration's increment
+    const float4*   __restrict__ normal_in,    // (n_x,n_y,n_z, neighbor_count) from DensityAlpha, or NULL
+    float*          __restrict__ kappa_v_total // running sum for the warm start (in-out), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -731,6 +738,7 @@ void K_DFSPH_ComputeKappaV(
 
     if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) {
         kappa_v_out[i] = 0.0f;
+        if (kappa_v_total != 0) kappa_v_total[i] = 0.0f;
         return;
     }
 
@@ -804,7 +812,9 @@ void K_DFSPH_ComputeKappaV(
     // divergence estimate is biased, so skip the solve (SPlisHSPlasH: numNeighbors < 20
     // in 3D). NULL normal_in disables the gate (bd-r5-review-n28.71).
     if (normal_in != 0 && __ldg(&normal_in[i]).w < DFSPH_DIV_MIN_NEIGHBORS) div_v = 0.0f;
-    kappa_v_out[i] = div_v * alpha_i * c_dfsph.omega / dt;
+    float dkv = div_v * alpha_i * c_dfsph.omega / dt;
+    kappa_v_out[i] = dkv;
+    if (kappa_v_total != 0) kappa_v_total[i] += dkv;
 }
 
 /* ======================================================================
