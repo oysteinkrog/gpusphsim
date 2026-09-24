@@ -1631,3 +1631,125 @@ def test_pbf_gunpowder_blast_moves_water(world, sim, monkeypatch):
     v_limit = float(sim._sim_params[0]["velocity_limit"])
     assert fire_speed > 0.9 * v_limit, (
         f"PBF lost the gunpowder burst: {fire_speed:.3f} m/s, limit {v_limit:.3f}")
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.72: PBF and DFSPH exposure matches the normalised K_Step1
+# ---------------------------------------------------------------------------
+
+def test_exposure_matches_across_solvers(world, sim):
+    """WCSPH K_Step1, K_PBF_ComputeLambda (do_heat call) and
+    K_DFSPH_ComputeDensityAlpha must all output exposure as the support
+    fraction sum(rate * W) / sum(W) over non-self, non-DEAD neighbours.
+
+    The centre SAND particle has exactly 10 WATER neighbours; the rest of the
+    block mixes SAND, WATER, WOOD (STATIC), FIRE (GAS, cross-phase path) and
+    MAT_RIGID, with WATER and FIRE hotter so exposure_heat is non-zero.
+    """
+    import dfsph_solver
+    import pbf_solver
+    import step1
+    from materials import WOOD, FIRE, MAT_RIGID, MATERIALS, build_interaction_matrix
+
+    w = world
+    w.packed_info[:] = 0
+    w._high_water = 0
+    # Upload constants to both solver modules; the last profile set wins for
+    # sim state, but each RawModule keeps its own copy of the constants.
+    sim.set_solver_profile(PROFILES["PBF"])
+    sim.set_solver_profile(PROFILES["DFSPH"])
+    half = 0.05
+    n = w.spawn_cube((-half, 0.3 - half, -half), (half, 0.3 + half, half),
+                     SAND, spacing=0.02)
+    assert n >= 100
+    rng = np.random.default_rng(72)
+    pos = cp.asnumpy(w.position[:n]).copy()
+    pos[:, :3] += rng.uniform(-0.002, 0.002, size=(n, 3)).astype(np.float32)
+    w.position[:n] = cp.asarray(pos)
+    w._density_initialized = True
+    sim._run_grid_setup(n, force_sort=True)
+
+    h = 0.04
+    spos = cp.asnumpy(w.sorted_position[:n])[:, :3].astype(np.float64)
+    centre = spos.mean(axis=0)
+    c = int(np.argmin(np.linalg.norm(spos - centre, axis=1)))
+    d_c = np.linalg.norm(spos - spos[c], axis=1)
+    nbr_c = np.nonzero((d_c < h) & (np.arange(n) != c))[0]
+    assert nbr_c.size >= 20, f"centre has only {nbr_c.size} neighbours"
+
+    def packed(mat):
+        return (mat & 0xFF) | ((MATERIALS[mat].behavior_class & 0x3) << 8)
+
+    mats = np.full(n, SAND, dtype=np.int64)
+    far = np.nonzero(d_c >= h)[0]
+    choice = rng.choice([SAND, WATER, WOOD, FIRE, MAT_RIGID], size=far.size,
+                        p=[0.4, 0.3, 0.1, 0.1, 0.1])
+    mats[far] = choice
+    water_c = rng.choice(nbr_c, size=10, replace=False)
+    mats[water_c] = WATER
+    info = np.array([packed(int(m)) for m in mats], dtype=np.uint32)
+    w.sorted_packed_info[:n] = cp.asarray(info)
+    temp = np.where((mats == WATER) | (mats == FIRE), 330.0, 300.0).astype(np.float32)
+    w.sorted_temperature[:n] = cp.asarray(temp)
+
+    def outs():
+        return (cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
+                cp.zeros(n, cp.float32))
+
+    # WCSPH
+    s1_dTdt, s1_eh, s1_ec = outs()
+    step1.compute_step1(
+        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], None,
+        w.sorted_packed_info[:n], w.sorted_temperature[:n],
+        sim._cell_start, sim._cell_end,
+        density_out=cp.zeros(n, cp.float32), shear_rate_out=cp.zeros(n, cp.float32),
+        dTdt_out=s1_dTdt, exposure_heat_out=s1_eh, exposure_corrode_out=s1_ec,
+    )
+    # PBF: predicted positions = current positions, do_heat call
+    pbf_dTdt, pbf_eh, pbf_ec = outs()
+    pbf_solver.pbf_compute_lambda(
+        w.sorted_position[:n], w.sorted_mass[:n], w.sorted_packed_info[:n],
+        sim._cell_start, sim._cell_end,
+        cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
+        temperature_in=w.sorted_temperature[:n],
+        dTdt_out=pbf_dTdt, exposure_heat_out=pbf_eh, exposure_corrode_out=pbf_ec,
+    )
+    # DFSPH
+    df_dTdt, df_eh, df_ec = outs()
+    dfsph_solver.compute_density_alpha(
+        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], None,
+        w.sorted_packed_info[:n], w.sorted_temperature[:n],
+        sim._cell_start, sim._cell_end,
+        cp.zeros(n, cp.float32), cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
+        df_dTdt, df_eh, df_ec,
+    )
+
+    ec = {k: cp.asnumpy(v) for k, v in
+          (("wcsph", s1_ec), ("pbf", pbf_ec), ("dfsph", df_ec))}
+    eh = {k: cp.asnumpy(v) for k, v in
+          (("wcsph", s1_eh), ("pbf", pbf_eh), ("dfsph", df_eh))}
+
+    # Centre SAND particle: W-weighted water fraction times the SAND-WATER rate.
+    inter = build_interaction_matrix()
+    rate_sw = float(inter[SAND][WATER]["reaction_rate"])
+    wvar = (h * h - d_c[nbr_c] ** 2) ** 3
+    is_w = np.isin(nbr_c, water_c)
+    expected_c = rate_sw * wvar[is_w].sum() / wvar.sum()
+    for name in ec:
+        assert abs(ec[name][c] - expected_c) < 1e-4, (
+            f"{name} centre exposure_corrode {ec[name][c]:.6f}, "
+            f"expected {expected_c:.6f}")
+
+    max_rate = float(inter["reaction_rate"].max())
+    live = mats != MAT_RIGID  # MAT_RIGID slots early-return differently per solver
+    for name in ec:
+        assert ec[name].max() <= max_rate + 1e-5, (
+            f"{name} exposure_corrode {ec[name].max():.4g} > max rate {max_rate}")
+    for name in ("pbf", "dfsph"):
+        dc = np.abs(ec[name][live] - ec["wcsph"][live]).max()
+        assert dc < 1e-4, f"{name} exposure_corrode differs from WCSPH by {dc:.3g}"
+        ref_h = np.abs(eh["wcsph"][live]).max()
+        assert ref_h > 1.0, f"scene gives no heat exposure ({ref_h:.3g})"
+        dh = np.abs(eh[name][live] - eh["wcsph"][live]).max()
+        assert dh < 1e-4 * max(1.0, ref_h), (
+            f"{name} exposure_heat differs from WCSPH by {dh:.3g} (max {ref_h:.3g})")
