@@ -239,16 +239,20 @@ def compute_kappa_v(
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     kappa_v_out: cupy.ndarray,
+    normal_in: "cupy.ndarray | None" = None,
 ) -> None:
+    """normal_in is sorted_normal from compute_density_alpha; its .w neighbour count
+    gates the solve (fewer than 20 neighbours gives kappa_v = 0). None disables the gate."""
     n = velocity.shape[0]
     module = _get_module()
     kernel = module.get_function("K_DFSPH_ComputeKappaV")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
+    norm_in = normal_in if normal_in is not None else np.intp(0)
     kernel(grid, block, (
         np.uint32(n), velocity, density, mass, alpha,
         packed_info, position, cell_start, cell_end,
-        kappa_v_out,
+        kappa_v_out, norm_in,
     ))
 
 

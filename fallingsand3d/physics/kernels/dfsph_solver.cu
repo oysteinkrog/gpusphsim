@@ -707,6 +707,8 @@ void K_DFSPH_NonPressureForces(
  * kappa_v_i = (1/dt) * div_v / max(alpha_i, eps)
  * ====================================================================== */
 
+#define DFSPH_DIV_MIN_NEIGHBORS 20.0f
+
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_DFSPH_ComputeKappaV(
     uint            numParticles,
@@ -718,7 +720,8 @@ void K_DFSPH_ComputeKappaV(
     const float4*   __restrict__ position,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float*          __restrict__ kappa_v_out
+    float*          __restrict__ kappa_v_out,
+    const float4*   __restrict__ normal_in     // (n_x,n_y,n_z, neighbor_count) from DensityAlpha, or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -796,6 +799,11 @@ void K_DFSPH_ComputeKappaV(
     // bilateral Jacobi diverges once alpha is not capped far below 1/denom
     // (bd-r5-review-n28.37). Same as SPlisHSPlasH densityAdv = max(densityAdv, 0).
     div_v = fmaxf(div_v, 0.0f);
+    // Neighbour-count gate: with fewer than DFSPH_DIV_MIN_NEIGHBORS neighbours
+    // (rigid included, bd-r5-review-n28.68) the kernel is truncated and the
+    // divergence estimate is biased, so skip the solve (SPlisHSPlasH: numNeighbors < 20
+    // in 3D). NULL normal_in disables the gate (bd-r5-review-n28.71).
+    if (normal_in != 0 && __ldg(&normal_in[i]).w < DFSPH_DIV_MIN_NEIGHBORS) div_v = 0.0f;
     kappa_v_out[i] = div_v * alpha_i * c_dfsph.omega / dt;
 }
 
