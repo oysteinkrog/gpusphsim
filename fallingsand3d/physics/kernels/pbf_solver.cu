@@ -166,7 +166,10 @@ void K_PBF_Predict(
     // GAS: add buoyancy + drag
     if (behavior == GAS) {
         float temp = __ldg(&temperature_in[i]);
-        v_star.y += GAS_BUOYANCY_BETA * (temp - GAS_AMBIENT_TEMP) * GAS_BUOYANCY_G * dt;
+        float3 b = gas_buoyancy_accel(temp, GET_MATERIAL_ID(pi));
+        v_star.x += b.x * dt;
+        v_star.y += b.y * dt;
+        v_star.z += b.z * dt;
         float drag = 1.0f - GAS_DRAG_COEFF * dt;
         drag = fmaxf(drag, 0.0f);
         v_star.x *= drag;
@@ -180,7 +183,10 @@ void K_PBF_Predict(
         float beta = c_materials[mat_id].thermal_expansion;
         if (beta > 0.0f) {
             float temp = __ldg(&temperature_in[i]);
-            v_star.y += beta * (temp - T_AMBIENT) * 9.81f * dt;
+            float3 b = boussinesq_accel(temp, beta);
+            v_star.x += b.x * dt;
+            v_star.y += b.y * dt;
+            v_star.z += b.z * dt;
         }
     }
 

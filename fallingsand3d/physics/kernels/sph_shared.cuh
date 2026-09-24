@@ -40,10 +40,30 @@
 #define T_MAX            5000.0f
 
 /* GAS physics */
-#define GAS_BUOYANCY_BETA  0.01f
 #define GAS_AMBIENT_TEMP   293.0f
-#define GAS_BUOYANCY_G     9.81f
 #define GAS_DRAG_COEFF     2.0f
+
+/* Buoyancy from the live gravity vector c_sim.gravity (all three solvers).
+ *
+ * GAS (ideal gas in ambient air, Archimedes): the displaced air pushes back
+ * with -g * rho_air/rho_gas = -g * (T/T_amb), plus the per-material
+ * MaterialProps.buoyancy_extra. Added on top of +g, the net is
+ *   a = -g * ((T - T_amb)/T_amb + buoyancy_extra)
+ * so gas at T_amb is weightless, hot gas moves against gravity, and the
+ * direction follows the gravity slider (including a flipped sign).
+ *
+ * FLUID (Boussinesq): a = -g * beta * (T - T_amb). */
+__device__ __forceinline__ float3 gas_buoyancy_accel(float temp, uint mat_id)
+{
+    float k = temp * (1.0f / GAS_AMBIENT_TEMP) + c_materials[mat_id].buoyancy_extra;
+    return make_float3(-k * c_sim.gravity.x, -k * c_sim.gravity.y, -k * c_sim.gravity.z);
+}
+
+__device__ __forceinline__ float3 boussinesq_accel(float temp, float beta)
+{
+    float k = beta * (temp - T_AMBIENT);
+    return make_float3(-k * c_sim.gravity.x, -k * c_sim.gravity.y, -k * c_sim.gravity.z);
+}
 
 /* Velocity limits -- now uses c_sim.velocity_limit (CFL-derived per solver) */
 #define VELOCITY_LIMIT     (c_sim.velocity_limit)

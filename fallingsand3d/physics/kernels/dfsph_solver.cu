@@ -680,7 +680,8 @@ void K_DFSPH_NonPressureForces(
         accel.y += fs * f_gas_press.y;
         accel.z += fs * f_gas_press.z;
         float temp = __ldg(&temperature[i]);
-        accel.y += GAS_BUOYANCY_BETA * (temp - GAS_AMBIENT_TEMP) * GAS_BUOYANCY_G;
+        float3 b = gas_buoyancy_accel(temp, GET_MATERIAL_ID(pi_i));
+        accel.x += b.x; accel.y += b.y; accel.z += b.z;
     }
 
     // FLUID thermal convection: Boussinesq buoyancy
@@ -689,7 +690,8 @@ void K_DFSPH_NonPressureForces(
         float temp_i = __ldg(&temperature[i]);
         float beta = c_materials[GET_MATERIAL_ID(pi_i)].thermal_expansion;
         if (beta > 0.0f) {
-            accel.y += beta * (temp_i - T_AMBIENT) * 9.81f;
+            float3 b = boussinesq_accel(temp_i, beta);
+            accel.x += b.x; accel.y += b.y; accel.z += b.z;
         }
     }
 

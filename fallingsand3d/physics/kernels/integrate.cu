@@ -198,19 +198,19 @@ void K_Integrate(
         sph_force.z + c_sim.gravity.z
     );
 
-    // GAS buoyancy: f_buoy = beta * (T - 293) * (0, 9.81, 0)
+    // GAS buoyancy (ideal gas, live gravity vector): -g * (T/T_amb + extra)
     if (behavior == GAS) {
-        float buoyancy = GAS_BUOYANCY_BETA * (temp - GAS_AMBIENT_TEMP) * GAS_BUOYANCY_G;
-        accel.y += buoyancy;
+        float3 b = gas_buoyancy_accel(temp, mat_id);
+        accel.x += b.x; accel.y += b.y; accel.z += b.z;
     }
 
     // FLUID thermal convection: Boussinesq buoyancy
-    // rho_eff = rho_0 * (1 - beta*(T-T0)), lighter when hot -> rises
-    // a_buoy = +beta * (T - T_ambient) * g  (positive = upward for hot fluid)
+    // rho_eff = rho_0 * (1 - beta*(T-T0)), lighter when hot -> moves against g
     if (behavior == FLUID) {
         float beta = c_materials[mat_id].thermal_expansion;
         if (beta > 0.0f) {
-            accel.y += beta * (temp - T_AMBIENT) * 9.81f;
+            float3 b = boussinesq_accel(temp, beta);
+            accel.x += b.x; accel.y += b.y; accel.z += b.z;
         }
     }
 
