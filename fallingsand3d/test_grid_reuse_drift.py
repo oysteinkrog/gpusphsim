@@ -169,7 +169,9 @@ def _run_translating_block(world, substeps, frames, reuse):
             perm = sim._sort_perm[:n_]
             rho = cp.empty(n_, dtype=cp.float32)
             rho[perm] = world.sorted_density[:n_]
-            densities.append(rho.get())
+            # The DEAD reserve parked after frame 1 raises n; keep the water
+            # block, which holds the first n original slots.
+            densities.append(rho[:n].get())
 
         sim._sim_step = _step
         for _ in range(frames):
