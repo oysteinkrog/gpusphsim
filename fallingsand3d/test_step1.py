@@ -1128,7 +1128,7 @@ def test_exposure_heat_one_fire_neighbour_near_wood_threshold() -> None:
     of magnitude of WOOD_IGNITE_EXPOSURE. A FIRE neighbour at 0.85h stays below it."""
     grid = np.arange(-2, 3) * (0.5 * H)
     offsets = np.array([(x, y, z) for x in grid for y in grid for z in grid
-                        if 0 < x * x + y * y + z * z <= H_SQ])
+                        if 0 < x * x + y * y + z * z < 0.99 * H_SQ])
     assert len(offsets) == 26
     fire_k = int(np.argmin(np.linalg.norm(offsets - [0.5 * H, 0, 0], axis=1)))
     threshold = _reaction_define("WOOD_IGNITE_EXPOSURE")
