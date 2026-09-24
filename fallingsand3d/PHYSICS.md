@@ -1047,6 +1047,43 @@ amplifying it.
 
 ---
 
+### 10.19 Spawn freelist and the parked DEAD reserve
+
+Boiling water (T > 373 K) turns into `SPAWN_N = 3` steam particles only if
+`K_SpawnGas` can claim 3 DEAD slots from the freelist. `K_Reactions` rebuilds
+the freelist every substep from the DEAD slots in `[0, _high_water)`. A scene
+where nothing has died has no DEAD slots, so without a reserve its water never
+boils. (bd-r5-review-n28.27)
+
+- **Reserve.** While WATER or ICE has been spawned (`World.needs_dead_reserve`),
+  the world keeps `World.dead_reserve` DEAD slots (default 15000, 0 turns it
+  off). `World.add_dead_reserve()` appends them at `_high_water` with packed
+  info `MAKE_PACKED(DEAD, STATIC)`, mass 0, zero velocity and T = 293 K. Every
+  kernel early-returns on them (STATIC skips integrate and step2; mass 0 adds
+  nothing to density). Plain `packed_info = 0` would read as behavior FLUID
+  and fall under gravity.
+- **Parking.** Slot index `s` maps to its own site on a cube lattice of side
+  `ceil(cbrt(max_particles))` at spacing `h`, about 1000 m below the world box
+  (past the camera far plane of 100). The lattice is snapped to the grid that
+  starts at `-world_half_size`, and each site is at a cell centre, so every
+  parked slot has its own grid cell. For 15000 slots, no hash bucket holds
+  more than 8 of them at table sizes 2^18 to 2^20.
+- **When it is filled.** `Simulation._maybe_compact` runs every
+  `compact_interval` frames (60) and on the first frame after
+  `notify_scene_changed()`. It counts dead slots once (`num_active`, one sync)
+  and tops the reserve up to `dead_reserve` DEAD slots.
+- **Compaction.** With the reserve on, compaction runs only when there are more
+  than `dead_reserve + compact_threshold` dead slots. `World.compact()` drops
+  every dead slot, parked or not, and `_maybe_compact` then re-creates the
+  reserve at the new tail. Without WATER or ICE, compaction still runs at
+  `compact_threshold` (100) dead slots.
+- A steam particle claims the slot where it is written, so a parked slot jumps
+  from the park lattice to the boiling water. The displacement tracker then
+  forces a full sort, as for any reused DEAD slot.
+
+**Source**: `world.py:add_dead_reserve`, `world.py:park_positions`,
+`simulation.py:_maybe_compact`, `reactions.cu:K_Reactions`, `spawn.cu:K_SpawnGas`
+
 ## 11. Multi-Solver Architecture
 
 Three solver backends are available, selectable at runtime via UI dropdown.
