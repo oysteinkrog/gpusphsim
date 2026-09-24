@@ -2092,6 +2092,12 @@ Simple per-particle physics, no neighbor interaction:
 
 Integration: symplectic Euler. World boundary clamp kills particles at floor.
 
+Launch size: `min(2 * last_foam_count + 1024, max_foam)` threads, where
+`last_foam_count` is the deferred readback (section 20.5). The kernel reads the
+live count from device memory. Foam that grows faster than the 2x headroom in
+the readback lag gets no physics for those frames (seen for 2 frames when the
+Dam Break splash fills the 200K pool in one frame).
+
 ### 19.5 Compaction (K_FoamCompact)
 
 Stream compaction every 8 frames (amortized cost):
@@ -2191,9 +2197,35 @@ solver-specific thresholds:
 - **PBF/DFSPH**: (0.15*h)² threshold, max 2 consecutive skips (tighter for
   constraint solver convergence quality)
 
+**Decision data (bd-r5-review-n28.46).** `max_displacement` holds the float
+bits of the largest squared per-substep displacement since the last full sort.
+At the end of each frame `_update_sort_skip_decision` does three things in this
+order, with no host sync:
+
+1. Latch. Each frame's D2H copy of `max_displacement` and `foam_count` has its
+   own event, queued with a scene epoch. The host pops every event that is done
+   (non-blocking query) and reads the pinned buffers if the newest landed copy
+   is from the current epoch. When the host keeps pace with the GPU this is the
+   previous frame's copy, so the lag is exactly one frame. When the host runs
+   ahead it is the newest copy that has landed. If none has landed, the
+   previous value is kept.
+2. Decide. A value at or above the +inf bits (`0x7F800000`) never skips. The
+   startup value and the value after `notify_scene_changed()` is the sentinel
+   `0xFFFFFFFF`, and `notify_scene_changed()` bumps the epoch, so copies
+   launched before a scene change are never used.
+3. Launch this frame's copies on the readback stream and queue their event.
+
+At the top of `step_frame` the compute stream waits on the newest copy's event
+(`wait_event`, device side), so the next full-sort memset of
+`max_displacement` and the foam kernels cannot run before or during the copy.
+`K_SpawnGas` writes the +inf bits into `max_displacement` when it spawns steam,
+because the spawned slots jump to the source position without Integrate
+seeing it, so the next frame does a full sort.
+
 **Source**: `pbf_solver.cu:K_PBF_Finalize` (max_displacement_out),
 `dfsph_solver.cu:K_DFSPH_Finalize` (max_displacement_out),
-`simulation.py:step_frame` (solver-specific threshold logic)
+`simulation.py:_update_sort_skip_decision` (latch and threshold logic),
+`spawn.cu:K_SpawnGas` (+inf on spawn)
 
 ## 10.13 Micropolar SPH (Phase 8, item 5.2)
 
