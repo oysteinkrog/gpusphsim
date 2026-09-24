@@ -144,11 +144,11 @@ def test_mark_wake_cells_single_particle() -> None:
     flags = allocate_cell_wake_flags(NUM_CELLS)
     mark_wake_cells(pos, vel, pi, flags, num_particles=1)
 
-    # Count flagged cells -- should be 27 (3x3x3, particle is interior).
-    # Note: spatial hash may produce collisions so flagged_count may be < 27.
+    # Count flagged cells: 27 (3x3x3, particle is interior). The additive
+    # spatial hash maps every 3x3x3 stencil to 27 distinct buckets.
     flagged_count = int(cupy.count_nonzero(flags))
     print(f"  Flagged cells: {flagged_count}")
-    assert 1 <= flagged_count <= 27, f"Expected 1-27 flagged cells, got {flagged_count}"
+    assert flagged_count == 27, f"Expected 27 flagged cells, got {flagged_count}"
 
     # The center cell (25,25,25) uses spatial hash with large primes & TABLE_MASK
     # hash = (25*73856093 + 25*19349669 + 25*83492791) & TABLE_MASK (additive, see common.cuh)

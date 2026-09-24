@@ -43,10 +43,9 @@ def _cell(p: np.ndarray) -> np.ndarray:
 def _hash(c: np.ndarray) -> np.ndarray:
     """CPU copy of spatialHash() in common.cuh (uint32 wrap, then mask)."""
     c = c.astype(np.int64)
-    hx = (c[..., 0] * 73856093) & 0xFFFFFFFF
-    hy = (c[..., 1] * 19349669) & 0xFFFFFFFF
-    hz = (c[..., 2] * 83492791) & 0xFFFFFFFF
-    return ((hx ^ hy ^ hz) & MASK).astype(np.int64)
+    h = (c[..., 0] * 73856093 + c[..., 1] * 19349669
+         + c[..., 2] * 83492791) & 0xFFFFFFFF
+    return (h & MASK).astype(np.int64)
 
 
 def _find_colliding_cells() -> tuple:
