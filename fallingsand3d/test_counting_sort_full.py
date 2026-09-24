@@ -49,8 +49,11 @@ def _hash(c: np.ndarray) -> np.ndarray:
 
 
 def _find_colliding_cells() -> tuple:
-    """Return two far-apart cells in [5, 45)^3 with the same table hash."""
-    r = np.arange(5, 45)
+    """Return two far-apart cells in the default world [0, 50)^3 with the
+    same table hash. The additive hash is linear, so two cells collide only
+    when their offset d has d.P = 0 mod 2^18; the shortest such offset is
+    (18, 47, 45), so the search needs the whole world."""
+    r = np.arange(0, 50)
     cx, cy, cz = np.meshgrid(r, r, r, indexing="ij")
     cells = np.stack([cx.ravel(), cy.ravel(), cz.ravel()], axis=1)
     hashes = _hash(cells)
