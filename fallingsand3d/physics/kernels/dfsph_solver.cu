@@ -1240,10 +1240,11 @@ void K_DFSPH_Finalize(
     float3 vel = make_float3(vel4.x, vel4.y, vel4.z);
     float dt = c_sim.dt;
 
-    // Sleeping check
+    // Sleeping check. Only GRANULAR may stay asleep: a FLUID or GAS particle
+    // carrying a stale SLEEPING bit (older build, loaded snapshot) wakes here.
     if (was_sleeping) {
         float vel_sq = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
-        if (vel_sq <= V_WAKE_SQ) {
+        if (behavior == GRANULAR && vel_sq <= V_WAKE_SQ) {
             float dTdt = sorted_dTdt[i];
             temp += dTdt * dt;
             temp -= COOL_RATE * (temp - T_AMBIENT) * dt;
@@ -1377,9 +1378,10 @@ void K_DFSPH_Finalize(
         i, c_sim.restitution
     );
 
-    // Box boundary
+    // Box boundary. FLUID gets zero wall friction, matching WCSPH and PBF.
+    float friction = (behavior == FLUID) ? 0.0f : c_sim.wall_friction;
     sdf_box_boundary(pos_new, vel, c_sim.world_min, c_sim.world_max,
-                     c_sim.restitution, c_sim.wall_friction);
+                     c_sim.restitution, friction);
 
     // SDF object collision with velocity reflection
     for (int s = 0; s < c_num_sdf_objects; s++) {
@@ -1456,14 +1458,20 @@ void K_DFSPH_Finalize(
         }
     }
 
-    // Sleep (velocity-based)
-    if (vel_sq < V_SLEEP_SQ) {
-        if (sc < 255) sc++;
+    // Sleep: velocity-based, GRANULAR only, matching WCSPH (integrate.cu) and
+    // PBF. Sleeping particles get no pressure, so a calm FLUID pool or slow GAS
+    // would freeze with nothing left to wake it.
+    if (behavior == GRANULAR) {
+        if (vel_sq < V_SLEEP_SQ) {
+            if (sc < 255) sc++;
+        } else {
+            sc = 0;
+        }
+        if (sc >= SLEEP_THRESHOLD) {
+            pi = SET_SLEEPING(pi);
+        }
     } else {
         sc = 0;
-    }
-    if (sc >= SLEEP_THRESHOLD) {
-        pi = SET_SLEEPING(pi);
     }
 
     // Temperature
