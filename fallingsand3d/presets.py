@@ -8,7 +8,7 @@ World domain: (-1,-1,-1) to (1,1,1). Spacing default=0.02.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from world import World
 import math
@@ -24,6 +24,33 @@ def _clear_world(world: World) -> None:
     """Kill all particles and reset high water mark."""
     world.packed_info[:] = 0
     world._high_water = 0
+
+
+SpawnBox = Tuple[Tuple[float, float, float], Tuple[float, float, float], int]
+
+
+def _check_no_overlap(boxes: List[SpawnBox]) -> List[Tuple[int, int]]:
+    """Find spawn boxes of different materials that share volume.
+
+    CPU-only. `boxes` is a list of (min_corner, max_corner, material_id), one
+    per `spawn_cube` call. Returns the index pairs (i, j), i < j, of boxes with
+    different materials whose intersection has positive volume. Boxes that only
+    touch on a face do not count. Two overlapping lattices put particles on or
+    near each other, which roughly doubles the local SPH density.
+    """
+    pairs: List[Tuple[int, int]] = []
+    for i in range(len(boxes)):
+        lo_i, hi_i, mat_i = boxes[i]
+        for j in range(i + 1, len(boxes)):
+            lo_j, hi_j, mat_j = boxes[j]
+            if mat_i == mat_j:
+                continue
+            if all(
+                min(hi_i[a], hi_j[a]) - max(lo_i[a], lo_j[a]) > 1e-9
+                for a in range(3)
+            ):
+                pairs.append((i, j))
+    return pairs
 
 
 def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
@@ -62,9 +89,11 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Water around the base (4 slabs surrounding the pile)
+    # Water around the base (4 slabs surrounding the pile). The slabs start
+    # at |x| or |z| = 0.6, the edge of the sand base, so no water particle
+    # shares a lattice point with a sand particle.
     n = world.spawn_cube(
-        min_corner=(-0.9, -0.9, 0.5),
+        min_corner=(-0.9, -0.9, 0.6),
         max_corner=(0.9, -0.2, 0.9),
         material_id=WATER,
         spacing=0.02,
@@ -72,21 +101,21 @@ def load_sand_castle(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     total += n
     n = world.spawn_cube(
         min_corner=(-0.9, -0.9, -0.9),
-        max_corner=(0.9, -0.2, -0.5),
+        max_corner=(0.9, -0.2, -0.6),
         material_id=WATER,
         spacing=0.02,
     )
     total += n
     n = world.spawn_cube(
-        min_corner=(-0.9, -0.9, -0.5),
-        max_corner=(-0.5, -0.2, 0.5),
+        min_corner=(-0.9, -0.9, -0.6),
+        max_corner=(-0.6, -0.2, 0.6),
         material_id=WATER,
         spacing=0.02,
     )
     total += n
     n = world.spawn_cube(
-        min_corner=(0.5, -0.9, -0.5),
-        max_corner=(0.9, -0.2, 0.5),
+        min_corner=(0.6, -0.9, -0.6),
+        max_corner=(0.9, -0.2, 0.6),
         material_id=WATER,
         spacing=0.02,
     )
@@ -451,10 +480,11 @@ def load_waterfall(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Additional water pool at bottom
+    # Water pool under the bottom step (stops below y=-0.75 so it does
+    # not share volume with the STATIC stone)
     n = world.spawn_cube(
         min_corner=(0.2, -0.9, -0.6),
-        max_corner=(0.85, -0.6, 0.6),
+        max_corner=(0.85, -0.75, 0.6),
         material_id=WATER,
         spacing=0.02,
     )
