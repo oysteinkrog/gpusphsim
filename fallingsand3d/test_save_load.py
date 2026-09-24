@@ -600,6 +600,56 @@ def test_load_corrupt_file_leaves_world_untouched(tmp_path, monkeypatch) -> None
     cp.cuda.Device().synchronize()
 
 
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_save_load_with_rigid_body_reinjects_once(tmp_path, monkeypatch) -> None:
+    """bd-r5-review-n28.22: Save then Load with a rigid body must not assert.
+
+    The save holds no MAT_RIGID particles, and after the load the next
+    substep rebuilds exactly one boundary block right after the loaded fluid.
+    """
+    import cupy as cp
+    import save_load as sl
+    from materials import MAT_RIGID, WATER
+    from simulation import Simulation
+    from world import World
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    world = World(60_000)
+    world.spawn_cube((-0.3, -0.3, -0.3), (0.3, 0.0, 0.3), WATER, 0.03)
+    sim = Simulation(world, dt=0.001, fixed_dt=True)
+    rbm = sim.rigid_body_manager
+    rbm.add_rigid_body_with_particles(
+        position=(0.0, 0.2, 0.0), half_extents=(0.05, 0.05, 0.05), mass=2.0,
+    )
+    rbm.finalize_boundary_data()
+    rbm.upload(sim.get_all_modules())
+    nb = rbm.num_boundary_particles
+
+    sim._sim_step(world._high_water)
+    assert rbm.boundary_injected
+    n_fluid = world._high_water - nb
+
+    sl.save_scene(world, sim, _stub_camera(), "rigid")
+    with np.load(str(tmp_path / "rigid.fs3d"), allow_pickle=False) as z:
+        assert not np.any((z["packed_info"] & 0xFF) == MAT_RIGID)
+        assert z["packed_info"].shape[0] == n_fluid
+
+    loaded = sl.load_scene(world, sim, _stub_camera(), "rigid")
+    assert loaded == n_fluid
+    assert not rbm.boundary_injected
+    for _ in range(3):
+        sim._sim_step(world._high_water)
+    cp.cuda.Device().synchronize()
+
+    assert rbm.num_bodies == 1
+    assert rbm.boundary_injected
+    assert rbm.boundary_offset == n_fluid
+    assert world._high_water == n_fluid + nb
+    mat = world.packed_info[:world._high_water].get() & 0xFF
+    assert np.all(mat[n_fluid:] == MAT_RIGID)
+    assert int(np.count_nonzero(mat == MAT_RIGID)) == nb
+
+
 def main() -> None:
     test_serialize_empty_sdf_manager()
     test_sdf_round_trip_single_box()
