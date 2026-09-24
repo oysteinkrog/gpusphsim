@@ -452,7 +452,7 @@ void K_DFSPH_NonPressureForces(
     // The confining pressure is the density solver's own pressure from the
     // previous substep, not Tait EOS: the solver drives rho to rho0, so Tait
     // would measure solver error instead of load. The stored p_rho2 is p/rho
-    // (ComputePressureAccel uses V_j * (p_i + p_j)), so p = p_rho2 * rho.
+    // (ComputePressureAccel uses m_j * (p_i/rho_i + p_j/rho_j)), so p = p_rho2 * rho.
     // The floor is the one-layer lithostatic pressure used by WCSPH step2; it
     // also covers the first substep and woken particles, where p_prev = 0.
     float eta_i = 0.0f;
@@ -878,8 +878,8 @@ void K_DFSPH_ComputeKappaV(
 
 /* ======================================================================
  * K_DFSPH_CorrectVelocityDiv -- Apply divergence correction
- * dv_i = -(dt/rho_i) SUM_j m_j * (kv_i/rho_i + kv_j/rho_j) * gradW_ij
- * v*_i += dv_i
+ * v*_i -= dt * SUM_j m_j * (kv_i/rho_i + kv_j/rho_j) * gradW_ij
+ * (kv >= 0; the pair terms on i and j are equal and opposite)
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -903,9 +903,9 @@ void K_DFSPH_CorrectVelocityDiv(
     uint pi_i = packed_info[i];
     int behavior_i = GET_BEHAVIOR(pi_i);
     if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) return;
-    // Rigid reaction: the pair changes v_i by -dt * V_j * kv_i * gW, so the
-    // body gets the impulse +m_i * dt * V_j * kv_i * gW, a force
-    // m_i * V_j * kv_i * gW over the substep (kv_j = 0 for STATIC).
+    // Rigid reaction: the pair changes v_i by -dt * m_j * (kv_i / rho_i) * gW,
+    // so the body gets the impulse +m_i * dt * m_j * (kv_i / rho_i) * gW, a
+    // force m_i * m_j * (kv_i / rho_i) * gW over the substep (kv_j = 0 for STATIC).
     float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
 
     float4 pos4_i = __ldg(&position[i]);
@@ -914,8 +914,11 @@ void K_DFSPH_CorrectVelocityDiv(
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
     float dt = c_sim.dt;
-    float rho_i = density[i];
     float kv_i = kappa_v[i];
+    // Symmetric pair form m_j * (kv_i/rho_i + kv_j/rho_j): the pair impulses on
+    // i and j cancel, so momentum is conserved across density jumps
+    // (bd-r5-review-n28.100). kv_i / rho_i is the same for every neighbour.
+    float kv_rho_i = kv_i / fmaxf(density[i], RHO_EPSILON);
 
     float3 dv = make_float3(0.0f, 0.0f, 0.0f);
 
@@ -953,8 +956,7 @@ void K_DFSPH_CorrectVelocityDiv(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = m_j / fmaxf(rho_j, RHO_EPSILON);
-                    float coeff = V_j * (kv_i + kv_j);
+                    float coeff = m_j * (kv_rho_i + kv_j / fmaxf(rho_j, RHO_EPSILON));
                     dv.x += coeff * gW.x;
                     dv.y += coeff * gW.y;
                     dv.z += coeff * gW.z;
@@ -994,8 +996,9 @@ void K_DFSPH_CorrectVelocityDiv(
  * K_DFSPH_ComputePressureAccel -- Pressure acceleration from p/rho^2
  *
  * Jacobi density solver kernel 1 of 3:
- * a_press_i = -SUM_j V_j * (p_rho2_i + p_rho2_j) * grad_W_ij
- * where V_j = m_j / rho_j (particle volume)
+ * a_press_i = -SUM_j m_j * (p_rho2_i/rho_i + p_rho2_j/rho_j) * grad_W_ij
+ * Symmetric in i and j, so the pair forces cancel (bd-r5-review-n28.100).
+ * p_rho2 holds p/rho (see K_DFSPH_NonPressureForces), so p_rho2/rho = p/rho^2.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -1025,11 +1028,12 @@ void K_DFSPH_ComputePressureAccel(
 
     float4 pos4_i = __ldg(&position[i]);
     float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
-    float p_i = p_rho2[i];
+    // p_i / rho_i is the same for every neighbour, so divide once.
+    float p_rho_i = p_rho2[i] / fmaxf(density[i], RHO_EPSILON);
     // Rigid reaction: only the last a_press is applied (ApplyPressureVelocity),
     // so the caller passes the rigid buffers on the final call only. The pair
-    // adds -V_j * p_i * gW to a_i (p_j = 0 for STATIC), so the body gets
-    // +m_i * V_j * p_i * gW.
+    // adds -m_j * (p_i / rho_i) * gW to a_i (p_j = 0 for STATIC), so the body
+    // gets +m_i * m_j * (p_i / rho_i) * gW.
     float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
 
     float h = c_sim.smoothing_length;
@@ -1071,8 +1075,7 @@ void K_DFSPH_ComputePressureAccel(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = m_j / fmaxf(rho_j, RHO_EPSILON);
-                    float coeff = -V_j * (p_i + p_j);
+                    float coeff = -m_j * (p_rho_i + p_j / fmaxf(rho_j, RHO_EPSILON));
                     a.x += coeff * gW.x;
                     a.y += coeff * gW.y;
                     a.z += coeff * gW.z;
