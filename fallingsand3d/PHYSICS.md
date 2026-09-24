@@ -1348,11 +1348,11 @@ Standard PBF velocity derivation from the corrected position. No artificial
 damping is needed when the mass factor is correct — the constraint solver
 produces appropriately-scaled corrections that don't inject excess energy.
 
-**Lambda persistence:** Converged lambda values are written back to unsorted
-buffer in K_PBF_Finalize and carried through the sort-reorder pipeline for
-warm-starting. Scaled by `pbf_warm_start` (default 0.5). Since PBF lambda is
-computed analytically (not iteratively), warm-starting serves as infrastructure
-for future iterative PBF variants.
+**No lambda warm start:** K_PBF_ComputeLambda computes lambda in closed form
+from the current predicted positions every iteration and never reads a previous
+value. `sorted_lambda_pbf` is a scratch buffer that carries lambda from
+ComputeLambda to ComputeDelta within one iteration. It is not reordered by the
+sort and not scattered back to unsorted order.
 
 ### 12.5 XSPH Viscosity (PBF)
 
@@ -2220,18 +2220,25 @@ Pipeline: Step1 → K_ComputePressure → Step2
 **Source**: `step2.cu:K_ComputePressure`, `step2.py:compute_pressure()`,
 `simulation.py:_run_wcsph_body`
 
-### 20.4 Warm-start kappa_v and lambda_pbf (PERF-008)
+### 20.4 Warm-start kappa_v (PERF-008) and PBF reorder skips
 
-DFSPH divergence solver kappa_v and PBF lambda are now carried through the
-counting sort pipeline (K_ScatterReorder, K_GatherReorder), persisted via
-finalize kernel writeback, and warm-started at the beginning of each substep.
+The DFSPH divergence solver's kappa_v is carried through the counting sort
+pipeline (K_ScatterReorder, K_GatherReorder), persisted via K_DFSPH_Finalize
+writeback, and warm-started at the beginning of each substep. It is scaled by
+`dfsph_div_warm_start` (default 0.5), then applied as an initial velocity
+correction before the divergence solver iterations.
 
-- **DFSPH kappa_v**: Scaled by `dfsph_div_warm_start` (default 0.5), then applied
-  as an initial velocity correction before the divergence solver iterations.
-- **PBF lambda**: Written back through K_PBF_Finalize for future use.
+PBF has no warm-start state (see 12.4). PBF also never reads kappa, kappa_v or
+the FP16 mirrors (sorted_velocity_h, sorted_temperature_h, sorted_dye_h), so
+`_run_grid_setup` passes None for all five when the active solver is PBF, and
+both reorder kernels skip the gather and the store for a NULL output. The
+pointer set depends only on the solver, and a solver switch recaptures the
+CUDA graph. Measured at 992K particles (PBF Dam Break, full sort each
+substep, shared GPU): the sort stage median went from about 4.0 ms to about
+2.4 ms.
 
-**Source**: `counting_sort.cu` (kappa_v_in/out, lambda_pbf_in/out),
-`dfsph_solver.cu:K_DFSPH_Finalize`, `pbf_solver.cu:K_PBF_Finalize`,
+**Source**: `counting_sort.cu` (kappa_v_in/out, NULL-guarded outputs),
+`dfsph_solver.cu:K_DFSPH_Finalize`, `simulation.py:_run_grid_setup`,
 `simulation.py:_run_dfsph_body` (warm-start application)
 
 ### 20.5 Grid Reuse for PBF/DFSPH (PERF-009)
