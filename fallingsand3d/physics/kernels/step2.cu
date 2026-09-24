@@ -159,6 +159,16 @@ void K_Step2(
 
     float4 vel4_i = velocity[index_i];
     float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
+    // FP16 pairing rule (bd-r5-review-n28.69): neighbour velocities come from
+    // the FP16 mirror, so pair differences (v_j - v_i) must take v_i from the
+    // same mirror. Otherwise co-moving particles see fp16(v) - v != 0, a
+    // lattice-snapping viscous force. The FP32 vel_i stays for veleval output
+    // and for boundary terms, whose other side is FP32.
+    float3 vel_i_pair = vel_i;
+    if (velocity_h) {
+        float4 vh_i = load_half4((const uint2*)velocity_h + index_i);
+        vel_i_pair = make_float3(vh_i.x, vh_i.y, vh_i.z);
+    }
 
     float rho_i = pos4_i.w;  // density packed into position.w by K_PackDensity (OPT-4.1)
     float p_i = __ldg(&pressure_in[index_i]);  // pre-computed (PERF-007)
@@ -432,18 +442,18 @@ void K_Step2(
                         // Includes 1/rho_i for dimensional correctness (G2 fix)
                         float visc_lap_const = c_precalc.viscosity_lap_coeff;  // = 45/(pi*h^6)
                         float visc_factor = eta_ij * visc_lap_const * m_j * lap_v / (rho_j * rho_i);
-                        f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
-                        f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
-                        f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                        f_viscosity.x += (vel_j.x - vel_i_pair.x) * visc_factor;
+                        f_viscosity.y += (vel_j.y - vel_i_pair.y) * visc_factor;
+                        f_viscosity.z += (vel_j.z - vel_i_pair.z) * visc_factor;
                         c_tot += visc_factor;
                     } else if (cross_ij) {
                         // FLUID-GRANULAR pair: one symmetric dynamic-form term on
                         // both sides (bd-r5-review-n28.41), undone by the fs_i multiply.
                         uint mat_fluid = is_granular_i ? mat_id_j : mat_id_i;
                         float visc_factor = cross_pair_visc(mat_fluid, m_j, lap_v, rho_i, rho_j) * inv_fs_i;
-                        f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
-                        f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
-                        f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                        f_viscosity.x += (vel_j.x - vel_i_pair.x) * visc_factor;
+                        f_viscosity.y += (vel_j.y - vel_i_pair.y) * visc_factor;
+                        f_viscosity.z += (vel_j.z - vel_i_pair.z) * visc_factor;
                         c_tot += visc_factor;
                     } else {
                         // FLUID/GAS: per-material dynamic viscosity (harmonic mean),
@@ -458,9 +468,9 @@ void K_Step2(
                         float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v
                                           / (fmaxf(rho_i, RHO_EPSILON) * fmaxf(rho_j, RHO_EPSILON))
                                           * inv_fs_i;
-                        f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
-                        f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
-                        f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
+                        f_viscosity.x += (vel_j.x - vel_i_pair.x) * visc_factor;
+                        f_viscosity.y += (vel_j.y - vel_i_pair.y) * visc_factor;
+                        f_viscosity.z += (vel_j.z - vel_i_pair.z) * visc_factor;
                         c_tot += visc_factor;
                     }
 
@@ -472,9 +482,9 @@ void K_Step2(
                         float w = W_poly6(rlen_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
                         float xsph_factor = (m_j / rho_avg) * w;
-                        xsph_sum.x += (vel_j.x - vel_i.x) * xsph_factor;
-                        xsph_sum.y += (vel_j.y - vel_i.y) * xsph_factor;
-                        xsph_sum.z += (vel_j.z - vel_i.z) * xsph_factor;
+                        xsph_sum.x += (vel_j.x - vel_i_pair.x) * xsph_factor;
+                        xsph_sum.y += (vel_j.y - vel_i_pair.y) * xsph_factor;
+                        xsph_sum.z += (vel_j.z - vel_i_pair.z) * xsph_factor;
                     }
                 }  // end neighbor particle loop
             }

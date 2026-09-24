@@ -101,14 +101,20 @@ void K_Step1(
         return;
     }
 
-    // Read velocity for strain-rate (GRANULAR) and vorticity (FLUID)
-    float4 vel4_i = velocity[index_i];
+    // Read velocity for strain-rate (GRANULAR) and vorticity (FLUID).
+    // FP16 pairing rule (bd-r5-review-n28.69): vel_i and dye_i are used only
+    // in pair differences against neighbours read from the FP16 mirrors, so
+    // they come from the same mirrors. Co-moving particles then give an exact
+    // zero difference instead of fp16(v) - v.
+    float4 vel4_i = velocity_h ? load_half4((const uint2*)velocity_h + index_i)
+                               : velocity[index_i];
     float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
 
     // Read dye color for diffusion (skip when dye disabled -- PERF-005)
     bool dye_on = (c_sim.dye_enabled != 0);
     float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (dye_on) dye_i = __ldg(&particle_dye_in[index_i]);
+    if (dye_on) dye_i = dye_h ? load_half4((const uint2*)dye_h + index_i)
+                              : __ldg(&particle_dye_in[index_i]);
 
     // Read temperature for heat diffusion
     float T_i = __ldg(&temperature_in[index_i]);
@@ -452,12 +458,15 @@ void K_Step1_BuildNL(
         return;
     }
 
-    float4 vel4_i = velocity[index_i];
+    // FP16 pairing rule (bd-r5-review-n28.69): same as K_Step1 above.
+    float4 vel4_i = velocity_h ? load_half4((const uint2*)velocity_h + index_i)
+                               : velocity[index_i];
     float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
 
     bool dye_on = (c_sim.dye_enabled != 0);
     float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (dye_on) dye_i = __ldg(&particle_dye_in[index_i]);
+    if (dye_on) dye_i = dye_h ? load_half4((const uint2*)dye_h + index_i)
+                              : __ldg(&particle_dye_in[index_i]);
 
     float T_i = __ldg(&temperature_in[index_i]);
     float kappa_i = c_materials[mat_id_i].thermal_conductivity;
