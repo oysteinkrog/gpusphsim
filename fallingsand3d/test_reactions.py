@@ -720,17 +720,6 @@ def test_ice_ignores_corrode_exposure():
     assert np.all(hlth == 1.0), f"ICE lost health: min={hlth.min()}"
 
 
-def test_metal_ignores_corrode_exposure_from_non_acid_pairs():
-    """METAL is not on the whitelist either: a non-zero exposure (as lava used
-    to produce) does not damage it. Acid damage on metal is tested elsewhere
-    through the table (ACID, METAL) plus the step1 test below."""
-    setup_params(dt=0.001)
-    d = make_particles(64, METAL, STATIC, exposure_corrode=1e4)
-    compute_reactions(**d)
-    assert np.all(d["sorted_health"].get() == 1.0)
-    assert all(GET_MATERIAL_ID(int(p)) == METAL for p in d["sorted_packed_info"].get())
-
-
 def test_corroded_stone_becomes_dead_not_fire():
     """(b) A fully corroded STONE particle becomes DEAD/STATIC with mass 0 and
     joins the spawn freelist. It never becomes FIRE."""
@@ -873,7 +862,6 @@ if __name__ == "__main__":
         test_static_boundary_skips_dead_slot,
         test_expired_gas_mass_stays_zero_in_simulation,
         test_ice_ignores_corrode_exposure,
-        test_metal_ignores_corrode_exposure_from_non_acid_pairs,
         test_corroded_stone_becomes_dead_not_fire,
         test_non_zero_reaction_rate_pairs_are_acid_water_mud_or_combustible,
         test_step1_ice_in_water_has_no_corrode_exposure,

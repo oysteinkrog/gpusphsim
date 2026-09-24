@@ -272,13 +272,13 @@ void K_Reactions(
     // Whitelist: only these materials can be corroded by acid.
     // MAT_DIRT is excluded: DIRT+WATER is handled above as DIRT->MUD wetting,
     // so DIRT should never reach this corrosion path via water exposure.
-    // MAT_ICE and MAT_METAL are excluded: ICE melts by temperature only and
-    // METAL is only eaten by acid. exposure_corrode sums every pair with a
-    // non-zero reaction_rate, so a heat-only pair (LAVA/METAL, WATER/ICE) must
-    // not reach this branch (bd-r5-review-n28.38).
+    // MAT_ICE is excluded: ICE melts by temperature only.
+    // exposure_corrode sums every pair with a non-zero reaction_rate, so the
+    // interaction table keeps rate 0 for heat-only pairs such as LAVA/METAL;
+    // otherwise lava would eat metal here (bd-r5-review-n28.38).
     // TODO: a separate acid exposure channel would remove the dependence on
     // the table having rate 0 for every non-acid pair on the whitelist.
-    if (exp_corrode > 0.0f && (mat_id == MAT_STONE ||
+    if (exp_corrode > 0.0f && (mat_id == MAT_STONE || mat_id == MAT_METAL ||
         mat_id == MAT_WOOD || mat_id == MAT_GRAVEL ||
         mat_id == MAT_OIL || mat_id == MAT_GUNPOWDER)) {
         float damage = exp_corrode * dt;
