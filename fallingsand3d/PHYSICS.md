@@ -222,7 +222,48 @@ mu_pair to mu0 (checked by `test_step2.py::test_granular_static_drag_matches_pai
 r=h/2 this is about 0.12 1/s per neighbour, well inside the explicit limit and far
 below `ACCEL_MAX_GRANULAR = 200`.
 
-**Source**: `step2.cu:348-357` (FLUID), `step2.cu:321-340` (GRANULAR), `dfsph_solver.cu:419-425`
+**Implicit viscous self-term (WCSPH step2, bd-r5-review-n28.52)**
+
+Every term above has the shape `c_j * (v_j - v_i)`. Step2 sums the coefficients that
+multiply `-v_i` over all neighbours, including STATIC and MAT_RIGID ones:
+```
+c_tot   = sum_j c_j
+x       = dt * fs_i * c_tot          [fs_i = force_scale for FLUID/GAS, 1 for GRANULAR]
+a_visc  = fs_i * sum_j c_j (v_j - v_i) / (1 + x)
+```
+This is backward Euler on `v_i` in the viscous term:
+`v' = (v + dt * fs_i * sum_j c_j v_j) / (1 + x)`. Explicit Euler needs `x < 2`. For
+an interior particle at dt = 1 ms, x is about 18.75 for LAVA (base_viscosity 100),
+9.4 for MUD (50), 0.94 for OIL, 0.19 for WATER, and about 1.9 for resting SAND at
+`mu_max = 500` (rho about 2500). Before this, LAVA and MUD velocities overshot the
+neighbour mean by up to 18x per substep, held back only by `ACCEL_MAX`. That left a
+velocity checkerboard in resting lava and made resting sand flip sign relative to its
+neighbours every substep.
+
+With the scale, a mode that alternates between neighbours changes by
+`1 - lambda * x / (1 + x)` per substep, where `lambda * c_tot` is the mode's Laplacian
+eigenvalue (at most 2 c_tot). This is always between -1 and 1. On the lattice
+(`test_implicit_viscosity.py`) one substep gives v'/v = -0.01 (3D checkerboard) and
+-0.10 (alternating planes) for LAVA, +0.32 and +0.27 for SAND, +0.84 and +0.83 for
+WATER. Before: -17.2 and -18.8 for LAVA, -0.82 and -0.98 for SAND.
+
+Side effects:
+- Smooth flows lose some viscous drag: about x/(1+x) of the accel on the stiffest
+  mode, about 16% for WATER and half for OIL. WATER `base_viscosity` was not retuned.
+  Dam Break WATER (21504 particles, dt 1 ms) peak KE went from 872 to 878 J
+  (+0.7%) and KE at 1 s from 256 to 265 J (+3.4%).
+- A falling LAVA block used to be held back by the clamped checkerboard. It now falls
+  under gravity like any fluid and only resists deformation: `eval_solvers.py`
+  `b1_lava_slow` mean speed after 200 steps went from 0.12 to 0.57 m/s.
+- MAT_RIGID: the viscous reaction on the first rigid body a particle touches is added
+  after the loop with the same `1 / (1 + x)` scale, so action equals reaction. A second
+  body in the same particle's neighbourhood stays explicit (not in `c_tot`, reaction
+  added at once).
+- DFSPH `NonPressureForces` and PBF are unchanged.
+
+**Source**: `step2.cu:348-357` (FLUID), `step2.cu:321-340` (GRANULAR), `step2.cu` K_Step2
+implicit scale before PostCalc, `neighbor_list.cu` K_Step2_NL (same scale),
+`dfsph_solver.cu:419-425`
 
 ### 3.4 XSPH Velocity Correction (FLUID only)
 
@@ -328,14 +369,13 @@ Clamped: `|v| <= velocity_limit = velocity_limit_factor * h / dt`, recomputed in
 ```
 dt_accuracy = DT_MAX * accuracy / 0.4
 dt_acoustic = 0.25 * h / c_sound
-dt_viscous  = accuracy * rho_min * h^2 / max_eta
-dt = clamp(min(dt_accuracy, dt_acoustic, dt_viscous), DT_MIN = 1e-5, DT_MAX = 1e-3)
+dt = clamp(min(dt_accuracy, dt_acoustic), DT_MIN = 1e-5, DT_MAX = 1e-3)
 ```
 
-dt_acoustic is about 2.2 ms (FIRE sets c_sound = 4.47 m/s) and dt_viscous about
-accuracy * 34 ms (OIL rho_min 2125, LAVA eta 100), so dt_accuracy is the bound that
-acts: the Accuracy slider and the `[` `]` keys give 0.25 ms at 0.1, 0.5 ms at 0.2 and
-1 ms at 0.4. Values above 0.4 are capped by DT_MAX.
+dt_acoustic is about 2.2 ms (FIRE sets c_sound = 4.47 m/s), so dt_accuracy is the
+bound that acts: the Accuracy slider and the `[` `]` keys give 0.25 ms at 0.1, 0.5 ms
+at 0.2 and 1 ms at 0.4. Values above 0.4 are capped by DT_MAX. There is no viscous CFL:
+step2 treats the viscous self-term implicitly (see 3.3 and 10.4).
 
 GRANULAR anti-creep: if `|v| < 0.01` AND `rho > 0.95*rho_0` AND `gamma_dot < 0.05`:
 set `v_new = 0`
@@ -475,7 +515,7 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | mu_0 (viscosity) | 1.0 | 3.5 | Lowered; effective viscosity = mu0 * force_scale |
 | epsilon (XSPH) | 0.8 (WCSPH profile `xsph_epsilon`) | 0.5 | Higher for smoother FLUID advection |
 | gravity | -4.0 | -9.8 | Reduced for miniature-world aesthetic |
-| dt | adaptive | 0.001 (fixed) | DT_MAX * accuracy / 0.4, capped by acoustic and viscous CFL, in [1e-5, 0.001] (see 4.2) |
+| dt | adaptive | 0.001 (fixed) | DT_MAX * accuracy / 0.4, capped by acoustic CFL, in [1e-5, 0.001] (see 4.2) |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention. FLUID and GAS pairs; GRANULAR pairs use 1.0 |
 | FLUID-GRANULAR pair scale | pressure: force_scale; viscosity: harmonic mean of force_scale*base_viscosity*rho0 and mu | N/A | Same value on both sides, so pair forces are antisymmetric (3.2, 3.3) |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
@@ -743,12 +783,16 @@ The parent advects with the new velocity only. Here FLUID adds the XSPH delta:
 larger dt. Other behaviors use `pos += vel_new * dt`. Both are symplectic Euler (4.3).
 **Source**: `integrate.cu:279-294`
 
-### 10.4 FIXED: Viscous CFL using mu_max from inactive materials
-The adaptive timestep computed viscous CFL from ALL materials in the table,
-including GRANULAR mu_max=10000, even when no GRANULAR particles existed.
-This gave dt ≈ 6.4e-4 instead of dt ≈ 0.005 (DT_MAX), an 8x penalty.
-**Fixed**: viscous CFL now uses base_viscosity only, not mu_max.
-**Source**: `simulation.py:131-155`
+### 10.4 FIXED: Viscous CFL did not match the viscosity form
+The adaptive timestep had a viscous CFL `accuracy * rho_min * h^2 / max_eta` built
+from `base_viscosity`. It assumed `nu = mu / rho`, but the FLUID viscosity has no
+`1/rho_i` (see 3.3), so the real explicit rate is `fs * mu * 15 / h^2` per second.
+The CFL gave about 7 ms and never bound, while LAVA needed about 0.1 ms. The corrected
+explicit bound (1.1e-5 s for LAVA) would have made WCSPH about 20x slower.
+**Fixed** (bd-r5-review-n28.52): step2 treats the viscous self-term implicitly, which
+is stable at any dt, and the viscous CFL is removed. GRANULAR at `mu_max` is covered by
+the same scale.
+**Source**: `simulation.py:_compute_adaptive_dt`, `step2.cu` (implicit scale)
 
 ### 10.5 OPEN: Boundary handling differences
 Parent uses penalty-force walls (smooth, damped).
@@ -851,7 +895,7 @@ The per-substep pipeline was restructured for performance (no physics changes):
 compute advection CFL, forcing a GPU→CPU sync (device→host transfer) every frame.
 The velocity-based advection CFL was never binding (velocity_limit and accel_max
 prevent supersonic particles), so it was removed. Adaptive dt now uses the accuracy
-bound plus the acoustic and viscous CFL, all computed on the CPU from the materials
+bound plus the acoustic CFL, both computed on the CPU from the materials
 table and `accuracy` (see 4.2). There is no GPU sync in the hot path.
 **Source**: `simulation.py:151-175`
 
@@ -1338,6 +1382,20 @@ dead occupant's values. (bd-r5-review-n28.42)
 
 **Source**: `spawn.cu:K_SpawnGas`, `spawn.py:compute_spawn`,
 `simulation.py:_run_reactions_spawn`, `simulation.py:_run_pbf_body`
+
+### 10.22 OPEN: Residual alternating viscous mode at large x
+
+The implicit viscous scale (3.3) makes every mode decay, but a mode that alternates
+between neighbours decays by `(1 - (lambda - 1) x) / (1 + x)`, which tends to
+`1 - lambda` for large x. For LAVA (x about 18.75) a pure alternating-plane mode keeps
+10% of its amplitude with flipped sign per substep; the worst possible mode
+(lambda = 2) would keep 90%. It is bounded and damped, far better than the old
+18x growth. In a 20x20x20 LAVA block in a STONE box (500 substeps at 1 ms) the
+fraction of particles whose deviation from the neighbour mean flips sign between
+substeps is at most 0.3% (it was 99.9% before), and the largest deviation at step 500
+is 0.028 m/s against 0.108 m/s for WATER in the same box (0.23 m/s before). A full
+implicit solve (Jacobi or CG on the viscous system) would remove the residual.
+**Source**: `step2.cu` (implicit scale), `test_implicit_viscosity.py`
 
 ## 11. Multi-Solver Architecture
 
