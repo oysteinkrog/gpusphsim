@@ -805,7 +805,7 @@ Cross-material pairs get boost=heat_exchange (e.g., WATER+LAVA=50.0).
 
 This is bidirectional: `T_j - T_i` can be positive or negative, so lava
 near water both cools the lava AND heats the water. This enables visible
-phase transitions: lava→stone (T<1000K), water→steam (T>373K). See §9.5.
+phase transitions: lava→gravel (T<1000K), water→steam (T>373K). See §9.5.
 
 ### 9.2 Key Heat Exchange Values
 
@@ -894,13 +894,13 @@ the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
 | WATER → ICE (STATIC) | T < 263 K and (sleeping or \|v\| < 0.02 m/s) | 263 K; velocity set to 0 |
 | STONE → LAVA (FLUID) | T > STONE `temp_melt` (1500 K) | 1500 K |
 | SAND → LAVA (FLUID) | T > SAND `temp_melt` (1700 K) | 1700 K |
-| LAVA → STONE (STATIC) | T < LAVA `temp_melt` (1000 K) | 1000 K |
+| LAVA → GRAVEL (GRANULAR) | T < LAVA `temp_melt` (1000 K) | 1000 K |
 | STEAM → WATER (FLUID) | T < 373 K | unchanged |
 | WATER boils | T > 373 K | unchanged; sets the spawn-gas flag and spawn.cu makes STEAM |
 
 Every material change also rescales mass by the spawn-mass rule (7.3):
 `m *= s(new) / s(old)` with `s = rest_density / 2500` for FLUID and GRANULAR and 1 for
-STATIC and GAS. STONE → LAVA multiplies by 2.6, LAVA → STONE divides by 2.6,
+STATIC and GAS. STONE → LAVA multiplies by 2.6, LAVA → GRAVEL multiplies by 4250/6500 (0.65),
 SAND → WET_SAND multiplies by 1.125, DIRT → MUD by 1.2, and WOOD, OIL or GUNPOWDER →
 FIRE go back to 0.02. Mass is not conserved across a transition; the rest volume is.
 
@@ -908,6 +908,12 @@ WATER freezes 10 K below the ICE melt point, so water between 263 K and 273 K
 stays liquid and ice at 273 K does not flip back and forth. ICE is STATIC, so
 only water that is sleeping or slower than V_WAKE (0.02 m/s) freezes. Faster cold
 water keeps flowing until it slows, so a stream does not stop in mid-air.
+
+Cooled LAVA becomes GRAVEL (GRANULAR, rest density 4250), not STATIC STONE. A
+STATIC particle never moves, so lava that cooled in flight or inside a water
+pool would hang where it cooled. GRAVEL falls until something supports it, and
+the sleep system then pins it. GRAVEL has no melt transition, so solidified lava
+does not melt back.
 
 Melt and solidify set the temperature to the threshold. The heat above it (or
 missing below it) is taken as consumed latent heat, so melted ice starts as
@@ -2922,8 +2928,8 @@ effective_threshold = threshold / (1 + 0.01 * max(temp - 293, 0))
 
 Hysteresis prevents oscillation (wet threshold >> dry threshold).
 
-Temperature-driven transitions, including WATER → ICE below 263 K, are listed
-in §9.5.
+Temperature-driven transitions, including WATER → ICE below 263 K and LAVA →
+GRAVEL below 1000 K, are listed in §9.5.
 
 FIRE is put out the same way. When FIRE's `exposure_corrode` is above
 `FIRE_EXTINGUISH_EXPOSURE = 0.3`, K_Reactions turns it into SMOKE/GAS with
