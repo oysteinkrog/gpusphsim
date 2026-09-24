@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUT_DIR = os.path.join(HERE, "bench_results")
 NOISE_BAND = 0.02  # 2 %: stage deltas inside this band count as noise
+CHECKSUM_RTOL = 1e-6  # position checksums closer than this count as the same physics
 
 
 def _apply_ptx_workaround():
@@ -302,11 +303,15 @@ def print_compare(a: dict, b: dict, noise: float = NOISE_BAND) -> None:
     for label, am, bm, rel, ok in compare(a, b, noise):
         d = "   n/a" if rel == float("inf") else f"{rel:+8.1%}"
         print(f"  {label:<16}{am:>10.3f}{bm:>10.3f}{d:>9}  {'within' if ok else 'OUTSIDE'}")
-    if a.get("checksum_position_sum") != b.get("checksum_position_sum"):
-        print(f"  checksum differs: {a.get('checksum_position_sum')} vs "
-              f"{b.get('checksum_position_sum')} (physics changed or run settings differ)")
+    # Float atomics make runs of the same code differ in the last digits
+    # (about 1e-9 relative at 1M), so compare with a tolerance.
+    ca, cb = a.get("checksum_position_sum"), b.get("checksum_position_sum")
+    if ca is None or cb is None:
+        print("  checksum missing from one run")
+    elif abs(ca - cb) <= CHECKSUM_RTOL * max(abs(ca), abs(cb), 1.0):
+        print(f"  checksum matches within {CHECKSUM_RTOL:g} relative")
     else:
-        print("  checksum identical")
+        print(f"  checksum differs: {ca} vs {cb} (physics changed or run settings differ)")
 
 
 def main(argv=None) -> int:
