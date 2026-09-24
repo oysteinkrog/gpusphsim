@@ -212,6 +212,15 @@ __constant__ PrecalcParams c_precalc;
 /* MAT_RIGID material ID -- Akinci boundary particles (must match materials.py) */
 #define MAT_RIGID 18
 
+/* Rest density baked into MAT_RIGID particle mass (must match
+ * rigid_bodies.RIGID_PSI_RHO0). A rigid particle stores
+ * mass = RIGID_PSI_RHO0 * V_b and reads density RIGID_PSI_RHO0, so volume
+ * terms m_j / rho_j give V_b. Akinci's boundary weight is psi_b = rho0_i * V_b
+ * with the fluid's own rest density, so density sums and Akinci coupling
+ * terms scale a rigid neighbour's mass by rho0_i / RIGID_PSI_RHO0
+ * (bd-r5-review-n28.77). */
+#define RIGID_PSI_RHO0 2500.0f
+
 /* MAT_DEAD material ID -- free slot (must match materials.DEAD).  Dead slots are
  * STATIC with mass 0, so every m_j-weighted neighbour term is zero, and
  * static_particle_boundary skips them (bd-r5-review-n28.23). */

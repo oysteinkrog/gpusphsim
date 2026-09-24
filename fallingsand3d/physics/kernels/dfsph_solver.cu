@@ -107,9 +107,12 @@ void K_DFSPH_ComputeDensityAlpha(
 
     bool is_fluid = (behavior_i == FLUID);
 
+    // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
+    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
+
     // MAT_RIGID boundary particles: early-return, no density/alpha needed
     if (mat_id_i == MAT_RIGID) {
-        density_out[i] = 2500.0f;
+        density_out[i] = RIGID_PSI_RHO0;
         alpha_out[i] = 0.0f;
         shear_rate_out[i] = 0.0f;
         dTdt_out[i] = 0.0f;
@@ -196,9 +199,12 @@ void K_DFSPH_ComputeDensityAlpha(
                         continue;
                     }
 
-                    // Density (Poly6)
+                    // Density (Poly6). MAT_RIGID mass is RIGID_PSI_RHO0 * V_b;
+                    // Akinci weights it with this particle's rest density
+                    // (bd-r5-review-n28.77). Volume terms below keep m_j / rho_j = V_b.
                     float diff = h_sq - r_sq;
-                    sum_density += m_j * diff * diff * diff;
+                    float m_dens = (GET_MATERIAL_ID(pi_j) == MAT_RIGID) ? m_j * rigid_dens_scale : m_j;
+                    sum_density += m_dens * diff * diff * diff;
 
                     // Exposure support weight: every non-self, non-DEAD neighbour,
                     // MAT_RIGID included, so a wall dilutes exposure (as in K_Step1).
@@ -528,7 +534,10 @@ void K_DFSPH_NonPressureForces(
                                 rb_linvel.y + (rb_angvel.z * r_b.x - rb_angvel.x * r_b.z),
                                 rb_linvel.z + (rb_angvel.x * r_b.y - rb_angvel.y * r_b.x)
                             );
-                            float visc_factor = mu_b * m_j * lap_v / fmaxf(rho_i, RHO_EPSILON);
+                            // psi_b = rho0_i * V_b; the mass slot holds
+                            // RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
+                            float psi_b = m_j * (c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0));
+                            float visc_factor = mu_b * psi_b * lap_v / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_visc = make_float3(
                                 (vel_boundary.x - vel_i.x) * visc_factor,
                                 (vel_boundary.y - vel_i.y) * visc_factor,

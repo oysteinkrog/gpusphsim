@@ -259,6 +259,8 @@ void K_PBF_ComputeLambda(
     float h_sq = c_sim.smoothing_length_sq;
     // Floor at 1: DEAD has rest_density 0, and C = rho / rho0 - 1 would be inf.
     float rho0 = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
+    // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
+    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
 
     // Density accumulator (Poly6)
     float sum_density = 0.0f;
@@ -341,11 +343,14 @@ void K_PBF_ComputeLambda(
                     }
 
                     // Density (Poly6, self-included).
-                    // Standard Akinci boundary: psi_b = m_j (no extra multiplier).
-                    // The former 2x boundary_scale inflated near-wall density to ~2*rho0,
-                    // causing particles to bounce off walls (unphysical repulsion).
+                    // Standard Akinci boundary: psi_b = rho0_i * V_b. MAT_RIGID mass
+                    // is RIGID_PSI_RHO0 * V_b, so it is scaled by rho0_i / RIGID_PSI_RHO0
+                    // (bd-r5-review-n28.77). No other multiplier: the former 2x
+                    // boundary_scale inflated near-wall density to ~2*rho0, causing
+                    // particles to bounce off walls (unphysical repulsion).
                     float diff = h_sq - r_sq;
-                    sum_density += m_j * diff * diff * diff;
+                    float m_dens = (GET_MATERIAL_ID(pi_j) == MAT_RIGID) ? m_j * rigid_dens_scale : m_j;
+                    sum_density += m_dens * diff * diff * diff;
 
                     // Exposure support weight: every non-self, non-DEAD neighbour,
                     // MAT_RIGID included, so a wall dilutes exposure (as in K_Step1).

@@ -147,6 +147,14 @@ assert RIGID_BODY_DTYPE.itemsize == 96, (
 
 MAX_RIGID_BODIES = 8
 
+# Rest density baked into MAT_RIGID particle mass (must match RIGID_PSI_RHO0 in
+# physics/kernels/common.cuh). Each boundary particle stores
+# mass = RIGID_PSI_RHO0 * V_b and reads density RIGID_PSI_RHO0, so the kernels'
+# volume terms m_j / rho_j give V_b. Density sums and the Akinci coupling scale
+# the mass by rho0_i / RIGID_PSI_RHO0, so every fluid sees
+# psi_b = rho0_i * V_b with its own rest density (bd-r5-review-n28.77).
+RIGID_PSI_RHO0 = 2500.0
+
 
 def sample_box_surface(half_extents: tuple, spacing: float) -> tuple:
     """Sample boundary particles on all 6 faces of a box.
@@ -312,12 +320,13 @@ def compute_boundary_volumes(
     smoothing_length : float
         SPH smoothing length h.
     rho0 : float
-        Rest density of the fluid.
+        Density the volume is scaled by. Boundary particles use
+        RIGID_PSI_RHO0; the kernels rescale to each fluid's own rest density.
 
     Returns
     -------
     cupy.ndarray (N,) float32
-        Boundary volumes psi_b.
+        rho0 * V_b, with V_b = 1 / sum_W.
     """
     import math
     N = len(positions)
@@ -433,7 +442,7 @@ class RigidBodyManager:
         sdf_type: int = SDF_BOX,
         spacing: float = 0.02,
         smoothing_length: float = 0.04,
-        rho0: float = 2500.0,
+        rho0: float = RIGID_PSI_RHO0,
         restitution: float = 0.5,
         friction: float = 0.3,
         is_kinematic: bool = False,
@@ -443,7 +452,17 @@ class RigidBodyManager:
 
         Convenience method that calls add_rigid_body, samples surface particles,
         computes Akinci boundary volumes, and stores boundary data.
+
+        rho0 must be RIGID_PSI_RHO0. The kernels scale the stored
+        RIGID_PSI_RHO0 * V_b to each fluid's own rest density, so another
+        value here would give every fluid the wrong boundary weight. The
+        parameter stays so old save files with rho0=2500 still load.
         """
+        if float(rho0) != RIGID_PSI_RHO0:
+            raise ValueError(
+                f"rho0 must be RIGID_PSI_RHO0 ({RIGID_PSI_RHO0}), got {rho0}: "
+                "the kernels rescale boundary mass to each fluid's rest density"
+            )
         idx = self.add_rigid_body(
             position, half_extents, mass, sdf_type,
             restitution, friction, is_kinematic, velocity
@@ -718,13 +737,14 @@ class RigidBodyManager:
             world.position[sl, 0] = wx
             world.position[sl, 1] = wy
             world.position[sl, 2] = wz
-            world.position[sl, 3] = 2500.0  # K_Step1 placeholder density for MAT_RIGID
+            world.position[sl, 3] = RIGID_PSI_RHO0  # K_Step1 placeholder density for MAT_RIGID
 
             world.velocity[sl] = 0.0
             world.veleval[sl] = 0.0
             world.sph_force[sl] = 0.0
 
-            # Mass = psi_b (Akinci boundary volume)
+            # Mass = RIGID_PSI_RHO0 * V_b (Akinci boundary volume at the
+            # reference density; kernels rescale to the fluid's rest density)
             world.mass[sl] = psi
 
             # packed_info: MAT_RIGID + STATIC + body_id
@@ -732,7 +752,7 @@ class RigidBodyManager:
             packed = packed | ((int(body_idx) & 0xFF) << 13)
             world.packed_info[sl] = cupy.uint32(packed)
 
-            world.density[sl] = 2500.0
+            world.density[sl] = RIGID_PSI_RHO0
             world.temperature[sl] = 293.0
             world.health[sl] = 1.0
             world.lifetime[sl] = 0.0

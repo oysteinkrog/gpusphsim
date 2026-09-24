@@ -86,10 +86,12 @@ void K_Step1(
 
     bool is_fluid = (behavior_i == FLUID);
     bool is_rigid_i = (mat_id_i == MAT_RIGID);
+    // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
+    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
 
     // Boundary particles don't need density computation -- early out
     if (is_rigid_i) {
-        density_out[index_i] = 2500.0f;  // rest density placeholder
+        density_out[index_i] = RIGID_PSI_RHO0;  // rest density placeholder (V_j = m_j / rho_j = V_b)
         pressure_out[index_i] = 0.0f;
         shear_rate_out[index_i] = 0.0f;
         dTdt_out[index_i] = 0.0f;
@@ -98,7 +100,7 @@ void K_Step1(
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         dye_rate_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        position[index_i].w = 2500.0f;  // pack the placeholder density like other particles
+        position[index_i].w = RIGID_PSI_RHO0;  // pack the placeholder density like other particles
         return;
     }
 
@@ -201,7 +203,10 @@ void K_Step1(
                         }
 
                         // --- Density: self-interaction included ---
-                        sum_density += m_j * diff * diff * diff;
+                        // MAT_RIGID mass is RIGID_PSI_RHO0 * V_b; Akinci weights it
+                        // with this particle's rest density (bd-r5-review-n28.77).
+                        float m_dens = (GET_MATERIAL_ID(pi_j) == MAT_RIGID) ? m_j * rigid_dens_scale : m_j;
+                        sum_density += m_dens * diff * diff * diff;
 
                         // --- All non-self computations: heat, exposure, vorticity, strain-rate ---
                         if (index_j != index_i) {
@@ -445,13 +450,15 @@ void K_Step1_BuildNL(
     bool is_gas_i = (behavior_i == GAS);
     bool is_fluid = (behavior_i == FLUID);
     bool is_rigid_i = (mat_id_i == MAT_RIGID);
+    // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
+    float rigid_dens_scale = c_materials[mat_id_i].rest_density * (1.0f / RIGID_PSI_RHO0);
 
     // Neighbor list write position
     uint nl_base = index_i * max_nb;
     uint nl_count = 0;
 
     if (is_rigid_i) {
-        density_out[index_i] = 2500.0f;
+        density_out[index_i] = RIGID_PSI_RHO0;
         pressure_out[index_i] = 0.0f;
         shear_rate_out[index_i] = 0.0f;
         dTdt_out[index_i] = 0.0f;
@@ -460,7 +467,7 @@ void K_Step1_BuildNL(
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         dye_rate_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        position[index_i].w = 2500.0f;  // pack the placeholder density like other particles
+        position[index_i].w = RIGID_PSI_RHO0;  // pack the placeholder density like other particles
         neighbor_count_out[index_i] = 0;
         return;
     }
@@ -540,7 +547,10 @@ void K_Step1_BuildNL(
                             continue;
                         }
 
-                        sum_density += m_j * diff * diff * diff;
+                        // MAT_RIGID mass is RIGID_PSI_RHO0 * V_b; Akinci weights it
+                        // with this particle's rest density (bd-r5-review-n28.77).
+                        float m_dens = (GET_MATERIAL_ID(pi_j) == MAT_RIGID) ? m_j * rigid_dens_scale : m_j;
+                        sum_density += m_dens * diff * diff * diff;
 
                         if (index_j != index_i) {
                             // Record neighbor for step2
