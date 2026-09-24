@@ -2535,6 +2535,12 @@ Velocity updated: `v*_i = v_i + dt * a_i`
   and radius under WCSPH, DFSPH and PBF within 2% after 2 s
   (`eval_gas_repulsion.py --free`).
 - **STATIC**: Skips all solver kernels, contributes to neighbor density sums.
+  `K_DFSPH_ComputeDensityAlpha` writes `max(rest_density, 1)` as its density
+  (for alpha and the boundary volume `m_j / rho_j`), but its heat rate divides
+  by the SPH-summed `rho * cp`, as WCSPH and PBF do (9.1). A one-layer STONE wall
+  (rest_density 6500, kernel sum about 2600) next to LAVA heats 42.9 K in 5
+  substeps of 1 ms under DFSPH, against 43.8 K under WCSPH and 39.9 K under PBF
+  (`test_static_heat_cross_solver.py`, bd-r5-review-n28.103).
 
 ### 13.7 DFSPH Sleep System
 
