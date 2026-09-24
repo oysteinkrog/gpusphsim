@@ -318,9 +318,11 @@ void K_Step2(
                             // The mass slot holds RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
                             float rho0 = c_materials[mat_id_i].rest_density;
                             float psi_b = m_j * __fdiv_rn(rho0, RIGID_PSI_RHO0);
-                            // Same pressure mirror as a regular STATIC wall,
-                            // 2 p_i / rho_i^2 (bd-r5-review-n28.106).
-                            float press_akinci = 2.0f * (p_i / (rho_i * rho_i));
+                            // Differs from the STATIC wall form 2 p_i / rho_i^2:
+                            // WCSPH water runs at about 2 rho0, where the wall
+                            // form is 2.5x weaker and bodies sink and leak
+                            // (bd-r5-review-n28.106, PHYSICS.md 3.2).
+                            float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0 * rho0));
                             float3 F_on_fluid = make_float3(
                                 psi_b * press_akinci * grad_s.x,
                                 psi_b * press_akinci * grad_s.y,
