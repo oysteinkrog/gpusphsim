@@ -944,7 +944,7 @@ void K_DFSPH_ComputePressureAccel(
  * Jacobi density solver kernel 2 of 3:
  * 1) Compute predicted density using v_total = v + dt * a_press:
  *    drho = SUM_j (m_j/rho_j) * (v_total_i - v_total_j) . grad_W_ij
- *    density_adv = rho_i / rho0 + dt * drho
+ *    density_adv = (rho_i / rho0) * (1 + dt * drho)
  * 2) Jacobi update pressure:
  *    residual = density_adv - 1.0
  *    p_rho2 = max(p_rho2 + omega * residual * alpha / dt^2, 0)
@@ -1072,11 +1072,14 @@ void K_DFSPH_DensitySolverUpdate(
         }
     }
 
-    // Predicted density ratio (normalized to rest density)
-    // Uses rho/rho0 - 1 formulation (matches SPlisHSPlasH reference)
-    // drho/rho0 makes both terms dimensionless; without /rho0 the solver
-    // converges to a wrong fixed point with ~20-40% density error.
-    float density_adv = rho_i / rho0 + dt * drho / rho0;
+    // Predicted density ratio (normalized to rest density).
+    // drho is volume weighted (SUM V_j (vt_i - vt_j) . gradW, units 1/s), so it
+    // is already the relative density rate (1/rho) Drho/Dt and dt * drho is
+    // dimensionless. rho*/rho0 = (rho_i/rho0) * (1 + dt * drho). Do not divide
+    // drho by rho0 again: that shrinks the A*p feedback by rho0 (2500 for WATER)
+    // and the Jacobi iteration stops converging. alpha (K_DFSPH_ComputeDensityAlpha)
+    // is the inverse diagonal of this residual.
+    float density_adv = (rho_i / rho0) * (1.0f + dt * drho);
     float residual = density_adv - 1.0f;
 
     // Jacobi update: accumulate pressure correction
