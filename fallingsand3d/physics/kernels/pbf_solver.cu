@@ -102,6 +102,24 @@ __device__ inline void pbf_rigid_reaction(
     warp_reduce_accumulate(d_rigid_torques, tau, body_id);
 }
 
+/* Move a predicted position to BOUNDARY_MARGIN outside every SDF object it
+ * lies inside or within the margin of. Used by K_PBF_Predict and by every
+ * K_PBF_ApplyDelta iteration. Position only: K_PBF_Finalize applies the
+ * restitution and friction impulse. */
+__device__ __forceinline__ void push_out_of_sdf(float3& p) {
+    for (int s = 0; s < c_num_sdf_objects; s++) {
+        SDFObject obj = c_sdf_objects[s];
+        float dist = eval_sdf(p, obj);
+        if (dist < BOUNDARY_MARGIN) {
+            float3 n = sdf_normal(p, obj);
+            float push = BOUNDARY_MARGIN - dist;
+            p.x += push * n.x;
+            p.y += push * n.y;
+            p.z += push * n.z;
+        }
+    }
+}
+
 /* ======================================================================
  * K_PBF_Predict -- Apply gravity, predict position
  *   x*_i = x_i + dt * (v_i + dt * g)
@@ -172,19 +190,7 @@ void K_PBF_Predict(
     );
 
     clamp_boundary(pred);
-
-    // SDF object collision: clamp predicted position outside SDF surfaces
-    for (int s = 0; s < c_num_sdf_objects; s++) {
-        SDFObject obj = c_sdf_objects[s];
-        float dist = eval_sdf(pred, obj);
-        if (dist < BOUNDARY_MARGIN) {
-            float3 n = sdf_normal(pred, obj);
-            float push = BOUNDARY_MARGIN - dist;
-            pred.x += push * n.x;
-            pred.y += push * n.y;
-            pred.z += push * n.z;
-        }
-    }
+    push_out_of_sdf(pred);
 
     predicted_out[i] = make_float4(pred.x, pred.y, pred.z, 1.0f);
 }
@@ -682,6 +688,10 @@ void K_PBF_ApplyDelta(
     float3 pos = make_float3(pos4.x + d4.x, pos4.y + d4.y, pos4.z + d4.z);
 
     clamp_boundary(pos);
+    // A delta can push the particle back into an SDF collider, so project
+    // it out again every iteration, as K_PBF_Predict does. The loop bound is
+    // 0 when the scene has no SDF objects.
+    push_out_of_sdf(pos);
     predicted_pos[i] = make_float4(pos.x, pos.y, pos.z, 1.0f);
 }
 
