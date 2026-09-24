@@ -40,12 +40,12 @@ def sim(world):
     return s
 
 
-def _drop_one(world, sim, material_id, vel):
-    """Spawn one particle GAP above the floor margin with velocity vel."""
+def _drop_one(world, sim, material_id, vel, gap=GAP):
+    """Spawn one particle `gap` above the floor margin with velocity vel."""
     world.packed_info[:] = 0
     world._high_water = 0
     floor = -sim.world_half_size + BOUNDARY_MARGIN
-    y = floor + GAP
+    y = floor + gap
     n = world.spawn_cube(
         min_corner=(-0.01, y - 0.01, -0.01),
         max_corner=(0.01, y + 0.01, 0.01),
@@ -87,3 +87,11 @@ def test_pbf_sand_wall_friction(world, sim):
     assert ts_before - ts_after >= 0.9 * expected_drop, (
         f"tangential speed dropped {ts_before - ts_after:.4f}, "
         f"expected >= {expected_drop:.4f} from wall_friction")
+
+
+def test_pbf_resting_particle_stays_at_rest(world, sim):
+    """A particle resting on the floor margin gets no bounce from the <= contact."""
+    floor, pos, v, dt = _drop_one(world, sim, WATER, (0.0, 0.0, 0.0), gap=0.0)
+    print(f"  resting: y={pos[1]:.6f} v={v[:3]}")
+    assert abs(pos[1] - floor) < 1e-5
+    assert abs(v[1]) < 1e-4, f"resting particle got v_y={v[1]:.6f}"
