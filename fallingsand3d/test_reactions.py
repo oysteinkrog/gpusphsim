@@ -1025,3 +1025,78 @@ def test_material_change_rescales_mass(old_mat, old_beh, new_mat, kw):
     compute_reactions(**d, sorted_mass=mass)
     assert GET_MATERIAL_ID(int(d["sorted_packed_info"].get()[0])) == new_mat
     np.testing.assert_allclose(mass.get()[0], spawn_mass(new_mat), rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.73: water puts out fire
+# ---------------------------------------------------------------------------
+
+def test_fire_wet_becomes_smoke():
+    """FIRE with exposure_corrode above FIRE_EXTINGUISH_EXPOSURE (0.3) becomes
+    SMOKE in one substep, well within 0.1 s, with lifetime 1 s and 373 K."""
+    from materials import SMOKE
+    setup_params(dt=0.001)
+    d = make_particles(16, FIRE, GAS, temp=1200.0, lifetime=1.0,
+                       exposure_corrode=0.8)
+    mass = cupy.full(16, 0.008, dtype=cupy.float32)
+    compute_reactions(**d, sorted_mass=mass)
+    pi = d["sorted_packed_info"].get()
+    for p in pi:
+        assert int(p) == MAKE_PACKED(SMOKE, GAS), f"packed {int(p):#x}, expected SMOKE|GAS"
+    np.testing.assert_allclose(d["sorted_lifetime"].get(), 1.0)
+    np.testing.assert_allclose(d["sorted_temperature"].get(), 373.0)
+    np.testing.assert_allclose(mass.get(), 0.008)
+
+
+def test_fire_dry_keeps_burning():
+    """FIRE with exposure_corrode 0 (or below 0.3) and lifetime 1.0 stays FIRE
+    for its full lifetime and only then becomes SMOKE."""
+    from materials import SMOKE
+    dt = 0.01
+    setup_params(dt=dt)
+    for exp_c in (0.0, 0.25):
+        d = make_particles(4, FIRE, GAS, temp=1200.0, lifetime=1.0,
+                           exposure_corrode=exp_c)
+        for step in range(95):  # 0.95 s
+            compute_reactions(**d, frame=step)
+        pi = d["sorted_packed_info"].get()
+        assert all(GET_MATERIAL_ID(int(p)) == FIRE for p in pi), \
+            f"FIRE went out early at exposure_corrode={exp_c}"
+        for step in range(95, 105):
+            compute_reactions(**d, frame=step)
+        pi = d["sorted_packed_info"].get()
+        assert all(GET_MATERIAL_ID(int(p)) == SMOKE for p in pi)
+
+
+def test_fire_row_rate_is_one_way():
+    """The FIRE row has reaction_rate 0 for WOOD, OIL, GUNPOWDER and ICE, so
+    those neighbours do not wet fire. The reverse direction keeps the pair's
+    rate, heat exchange stays symmetric, and WATER still feeds FIRE."""
+    from materials import build_interaction_matrix
+    m = build_interaction_matrix()
+    for src, reverse_rate in ((WOOD, 0.9), (OIL, 1.0), (GUNPOWDER, 0.9), (ICE, 0.0)):
+        assert m[FIRE][src]["reaction_rate"] == 0.0, f"FIRE row rate for {src}"
+        assert m[src][FIRE]["reaction_rate"] == pytest.approx(reverse_rate)
+        assert m[FIRE][src]["heat_exchange"] == m[src][FIRE]["heat_exchange"] > 0.0
+    assert m[FIRE][WATER]["reaction_rate"] == pytest.approx(0.8)
+    nonzero = [b for b in range(len(m)) if m[FIRE][b]["reaction_rate"] != 0.0]
+    assert nonzero == [WATER], f"FIRE row has non-zero rate from {nonzero}"
+
+
+def test_step1_fire_in_water_goes_out_fire_on_wood_does_not():
+    """Through K_Step1: FIRE ringed by WATER gets exposure_corrode 0.8 and
+    becomes SMOKE; FIRE ringed by WOOD gets 0 and stays FIRE."""
+    from materials import SMOKE
+    packed = [MAKE_PACKED(FIRE, GAS)] + [MAKE_PACKED(WATER, FLUID)] * 6
+    _, exp_c = _step1_exposure(packed, [1200.0] + [293.0] * 6,
+                               _ring_masses(0.0081), _RING)
+    assert exp_c == pytest.approx(0.8, abs=1e-4), f"FIRE in WATER exposure_corrode {exp_c}"
+    setup_params(dt=0.001)
+    d = make_particles(1, FIRE, GAS, temp=1200.0, lifetime=1.0, exposure_corrode=exp_c)
+    compute_reactions(**d)
+    assert GET_MATERIAL_ID(int(d["sorted_packed_info"].get()[0])) == SMOKE
+
+    packed = [MAKE_PACKED(FIRE, GAS)] + [MAKE_PACKED(WOOD, STATIC)] * 6
+    _, exp_c = _step1_exposure(packed, [1200.0] + [293.0] * 6,
+                               _ring_masses(0.0081), _RING)
+    assert exp_c == 0.0, f"FIRE on WOOD exposure_corrode {exp_c}"
