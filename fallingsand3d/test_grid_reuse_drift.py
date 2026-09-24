@@ -202,3 +202,36 @@ def test_fast_block_density_matches_full_sort(world):
     # At 2 mm per substep the predicted drift is over 0.25h, so no substep
     # may reuse the grid.
     assert skipped == 0, skipped
+
+
+@pytest.mark.parametrize("profile_name", ["PBF", "DFSPH"])
+def test_pbf_dfsph_finalize_measure_drift_since_sort(world, profile_name):
+    """K_PBF_Finalize and K_DFSPH_Finalize also measure against the anchor."""
+    from solver_profiles import PROFILES
+
+    sim = _make_sim(world, 1)
+    try:
+        world.spawn_cube(min_corner=(-0.5, -0.1, -0.1), max_corner=(-0.3, 0.1, 0.1),
+                         material_id=WATER, spacing=0.02, velocity=(1.0, 0.0, 0.0))
+        sim.set_solver_profile(PROFILES[profile_name])
+        sim.set_gravity(0.0)
+        sim._spawn_substep = sim._damping_duration
+        sim.notify_scene_changed()
+        n = world._high_water
+        dt = sim.dt
+        sim._sort_skip_next = False
+        sim._sim_step(n)
+        cp.cuda.Device().synchronize()
+        one_step = _disp_sq(world)
+        steps = 4
+        sim._sort_skip_next = True
+        for _ in range(steps - 1):
+            sim._sim_step(n)
+        cp.cuda.Device().synchronize()
+        drift = _disp_sq(world)
+        # Per-substep tracking would stay near one_step.
+        assert drift >= 0.8 * (steps * dt * 1.0) ** 2, (drift, one_step, dt)
+        assert drift > 4.0 * one_step, (drift, one_step)
+    finally:
+        sim._sort_skip_next = False
+        sim.close()
