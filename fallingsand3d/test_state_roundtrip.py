@@ -50,6 +50,32 @@ SNAPPED = ("position", "velocity", "packed_info", "temperature", "health",
            "lifetime", "mass", "particle_dye")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _compiled_kernels():
+    """Compile the solver and rigid body kernels once per module.
+
+    conftest.py keeps the CuPy kernel cache in memory, so the first
+    Simulation in a pytest process compiles every module (about 20 s). Doing
+    it here keeps that one-time cost in setup, and each test's own time is
+    what the 10 s budget measures.
+    """
+    from simulation import Simulation
+    from world import World
+
+    world = World(20_000)
+    world.spawn_cube((-0.2, -0.2, -0.2), (0.2, 0.0, 0.2), WATER, 0.04)
+    sim = Simulation(world, dt=0.001, fixed_dt=True)
+    rbm = sim.rigid_body_manager
+    rbm.add_rigid_body_with_particles(
+        position=(0.0, 0.2, 0.0), half_extents=(0.05, 0.05, 0.05), mass=2.0,
+    )
+    rbm.finalize_boundary_data()
+    rbm.upload(sim.get_all_modules())
+    sim._sim_step(world._high_water)
+    cp.cuda.Device().synchronize()
+    sim.close()
+
+
 def _bits(a: np.ndarray) -> np.ndarray:
     """View as raw 32-bit words so the comparison is bit-exact (NaN, -0.0)."""
     return np.ascontiguousarray(a).view(np.uint32)
@@ -83,22 +109,32 @@ def _mixed_world():
     sand_lo = world._high_water
     world.spawn_cube((0.1, -0.3, -0.3), (0.3, -0.1, -0.1), SAND, 0.03)
     sand_hi = world._high_water
-    world.packed_info[sand_lo:sand_hi] |= cp.uint32(SLEEP_BIT)
     world.sleep_counter[sand_lo:sand_hi] = 200
     assert world.spawn_sphere((0.0, 0.3, 0.0), 0.01, WATER, 1) == 1
-    world.packed_info[world._high_water - 1] |= cp.uint32(SPAWN_FLAG)
+    spawned = world._high_water - 1
     world.spawn_cube((-0.3, -0.5, 0.1), (0.3, -0.44, 0.3), STONE, 0.03)
     world.kill_in_sphere((-0.15, -0.15, -0.15), 0.02)
     assert world.add_dead_reserve(64) == 64
 
     sim = Simulation(world, dt=0.001, fixed_dt=True)
-    # Non-trivial per-particle values in the fields load/restore must copy.
+    # Set the bits and non-trivial per-particle values on the host: each
+    # distinct CuPy expression is a fresh NVRTC compile under the in-memory
+    # cache, and host writes keep the test inside its time budget.
     n = world._high_water
-    world.temperature[:n] += cp.arange(n, dtype=cp.float32) * cp.float32(0.001)
-    world.lifetime[:n] = cp.arange(n, dtype=cp.float32) * cp.float32(0.01)
-    world.density[:n] = cp.float32(2500.0) + cp.arange(n, dtype=cp.float32)
-    world.particle_dye[:n, 0] = cp.float32(0.25)
-    world.velocity[:n, 1] = cp.float32(-0.5)
+    packed = world.packed_info[:n].get()
+    packed[sand_lo:sand_hi] |= np.uint32(SLEEP_BIT)
+    packed[spawned] |= np.uint32(SPAWN_FLAG)
+    world.packed_info[:n] = cp.asarray(packed)
+    ramp = np.arange(n, dtype=np.float32)
+    world.temperature[:n] = cp.asarray(world.temperature[:n].get() + ramp * np.float32(0.001))
+    world.lifetime[:n] = cp.asarray(ramp * np.float32(0.01))
+    world.density[:n] = cp.asarray(np.float32(2500.0) + ramp)
+    dye = world.particle_dye[:n].get()
+    dye[:, 0] = 0.25
+    world.particle_dye[:n] = cp.asarray(dye)
+    vel = world.velocity[:n].get()
+    vel[:, 1] = -0.5
+    world.velocity[:n] = cp.asarray(vel)
     return world, sim
 
 
@@ -127,13 +163,11 @@ def _scramble(world, sim, camera) -> None:
 def _assert_fresh_warm_start(world) -> None:
     """Loaded or restored slots start with no warm-start, sleep or spin state."""
     n = world._high_water
-    assert not bool(cp.any(world.kappa[:n] != 0))
-    assert not bool(cp.any(world.kappa_v[:n] != 0))
-    assert not bool(cp.any(world.sleep_counter[:n] != 0))
-    assert not bool(cp.any(world.angular_velocity[:n] != 0))
+    for k in ("kappa", "kappa_v", "sleep_counter", "angular_velocity"):
+        assert not np.any(getattr(world, k)[:n].get()), k
     assert np.array_equal(_bits(world.veleval[:n].get()), _bits(world.velocity[:n].get()))
     # Tail beyond the restored range holds no live particle.
-    assert not bool(cp.any(world.packed_info[n:] != 0))
+    assert not np.any(world.packed_info[n:].get())
 
 
 def _assert_color_matches_material(world) -> None:
@@ -289,6 +323,6 @@ def test_load_scene_with_rigid_bodies_steps(tmp_path, monkeypatch):
     mat = world.packed_info[:n].get() & 0xFF
     assert int(np.count_nonzero(mat == MAT_RIGID)) == nb
     assert np.all(mat[n_fluid:] == MAT_RIGID)
-    assert bool(cp.all(cp.isfinite(world.position[:n])))
-    assert bool(cp.all(cp.isfinite(world.velocity[:n])))
+    assert np.all(np.isfinite(world.position[:n].get()))
+    assert np.all(np.isfinite(world.velocity[:n].get()))
     assert np.all(np.isfinite(rbm.download_bodies()["position"]))
