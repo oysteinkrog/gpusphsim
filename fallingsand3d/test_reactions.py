@@ -896,6 +896,55 @@ def test_sand_wetting_is_graded_by_water_fraction():
     assert after(WET_SAND, w6) == MUD
 
 
+# ---------------------------------------------------------------------------
+# Latent heat: a phase change clamps temperature to the threshold
+# (bd-r5-review-n28.64)
+# ---------------------------------------------------------------------------
+
+def _temp_melt(mat_id: int) -> float:
+    return float(build_material_array()[mat_id]["temp_melt"])
+
+
+def test_ice_melt_clamps_temperature():
+    """ICE at 280 K becomes WATER at exactly 273 K (the excess is latent heat)."""
+    setup_params()
+    d = make_particles(1, ICE, STATIC, temp=280.0)
+    compute_reactions(**d)
+
+    pi = int(d["sorted_packed_info"].get()[0])
+    temp = float(d["sorted_temperature"].get()[0])
+    assert GET_MATERIAL_ID(pi) == WATER
+    assert temp == 273.0, f"expected 273.0 K after melting, got {temp}"
+
+
+def test_lava_solidify_clamps_temperature():
+    """LAVA 10 K below temp_melt becomes STONE at exactly temp_melt."""
+    setup_params()
+    t_melt = _temp_melt(LAVA)
+    d = make_particles(1, LAVA, FLUID, temp=t_melt - 10.0)
+    compute_reactions(**d)
+
+    pi = int(d["sorted_packed_info"].get()[0])
+    temp = float(d["sorted_temperature"].get()[0])
+    assert GET_MATERIAL_ID(pi) == STONE
+    assert temp == np.float32(t_melt), f"expected {t_melt} K after solidifying, got {temp}"
+
+
+def test_stone_and_sand_melt_clamp_temperature():
+    """STONE and SAND above their temp_melt become LAVA at exactly temp_melt."""
+    for mat_id, behavior in ((STONE, STATIC), (SAND, GRANULAR)):
+        setup_params()
+        t_melt = _temp_melt(mat_id)
+        d = make_particles(1, mat_id, behavior, temp=t_melt + 50.0)
+        compute_reactions(**d)
+
+        pi = int(d["sorted_packed_info"].get()[0])
+        temp = float(d["sorted_temperature"].get()[0])
+        assert GET_MATERIAL_ID(pi) == LAVA, f"mat {mat_id}: expected LAVA"
+        assert temp == np.float32(t_melt), (
+            f"mat {mat_id}: expected {t_melt} K after melting, got {temp}")
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,
@@ -934,6 +983,9 @@ if __name__ == "__main__":
         test_wood_next_to_dead_slot_gets_no_heat_exposure,
         test_stone_in_acid_survives_about_one_over_rate,
         test_sand_wetting_is_graded_by_water_fraction,
+        test_ice_melt_clamps_temperature,
+        test_lava_solidify_clamps_temperature,
+        test_stone_and_sand_melt_clamp_temperature,
     ]
 
     passed = 0

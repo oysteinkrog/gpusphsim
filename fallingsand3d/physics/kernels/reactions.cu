@@ -153,12 +153,16 @@ void K_Reactions(
     float dt = c_sim.dt;
 
     // ---- Phase transitions based on temperature ----
+    // Melt and solidify set temperature to the threshold: the excess above
+    // (or deficit below) it is taken as consumed latent heat.  The particle
+    // must then gain or lose heat again before any reverse transition
+    // (bd-r5-review-n28.64).  No per-particle latent-energy store.
 
     // ICE (mat=11, temp > 273K) -> WATER (in-place, small density ratio)
     if (mat_id == MAT_ICE && temp > ICE_MELT_TEMP) {
         pi = MAKE_PACKED(MAT_WATER, FLUID);
         packed_info[i] = pi;
-        temperature[i] = temp;
+        temperature[i] = ICE_MELT_TEMP;
         return;  // done with this particle
     }
 
@@ -166,7 +170,7 @@ void K_Reactions(
     if (mat_id == MAT_STONE && temp > c_materials[MAT_STONE].temp_melt) {
         pi = MAKE_PACKED(MAT_LAVA, FLUID);
         packed_info[i] = pi;
-        temperature[i] = temp;
+        temperature[i] = c_materials[MAT_STONE].temp_melt;
         return;
     }
 
@@ -174,7 +178,7 @@ void K_Reactions(
     if (mat_id == MAT_SAND && temp > c_materials[MAT_SAND].temp_melt) {
         pi = MAKE_PACKED(MAT_LAVA, FLUID);
         packed_info[i] = pi;
-        temperature[i] = temp;
+        temperature[i] = c_materials[MAT_SAND].temp_melt;
         return;
     }
 
@@ -182,7 +186,7 @@ void K_Reactions(
     if (mat_id == MAT_LAVA && temp < c_materials[MAT_LAVA].temp_melt) {
         pi = MAKE_PACKED(MAT_STONE, STATIC);
         packed_info[i] = pi;
-        temperature[i] = temp;
+        temperature[i] = c_materials[MAT_LAVA].temp_melt;
         return;
     }
 
