@@ -605,7 +605,7 @@ def test_death_without_mass_buffer_still_works():
 
 
 def _boundary_push(neighbor_packed: int) -> tuple:
-    """Integrate one FLUID particle 0.5h from one STATIC neighbour with mass 0.02.
+    """Integrate one FLUID particle 0.3h from one STATIC neighbour with mass 0.02.
     Return the fluid particle's (position, velocity) after one K_Integrate."""
     import integrate as integ
     from grid_params import build_grid_params, CELL_SIZE, TABLE_MASK
@@ -624,7 +624,7 @@ def _boundary_push(neighbor_packed: int) -> tuple:
 
     # Both particles in the same grid cell; the fluid moves toward the neighbour.
     pos = np.array([[0.005, 0.005, 0.005, 1.0],
-                    [0.005 + 0.5 * H, 0.005, 0.005, 1.0]], dtype=np.float32)
+                    [0.005 + 0.3 * H, 0.005, 0.005, 1.0]], dtype=np.float32)
     vel = np.array([[0.1, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
     cell = np.floor((pos[0, :3] + 1.0) / float(CELL_SIZE)).astype(np.int64)
     assert np.array_equal(cell, np.floor((pos[1, :3] + 1.0) / float(CELL_SIZE)).astype(np.int64))
@@ -654,9 +654,10 @@ def _boundary_push(neighbor_packed: int) -> tuple:
 
 
 def test_static_boundary_skips_dead_slot():
-    """A MAT_DEAD/STATIC neighbour with mass 0.02 at 0.5h gives zero push and
+    """A MAT_DEAD/STATIC neighbour with mass 0.02 at 0.3h gives zero push and
     no velocity reflection. A STONE neighbour at the same place does push
-    (control, proves the test reaches static_particle_boundary)."""
+    (control, proves the test reaches static_particle_boundary). The push band
+    is 0.5h (bd-r5-review-n28.43), so the neighbour sits inside it."""
     p_dead, v_dead, p0, v0 = _boundary_push(MAKE_PACKED(DEAD, STATIC))
     free_pos = p0 + DT * v0
     assert np.allclose(p_dead, free_pos, atol=1e-6), f"dead slot pushed fluid: {p_dead} vs {free_pos}"
