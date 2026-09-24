@@ -149,6 +149,21 @@ a_pressure = pressure_precalc * f_pressure
 Sign: pressure_precalc is positive (+45/...), absorbing the double negative from
 -1 * C_spiky (where C_spiky = -45/...). Net effect: positive pressure = repulsion.
 
+**Output scale per pair (bd-r5-review-n28.41).** Step2 multiplies particle i's sums by
+`fs_i` (1.0 for GRANULAR, `force_scale` = 0.02 for FLUID and GAS). A same-behaviour pair
+therefore gets the same scale on both sides. A FLUID-GRANULAR pair uses one scale on both
+sides:
+```
+fs_cross = min(fs_FLUID, fs_GRANULAR) = force_scale
+a_pressure_i += fs_cross * pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_var
+```
+The kernel multiplies the cross term by `fs_cross / fs_i` in the loop, so the final `fs_i`
+leaves exactly `fs_cross`. Then `m_i a_i = -m_j a_j` for every pair, and a water-sand
+interface conserves momentum. `min` (not the geometric mean 0.141) is used so that sand
+under water feels the same pressure acceleration as the water it displaces: at hydrostatic
+balance its upward push is about |g|, not 7x or 50x |g|
+(`test_cross_force_scale.py::test_submerged_sand_not_ejected`, ratio sand/water = 1.0).
+
 **Source**: `step2.cu:315-321` (accumulation), `step2.cu:379-390` (PostCalc)
 
 ### 3.3 Viscosity Force
@@ -168,6 +183,17 @@ kinematic-like coefficients, not physical dynamic viscosities in Pa*s.
 This choice is coupled with `force_scale=0.02` which globally scales all FLUID SPH
 forces. Changing to the dynamic form `/ (rho_i * rho_j)` requires simultaneously
 retuning `force_scale` and all per-material `base_viscosity` values.
+
+**FLUID-GRANULAR pairs: one dynamic form on both sides (bd-r5-review-n28.41)**
+```
+mu_F    = force_scale * base_viscosity_F * rho0_F     [FLUID effective value, WATER = 50]
+mu_G    = mu (step1 `viscosity`, 1.0 in the app)       [same value as viscosity_precalc]
+mu_pair = 2 * mu_F * mu_G / (mu_F + mu_G)              [WATER-SAND: 1.96]
+a_visc += mu_pair * [45/(pi*h^6)] * m_j * (v_j - v_i) / (rho_i * rho_j) * (h - |r|)
+```
+F is whichever particle of the pair is FLUID. This term already carries its scale, so the
+kernel divides it by `fs_i` before the final multiply. It is symmetric in i and j, so
+viscous forces between water and sand are equal and opposite.
 
 **GRANULAR-GRANULAR: Dynamic viscosity form (divides by rho_i * rho_j)**
 ```
@@ -189,8 +215,8 @@ GRANULAR i:   a_visc += mu0 * [45/(pi*h^6)] * m_b * (v_b - v_i) / (rho_i * rho0_
 GRANULAR uses the same dynamic form as its pair code, with the boundary density taken as
 the rest density `rho0_i` of i's own material (Akinci mirror: the wall stands in for more
 sand). It does not read the STATIC particle's own density. The drag rate per boundary
-neighbour therefore equals a GRANULAR-nonGRANULAR pair with mu0 at rest density
-(checked by `test_step2.py::test_granular_static_drag_matches_pair` and
+neighbour therefore equals the FLUID-GRANULAR pair drag at rest density rescaled from
+mu_pair to mu0 (checked by `test_step2.py::test_granular_static_drag_matches_pair` and
 `test_granular_rigid_drag_matches_pair`). At h=0.04, m=0.02, rho0_sand=4000 and
 r=h/2 this is about 0.12 1/s per neighbour, well inside the explicit limit and far
 below `ACCEL_MAX_GRANULAR = 200`.
@@ -438,7 +464,8 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | epsilon (XSPH) | 0.8 (WCSPH profile `xsph_epsilon`) | 0.5 | Higher for smoother FLUID advection |
 | gravity | -4.0 | -9.8 | Reduced for miniature-world aesthetic |
 | dt | adaptive | 0.001 (fixed) | DT_MAX * accuracy / 0.4, capped by acoustic and viscous CFL, in [1e-5, 0.001] (see 4.2) |
-| force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention |
+| force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention. FLUID and GAS pairs; GRANULAR pairs use 1.0 |
+| FLUID-GRANULAR pair scale | pressure: force_scale; viscosity: harmonic mean of force_scale*base_viscosity*rho0 and mu | N/A | Same value on both sides, so pair forces are antisymmetric (3.2, 3.3) |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
 | integrate | accel = sph + g | accel = sph + g | Both treat step2 output as acceleration |
 | position update | FLUID: pos += veleval_xsph * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
@@ -490,6 +517,9 @@ With m_j = 0.02 (matching parent) and force_scale = 0.02 (matching parent's `out
 Effective SPH scaling = m_j * force_scale = 0.02 * 0.02 = 0.0004
 Parent SPH scaling    = m_j * m_j         = 0.02 * 0.02 = 0.0004  (identical)
 ```
+
+This holds for FLUID and GAS pairs. GRANULAR pairs use scale 1.0, and FLUID-GRANULAR
+pairs use one shared value on both sides (3.2, 3.3).
 
 ### 7.3 Why mass = 0.02 and rest_density = 2500
 
@@ -916,8 +946,8 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 **Design decisions (Phase 6, intentionally kept):**
 - I1: XSPH pre-integration lag (standard Euler, <0.008s lag)
 - I3: Grid reuse: WCSPH (0.25*h threshold, 4-frame cap), PBF/DFSPH (0.15*h threshold, 2-frame cap)
-- F1: force_scale=0.02 (co-adapted WCSPH convention)
-- F2: WCSPH viscosity convention (force_scale absorbs 1/rho for FLUID)
+- F1: force_scale=0.02 (co-adapted WCSPH convention). It applies per pair: FLUID-GRANULAR pairs use force_scale on both sides (3.2)
+- F2: WCSPH viscosity convention (force_scale absorbs 1/rho for FLUID-FLUID). FLUID-GRANULAR pairs use the symmetric dynamic form of 3.3
 - F3: Tait EOS for mu(I) (lithostatic needs expensive column height)
 - G4: Surface tension is "surface normal cohesion" (not full Akinci model)
 - J10: Sorted array transitions handled by per-particle branching (safe invariant)
