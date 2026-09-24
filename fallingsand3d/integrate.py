@@ -384,6 +384,9 @@ def update_boundary_particles(
     mass_out: cupy.ndarray,
     offset: int,
     num_boundary: int,
+    anchor: "Optional[cupy.ndarray]" = None,
+    max_displacement: "Optional[cupy.ndarray]" = None,
+    reset_anchor: bool = False,
 ) -> None:
     """Launch K_UpdateBoundaryParticles: transform local -> world positions.
 
@@ -406,9 +409,22 @@ def update_boundary_particles(
         Start index in main arrays for boundary particles.
     num_boundary : int
         Number of boundary particles.
+    anchor : cupy.ndarray, (N, 4) float32, optional
+        Each boundary particle's position at the last full sort. With
+        max_displacement it lets grid reuse see rigid body motion
+        (bd-r5-review-n28.65). None turns tracking off.
+    max_displacement : cupy.ndarray, (1,) uint32, optional
+        Grid-reuse drift tracker (world.max_displacement). The kernel
+        atomicMaxes |x - anchor|^2 into it on gather-only substeps.
+    reset_anchor : bool
+        True when this substep runs a full sort: the kernel stores the new
+        positions as the anchor and records no drift.
     """
     if num_boundary <= 0:
         return
+    track = anchor is not None and max_displacement is not None
+    anchor_ptr = anchor if track else np.intp(0)
+    max_disp_ptr = max_displacement if track else np.intp(0)
 
     module = _get_module()
     kernel = module.get_function("K_UpdateBoundaryParticles")
@@ -426,5 +442,8 @@ def update_boundary_particles(
             mass_out,
             np.int32(offset),
             np.int32(num_boundary),
+            anchor_ptr,
+            max_disp_ptr,
+            np.int32(1 if reset_anchor else 0),
         ),
     )

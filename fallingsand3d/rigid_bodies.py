@@ -370,6 +370,13 @@ class RigidBodyManager:
         # Combined boundary particle data (set after all bodies added)
         # Columns: x_local, y_local, z_local, psi, body_id, nx, ny, nz
         self.boundary_data = None  # cupy (N, 8) float32
+        # Grid-reuse drift anchor (bd-r5-review-n28.65): each boundary
+        # particle's position at the last full sort, written by
+        # K_UpdateBoundaryParticles. boundary_anchor_valid is False until a
+        # full-sort substep has written it after the block was (re)built;
+        # Simulation forces a full sort while it is False.
+        self.boundary_anchor = None  # cupy (N, 4) float32
+        self.boundary_anchor_valid: bool = False
         # One-shot injection state (bd-r5-review-n28.22). This flag is the single
         # source of truth for "the boundary block exists in the world arrays".
         # inject_boundary_particles() sets it; reset() and mark_for_reinjection()
@@ -414,6 +421,7 @@ class RigidBodyManager:
         self._boundary_injected = False
         self.boundary_offset = -1
         self.boundary_dropped = False
+        self.boundary_anchor_valid = False
         # The block leaves _high_water accounting until it is injected again.
         self._set_reserved_tail(self.num_boundary_particles)
 
@@ -470,14 +478,17 @@ class RigidBodyManager:
 
     def finalize_boundary_data(self) -> None:
         """Combine all per-body boundary data into a single GPU array."""
+        self.boundary_anchor_valid = False
         if not self._boundary_data_list:
             self.boundary_data = None
+            self.boundary_anchor = None
             self.num_boundary_particles = 0
             self._set_reserved_tail(0)
             return
         combined = np.concatenate(self._boundary_data_list, axis=0)
         self.boundary_data = cupy.asarray(combined)
         self.num_boundary_particles = len(combined)
+        self.boundary_anchor = cupy.zeros((len(combined), 4), dtype=cupy.float32)
         # Keep room for the block until inject_boundary_particles() puts it
         # inside _high_water (bd-r5-review-n28.58).
         if not self._boundary_injected:
@@ -625,6 +636,7 @@ class RigidBodyManager:
         )
         self._boundary_injected = True
         self.boundary_offset = -1
+        self.boundary_anchor_valid = False
 
         from materials import MAT_RIGID, STATIC
 
@@ -747,6 +759,8 @@ class RigidBodyManager:
         self._build_params = []
         self.num_boundary_particles = 0
         self.boundary_data = None
+        self.boundary_anchor = None
+        self.boundary_anchor_valid = False
         self.d_rigid_bodies.fill(0)
         self.rigid_forces.fill(0)
         self.rigid_torques.fill(0)

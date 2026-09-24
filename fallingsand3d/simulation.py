@@ -622,6 +622,12 @@ class Simulation:
         substep then runs K_UpdateBoundaryParticles at the stored offset, so
         positions, velocities and psi come from the current GPU body state.
 
+        The kernel also feeds the boundary drift since the last full sort into
+        world.max_displacement, so a moving body forces a full sort the same
+        way moving fluid does (bd-r5-review-n28.65). On a substep that runs a
+        full sort it writes the anchor instead. Until the anchor has been
+        written for the current block this substep is made a full sort.
+
         Returns world._high_water (the new n when injection grew the range).
         """
         rbm = self.rigid_body_manager
@@ -629,6 +635,12 @@ class Simulation:
         if not rbm.boundary_injected:
             rbm.inject_boundary_particles(w)
         if rbm.boundary_offset >= 0:
+            full_sort = self._next_setup_is_full_sort(w._high_water)
+            if not full_sort and not rbm.boundary_anchor_valid:
+                # No anchor for this block yet: drift is unknown, so sort.
+                self._sort_skip_next = False
+                self._sort_skip_consecutive = 0
+                full_sort = True
             integrate.update_boundary_particles(
                 rbm.boundary_data,
                 rbm.d_rigid_bodies,
@@ -637,8 +649,22 @@ class Simulation:
                 w.mass,
                 offset=rbm.boundary_offset,
                 num_boundary=rbm.num_boundary_particles,
+                anchor=rbm.boundary_anchor,
+                max_displacement=w.max_displacement,
+                reset_anchor=full_sort,
             )
+            if full_sort:
+                rbm.boundary_anchor_valid = True
         return w._high_water
+
+    def _next_setup_is_full_sort(self, n: int) -> bool:
+        """True when the next _run_grid_setup(n) will run a full sort.
+
+        Mirrors its branch: a full sort unless the skip flag is set and n
+        still matches the last full sort. Host-only, no device sync.
+        """
+        return (not self._sort_skip_next
+                or n != getattr(self, '_last_full_sort_n', -1))
 
     def reset_scene_objects(self) -> None:
         """Remove all SDF objects and rigid bodies (bd-r5-review-n28.39).
@@ -1483,8 +1509,7 @@ class Simulation:
         flag is set and n still matches the last full sort. Host-only, so it
         also holds for graph replays.
         """
-        full_sort = (not self._sort_skip_next
-                     or n != getattr(self, '_last_full_sort_n', -1))
+        full_sort = self._next_setup_is_full_sort(n)
         self._substeps_since_sort = 1 if full_sort else self._substeps_since_sort + 1
         self._frame_substeps += 1
 

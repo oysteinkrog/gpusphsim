@@ -798,6 +798,16 @@ void K_RigidBodyCollisions(
  * viscous coupling with fluid.
  *
  * Runs AFTER K_IntegrateRigidBodies, BEFORE hash/sort for next substep.
+ *
+ * Grid-reuse drift (bd-r5-review-n28.65): boundary particles are STATIC, so
+ * K_Integrate and the PBF/DFSPH finalize kernels never record their motion.
+ * This kernel records it instead. anchor[i] holds boundary particle i's
+ * position at the last full sort. On a substep that runs a full sort the host
+ * passes reset_anchor = 1: the kernel stores the new position as the anchor
+ * and records nothing (the full sort clears max_displacement anyway). On a
+ * gather-only substep it atomicMaxes |x - anchor|^2 into max_displacement, so
+ * a moving body forces a full sort just like moving fluid. NULL anchor or
+ * NULL max_displacement: no tracking.
  * ====================================================================== */
 
 extern "C" __global__
@@ -808,7 +818,10 @@ void K_UpdateBoundaryParticles(
     float4*         __restrict__ velocity_out,    // main unsorted velocity array
     float*          __restrict__ mass_out,         // main unsorted mass array
     int             offset,                        // start index in main arrays
-    int             N                              // number of boundary particles
+    int             N,                             // number of boundary particles
+    float4*         __restrict__ anchor,           // [N] position at the last full sort, or NULL
+    uint*           __restrict__ max_displacement_out, // [1] atomicMax of drift^2 (float-as-uint), or NULL
+    int             reset_anchor                   // 1: this substep runs a full sort
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
@@ -842,4 +855,18 @@ void K_UpdateBoundaryParticles(
     position_out[idx] = make_float4(pos.x, pos.y, pos.z, 0.0f);
     velocity_out[idx] = make_float4(vel.x, vel.y, vel.z, 0.0f);
     mass_out[idx] = psi;  // boundary volume as mass
+
+    // Grid-reuse drift since the last full sort (see header).
+    if (anchor && max_displacement_out) {
+        if (reset_anchor) {
+            anchor[i] = make_float4(pos.x, pos.y, pos.z, 0.0f);
+        } else {
+            const float4 a = anchor[i];
+            const float dx = pos.x - a.x;
+            const float dy = pos.y - a.y;
+            const float dz = pos.z - a.z;
+            const float disp_sq = dx * dx + dy * dy + dz * dz;
+            atomicMax(max_displacement_out, __float_as_uint(disp_sq));
+        }
+    }
 }
