@@ -523,10 +523,11 @@ class RigidBodyManager:
             CuPy RawModule objects to upload c_num_rigid_bodies count to.
         """
         # Copy body data to device global memory
+        # CuPy 13 cannot cupy.asarray() a structured dtype ("Unsupported
+        # dtype"), so copy the raw 96-byte structs straight into device memory.
         if self._num_bodies > 0:
-            self.d_rigid_bodies[:self._num_bodies] = cupy.asarray(
-                self._bodies_cpu[:self._num_bodies]
-            )
+            src = np.ascontiguousarray(self._bodies_cpu[:self._num_bodies])
+            self.d_rigid_bodies.data.copy_from_host(src.ctypes.data, src.nbytes)
 
         # Upload count to constant memory in all modules
         h_count = np.array([self._num_bodies], dtype=np.int32)
