@@ -987,9 +987,13 @@ class Simulation:
 
         # Implicit surface tension (WCSPH only, quality mode for < 100K particles)
         if self.ist_enabled and n < self._IST_MAX_PARTICLES:
+            # No-op after the substep prologue; covers direct body calls.
+            w.ensure_ist_scratch(self._IST_MAX_PARTICLES)
             result = implicit_st.run_implicit_st(
                 w.sorted_velocity[:n],
-                w.sorted_veleval[:n],  # reuse veleval as scratch (overwritten by integrate anyway)
+                # Own scratch: sorted_veleval holds the step2 XSPH velocity
+                # that integrate reads, so IST must not overwrite it.
+                w.sorted_ist_scratch[:n],
                 w.sorted_position[:n],
                 w.sorted_density[:n],
                 w.sorted_mass[:n],
@@ -999,7 +1003,7 @@ class Simulation:
                 self._cell_end,
                 num_iterations=self.ist_iterations,
             )
-            # If result ended up in veleval (odd iteration count), copy back to velocity
+            # If result ended up in the scratch (odd iteration count), copy back to velocity
             if result.data.ptr != w.sorted_velocity[:n].data.ptr:
                 w.sorted_velocity[:n] = result
             mark("ist")
@@ -1492,6 +1496,11 @@ class Simulation:
 
         # --- Spawn velocity damping ramp ---
         self._apply_damping_ramp()
+
+        # IST scratch is allocated here, outside the graph body, so a graph
+        # capture never allocates (bd-r5-review-n28.56).
+        if self.ist_enabled:
+            self.world.ensure_ist_scratch(self._IST_MAX_PARTICLES)
 
         # --- Rigid body: update boundary particles in unsorted arrays ---
         rbm = self.rigid_body_manager

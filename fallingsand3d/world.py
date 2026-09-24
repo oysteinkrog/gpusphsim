@@ -270,6 +270,7 @@ class World:
         'delta_position', 'sorted_delta_position',
         'sorted_pressure_normal',
         'alpha_dfsph', 'sorted_alpha_dfsph',
+        'sorted_ist_scratch',
     )
 
     def _needs_alloc(self, *names: str) -> bool:
@@ -307,6 +308,19 @@ class World:
         if self._needs_alloc('alpha_dfsph', 'sorted_alpha_dfsph'):
             self.alpha_dfsph = cp.zeros(n, dtype=cp.float32)
             self.sorted_alpha_dfsph = cp.zeros(n, dtype=cp.float32)
+
+    def ensure_ist_scratch(self, size: int) -> None:
+        """Lazily allocate the implicit surface tension ping-pong buffer.
+
+        IST needs its own float4 scratch so it does not overwrite
+        sorted_veleval, which holds the step2 XSPH advection velocity that
+        K_Integrate reads (bd-r5-review-n28.56). Sized to
+        min(size, max_particles); host-only check, no device sync.
+        """
+        n = min(int(size), self.max_particles)
+        arr = getattr(self, 'sorted_ist_scratch', None)
+        if arr is None or arr.shape[0] != n:
+            self.sorted_ist_scratch = cp.zeros((n, 4), dtype=cp.float32)
 
     def resize(self, new_max: int) -> None:
         """Reallocate all arrays for a new max_particles. Kills all particles.
