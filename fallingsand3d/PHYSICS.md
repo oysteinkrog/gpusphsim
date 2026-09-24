@@ -3334,8 +3334,9 @@ velocity 0.5 m/s reaches 0.046 m/s after 100 substeps (0 before); a 6 cm WATER
 layer on a plate moving at 0.5 m/s reaches 0.126 m/s mean after 60 substeps; a
 free 6 cm sphere spinning at 5 rad/s drops to 0.64 rad/s after 200 substeps
 (4.33 rad/s before, 4.60 from body damping alone); with zero gravity the fluid
-momentum gain equals minus the body impulse. A kinematic body is not moved by
-K_IntegrateRigidBodies, so its velocity acts as a moving surface in place.
+momentum gain equals minus the body impulse. A kinematic body moves with its
+lin_vel (22.7), so these tests reset its position after every step to get a
+moving surface on a body that stays put, like a conveyor belt.
 
 The reaction is taken before the per-particle clamps (PBF `|dx| <= 0.5h`, DFSPH
 `|dv_div| <= h/dt`, `|a_press| <= h/dt^2` and the velocity limit). When a clamp
@@ -3389,6 +3390,18 @@ q = normalize(q)
 ```
 
 Velocity damping: linear 1-0.01*dt, angular 1-0.05*dt. Angular velocity clamped to 20 rad/s. Force clamped to 1000*mass.
+
+**Kinematic bodies (bd-r5-review-n28.105)**: a body with `is_kinematic` (or
+`inv_mass <= 0`) skips gravity, fluid force and torque, damping, the clamps and
+the world-wall bounce, but its pose still advances every substep with the same
+update: `x += v * dt` and `q += 0.5 * dt * (0, omega) * q` from the stored
+`lin_vel` and `ang_vel`. The velocities stay as set. The boundary particles and
+the fluid coupling use `lin_vel` as the surface velocity, so the body now moves
+at the velocity the fluid sees. A kinematic body with `lin_vel = (1, 0, 0)`
+moves 1 m in 1 s (`test_integrate.py::test_kinematic_body_moves_with_its_velocity`).
+The force and torque accumulators are not cleared by the kernel for a kinematic
+body, so the fluid reaction stays readable until the next substep prologue
+clears them. Rigid-rigid collision still skips kinematic bodies as movers.
 
 **Box inverse inertia (bd-mzc.24)**: For a box with half-extents `(hx, hy, hz)` and mass `m`,
 the body-frame principal moments use divisor **3** (not 12):
