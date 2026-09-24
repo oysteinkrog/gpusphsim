@@ -442,11 +442,28 @@ Child:   effective_accel = m * precalc * SUM(press_sym * grad) + gravity
 accel = sph_force + gravity                    [sph_force is acceleration]
 ```
 
-For GAS: `accel.y += 0.01 * (T - 293) * 9.81`  (buoyancy)
+For GAS (ideal-gas buoyancy along the live gravity vector `g = c_sim.gravity`):
+```
+accel += -g * (T / T_amb + buoyancy_extra)
+net   = -g * ((T - T_amb) / T_amb + buoyancy_extra)     [with the +g already in accel]
+```
+- `T_amb = GAS_AMBIENT_TEMP = 293 K`; `buoyancy_extra` is per material
+  (STEAM 0.01, SMOKE 0.005, FIRE 0.02).
+- Archimedes for a gas parcel in ambient air: the air pushes back with
+  `-g * rho_air / rho_gas = -g * T / T_amb`. Gas at `T_amb` is weightless apart
+  from `buoyancy_extra`; hot gas moves against gravity, whatever its sign or direction.
+- Examples at `g = (0, -4, 0)`: STEAM at 373 K nets +1.13 m/s^2; FIRE at 1200 K
+  nets +12.5 m/s^2, and with `GAS_DRAG_COEFF = 2/s` its terminal speed is about
+  6.2 m/s (well under the velocity clamp). STEAM rises at `g = -9.81` too.
+- Same formula in all three solvers: `gas_buoyancy_accel()` in `sph_shared.cuh`,
+  used by `K_Integrate` (WCSPH), `K_PBF_Predict` and `K_DFSPH_NonPressureForces`.
+
+For FLUID with `thermal_expansion > 0`: Boussinesq term `-g * beta * (T - T_amb)`
+(see section 14).
 
 Clamped: `|accel| <= 200 m/s^2`
 
-**Source**: `integrate.cu:196-206`
+**Source**: `integrate.cu` (K_Integrate acceleration block), `sph_shared.cuh:gas_buoyancy_accel`
 
 ### 4.2 Velocity Update
 
@@ -2482,22 +2499,23 @@ asleep; now none are. Dam Break COM_y is unchanged (-0.603).
 
 ### 14.1 Formula
 
-For FLUID particles with non-zero `thermal_expansion` (β):
+For FLUID particles with non-zero `thermal_expansion` (β), along the live gravity
+vector `g = c_sim.gravity`:
 ```
-a_buoy_y = +β * (T - T_ambient) * g
+a_buoy = -g * β * (T - T_ambient)
 ```
 
 Where:
 - β = `c_materials[mat_id].thermal_expansion` (1/K)
 - T_ambient = 293 K
-- g = 9.81 m/s²
+- g = `c_sim.gravity` (default (0, -4, 0), UI slider -20 to 5 on y)
 
 From the Boussinesq approximation: `ρ_eff = ρ_0 * (1 - β*(T-T_0))`.
-Hot fluid (T > T_0) has lower effective density → buoyancy force pushes it upward.
-With gravity pointing down (negative y), the buoyancy acceleration is upward (positive y)
-when T > T_ambient. The formula `accel.y += β * (T - T_ambient) * 9.81` achieves this:
-- T > 293: positive contribution → upward (hot rises)
-- T < 293: negative contribution → downward (cold sinks)
+Hot fluid (T > T_0) has lower effective density, so it moves against gravity;
+cold fluid (T < T_0) moves with it. The size scales with |g|, and the direction
+follows the gravity vector, including a flipped sign.
+
+Code: `boussinesq_accel(temp, beta)` in `sph_shared.cuh`.
 
 ### 14.2 Material Properties
 
@@ -2512,10 +2530,10 @@ when T > T_ambient. The formula `accel.y += β * (T - T_ambient) * 9.81` achieve
 ### 14.3 Solver Support
 
 - **WCSPH**: Applied in `K_Integrate` after gravity
-- **PBF**: Applied in `K_PBF_Finalize` as velocity correction (v += β*(T-T₀)*g*dt)
+- **PBF**: Applied in `K_PBF_Predict` as a velocity term (v* += a_buoy*dt), once per substep
 - **DFSPH**: Applied in `K_DFSPH_NonPressureForces` alongside gravity
 
-**Source**: `integrate.cu`, `pbf_solver.cu:K_PBF_Finalize`, `dfsph_solver.cu:K_DFSPH_NonPressureForces`
+**Source**: `integrate.cu`, `pbf_solver.cu:K_PBF_Predict`, `dfsph_solver.cu:K_DFSPH_NonPressureForces`
 
 ---
 
