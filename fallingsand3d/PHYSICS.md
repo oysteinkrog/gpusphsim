@@ -2464,9 +2464,18 @@ Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
 - `World.compact()` moves `boundary_offset` to the number of alive slots below
   it (the gather keeps order, so the block stays contiguous). If any block slot
   is dead, it calls `mark_for_reinjection()` instead.
-- Scene load, undo and R reset call `mark_for_reinjection()`. `save_scene()`
+- Scene load and undo call `mark_for_reinjection()`. `save_scene()`
   does not write MAT_RIGID particles, and `load_scene()` drops any it finds.
   The block is rebuilt from the body state on the next substep.
+- Undo snapshots also hold the GPU rigid body array and the body count
+  (`snapshot.py`). Restore copies the array back, reads it once into the CPU
+  body list and re-uploads the count, so the block is rebuilt at the restored
+  poses. If the body count changed since capture, the rigid state is not
+  restored and a warning is printed.
+- The R key, the solver switch and preset load call
+  `Simulation.reset_scene_objects()`. It clears SDF objects, calls
+  `rbm.reset()` and uploads a body count of 0. The default scene that R and
+  the solver switch spawn has no rigid bodies.
 - Boundary particles are drawn, because they sit inside `_high_water`.
 
 **Source**: `integrate.cu:K_UpdateBoundaryParticles`, `rigid_bodies.py:inject_boundary_particles`,
