@@ -498,7 +498,7 @@ void K_PBF_ComputeLambda(
 /* ======================================================================
  * K_PBF_ComputeDelta -- Position correction + artificial pressure
  *   s_corr = -k * (W(r) / W(dq*h))^n
- *   dx_i = (1/rho0) SUM_j (lambda_i + lambda_j + s_corr) * gradW_spiky
+ *   dx_i = SUM_j m_j (lambda_i/rho0_i + lambda_j/rho0_j + s_corr/rho0_i) * gradW_spiky
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -607,12 +607,22 @@ void K_PBF_ComputeDelta(
                     // STATIC boundary: stronger one-way repulsion.
                     // Mirror lambda_i (Akinci-style) so boundary pushes fluid out
                     // with strength proportional to the fluid's own compression.
+                    // lambda_j belongs to C_j = rho_j / rho0_j - 1, so it
+                    // scales by 1/rho0_j, not 1/rho0_i. Written as
+                    // lambda_j * (rho0_i / rho0_j) inside the / rho0_i form.
+                    // The mirror uses rho0_i for both terms. Same rest density
+                    // keeps the ratio at exactly 1, so same-material pairs
+                    // give bitwise the same delta as before.
                     float lambda_eff_j = lambda_j;
                     if (bj_delta == STATIC) {
                         lambda_eff_j = lambda_i;  // mirror fluid's own lambda
+                    } else {
+                        float rho0_j = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, 1.0f);
+                        if (rho0_j != rho0) lambda_eff_j = lambda_j * (rho0 / rho0_j);
                     }
 
-                    // Mass-weighted: dp = (m_j/rho0) * (l_i+l_j+s) * gradW
+                    // Mass-weighted: dp = m_j * (l_i/rho0_i + l_j/rho0_j + s/rho0_i) * gradW.
+                    // m_i*dp_i + m_j*dp_j = 0 per pair (s_corr aside), for any masses.
                     float coeff = m_j * (lambda_i + lambda_eff_j + s_corr) / rho0;
                     delta.x += coeff * gW.x;
                     delta.y += coeff * gW.y;
