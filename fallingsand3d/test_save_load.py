@@ -872,3 +872,104 @@ def test_load_scene_rebuilds_color(tmp_path, monkeypatch) -> None:
     w_by_mat = {m: set(got[(packed & 0xFF) == m, 3].tolist()) for m in (WATER, SAND, STONE)}
     assert w_by_mat == {WATER: {0.0}, SAND: {0.25}, STONE: {0.75}}
 
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.117: load switches to the saved solver; colour round trip
+# ---------------------------------------------------------------------------
+
+class _SwitchingStubSim(_StubSim):
+    """_StubSim that records solver switches."""
+
+    def __init__(self, name: str = "WCSPH") -> None:
+        super().__init__()
+        self._profile = types_ns(name=name)
+        self.switches = []
+
+    def set_solver_profile(self, profile) -> None:
+        self.switches.append(profile.name)
+        self._profile = profile
+
+
+def _arrays_with_solver(n: int, solver) -> dict:
+    arrays = _valid_arrays(n)
+    header = json.loads(arrays["header"].tobytes())
+    if solver is not None:
+        header["solver"] = solver
+    arrays["header"] = np.frombuffer(json.dumps(header).encode(), dtype=np.uint8)
+    return arrays
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+@pytest.mark.parametrize("saved,active,switches,warned", [
+    ("DFSPH", "WCSPH", ["DFSPH"], False),
+    ("WCSPH", "WCSPH", [], False),
+    (None, "PBF", [], False),
+    ("NoSuchSolver", "WCSPH", [], True),
+])
+def test_load_switches_solver_by_header(tmp_path, monkeypatch, saved, active,
+                                        switches, warned) -> None:
+    import save_load as sl
+    from world import World
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    _write_npz(str(tmp_path / "s.fs3d"), _arrays_with_solver(8, saved))
+    sim = _SwitchingStubSim(active)
+    report = {}
+    assert sl.load_scene(World(1_000), sim, _stub_camera(), "s.fs3d", report) == 8
+    assert sim.switches == switches
+    assert any("unknown solver" in w for w in report["warnings"]) == warned
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_load_dfsph_save_under_wcsph_runs_dfsph(tmp_path, monkeypatch) -> None:
+    """A DFSPH save loaded while WCSPH is active switches the real Simulation."""
+    import cupy as cp
+    import save_load as sl
+    from materials import WATER
+    from simulation import Simulation
+    from solver_profiles import PROFILES, SolverType
+    from world import World
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    world = World(20_000)
+    world.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.0, 0.1), WATER, 0.02)
+    n = world._high_water
+    sim = Simulation(world, dt=0.001, fixed_dt=True)
+    sim.set_solver_profile(PROFILES["DFSPH"])
+    sl.save_scene(world, sim, _stub_camera(), "dfsph")
+
+    sim.set_solver_profile(PROFILES["WCSPH"])
+    assert sim._profile.solver_type == SolverType.WCSPH
+    assert sl.load_scene(world, sim, _stub_camera(), "dfsph") == n
+    assert sim._profile.name == "DFSPH"
+    assert sim._profile.solver_type == SolverType.DFSPH
+    assert sim.dt == PROFILES["DFSPH"].dt
+    assert world.kappa is not None and world.kappa_v is not None
+    sim._sim_step(world._high_water)
+    cp.cuda.Device().synchronize()
+    assert np.all(np.isfinite(world.position[:n].get()))
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_color_round_trip_through_save(tmp_path, monkeypatch) -> None:
+    """Colours after load equal the colours the world had when saved."""
+    import cupy as cp
+    import save_load as sl
+    from materials import SAND, STONE, WATER
+    from world import World
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    sim, cam = _StubSim(), _stub_camera()
+    world = World(20_000)
+    for i, mat in enumerate((WATER, SAND, STONE)):
+        x = -0.3 + 0.25 * i
+        world.spawn_cube((x, -0.05, -0.05), (x + 0.1, 0.05, 0.05), mat, 0.02)
+    n = world._high_water
+    before = world.color[:n].get()
+    sl.save_scene(world, sim, cam, "rt")
+
+    world.color[:] = 9.0
+    assert sl.load_scene(world, sim, cam, "rt") == n
+    cp.cuda.Device().synchronize()
+    np.testing.assert_allclose(world.color[:n].get(), before, rtol=0, atol=1e-7)
