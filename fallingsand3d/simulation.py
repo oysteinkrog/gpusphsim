@@ -698,6 +698,17 @@ class Simulation:
         if n != getattr(self, '_last_full_sort_n', -1):
             force_sort = True
 
+        # PBF never reads the DFSPH warm-start state (kappa, kappa_v) or any FP16
+        # mirror (velocity, temperature, dye), so the reorder skips them. The pointer set depends only
+        # on the solver, and a solver switch resets and recaptures the CUDA graph,
+        # so a captured graph always sees one fixed set (bd-r5-review-n28.45).
+        is_pbf = self._profile.solver_type == SolverType.PBF
+        sorted_kappa = None if is_pbf else w.sorted_kappa
+        sorted_kappa_v = None if is_pbf else w.sorted_kappa_v
+        sorted_velocity_h = None if is_pbf else w.sorted_velocity_h
+        sorted_temperature_h = None if is_pbf else w.sorted_temperature_h
+        sorted_dye_h = None if is_pbf else w.sorted_dye_h
+
         if self._sort_skip_next and not force_sort:
             # Grid reuse: just re-gather unsorted -> sorted using old sort_perm
             self._sort_skipped_count += 1
@@ -724,13 +735,13 @@ class Simulation:
                 sorted_health=w.sorted_health,
                 sorted_lifetime=w.sorted_lifetime,
                 sorted_sleep_counter=w.sorted_sleep_counter,
-                sorted_kappa=w.sorted_kappa,
+                sorted_kappa=sorted_kappa,
                 sorted_particle_dye=w.sorted_particle_dye,
                 sorted_angular_velocity=w.sorted_angular_velocity,
-                sorted_kappa_v=w.sorted_kappa_v,
-                sorted_velocity_h=w.sorted_velocity_h,
-                sorted_temperature_h=w.sorted_temperature_h,
-                sorted_dye_h=w.sorted_dye_h,
+                sorted_kappa_v=sorted_kappa_v,
+                sorted_velocity_h=sorted_velocity_h,
+                sorted_temperature_h=sorted_temperature_h,
+                sorted_dye_h=sorted_dye_h,
             )
             return
 
@@ -775,13 +786,13 @@ class Simulation:
             sorted_health=w.sorted_health,
             sorted_lifetime=w.sorted_lifetime,
             sorted_sleep_counter=w.sorted_sleep_counter,
-            sorted_kappa=w.sorted_kappa,
+            sorted_kappa=sorted_kappa,
             sorted_particle_dye=w.sorted_particle_dye,
             sorted_angular_velocity=w.sorted_angular_velocity,
-            sorted_kappa_v=w.sorted_kappa_v,
-            sorted_velocity_h=w.sorted_velocity_h,
-            sorted_temperature_h=w.sorted_temperature_h,
-            sorted_dye_h=w.sorted_dye_h,
+            sorted_kappa_v=sorted_kappa_v,
+            sorted_velocity_h=sorted_velocity_h,
+            sorted_temperature_h=sorted_temperature_h,
+            sorted_dye_h=sorted_dye_h,
         )
 
     def _run_reactions_spawn(self, n: int, mark: StageMark = _no_mark) -> None:

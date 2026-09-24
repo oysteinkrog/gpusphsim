@@ -144,10 +144,10 @@ def counting_sort_full(
     sorted_health: cupy.ndarray,
     sorted_lifetime: cupy.ndarray,
     sorted_sleep_counter: cupy.ndarray,
-    sorted_kappa: cupy.ndarray,
+    sorted_kappa: "Optional[cupy.ndarray]",
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
-    sorted_kappa_v: cupy.ndarray,
+    sorted_kappa_v: "Optional[cupy.ndarray]",
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
     # FP16 temperature + dye outputs (PERF-011)
@@ -244,10 +244,10 @@ def counting_sort_full(
         sorted_health,
         sorted_lifetime,
         sorted_sleep_counter,
-        sorted_kappa,
+        sorted_kappa if sorted_kappa is not None else _null,
         sorted_particle_dye,
         sorted_angular_velocity,
-        sorted_kappa_v,
+        sorted_kappa_v if sorted_kappa_v is not None else _null,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,
         # FP16 temperature + dye (PERF-011)
@@ -290,10 +290,10 @@ def gather_reorder(
     sorted_health: cupy.ndarray,
     sorted_lifetime: cupy.ndarray,
     sorted_sleep_counter: cupy.ndarray,
-    sorted_kappa: cupy.ndarray,
+    sorted_kappa: "Optional[cupy.ndarray]",
     sorted_particle_dye: cupy.ndarray,
     sorted_angular_velocity: cupy.ndarray,
-    sorted_kappa_v: cupy.ndarray,
+    sorted_kappa_v: "Optional[cupy.ndarray]",
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
     # FP16 temperature + dye outputs (PERF-011)
@@ -342,10 +342,10 @@ def gather_reorder(
         sorted_health,
         sorted_lifetime,
         sorted_sleep_counter,
-        sorted_kappa,
+        sorted_kappa if sorted_kappa is not None else _null,
         sorted_particle_dye,
         sorted_angular_velocity,
-        sorted_kappa_v,
+        sorted_kappa_v if sorted_kappa_v is not None else _null,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,
         # FP16 temperature + dye (PERF-011)
