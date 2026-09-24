@@ -1197,8 +1197,9 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
 - `MAT_DEAD = 0` is defined in `common.cuh` next to `MAT_RIGID`.
 - **Brush kill.** `World.kill_in_sphere` runs one kernel (`K_KillSphere`, no
   host sync). Each live, non-rigid particle in the sphere gets
-  `MAKE_PACKED(DEAD, STATIC)` (`world.DEAD_PACKED`, 0x300) and zero mass,
-  health, velocity and color. As STATIC it skips every solver's fluid path.
+  `MAKE_PACKED(DEAD, STATIC)` (`world.DEAD_PACKED`, 0x300), zero mass,
+  health and velocity, and color `(0, 0, 0, -1)`. As STATIC it skips every
+  solver's fluid path.
   `World.compact()` fills the dead tail with the same encoding. The alive test
   everywhere is `material_id != 0`, so a bare `packed_info = 0` also counts as
   dead. (bd-r5-review-n28.34)
@@ -1211,8 +1212,21 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   (0.01), which leaves GAS (0.2 to 0.6) unchanged.
 - A fully corroded particle becomes DEAD/STATIC with mass 0 and joins the
   freelist, the same as consumed acid (see 21.3).
+- **Rendering.** Every draw covers `[0, _high_water)`, dead slots included.
+  `compute_color` and `compute_fluid_color` (`sph_shared.cuh`) return
+  `(0, 0, 0, -1)` for `MAT_DEAD`, so Integrate and the PBF and DFSPH Finalize
+  kernels mark every dead slot, whatever its behavior bits. `K_KillSphere` and
+  `add_dead_reserve` write `color.w = -1` directly. `particle.vert`,
+  `particle_nonfluid.vert`, `ssfr_depth.vert` and `ssfr_thickness.vert` move
+  any vertex with `color.w < 0` off screen with point size 0, so a killed
+  particle vanishes at once and does not wait for compaction (every 60 frames,
+  at least 100 dead). Live particles keep the behavior code in `color.w`
+  (FLUID 0.0, GRANULAR 0.25, GAS 0.5, STATIC 0.75). The dead vertices are
+  still fetched, so they cost vertex work but no fragment work.
+  (bd-r5-review-n28.60)
 
 **Source**: `reactions.cu:K_Reactions`, `sph_shared.cuh:static_particle_boundary`,
+`sph_shared.cuh:compute_color`, `shaders/particle.vert`,
 `simulation.py:_run_reactions_spawn`, `world.py:kill_in_sphere`,
 `dfsph_solver.cu:K_DFSPH_DensitySolverUpdate`, `pbf_solver.cu:K_PBF_ComputeLambda`
 
