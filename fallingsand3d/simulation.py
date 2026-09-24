@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -43,6 +43,13 @@ import implicit_st
 # Adaptive timestep limits
 DT_MIN = 1e-5
 DT_MAX = 0.001
+
+
+def _no_mark(label: str) -> None:
+    """Default stage callback: does nothing (used by the untimed and graph paths)."""
+
+
+StageMark = Callable[[str], None]
 
 
 class Simulation:
@@ -711,8 +718,12 @@ class Simulation:
             sorted_dye_h=w.sorted_dye_h,
         )
 
-    def _run_reactions_spawn(self, n: int) -> None:
-        """Common reactions + spawn pass (used by all solvers after density)."""
+    def _run_reactions_spawn(self, n: int, mark: StageMark = _no_mark) -> None:
+        """Common reactions + spawn pass (used by all solvers after density).
+
+        mark(label) is called after each stage ('reactions', 'blast', 'spawn');
+        only the timed path passes a real callback.
+        """
         w = self.world
         # Reset freelist counter (graph-safe memset)
         spawn.reset_freelist(self._dead_count)
@@ -730,6 +741,7 @@ class Simulation:
             dead_indices=self._dead_indices,
             dead_count=self._dead_count,
         )
+        mark("reactions")
 
         # Blast wave: radial impulse from freshly-exploded gunpowder
         from materials import GUNPOWDER
@@ -743,6 +755,7 @@ class Simulation:
                 self._cell_end,
                 smoothing_length=self._h,
             )
+            mark("blast")
 
         # Spawn (always included — zero-cost when no SPAWN_GAS flags set)
         spawn.compute_spawn(
@@ -761,27 +774,37 @@ class Simulation:
             self._dead_indices,
             self._dead_count,
         )
+        mark("spawn")
 
-    def _run_graph_body(self, n: int) -> None:
+    def _run_graph_body(self, n: int, mark: StageMark = _no_mark) -> None:
         """Execute the graph-capturable portion of the pipeline.
 
         Dispatches to the correct solver body based on the active profile.
+        mark is a per-stage callback for the timed path.  It must stay the
+        no-op default during graph capture (event records cannot be captured).
+        PBF/DFSPH report their whole body as one 'solver' stage.
         """
         if self._profile.solver_type == SolverType.PBF:
             self._run_pbf_body(n)
+            mark("solver")
         elif self._profile.solver_type == SolverType.DFSPH:
             self._run_dfsph_body(n)
+            mark("solver")
         else:
-            self._run_wcsph_body(n)
+            self._run_wcsph_body(n, mark)
 
-    def _run_wcsph_body(self, n: int) -> None:
-        """WCSPH pipeline: Grid -> Step1 -> Reactions -> Spawn -> Step2 -> Integrate -> Wake."""
+    def _run_wcsph_body(self, n: int, mark: StageMark = _no_mark) -> None:
+        """WCSPH pipeline: Grid -> Step1 -> Reactions -> Spawn -> Step2 -> Integrate -> Wake.
+
+        mark(label) is called after each stage; see _run_graph_body.
+        """
         w = self.world
 
         # Grid setup (may skip sort if particles barely moved).
         # max_displacement is reset only on full sort (in _run_grid_setup),
         # so it accumulates across substeps since the last full sort.
         self._run_grid_setup(n)
+        mark("sort")
 
         # Snapshot the previous-substep density (packed into position.w by the last
         # K_Step1, carried permutation-correctly through the position reorder) into a
@@ -814,12 +837,13 @@ class Simulation:
             temperature_h=w.sorted_temperature_h,
             dye_h=w.sorted_dye_h,
         )
+        mark("step1")
 
         # Pack density into position.w now done inside K_Step1 (PERF-004)
         # Pressure pre-computed inside K_Step1 (PERF-007)
 
         # Reactions + Spawn
-        self._run_reactions_spawn(n)
+        self._run_reactions_spawn(n, mark)
 
         # Step2: pressure + viscosity + XSPH + vorticity confinement + surface tension
         # (density read from position.w, packed by K_PackDensity above)
@@ -842,6 +866,7 @@ class Simulation:
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
         )
+        mark("step2")
 
         # Implicit surface tension (WCSPH only, quality mode for < 100K particles)
         if self.ist_enabled and n < self._IST_MAX_PARTICLES:
@@ -860,6 +885,7 @@ class Simulation:
             # If result ended up in veleval (odd iteration count), copy back to velocity
             if result.data.ptr != w.sorted_velocity[:n].data.ptr:
                 w.sorted_velocity[:n] = result
+            mark("ist")
 
         # Integrate (pass max_displacement for grid reuse tracking)
         integrate.integrate(
@@ -896,6 +922,7 @@ class Simulation:
             cell_start=self._cell_start,
             cell_end=self._cell_end,
         )
+        mark("integrate")
 
         # Wake propagation (memset + 2 kernels)
         wake.run_wake_propagation(
@@ -906,6 +933,7 @@ class Simulation:
             self._cell_wake_flags,
             num_particles=n,
         )
+        mark("wake")
 
     def _run_pbf_body(self, n: int) -> None:
         """PBF pipeline: Grid -> Predict -> [Lambda -> Delta -> Apply]xN -> Finalize."""
@@ -1237,29 +1265,9 @@ class Simulation:
         so sort-skip decisions don't invalidate graphs. When n changes, fall back
         to direct kernel launches (no graph capture overhead).
         """
-        # Update device substep counter for RNG seeding (unique per substep)
-        self._frame_counter_d.fill(self._substep_counter)
-
-        # --- Spawn velocity damping ramp ---
-        self._apply_damping_ramp()
-
-        # --- Rigid body: update boundary particles in unsorted arrays ---
-        rbm = self.rigid_body_manager
-        if rbm.num_bodies > 0 and rbm.num_boundary_particles > 0:
-            n = self._update_rigid_boundary(n)
-
-        # Zero rigid body force/torque accumulators before solver
-        graphs_disabled = False
-        if rbm.num_bodies > 0:
-            rbm.rigid_forces.fill(0)
-            rbm.rigid_torques.fill(0)
-            # Disable CUDA graph when rigid bodies are active
-            graphs_disabled = True
-
-        # --- Update kinematic SDF objects ---
-        if self.sdf_manager._motions:
-            self.sdf_manager.update_kinematics(self.sim_time, self.dt)
-            self.sdf_manager.upload_if_dirty()
+        n = self._substep_prologue(n)
+        # Rigid bodies active: always run directly, no graph
+        graphs_disabled = self.rigid_body_manager.num_bodies > 0
 
         # Select graph based on sort-skip state
         is_gather = self._sort_skip_next
@@ -1290,6 +1298,42 @@ class Simulation:
             # n stable, graph exists — fast replay
             graph.launch()
 
+        self._substep_epilogue(n)
+
+    def _substep_prologue(self, n: int) -> int:
+        """Per-substep host-side setup shared by _sim_step and _sim_step_timed.
+
+        Sets the RNG substep counter, applies the spawn damping ramp, moves
+        rigid-body boundary particles (may change n), zeroes the rigid force
+        accumulators and advances kinematic SDF objects.  Returns the new n.
+        """
+        # Update device substep counter for RNG seeding (unique per substep)
+        self._frame_counter_d.fill(self._substep_counter)
+
+        # --- Spawn velocity damping ramp ---
+        self._apply_damping_ramp()
+
+        # --- Rigid body: update boundary particles in unsorted arrays ---
+        rbm = self.rigid_body_manager
+        if rbm.num_bodies > 0 and rbm.num_boundary_particles > 0:
+            n = self._update_rigid_boundary(n)
+
+        # Zero rigid body force/torque accumulators before solver
+        if rbm.num_bodies > 0:
+            rbm.rigid_forces.fill(0)
+            rbm.rigid_torques.fill(0)
+
+        # --- Update kinematic SDF objects ---
+        if self.sdf_manager._motions:
+            self.sdf_manager.update_kinematics(self.sim_time, self.dt)
+            self.sdf_manager.upload_if_dirty()
+        return n
+
+    def _substep_epilogue(self, n: int, mark: StageMark = _no_mark) -> None:
+        """Per-substep work after the solver body (outside any CUDA graph).
+
+        Rigid-body integration and collisions, foam, then advance sim time.
+        """
         # Rigid body integration (outside graph -- forces vary per substep)
         rbm = self.rigid_body_manager
         if rbm.num_bodies > 0:
@@ -1303,9 +1347,11 @@ class Simulation:
             )
             # US-020: Rigid body collision push-apart (body-vs-SDF and body-vs-body)
             integrate.rigid_body_collisions(rbm.d_rigid_bodies, rbm.num_bodies)
+            mark("rigid")
 
         # Foam generation + physics (outside graph -- uses atomicAdd with variable count)
         self._run_foam_step(n)
+        mark("foam")
 
         self.sim_time += self.dt
         self._substep_counter += 1
@@ -1358,15 +1404,10 @@ class Simulation:
     def _sim_step_timed(self, n: int) -> None:
         """Run one substep with CUDA event timing (bypasses graph capture).
 
-        Note: Detailed per-kernel timing only available for WCSPH.
-        PBF/DFSPH fall through to a single timed graph body call.
+        Runs the same prologue, solver body and epilogue as _sim_step, with a
+        mark callback that records a CUDA event after each stage.  Only the
+        timed path passes a real mark; graph capture always uses the no-op.
         """
-        # For non-WCSPH solvers, run un-timed (timing panel shows WCSPH stages)
-        if self._profile.solver_type != SolverType.WCSPH:
-            self._sim_step(n)
-            return
-
-        w = self.world
         events = []
         labels = []
 
@@ -1377,144 +1418,16 @@ class Simulation:
             labels.append(label)
 
         mark("start")
+        n = self._substep_prologue(n)
+        self._run_graph_body(n, mark)
+        self._substep_epilogue(n, mark)
+        self._read_deferred_timings()
+        # Store this substep's events for reading next substep
+        self._pending_timing_events = events
+        self._pending_timing_labels = labels
 
-        self._frame_counter_d.fill(self._substep_counter)
-
-        # --- Spawn velocity damping ramp (bd-r4-epic-x2j.3: was missing from timed path) ---
-        self._apply_damping_ramp()
-
-        # Update rigid body boundary particles
-        rbm = self.rigid_body_manager
-        if rbm.num_bodies > 0 and rbm.num_boundary_particles > 0:
-            n = self._update_rigid_boundary(n)
-
-        # 1-4. Grid setup (counting sort or gather-only if skipping)
-        # max_displacement reset happens inside _run_grid_setup on full sort
-        self._run_grid_setup(n)
-        mark("sort")
-
-        # Snapshot previous-substep density from position.w (bd-r4fix-uup.14; see _run_wcsph_body)
-        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
-
-        # 5. Step1
-        step1.compute_step1(
-            w.sorted_position[:n], w.sorted_velocity[:n],
-            w.sorted_mass[:n],
-            w.sorted_density_prev[:n],
-            w.sorted_packed_info[:n], w.sorted_temperature[:n],
-            self._cell_start, self._cell_end,
-            density_out=w.sorted_density,
-            shear_rate_out=w.sorted_shear_rate,
-            dTdt_out=w.sorted_dTdt,
-            exposure_heat_out=w.sorted_exposure_heat,
-            exposure_corrode_out=w.sorted_exposure_corrode,
-            vorticity_out=w.sorted_vorticity,
-            normal_out=w.sorted_normal,
-            particle_dye_in=w.sorted_particle_dye[:n],
-            dye_rate_out=w.sorted_dye_rate,
-            velocity_h=w.sorted_velocity_h,
-            pressure_out=w.sorted_pressure,
-            temperature_h=w.sorted_temperature_h,
-            dye_h=w.sorted_dye_h,
-        )
-        mark("step1")
-
-        # 6. Reactions
-        spawn.reset_freelist(self._dead_count)
-        reactions.compute_reactions(
-            w.sorted_packed_info[:n], w.sorted_temperature[:n],
-            w.sorted_health[:n], w.sorted_lifetime[:n],
-            w.sorted_velocity[:n], w.sorted_exposure_heat[:n],
-            w.sorted_exposure_corrode[:n],
-            frame_d=self._frame_counter_d,
-            dead_indices=self._dead_indices, dead_count=self._dead_count,
-        )
-        mark("reactions")
-
-        # 7. Spawn
-        spawn.compute_spawn(
-            w.sorted_packed_info[:n], w.sorted_position[:n],
-            w.sorted_velocity[:n], w.sorted_veleval[:n],
-            w.sorted_mass[:n], w.sorted_temperature[:n],
-            w.sorted_health[:n], w.sorted_lifetime[:n],
-            w.sorted_color[:n], w.sorted_sleep_counter[:n],
-            w.sorted_density[:n], w.sorted_shear_rate[:n],
-            self._dead_indices, self._dead_count,
-        )
-        mark("spawn")
-
-        # 8. Step2 (density packed into position.w by K_Step1 -- PERF-004, pressure from Step1 -- PERF-007)
-        rbm = self.rigid_body_manager
-        step2.compute_step2(
-            w.sorted_position[:n], w.sorted_velocity[:n],
-            w.sorted_mass[:n],
-            w.sorted_packed_info[:n],
-            w.sorted_shear_rate[:n],
-            self._cell_start, self._cell_end,
-            vorticity_in=w.sorted_vorticity,
-            normal_in=w.sorted_normal,
-            sph_force_out=w.sorted_sph_force,
-            veleval_out=w.sorted_veleval,
-            velocity_h=w.sorted_velocity_h,
-            pressure_in=w.sorted_pressure,
-            d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
-            d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
-            d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
-        )
-        mark("step2")
-
-        # 9. Integrate (with max_displacement tracking for grid reuse)
-        integrate.integrate(
-            w.sorted_position[:n], w.sorted_velocity[:n],
-            w.sorted_veleval[:n], w.sorted_sph_force[:n],
-            w.sorted_mass[:n], w.sorted_packed_info[:n],
-            w.sorted_temperature[:n], w.sorted_health[:n],
-            sorted_lifetime=w.sorted_lifetime[:n],
-            sorted_density=w.sorted_density[:n],
-            sorted_shear_rate=w.sorted_shear_rate[:n],
-            sorted_dTdt=w.sorted_dTdt[:n],
-            sorted_sleep_counter=w.sorted_sleep_counter[:n],
-            sorted_dye_rate=w.sorted_dye_rate[:n],
-            sorted_particle_dye=w.sorted_particle_dye[:n],
-            sorted_vorticity=w.sorted_vorticity[:n],
-            sorted_angular_velocity=w.sorted_angular_velocity[:n],
-            sort_indexes=self._sort_perm[:n],
-            position_out=w.position, velocity_out=w.velocity,
-            color_out=w.color, packed_info_out=w.packed_info,
-            sleep_counter_out=w.sleep_counter,
-            temperature_out=w.temperature,
-            particle_dye_out=w.particle_dye,
-            angular_velocity_out=w.angular_velocity,
-            health_out=w.health,
-            lifetime_out=w.lifetime,
-            mass_out=w.mass,
-            max_displacement=w.max_displacement,
-        )
-        mark("integrate")
-
-        # 10. Wake
-        wake.run_wake_propagation(
-            w.position[:n], w.velocity[:n], w.packed_info[:n],
-            w.sleep_counter[:n], self._cell_wake_flags, num_particles=n,
-        )
-        mark("wake")
-
-        # 10b. Rigid body integration + collision
-        if rbm.num_bodies > 0:
-            integrate.integrate_rigid_bodies(
-                rbm.d_rigid_bodies,
-                rbm.rigid_forces,
-                rbm.rigid_torques,
-                rbm.num_bodies,
-                self.dt,
-                gravity=tuple(float(x) for x in self._sim_params[0]["gravity"]),
-            )
-            integrate.rigid_body_collisions(rbm.d_rigid_bodies, rbm.num_bodies)
-
-        # 11. Foam (secondary particles)
-        self._run_foam_step(n)
-        mark("foam")
-
+    def _read_deferred_timings(self) -> None:
+        """Turn the previous timed substep's events into stage timings (ms)."""
         # --- Deferred timing read (1-substep latency, no per-substep sync stall) ---
         # Read timings from the PREVIOUS substep's events; by the time we get here
         # those GPU kernels are almost certainly already complete (a full substep
@@ -1544,13 +1457,6 @@ class Simulation:
                         self._timing_ema[k] = v
             except Exception:
                 pass  # timing is advisory — never crash the sim loop
-
-        # Store this substep's events for reading next substep
-        self._pending_timing_events = events
-        self._pending_timing_labels = labels
-
-        self.sim_time += self.dt
-        self._substep_counter += 1
 
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
