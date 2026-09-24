@@ -34,14 +34,18 @@ def _eval(params, gd, p, rho):
     rho = cupy.asarray(rho, dtype=cupy.float32)
     out = cupy.zeros_like(gd)
     n = gd.size
-    mod.get_function("eval_eta")(((n + 127) // 128,), (128,), (gd, p, rho, out, np.int32(n)))
+    mod.get_function("eval_eta")(
+        ((n + 127) // 128,), (128,), (gd, p, rho, out, np.int32(n))
+    )
     return cupy.asnumpy(out)
 
 
 def _ref(params, gd, p, rho):
     g = params[0]
-    I = gd * g["particle_spacing"] / np.sqrt(p / rho)
-    mu_I = g["mu_s"] + (g["mu_2"] - g["mu_s"]) / (1.0 + g["I0"] / np.maximum(I, 1e-8))
+    inertial = gd * g["particle_spacing"] / np.sqrt(p / rho)
+    mu_I = g["mu_s"] + (g["mu_2"] - g["mu_s"]) / (
+        1.0 + g["I0"] / np.maximum(inertial, 1e-8)
+    )
     return np.minimum(g["mu_max"], g["mu0"] + mu_I * p / np.maximum(gd, FLOOR))
 
 
