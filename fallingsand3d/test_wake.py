@@ -151,9 +151,9 @@ def test_mark_wake_cells_single_particle() -> None:
     assert 1 <= flagged_count <= 27, f"Expected 1-27 flagged cells, got {flagged_count}"
 
     # The center cell (25,25,25) uses spatial hash with large primes & TABLE_MASK
-    # hash = ((25*73856093) ^ (25*19349669) ^ (25*83492791)) & (TABLE_SIZE-1)
+    # hash = (25*73856093 + 25*19349669 + 25*83492791) & TABLE_MASK (additive, see common.cuh)
     TABLE_MASK = NUM_CELLS - 1
-    center_hash = ((25 * 73856093) ^ (25 * 19349669) ^ (25 * 83492791)) & TABLE_MASK
+    center_hash = (25 * 73856093 + 25 * 19349669 + 25 * 83492791) & TABLE_MASK
     assert int(flags[center_hash]) != 0
     print(f"  Center cell {center_hash} flagged correctly")
 
@@ -219,10 +219,10 @@ def test_wake_sleepers_in_flagged_cell() -> None:
     sc = cupy.array([50], dtype=cupy.uint8)
 
     # Flag the cell at origin: cell (25,25,25), spatial hash with large primes
-    # hash = ((25*73856093) ^ (25*19349669) ^ (25*83492791)) & (TABLE_SIZE-1)
+    # hash = (25*73856093 + 25*19349669 + 25*83492791) & TABLE_MASK (additive, see common.cuh)
     flags = allocate_cell_wake_flags(NUM_CELLS)
     TABLE_MASK = NUM_CELLS - 1
-    center_hash = ((25 * 73856093) ^ (25 * 19349669) ^ (25 * 83492791)) & TABLE_MASK
+    center_hash = (25 * 73856093 + 25 * 19349669 + 25 * 83492791) & TABLE_MASK
     flags[center_hash] = cupy.uint32(1)
 
     wake_sleepers_and_clear_just_woke(pos, pi, sc, flags, num_particles=1)
