@@ -219,6 +219,16 @@ def compute_non_pressure_forces(
     ))
 
 
+def _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques):
+    """Kernel arguments for the rigid buffers; NULL when a buffer is None."""
+    null = np.intp(0)
+    return (
+        d_rigid_bodies if d_rigid_bodies is not None else null,
+        d_rigid_forces if d_rigid_forces is not None else null,
+        d_rigid_torques if d_rigid_torques is not None else null,
+    )
+
+
 def compute_kappa_v(
     velocity: cupy.ndarray,
     density: cupy.ndarray,
@@ -251,15 +261,22 @@ def correct_velocity_div(
     position: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
+    d_rigid_bodies: "cupy.ndarray | None" = None,
+    d_rigid_forces: "cupy.ndarray | None" = None,
+    d_rigid_torques: "cupy.ndarray | None" = None,
 ) -> None:
+    """Apply the divergence correction. With rigid bodies, also adds the
+    reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques."""
     n = velocity.shape[0]
     module = _get_module()
     kernel = module.get_function("K_DFSPH_CorrectVelocityDiv")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
+    rb_ptr, rf_ptr, rt_ptr = _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques)
     kernel(grid, block, (
         np.uint32(n), velocity, density, mass, kappa_v,
         packed_info, position, cell_start, cell_end,
+        rb_ptr, rf_ptr, rt_ptr,
     ))
 
 
@@ -272,16 +289,26 @@ def compute_pressure_accel(
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     accel_out: cupy.ndarray,
+    d_rigid_bodies: "cupy.ndarray | None" = None,
+    d_rigid_forces: "cupy.ndarray | None" = None,
+    d_rigid_torques: "cupy.ndarray | None" = None,
 ) -> None:
-    """Compute pressure acceleration from p/rho^2 (Jacobi density solver step 1)."""
+    """Compute pressure acceleration from p/rho^2 (Jacobi density solver step 1).
+
+    Pass the rigid buffers only on the final call, whose a_press is the one
+    K_DFSPH_ApplyPressureVelocity applies; the kernel then adds the reaction
+    of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
+    """
     n = position.shape[0]
     module = _get_module()
     kernel = module.get_function("K_DFSPH_ComputePressureAccel")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
+    rb_ptr, rf_ptr, rt_ptr = _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques)
     kernel(grid, block, (
         np.uint32(n), p_rho2, position, density, mass,
         packed_info, cell_start, cell_end, accel_out,
+        rb_ptr, rf_ptr, rt_ptr,
     ))
 
 

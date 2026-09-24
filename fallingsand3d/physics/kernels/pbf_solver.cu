@@ -38,6 +38,26 @@ struct PBFParams {
 
 __constant__ PBFParams c_pbf;
 
+/* Add F_on_body and its torque about the body centre to the accumulators of
+ * the body that owns boundary particle j. */
+__device__ inline void pbf_rigid_reaction(
+    const RigidBody* __restrict__ d_rigid_bodies,
+    float* __restrict__ d_rigid_forces,
+    float* __restrict__ d_rigid_torques,
+    uint pi_j, float4 pos4_j, float3 F_on_body
+) {
+    int body_id = GET_BODY_ID(pi_j);
+    float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
+    float3 r_b = make_float3(pos4_j.x - rb_pos.x, pos4_j.y - rb_pos.y, pos4_j.z - rb_pos.z);
+    float3 tau = make_float3(
+        r_b.y * F_on_body.z - r_b.z * F_on_body.y,
+        r_b.z * F_on_body.x - r_b.x * F_on_body.z,
+        r_b.x * F_on_body.y - r_b.y * F_on_body.x
+    );
+    warp_reduce_accumulate(d_rigid_forces, F_on_body, body_id);
+    warp_reduce_accumulate(d_rigid_torques, tau, body_id);
+}
+
 /* ======================================================================
  * K_PBF_Predict -- Apply gravity, predict position
  *   x*_i = x_i + dt * (v_i + dt * g)
@@ -431,7 +451,10 @@ void K_PBF_ComputeDelta(
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float4*         __restrict__ delta_out
+    float4*         __restrict__ delta_out,
+    const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques   // torque accumulator (NULL if no bodies)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -440,6 +463,14 @@ void K_PBF_ComputeDelta(
     int behavior_i = GET_BEHAVIOR(pi_i);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
     bool is_gas_i = (behavior_i == GAS);
+    // Reaction on a rigid body: the pair's position correction dx on i is an
+    // impulse m_i * dx / dt on the fluid over the substep, i.e. a force
+    // m_i * dx / dt^2. The body gets the negative of it.
+    float rigid_scale = 0.0f;
+    if (d_rigid_bodies != 0) {
+        float dt_r = fmaxf(c_sim.dt, 1e-8f);
+        rigid_scale = mass[i] / (dt_r * dt_r);
+    }
 
     // GAS skips PBF constraints (compressible phase, not position-corrected).
     // STATIC and sleeping particles also skip.
@@ -527,6 +558,16 @@ void K_PBF_ComputeDelta(
                     delta.x += coeff * gW.x;
                     delta.y += coeff * gW.y;
                     delta.z += coeff * gW.z;
+
+                    // Two-way rigid coupling: the body receives exactly minus
+                    // what this pair gives the fluid (before the 0.5h clamp below).
+                    if (bj_delta == STATIC && d_rigid_bodies != 0
+                        && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+                        float fs = -rigid_scale * coeff;
+                        pbf_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                           pi_j, pos4_j,
+                                           make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
+                    }
                 }
             }
         }
@@ -610,9 +651,9 @@ void K_PBF_Finalize(
     const float4*   __restrict__ vorticity_in,     // (omega_x,y,z, |omega|) from ComputeLambda, or NULL
     const float4*   __restrict__ normal_in,         // (n_x,n_y,n_z, neighbor_count) from ComputeLambda, or NULL
     const float4*   __restrict__ pressure_normal_in, // density gradient normal for GRANULAR friction, or NULL
-    const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies)
-    float*          __restrict__ d_rigid_forces,     // force accumulator (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques,    // torque accumulator (NULL if no bodies)
+    const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies); only gates the XSPH skip
+    float*          __restrict__ d_rigid_forces,     // unused: the reaction is accumulated in K_PBF_ComputeDelta
+    float*          __restrict__ d_rigid_torques,    // unused: see d_rigid_forces
     const float*    __restrict__ sorted_lifetime,    // reaction-mutated lifetime (sorted), or NULL
     float*          __restrict__ health_out,         // unsorted health writeback, or NULL
     float*          __restrict__ lifetime_out,       // unsorted lifetime writeback, or NULL
@@ -793,10 +834,6 @@ void K_PBF_Finalize(
         float3 xsph = make_float3(0.0f, 0.0f, 0.0f);
         bool do_xsph = (behavior == FLUID || behavior == GRANULAR);
 
-        // Akinci pressure mirroring for rigid body force accumulation
-        float p_i = compute_pressure(rho_i, behavior, mat_id);
-        float rho0_i = fmaxf(c_materials[mat_id].rest_density, RHO_EPSILON);  // DEAD has rest_density 0
-
         int3 cell_i = get_cell(pred);
         for (int dz = -1; dz <= 1; dz++) {
             for (int dy = -1; dy <= 1; dy++) {
@@ -844,41 +881,12 @@ void K_PBF_Finalize(
 
                         float m_j = __ldg(&mass[j]);
 
-                        // Akinci pressure force on rigid body (two-way coupling)
-                        if (bj == STATIC && d_rigid_bodies != 0) {
-                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
-                            if (mat_id_j == MAT_RIGID) {
-                                float rlen = sqrtf(r_sq);
-                                // step2.cu Akinci convention: grad_spiky_variable (no baked
-                                // coefficient) times POSITIVE pressure_precalc, so F_on_fluid
-                                // points along +r = away from the boundary (repulsive).
-                                // grad_spiky's baked-in NEGATIVE spiky_grad_coeff would flip
-                                // the sign and push fluid INTO the boundary.
-                                float3 gW = grad_spiky_variable(r, rlen, h);
-                                float pp = c_precalc.pressure_precalc;
-                                float psi_b = m_j;
-                                float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
-                                float m_i_val = __ldg(&mass[i]);
-                                float3 F_on_fluid = make_float3(
-                                    m_i_val * psi_b * press_akinci * pp * gW.x,
-                                    m_i_val * psi_b * press_akinci * pp * gW.y,
-                                    m_i_val * psi_b * press_akinci * pp * gW.z
-                                );
-                                int body_id = GET_BODY_ID(pi_j);
-                                float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
-                                float3 r_b = make_float3(
-                                    pred4_j.x - rb_pos.x, pred4_j.y - rb_pos.y, pred4_j.z - rb_pos.z
-                                );
-                                float3 F_on_body = make_float3(-F_on_fluid.x, -F_on_fluid.y, -F_on_fluid.z);
-                                float3 tau = make_float3(
-                                    r_b.y * F_on_body.z - r_b.z * F_on_body.y,
-                                    r_b.z * F_on_body.x - r_b.x * F_on_body.z,
-                                    r_b.x * F_on_body.y - r_b.y * F_on_body.x
-                                );
-                                warp_reduce_accumulate(d_rigid_forces, F_on_body, body_id);
-                                warp_reduce_accumulate(d_rigid_torques, tau, body_id);
-                                continue;  // skip XSPH for boundary particles
-                            }
+                        // Rigid boundary particles get no XSPH. The fluid-body
+                        // reaction is accumulated in K_PBF_ComputeDelta, where
+                        // the constraint pushes the fluid.
+                        if (bj == STATIC && d_rigid_bodies != 0
+                            && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+                            continue;
                         }
 
                         float4 orig4_j = __ldg(&original_pos[j]);

@@ -1042,6 +1042,20 @@ class Simulation:
         )
         mark("wake")
 
+    def _rigid_kwargs(self) -> dict:
+        """Rigid-body buffers for solver kernels that add the fluid-body reaction.
+
+        Empty when there are no bodies, so the kernels get NULL pointers.
+        """
+        rbm = self.rigid_body_manager
+        if rbm.num_bodies <= 0:
+            return {}
+        return {
+            "d_rigid_bodies": rbm.d_rigid_bodies,
+            "d_rigid_forces": rbm.rigid_forces,
+            "d_rigid_torques": rbm.rigid_torques,
+        }
+
     def _run_pbf_body(self, n: int, mark: StageMark = _no_mark) -> None:
         """PBF pipeline: Grid -> Predict -> [Lambda -> Delta -> Apply]xN -> Finalize.
 
@@ -1092,7 +1106,10 @@ class Simulation:
             n, mark, predicted_position=w.sorted_predicted_position,
         )
 
-        # 4. Solver iterations (fixed count for CUDA graph)
+        # 4. Solver iterations (fixed count for CUDA graph).
+        # Each iteration's delta moves the fluid, so each adds its rigid reaction.
+        rbm = self.rigid_body_manager
+        rigid_kw = self._rigid_kwargs()
         for i in range(self._profile.pbf_iterations):
             if i > 0:
                 pbf_solver.pbf_compute_lambda(
@@ -1108,6 +1125,7 @@ class Simulation:
                 w.sorted_mass[:n], w.sorted_packed_info[:n],
                 self._cell_start, self._cell_end,
                 w.sorted_delta_position,
+                **rigid_kw,
             )
 
             pbf_solver.pbf_apply_delta(
@@ -1117,7 +1135,6 @@ class Simulation:
         mark("iterations")
 
         # 5. Finalize: velocity update, XSPH, friction, color, sleep, writeback
-        rbm = self.rigid_body_manager
         pbf_solver.pbf_finalize(
             w.sorted_predicted_position[:n], w.sorted_position[:n],
             w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
@@ -1216,6 +1233,9 @@ class Simulation:
         mark("non_pressure")
 
         # 4. Divergence solver (warm-started kappa_v -- PERF-008)
+        # Every correction pass (warm start included) is applied to the fluid,
+        # so each one adds its rigid reaction.
+        rigid_kw = self._rigid_kwargs()
         # Apply warm-started kappa_v from previous substep (scaled during sort reorder writeback)
         if self._profile.dfsph_div_warm_start > 0.0:
             w.sorted_kappa_v[:n] *= self._profile.dfsph_div_warm_start
@@ -1224,6 +1244,7 @@ class Simulation:
                 w.sorted_mass[:n], w.sorted_kappa_v[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
+                **rigid_kw,
             )
         for _ in range(self._profile.dfsph_div_iters):
             dfsph_solver.compute_kappa_v(
@@ -1238,6 +1259,7 @@ class Simulation:
                 w.sorted_mass[:n], w.sorted_kappa_v[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
+                **rigid_kw,
             )
 
         mark("divergence")
@@ -1257,6 +1279,9 @@ class Simulation:
         a_press = w.sorted_predicted_position
         # Warm-start: scale previous pressure by decay factor (0.5 = carry 50%)
         p_rho2[:n] *= self._profile.dfsph_warm_start
+        # Only the last a_press is applied to the fluid, so only the last
+        # compute_pressure_accel call adds the rigid reaction.
+        dens_iters = self._profile.dfsph_dens_iters
         # Compute initial a_press from warm-started p_rho2
         dfsph_solver.compute_pressure_accel(
             p_rho2[:n], w.sorted_position[:n],
@@ -1264,8 +1289,9 @@ class Simulation:
             w.sorted_packed_info[:n],
             self._cell_start, self._cell_end,
             a_press,
+            **(rigid_kw if dens_iters == 0 else {}),
         )
-        for _ in range(self._profile.dfsph_dens_iters):
+        for it in range(dens_iters):
             dfsph_solver.density_solver_update(
                 w.sorted_velocity[:n], a_press[:n],
                 w.sorted_position[:n], w.sorted_density[:n],
@@ -1280,6 +1306,7 @@ class Simulation:
                 w.sorted_packed_info[:n],
                 self._cell_start, self._cell_end,
                 a_press,
+                **(rigid_kw if it == dens_iters - 1 else {}),
             )
         dfsph_solver.apply_pressure_velocity(
             w.sorted_velocity[:n], a_press[:n],

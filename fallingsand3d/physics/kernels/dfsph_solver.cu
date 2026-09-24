@@ -21,6 +21,26 @@
 
 #include "sph_shared.cuh"
 
+/* Add F_on_body and its torque about the body centre to the accumulators of
+ * the body that owns boundary particle j. */
+__device__ inline void dfsph_rigid_reaction(
+    const RigidBody* __restrict__ d_rigid_bodies,
+    float* __restrict__ d_rigid_forces,
+    float* __restrict__ d_rigid_torques,
+    uint pi_j, float4 pos4_j, float3 F_on_body
+) {
+    int body_id = GET_BODY_ID(pi_j);
+    float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
+    float3 r_b = make_float3(pos4_j.x - rb_pos.x, pos4_j.y - rb_pos.y, pos4_j.z - rb_pos.z);
+    float3 tau = make_float3(
+        r_b.y * F_on_body.z - r_b.z * F_on_body.y,
+        r_b.z * F_on_body.x - r_b.x * F_on_body.z,
+        r_b.x * F_on_body.y - r_b.y * F_on_body.x
+    );
+    warp_reduce_accumulate(d_rigid_forces, F_on_body, body_id);
+    warp_reduce_accumulate(d_rigid_torques, tau, body_id);
+}
+
 /* ======================================================================
  * DFSPH Parameters
  * ====================================================================== */
@@ -779,7 +799,10 @@ void K_DFSPH_CorrectVelocityDiv(
     const uint*     __restrict__ packed_info,
     const float4*   __restrict__ position,
     const uint*     __restrict__ cell_start,
-    const uint*     __restrict__ cell_end
+    const uint*     __restrict__ cell_end,
+    const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques   // torque accumulator (NULL if no bodies)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -787,6 +810,10 @@ void K_DFSPH_CorrectVelocityDiv(
     uint pi_i = packed_info[i];
     int behavior_i = GET_BEHAVIOR(pi_i);
     if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) return;
+    // Rigid reaction: the pair changes v_i by -dt * V_j * kv_i * gW, so the
+    // body gets the impulse +m_i * dt * V_j * kv_i * gW, a force
+    // m_i * V_j * kv_i * gW over the substep (kv_j = 0 for STATIC).
+    float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
 
     float4 pos4_i = __ldg(&position[i]);
     float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
@@ -838,6 +865,14 @@ void K_DFSPH_CorrectVelocityDiv(
                     dv.x += coeff * gW.x;
                     dv.y += coeff * gW.y;
                     dv.z += coeff * gW.z;
+
+                    if (bj == STATIC && d_rigid_bodies != 0
+                        && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+                        float fs = m_i_rigid * coeff;
+                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                             pi_j, pos4_j,
+                                             make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
+                    }
                 }
             }
         }
@@ -880,7 +915,10 @@ void K_DFSPH_ComputePressureAccel(
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float4*         __restrict__ accel_out
+    float4*         __restrict__ accel_out,
+    const RigidBody* __restrict__ d_rigid_bodies,  // non-NULL only on the final call (see below)
+    float*          __restrict__ d_rigid_forces,
+    float*          __restrict__ d_rigid_torques
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -895,6 +933,11 @@ void K_DFSPH_ComputePressureAccel(
     float4 pos4_i = __ldg(&position[i]);
     float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
     float p_i = p_rho2[i];
+    // Rigid reaction: only the last a_press is applied (ApplyPressureVelocity),
+    // so the caller passes the rigid buffers on the final call only. The pair
+    // adds -V_j * p_i * gW to a_i (p_j = 0 for STATIC), so the body gets
+    // +m_i * V_j * p_i * gW.
+    float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
 
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
@@ -940,6 +983,14 @@ void K_DFSPH_ComputePressureAccel(
                     a.x += coeff * gW.x;
                     a.y += coeff * gW.y;
                     a.z += coeff * gW.z;
+
+                    if (bj == STATIC && d_rigid_bodies != 0
+                        && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+                        float fs = -m_i_rigid * coeff;
+                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                             pi_j, pos4_j,
+                                             make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
+                    }
                 }
             }
         }
@@ -1192,9 +1243,9 @@ void K_DFSPH_Finalize(
     const float4*   __restrict__ vorticity_in,          // (omega_x,y,z, |omega|) for micropolar, or NULL
     const float*    __restrict__ sorted_kappa_v,        // divergence kappa for warm-start writeback
     float*          __restrict__ kappa_v_out,           // unsorted kappa_v output (warm-start next frame)
-    const RigidBody* __restrict__ d_rigid_bodies,       // rigid body state (NULL if no bodies)
-    float*          __restrict__ d_rigid_forces,        // force accumulator (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques,       // torque accumulator (NULL if no bodies)
+    const RigidBody* __restrict__ d_rigid_bodies,       // rigid body state (NULL if no bodies); only gates the XSPH skip
+    float*          __restrict__ d_rigid_forces,        // unused: reaction is accumulated in the solver kernels
+    float*          __restrict__ d_rigid_torques,       // unused: see d_rigid_forces
     const float*    __restrict__ sorted_lifetime,       // reaction-mutated lifetime (sorted), or NULL
     float*          __restrict__ health_out,            // unsorted health writeback, or NULL
     float*          __restrict__ lifetime_out,          // unsorted lifetime writeback, or NULL
@@ -1277,17 +1328,13 @@ void K_DFSPH_Finalize(
         sc = 0;
     }
 
-    // XSPH velocity smoothing + rigid body Akinci pressure force accumulation
+    // XSPH velocity smoothing
     float3 vel_advect = vel;
     if (behavior == FLUID || behavior == GRANULAR) {
         float h = c_sim.smoothing_length;
         float h_sq = c_sim.smoothing_length_sq;
         float rho_i = sorted_density[i];
         float3 xsph = make_float3(0.0f, 0.0f, 0.0f);
-
-        // Akinci pressure mirroring: compute p_i for rigid body force accumulation
-        float p_i = compute_pressure(rho_i, behavior, mat_id);
-        float rho0_i = fmaxf(c_materials[mat_id].rest_density, RHO_EPSILON);  // DEAD has rest_density 0
 
         int3 cell_i = get_cell(pos);
         for (int dz = -1; dz <= 1; dz++) {
@@ -1311,43 +1358,12 @@ void K_DFSPH_Finalize(
 
                         float m_j = __ldg(&sorted_mass[j]);
 
-                        // Akinci pressure force on rigid body (two-way coupling)
-                        if (bj == STATIC && d_rigid_bodies != 0) {
-                            uint mat_id_j = GET_MATERIAL_ID(pi_j);
-                            if (mat_id_j == MAT_RIGID) {
-                                float rlen = sqrtf(r_sq);
-                                // step2.cu Akinci convention: grad_spiky_variable (no baked
-                                // coefficient) times POSITIVE pressure_precalc, so F_on_fluid
-                                // points along +r = away from the boundary (repulsive).
-                                // grad_spiky's baked-in NEGATIVE spiky_grad_coeff would flip
-                                // the sign and push fluid INTO the boundary.
-                                float3 gW = grad_spiky_variable(r, rlen, h);
-                                float pp = c_precalc.pressure_precalc;
-                                float psi_b = m_j;
-                                float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
-                                // Force on fluid from boundary (acceleration * mass)
-                                float m_i = __ldg(&sorted_mass[i]);
-                                float3 F_on_fluid = make_float3(
-                                    m_i * psi_b * press_akinci * pp * gW.x,
-                                    m_i * psi_b * press_akinci * pp * gW.y,
-                                    m_i * psi_b * press_akinci * pp * gW.z
-                                );
-                                // Newton's 3rd law: reaction on body
-                                int body_id = GET_BODY_ID(pi_j);
-                                float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
-                                float3 r_b = make_float3(
-                                    p4j.x - rb_pos.x, p4j.y - rb_pos.y, p4j.z - rb_pos.z
-                                );
-                                float3 F_on_body = make_float3(-F_on_fluid.x, -F_on_fluid.y, -F_on_fluid.z);
-                                float3 tau = make_float3(
-                                    r_b.y * F_on_body.z - r_b.z * F_on_body.y,
-                                    r_b.z * F_on_body.x - r_b.x * F_on_body.z,
-                                    r_b.x * F_on_body.y - r_b.y * F_on_body.x
-                                );
-                                warp_reduce_accumulate(d_rigid_forces, F_on_body, body_id);
-                                warp_reduce_accumulate(d_rigid_torques, tau, body_id);
-                                continue;  // skip XSPH for boundary particles
-                            }
+                        // Rigid boundary particles get no XSPH. The fluid-body
+                        // reaction is accumulated in K_DFSPH_CorrectVelocityDiv and
+                        // K_DFSPH_ComputePressureAccel, where the solver pushes the fluid.
+                        if (bj == STATIC && d_rigid_bodies != 0
+                            && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+                            continue;
                         }
 
                         float4 vj4 = __ldg(&sorted_velocity[j]);

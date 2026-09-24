@@ -238,15 +238,25 @@ def pbf_compute_delta(
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     delta_out: cupy.ndarray,
+    d_rigid_bodies: "cupy.ndarray | None" = None,
+    d_rigid_forces: "cupy.ndarray | None" = None,
+    d_rigid_torques: "cupy.ndarray | None" = None,
 ) -> None:
+    """Position correction. With rigid bodies, also adds the reaction of each
+    fluid-rigid pair to d_rigid_forces / d_rigid_torques."""
     n = predicted_pos.shape[0]
     module = _get_module()
     kernel = module.get_function("K_PBF_ComputeDelta")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
+    _null_f = np.intp(0)
+    rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
+    rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null_f
+    rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null_f
     kernel(grid, block, (
         np.uint32(n), predicted_pos, lambda_in, mass, packed_info,
         cell_start, cell_end, delta_out,
+        rb_ptr, rf_ptr, rt_ptr,
     ))
 
 
