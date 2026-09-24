@@ -858,14 +858,13 @@ def _granular_pair_reference_x() -> float:
     sand rest density, rescaled to the GRANULAR viscosity mu0.
 
     The FLUID-GRANULAR pair uses the harmonic mean of mu0 and the FLUID
-    effective value force_scale * base_viscosity * rho0 (bd-r5-review-n28.41),
-    so the pair drag is multiplied by mu0 / mu_pair to get the mu0 drag.
+    dynamic viscosity base_viscosity (bd-r5-review-n28.41, n28.79), so the
+    pair drag is multiplied by mu0 / mu_pair to get the mu0 drag.
     """
     from materials import SAND, WATER
     rho0_sand = float(MATERIALS[SAND].rest_density)
     fx, _ = _granular_drag_x(WATER, FLUID, rho0_sand)
-    fs = float(build_granular_params(mu0=VISCOSITY)[0]["force_scale"])
-    mu_f = fs * float(MATERIALS[WATER].base_viscosity) * float(MATERIALS[WATER].rest_density)
+    mu_f = float(MATERIALS[WATER].base_viscosity)
     mu_g = VISCOSITY
     mu_pair = 2.0 * mu_f * mu_g / (mu_f + mu_g)
     return fx * mu_g / mu_pair

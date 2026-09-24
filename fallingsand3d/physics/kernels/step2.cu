@@ -64,19 +64,21 @@ void K_ComputePressure(
  * kind). Dropping the 1/rho_b made sand-on-wall drag rho0 (~4000x) too
  * strong (bd-r5-review-n28.24).
  *
- * FLUID/GAS i keep the tuned kinematic form base_viscosity * lap_coeff *
- * m_b * lap / rho_i (matches the / rho_j FLUID pair form, rho_j ~ rho_i).
+ * FLUID/GAS i use the same dynamic form with mu = base_viscosity, as in
+ * their pair code (bd-r5-review-n28.79). The result is divided by
+ * force_scale so the final fs_i multiply leaves the plain accel
+ * mu * m_b * lap / (rho_i * rho_b), as in DFSPH.
  * ====================================================================== */
 __device__ __forceinline__ float boundary_visc_factor(
     bool is_granular_i, uint mat_id_i, float m_b, float lap_v_b, float rho_i)
 {
     float rho_i_safe = fmaxf(rho_i, RHO_EPSILON);
+    float rho_b = fmaxf(c_materials[mat_id_i].rest_density, RHO_EPSILON);
     if (is_granular_i) {
-        float rho_b = fmaxf(c_materials[mat_id_i].rest_density, RHO_EPSILON);
         return c_precalc.viscosity_precalc * m_b * lap_v_b / (rho_i_safe * rho_b);
     }
     float mu_b = c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-    return mu_b * m_b * lap_v_b / rho_i_safe;
+    return mu_b * m_b * lap_v_b / (rho_i_safe * rho_b * fmaxf(c_granular.force_scale, 1e-6f));
 }
 
 /* ======================================================================
@@ -88,17 +90,17 @@ __device__ __forceinline__ float boundary_visc_factor(
  * interface creates momentum. Cross pairs therefore use
  *   pressure:  fs_cross = min(fs_FLUID, fs_GRANULAR) = force_scale
  *   viscosity: dynamic form mu_pair * m_j * lap / (rho_i * rho_j),
- *              mu_pair = harmonic mean of the FLUID effective value
- *              (force_scale * base_viscosity * rho0 * lap_coeff) and the
- *              GRANULAR value (viscosity_precalc = mu * lap_coeff).
+ *              mu_pair = harmonic mean of the FLUID dynamic viscosity
+ *              (base_viscosity * lap_coeff, the same number the FLUID
+ *              pair uses, bd-r5-review-n28.79) and the GRANULAR value
+ *              (viscosity_precalc = mu * lap_coeff).
  * Both are symmetric in i and j. The terms are divided by fs_i here so
  * the final fs_i multiply leaves exactly the pair value.
  * ====================================================================== */
 __device__ __forceinline__ float cross_pair_visc(
     uint mat_fluid, float m_j, float lap_v, float rho_i, float rho_j)
 {
-    float mu_f = c_granular.force_scale * c_materials[mat_fluid].base_viscosity
-               * c_materials[mat_fluid].rest_density * c_precalc.viscosity_lap_coeff;
+    float mu_f = c_materials[mat_fluid].base_viscosity * c_precalc.viscosity_lap_coeff;
     float mu_g = c_precalc.viscosity_precalc;
     float mu_pair = 2.0f * mu_f * mu_g / (mu_f + mu_g + 1e-8f);
     return mu_pair * m_j * lap_v
@@ -444,20 +446,18 @@ void K_Step2(
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
                         c_tot += visc_factor;
                     } else {
-                        // FLUID/GAS: per-material viscosity via harmonic mean.
-                        //
-                        // NOTE (design choice): This uses kinematic-viscosity form (/ rho_j only),
-                        // NOT the standard dynamic-viscosity SPH form (/ (rho_i * rho_j)).
-                        // GRANULAR uses the dynamic form because mu(I) eta has Pa*s units.
-                        // FLUID uses kinematic form — base_viscosity acts as a tuned coefficient,
-                        // not a physical dynamic viscosity. This is coupled with force_scale=0.02
-                        // which scales FLUID/GAS same-behaviour SPH forces (pressure + viscosity).
-                        // Changing to / (rho_i * rho_j) requires retuning both force_scale and
-                        // all per-material base_viscosity values.
+                        // FLUID/GAS: per-material dynamic viscosity (harmonic mean),
+                        // accel = mu_ij * lap * m_j * lap_v / (rho_i * rho_j) * (v_j - v_i).
+                        // Same number and pair formula as DFSPH, symmetric in i and j
+                        // so the pair conserves momentum when rho_i != rho_j
+                        // (bd-r5-review-n28.79). inv_fs_i undoes the final fs_i multiply,
+                        // so force_scale no longer sets the FLUID viscosity.
                         float mu_i = c_materials[mat_id_i].base_viscosity;
                         float mu_j = c_materials[mat_id_j].base_viscosity;
                         float mu_ij = 2.0f * mu_i * mu_j / (mu_i + mu_j + 1e-8f);
-                        float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v / rho_j;
+                        float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v
+                                          / (fmaxf(rho_i, RHO_EPSILON) * fmaxf(rho_j, RHO_EPSILON))
+                                          * inv_fs_i;
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;

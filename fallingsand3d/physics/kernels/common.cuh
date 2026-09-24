@@ -40,7 +40,7 @@ struct MaterialProps {
     float rest_density;          // kg/m^3
     float eos_stiffness;         // Tait EOS k
     float eos_gamma;             // Tait EOS exponent (7 for liquid, 1 for gas)
-    float base_viscosity;        // viscosity coefficient (WCSPH: kinematic-like with force_scale; DFSPH: dynamic mu/rho_i)
+    float base_viscosity;        // dynamic viscosity mu for FLUID/GAS; WCSPH and DFSPH both use mu*m_j*lap/(rho_i*rho_j)
     float friction_coeff;        // mu_s for granular friction
     float cohesion;              // cohesion coefficient
     float buoyancy_extra;        // extra buoyancy factor for gas

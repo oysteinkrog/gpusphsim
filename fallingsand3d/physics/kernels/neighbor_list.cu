@@ -323,21 +323,35 @@ void K_Step1_NL(
  * interface creates momentum. Cross pairs therefore use
  *   pressure:  fs_cross = min(fs_FLUID, fs_GRANULAR) = force_scale
  *   viscosity: dynamic form mu_pair * m_j * lap / (rho_i * rho_j),
- *              mu_pair = harmonic mean of the FLUID effective value
- *              (force_scale * base_viscosity * rho0 * lap_coeff) and the
- *              GRANULAR value (viscosity_precalc = mu * lap_coeff).
+ *              mu_pair = harmonic mean of the FLUID dynamic viscosity
+ *              (base_viscosity * lap_coeff, the same number the FLUID
+ *              pair uses, bd-r5-review-n28.79) and the GRANULAR value
+ *              (viscosity_precalc = mu * lap_coeff).
  * Both are symmetric in i and j. The terms are divided by fs_i here so
  * the final fs_i multiply leaves exactly the pair value.
  * ====================================================================== */
 __device__ __forceinline__ float cross_pair_visc(
     uint mat_fluid, float m_j, float lap_v, float rho_i, float rho_j)
 {
-    float mu_f = c_granular.force_scale * c_materials[mat_fluid].base_viscosity
-               * c_materials[mat_fluid].rest_density * c_precalc.viscosity_lap_coeff;
+    float mu_f = c_materials[mat_fluid].base_viscosity * c_precalc.viscosity_lap_coeff;
     float mu_g = c_precalc.viscosity_precalc;
     float mu_pair = 2.0f * mu_f * mu_g / (mu_f + mu_g + 1e-8f);
     return mu_pair * m_j * lap_v
          / (fmaxf(rho_i, RHO_EPSILON) * fmaxf(rho_j, RHO_EPSILON));
+}
+
+/* Viscous drag coefficient against a STATIC boundary particle; mirrors
+ * boundary_visc_factor in step2.cu (bd-r5-review-n28.24, n28.79). */
+__device__ __forceinline__ float boundary_visc_factor(
+    bool is_granular_i, uint mat_id_i, float m_b, float lap_v_b, float rho_i)
+{
+    float rho_i_safe = fmaxf(rho_i, RHO_EPSILON);
+    float rho_b = fmaxf(c_materials[mat_id_i].rest_density, RHO_EPSILON);
+    if (is_granular_i) {
+        return c_precalc.viscosity_precalc * m_b * lap_v_b / (rho_i_safe * rho_b);
+    }
+    float mu_b = c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
+    return mu_b * m_b * lap_v_b / (rho_i_safe * rho_b * fmaxf(c_granular.force_scale, 1e-6f));
 }
 
 extern "C" __global__ __launch_bounds__(256, 3)
@@ -502,9 +516,8 @@ void K_Step2_NL(
                     rb_linvel.z + (rb_angvel.x * r_b.y - rb_angvel.y * r_b.x)
                 );
                 float lap_v_b = lap_visc_variable(rlen, h);
-                float mu_b = is_granular_i ? c_precalc.viscosity_precalc
-                           : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-                float visc_factor_b = mu_b * psi_b * lap_v_b / fmaxf(rho_i, RHO_EPSILON);
+                float visc_factor_b = boundary_visc_factor(
+                    is_granular_i, mat_id_i, psi_b, lap_v_b, rho_i);
                 float3 F_visc = make_float3(
                     (vel_boundary.x - vel_i.x) * visc_factor_b,
                     (vel_boundary.y - vel_i.y) * visc_factor_b,
@@ -553,9 +566,8 @@ void K_Step2_NL(
                 f_pressure.y += m_j * press_sym_b * grad_s.y;
                 f_pressure.z += m_j * press_sym_b * grad_s.z;
                 float lap_v_b = lap_visc_variable(rlen, h);
-                float mu_b = is_granular_i ? c_precalc.viscosity_precalc
-                           : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-                float visc_factor_b = mu_b * m_j * lap_v_b / fmaxf(rho_i, RHO_EPSILON);
+                float visc_factor_b = boundary_visc_factor(
+                    is_granular_i, mat_id_i, m_j, lap_v_b, rho_i);
                 f_viscosity.x += (-vel_i.x) * visc_factor_b;
                 f_viscosity.y += (-vel_i.y) * visc_factor_b;
                 f_viscosity.z += (-vel_i.z) * visc_factor_b;
@@ -601,7 +613,10 @@ void K_Step2_NL(
             float mu_i = c_materials[mat_id_i].base_viscosity;
             float mu_j = c_materials[mat_id_j].base_viscosity;
             float mu_ij = 2.0f * mu_i * mu_j / (mu_i + mu_j + 1e-8f);
-            float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v / rho_j;
+            // Dynamic form, same as K_Step2 and DFSPH (bd-r5-review-n28.79).
+            float visc_factor = mu_ij * c_precalc.viscosity_lap_coeff * m_j * lap_v
+                              / (fmaxf(rho_i, RHO_EPSILON) * fmaxf(rho_j, RHO_EPSILON))
+                              * inv_fs_i;
             f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
             f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
             f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;

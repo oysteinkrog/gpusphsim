@@ -168,7 +168,12 @@ MAT_RIGID = 18
 #     so they rest at rest_density at spacing 0.02.
 #   - eos_stiffness: Tait EOS pressure coefficient (game-tuned)
 #   - eos_gamma: 7 for FLUID/GRANULAR, 1 for GAS, 0 for STATIC/DEAD
-#   - base_viscosity in Pa*s (scaled for game feel)
+#   - base_viscosity: FLUID/GAS dynamic viscosity mu in Pa*s (scaled for game
+#     feel). WCSPH and DFSPH read this one number with one pair formula,
+#     a_i = mu_ij * lap * m_j * lap_v / (rho_i * rho_j) * (v_j - v_i), so the
+#     kinematic value is mu / rho0 (WATER 1.0 / 2500 = 4e-4 m^2/s) in both.
+#     PBF uses it as the XSPH factor c = 0.05 * mu, capped at 0.5
+#     (bd-r5-review-n28.79).
 #   - temperatures in Kelvin
 # ---------------------------------------------------------------------------
 
