@@ -208,7 +208,13 @@ veleval_out_i = v_i + epsilon * xsph_sum_i     [FLUID only]
 GRANULAR/GAS:  veleval_out_i = v_i             [plain velocity, no XSPH correction]
 ```
 
-`epsilon = 0.8` (from `c_granular.xsph_epsilon`)
+`epsilon` = `c_granular.xsph_epsilon`, built from the active WCSPH profile's
+`xsph_epsilon` (with `force_scale` and `mu0`) at init and on every switch to a WCSPH
+profile (`Simulation._wcsph_granular_params`). Both WCSPH profiles use 0.8, the same as
+`step2.DEFAULT_XSPH_EPSILON`. XSPH only changes the FLUID advection velocity, not the
+stored velocity. Dam Break (21.5K WATER, 5 s) with 0.1 in place of 0.8 gave the same
+KE decay (final/peak 0.003 to 0.004) and v_max at 5 s of 1.1 to 1.5 m/s for both values
+at dt 1 ms and 0.5 ms (bd-r5-review-n28.25), so the value was left at 0.8.
 
 **FLUID only**: XSPH accumulation in the inner loop is guarded by `is_fluid_i` (bd-mzc.34).
 GRANULAR position is advected with `vel_new` in `integrate.cu`, not `veleval_xsph`, so
@@ -278,7 +284,29 @@ v_new = v + dt * accel
 
 GAS drag: `v_new *= (1 - 2.0 * dt)`
 
-Clamped: `|v| <= 10 m/s`
+Clamped: `|v| <= velocity_limit = velocity_limit_factor * h / dt`, recomputed in
+`_upload_dt` whenever dt changes. With h = 0.04:
+
+| Solver | factor | dt | velocity_limit |
+|--------|--------|----|----------------|
+| WCSPH (Fast), accuracy 0.4 | 0.9 | 1 ms | 36 m/s |
+| WCSPH, accuracy 0.2 | 0.9 | 0.5 ms | 72 m/s |
+| PBF | 0.9 | 1/120 s | 4.3 m/s |
+| DFSPH | 0.4 | 1/300 s | 4.8 m/s |
+
+**WCSPH timestep** (`Simulation._compute_adaptive_dt`, adaptive mode only):
+
+```
+dt_accuracy = DT_MAX * accuracy / 0.4
+dt_acoustic = 0.25 * h / c_sound
+dt_viscous  = accuracy * rho_min * h^2 / max_eta
+dt = clamp(min(dt_accuracy, dt_acoustic, dt_viscous), DT_MIN = 1e-5, DT_MAX = 1e-3)
+```
+
+dt_acoustic is about 2.2 ms (FIRE sets c_sound = 4.47 m/s) and dt_viscous about
+accuracy * 34 ms (OIL rho_min 2125, LAVA eta 100), so dt_accuracy is the bound that
+acts: the Accuracy slider and the `[` `]` keys give 0.25 ms at 0.1, 0.5 ms at 0.2 and
+1 ms at 0.4. Values above 0.4 are capped by DT_MAX.
 
 GRANULAR anti-creep: if `|v| < 0.01` AND `rho > 0.95*rho_0` AND `gamma_dot < 0.05`:
 set `v_new = 0`
@@ -407,15 +435,15 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | k (EOS stiffness) | 500.0 (Water) | 3.0 | High k needed to resist gravity with force_scale=0.02 |
 | gamma (EOS exponent) | 7.0 (all) | 7 | Tait EOS for all materials |
 | mu_0 (viscosity) | 1.0 | 3.5 | Lowered; effective viscosity = mu0 * force_scale |
-| epsilon (XSPH) | 0.8 | 0.5 | Higher for smoother FLUID advection |
+| epsilon (XSPH) | 0.8 (WCSPH profile `xsph_epsilon`) | 0.5 | Higher for smoother FLUID advection |
 | gravity | -4.0 | -9.8 | Reduced for miniature-world aesthetic |
-| dt | adaptive | 0.001 (fixed) | CFL: min(acoustic, viscous) ∈ [1e-5, 0.001]; DT_MAX=0.001 |
+| dt | adaptive | 0.001 (fixed) | DT_MAX * accuracy / 0.4, capped by acoustic and viscous CFL, in [1e-5, 0.001] (see 4.2) |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
 | integrate | accel = sph + g | accel = sph + g | Both treat step2 output as acceleration |
 | position update | FLUID: pos += veleval_xsph * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
 | boundaries | impulse SDF | penalty springs | Fundamentally different |
-| velocity_limit | 10 | 200 | Tight clamp prevents particles escaping grid cells |
+| velocity_limit | 0.9 * h / dt (36 m/s at 1 ms, 72 m/s at 0.5 ms) | 200 | CFL-derived per solver, see 4.2 |
 | accel_max | 200 | N/A | Prevents shockwave-level accelerations (FLUID + GRANULAR) |
 | boundary_stiffness | N/A | 20000 | Only in parent |
 | boundary_dampening | N/A | 256 | Only in parent |
@@ -667,7 +695,7 @@ Changes:
    0.4 for DFSPH. Replaces hardcoded 10. DFSPH uses lower limit to prevent Jacobi
    solver oscillation at boundaries.
 6. **mu0 0.1 → 1.0**: Higher viscous damping prevents oscillations.
-7. **XSPH epsilon 0.5 → 0.1**: Per-material viscosity now dominates velocity smoothing.
+7. **XSPH epsilon**: set per WCSPH profile, 0.8 for both (see 3.4).
 8. **max_substeps 20 → 40**: Accommodates smaller dt at higher speeds.
 
 **Source**: simulation.py, integrate.cu, step2.py, materials.py
@@ -693,11 +721,10 @@ The per-substep pipeline was restructured for performance (no physics changes):
 ### 10.9 FIXED: GPU→CPU sync every frame in adaptive timestep
 `_compute_adaptive_dt()` used `float(cp.max(...))` on GPU velocity arrays to
 compute advection CFL, forcing a GPU→CPU sync (device→host transfer) every frame.
-With current parameters, the acoustic CFL (dt≈0.05) always exceeds DT_MAX (0.005)
-by 10x, and the velocity-based advection CFL was never binding (velocity_limit=50
-and accel_max=5000 prevent supersonic particles). Removed the advection CFL
-entirely; adaptive dt now uses only acoustic and viscous CFL, both precomputed
-from the materials table at init time — zero GPU sync in the hot path.
+The velocity-based advection CFL was never binding (velocity_limit and accel_max
+prevent supersonic particles), so it was removed. Adaptive dt now uses the accuracy
+bound plus the acoustic and viscous CFL, all computed on the CPU from the materials
+table and `accuracy` (see 4.2). There is no GPU sync in the hot path.
 **Source**: `simulation.py:151-175`
 
 ### 10.10 OPTIMIZATION: CUDA graph capture for SPH pipeline
@@ -856,7 +883,7 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 **Material properties (Phase 1):**
 - B1: Density scaling to force_scale=0.02 convention (OIL=2125, LAVA=6500, etc.)
 - B2: EOS stiffness rebalance for denser materials (LAVA=800, STONE=1500, etc.)
-- C1: XSPH epsilon 0.8→0.1 (stable), 0.05 (fast) to let per-material viscosity dominate
+- C1: XSPH epsilon comes from the WCSPH profile; both WCSPH profiles use 0.8 (see 3.4)
 - C2: ACCEL_MAX_FLUID 30→200 for dramatic splashes/explosions
 - E1: Gravity 9.8→4.0 for miniature-world aesthetic
 
@@ -1112,7 +1139,7 @@ All three solvers now support the complete material behavior set:
 | Pressure solve | Tait EOS | Density constraint | Div+Dens iters |
 | Viscosity (FLUID) | Laplacian (per-material) | XSPH (per-material scaled) | Laplacian (per-material)/rho_i |
 | Viscosity (GRANULAR) | mu(I) in Step2 | XSPH*10 + DP friction | mu(I) in NonPressure |
-| XSPH smoothing | Step2, FLUID only (eps=0.8) | Finalize (c=0.05) | NonPressure (eps=0.5) |
+| XSPH smoothing | Step2, FLUID only (eps=0.8, profile) | Finalize (c=0.05) | NonPressure (eps=0.1) |
 | GAS buoyancy | Integrate | Predict (v+=) | NonPressure (accel) |
 | GAS phase separation | Step1 (skip GAS) | ComputeLambda (skip GAS) | DensityAlpha (skip GAS) |
 | Heat diffusion | Step1 | ComputeLambda | DensityAlpha |
@@ -1132,7 +1159,7 @@ All three solvers now support the complete material behavior set:
 - PBF vorticity epsilon is 50x lower (0.001 vs 0.05) to prevent energy injection at fixed dt
 - PBF surface tension is disabled (gamma=0) — relies on weak attractive constraint instead
 - PBF Drucker-Prager uses velocity-space friction in Finalize (once, iteration-independent)
-- WCSPH uses adaptive CFL timestep; PBF/DFSPH use fixed dt
+- WCSPH uses adaptive dt set by `accuracy` (0.5 ms for WCSPH, 1 ms for WCSPH (Fast), see 4.2); PBF/DFSPH use fixed dt
 
 ---
 
@@ -2055,7 +2082,8 @@ omega_new = omega + dt * nu_t * (0.5 * curl_v - omega)
 Where:
 - `omega` = per-particle angular velocity (float4: wx, wy, wz, unused), persistent
 - `curl_v` = vorticity from step1 (sorted_vorticity.xyz)
-- `nu_t` = micropolar coupling viscosity (default 0.1, in solver_profiles.py)
+- `nu_t` = micropolar coupling viscosity, 0.1, hardcoded in integrate.cu, pbf_solver.cu and
+  dfsph_solver.cu. `SolverProfile.micropolar_nu_t` exists but is not read yet.
 - `dt` = simulation timestep
 
 The formula relaxes angular velocity toward half the fluid vorticity:

@@ -25,7 +25,7 @@ class SolverProfile:
     accuracy: float = 0.4          # adaptive dt = 1 ms * accuracy / 0.4, capped at 1 ms (WCSPH only)
     # WCSPH params, uploaded to step2's c_granular at init and on profile switch
     force_scale: float = 0.02
-    xsph_epsilon: float = 0.8      # matches step2.DEFAULT_XSPH_EPSILON; lower values untested
+    xsph_epsilon: float = 0.8      # matches step2.DEFAULT_XSPH_EPSILON; see PHYSICS.md 3.4
     mu0: float = 1.0               # GRANULAR base viscosity in c_granular
     # PBF params
     pbf_iterations: int = 4
