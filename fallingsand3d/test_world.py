@@ -484,8 +484,10 @@ def test_run_spawner_respects_budget():
 @pytest.mark.parametrize("loader", ["load_fire_and_ice", "load_water_mill"])
 def test_source_presets_set_spawner_budget(loader):
     """Fire and Ice and Water Mill give their spawner a budget below max_particles."""
+    from unittest.mock import MagicMock
     import presets
     w = World(500_000)
+    w.sdf_manager = MagicMock()  # Water Mill adds a kinematic SDF cylinder
     _, spawner = getattr(presets, loader)(w)
     assert spawner is not None
     assert 0 < spawner["budget"] < w.max_particles

@@ -26,6 +26,12 @@ class RecordingWorld:
 
     def __init__(self) -> None:
         self.packed_info = np.zeros(1, dtype=np.uint32)
+        # Warm-start arrays and pool size read by _clear_world and the
+        # spawner budgets (bd-r5-review-n28.96)
+        self.kappa = np.zeros(1, dtype=np.float32)
+        self.kappa_v = np.zeros(1, dtype=np.float32)
+        self.sorted_lambda_pbf = np.zeros(1, dtype=np.float32)
+        self.max_particles = 500_000
         self._high_water = 0
         self.boxes: list = []
         self.spacings: list = []
