@@ -1600,6 +1600,22 @@ Standard PBF velocity derivation from the corrected position. No artificial
 damping is needed when the mass factor is correct — the constraint solver
 produces appropriately-scaled corrections that don't inject excess energy.
 
+**Reaction kicks go into x\*.** Under PBF, reactions run after `K_PBF_Predict`
+has consumed `velocity`, and this step rebuilds velocity from positions only.
+So `K_Reactions` (25 m/s gunpowder burst) and `K_BlastWave` (up to 15 m/s
+radial push within h) add `dt * dv` to `predicted_position` wherever they add
+`dv` to `velocity`. The burst is a plain store on the exploding particle. The
+blast uses `atomicAdd` on x, y and z of each non-STATIC target, so STATIC keeps
+x\* = x. The constraint iterations then start from the kicked x\*, and
+`v_new = (x* - x_old) / dt` carries the kick. The Drucker-Prager `v_pred` (12.7)
+reads `velocity` after the kick, so the kick is not treated as a constraint
+correction. WCSPH and DFSPH pass NULL and are unchanged. Two limits:
+- The final velocity is still clamped at `0.9 h / dt` (4.3 m/s at dt = 1/120),
+  so the 25 m/s burst leaves the FIRE particle at the clamp.
+- A kicked x\* can move several cells from where the grid put it, so the
+  iterations of that substep miss some of its neighbours. The next full sort
+  fixes it.
+
 **No lambda warm start:** K_PBF_ComputeLambda computes lambda in closed form
 from the current predicted positions every iteration and never reads a previous
 value. `sorted_lambda_pbf` is a scratch buffer that carries lambda from
