@@ -61,3 +61,32 @@ def test_main_loop_uploads_sdf_before_step_frame():
             f"sim.step_frame at main.py:{step} has no "
             "sim.sdf_manager.upload_if_dirty() call right before it"
         )
+
+
+def test_position_edit_moves_oscillate_center():
+    """bd-r5-review-n28.59: a drag on an oscillating object must stick."""
+    mgr = SDFManager()
+    mgr.add_sdf_object(0, position=(0.0, 0.0, 0.0))
+    mgr.add_kinematic_motion(0, "oscillate_x", {"amplitude": 0.3, "frequency": 0.5})
+    assert mgr._motions[0]["center"] == [0.0, 0.0, 0.0]
+
+    mgr.update_sdf_object(0, position=[1.0, 0.0, 0.0])
+    assert mgr._motions[0]["center"] == [1.0, 0.0, 0.0]
+
+    mgr.update_kinematics(t=0.0, dt=1.0 / 120.0)  # sin(0) = 0
+    assert mgr._objects[0]["position"][0] == 1.0
+
+    # Edit mid-oscillation: the center moves by the delta, not to new_pos.
+    mgr.update_kinematics(t=0.5, dt=1.0 / 120.0)  # x = 1 + 0.3*sin(pi/2) = 1.3
+    mgr.update_sdf_object(0, position=[1.3, 0.2, 0.0])
+    center = mgr._motions[0]["center"]
+    assert abs(center[0] - 1.0) < 1e-9 and abs(center[1] - 0.2) < 1e-9
+
+
+def test_position_edit_leaves_rotate_y_motion_alone():
+    mgr = SDFManager()
+    mgr.add_sdf_object(0, position=(0.0, 0.0, 0.0))
+    mgr.add_kinematic_motion(0, "rotate_y", {"speed": 1.0})
+    mgr.update_sdf_object(0, position=[0.5, 0.0, 0.0])
+    mgr.update_kinematics(t=0.1, dt=1.0 / 120.0)
+    assert mgr._objects[0]["position"] == [0.5, 0.0, 0.0]
