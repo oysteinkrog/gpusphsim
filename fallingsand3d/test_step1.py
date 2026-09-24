@@ -20,9 +20,10 @@ Acceptance criteria (strain-rate, US-015):
   - Test: stationary sand -> gamma_dot ~ 0
   - Test: sand in shear flow -> gamma_dot > 0
 
-Acceptance criteria (exposure, US-021):
-  - exposure_corrode_i += c_interactions[mat_i][mat_j].reaction_rate * W_poly6(r_sq, h_sq)
-  - exposure_heat_i += c_interactions[mat_i][mat_j].heat_exchange * max(T_j-T_i, 0) * W_poly6
+Acceptance criteria (exposure, US-021, normalised in bd-r5-review-n28.48):
+  - exposure_corrode_i = sum_j c_interactions[mat_i][mat_j].reaction_rate * W_ij / sum_j W_ij
+  - exposure_heat_i = sum_j heat_exchange_ij * max(T_j-T_i, 0) * W_ij / sum_j W_ij
+  - sum_j W_ij covers every non-self, non-DEAD neighbour in range
   - No if/else branching on material type (pure table lookup via c_interactions)
   - Test: acid near metal -> metal's exposure_corrode > 0
   - Test: fire near wood -> wood's exposure_heat > 0
@@ -1036,6 +1037,133 @@ def test_water_water_no_exposure() -> None:
     print("[OK] Water near water -> exposure_corrode == 0, exposure_heat == 0")
 
 
+# ===================================================================
+# Exposure normalisation (bd-r5-review-n28.48)
+# ===================================================================
+
+MAT_WATER_ID = 5
+PACKED_SAND_G = MAT_SAND | (GRANULAR << 8)
+
+
+def _reaction_define(name: str) -> float:
+    """Read a #define threshold from reactions.cu so the test follows the kernel."""
+    import re
+    path = os.path.join(os.path.dirname(__file__), "physics", "kernels", "reactions.cu")
+    with open(path, encoding="utf-8") as f:
+        m = re.search(r"#define\s+" + name + r"\s+([0-9.]+)f", f.read())
+    assert m, f"{name} not found in reactions.cu"
+    return float(m.group(1))
+
+
+def _exposure_both_kernels(positions, packed_info, temperature):
+    """Sort the scene, run K_Step1 and K_Step1_BuildNL, and return
+    [(exposure_heat, exposure_corrode)] for original particle 0 from each."""
+    from step1 import compute_step1_build_nl
+    _upload_all_params()
+    n = positions.shape[0]
+    mass = np.full(n, MASS, dtype=np.float32)
+    scene = counting_sort_scene(
+        positions, velocity=np.zeros((n, 4), np.float32), mass=mass,
+        packed_info=packed_info, temperature=temperature,
+        grid_params=default_grid_params(),
+    )
+    k0 = int(np.where(cupy.asnumpy(scene["sort_perm"]) == 0)[0][0])
+    args = (scene["position"], scene["velocity"], scene["mass"], None,
+            scene["packed_info"], scene["temperature"],
+            scene["cell_start"], scene["cell_end"])
+    out = []
+    _, _, _, eh, ec, _ = compute_step1(*args, velocity_h=scene["velocity_h"])
+    out.append((float(eh[k0].get()), float(ec[k0].get()), cupy.asnumpy(ec)))
+    max_nb = 64
+    nl_idx = cupy.zeros(n * max_nb, dtype=cupy.uint32)
+    nl_cnt = cupy.zeros(n, dtype=cupy.uint32)
+    res = compute_step1_build_nl(*args, nl_idx, nl_cnt, max_nb=max_nb,
+                                 velocity_h=scene["velocity_h"])
+    eh, ec = res[3], res[4]
+    out.append((float(eh[k0].get()), float(ec[k0].get()), cupy.asnumpy(ec)))
+    cupy.cuda.Device().synchronize()
+    return out
+
+
+def _w_var(offsets):
+    r_sq = np.sum(np.asarray(offsets, np.float64) ** 2, axis=1)
+    return np.where(r_sq <= H_SQ, (H_SQ - r_sq) ** 3, 0.0)
+
+
+def test_exposure_corrode_is_support_fraction() -> None:
+    """SAND with 10 WATER and 20 SAND neighbours inside h: exposure_corrode is
+    0.4 * (water share of sum W) within 5%, in both K_Step1 and K_Step1_BuildNL,
+    and no particle exceeds the largest reaction_rate."""
+    rng = np.random.default_rng(48)
+    offsets = []
+    while len(offsets) < 30:
+        v = rng.uniform(-0.95 * H, 0.95 * H, 3)
+        if 0.3 * H < np.linalg.norm(v) < 0.95 * H:
+            offsets.append(v)
+    offsets = np.array(offsets)
+    n = 31
+    pos = np.zeros((n, 4), np.float32)
+    pos[:, 3] = 1.0
+    pos[1:, :3] = offsets
+    packed = np.full(n, PACKED_SAND_G, np.uint32)
+    packed[1:11] = PACKED_WATER
+    temp = np.full(n, 293.0, np.float32)
+
+    w = _w_var(offsets)
+    expected = 0.4 * w[:10].sum() / w.sum()
+    max_rate = float(build_interaction_matrix()["reaction_rate"].max())
+    for name, (_, exp_c, all_c) in zip(("K_Step1", "K_Step1_BuildNL"),
+                                       _exposure_both_kernels(pos, packed, temp)):
+        print(f"  {name}: exposure_corrode {exp_c:.5f}, expected {expected:.5f}")
+        assert abs(exp_c - expected) <= 0.05 * expected, (name, exp_c, expected)
+        assert np.all(all_c <= max_rate + 1e-6), (name, all_c.max())
+        assert np.all(all_c >= 0.0)
+    # Half-water sand sits at the SAND -> WET_SAND threshold, not far past it.
+    assert expected < 0.4
+
+
+def test_exposure_heat_one_fire_neighbour_near_wood_threshold() -> None:
+    """WOOD on a 0.5h lattice with one FIRE neighbour at r = h/2: exposure_heat
+    equals heat_exchange * dT * W(h/2) / sum W within 5%, and is within an order
+    of magnitude of WOOD_IGNITE_EXPOSURE. A FIRE neighbour at 0.85h stays below it."""
+    grid = np.arange(-2, 3) * (0.5 * H)
+    offsets = np.array([(x, y, z) for x in grid for y in grid for z in grid
+                        if 0 < x * x + y * y + z * z <= H_SQ])
+    assert len(offsets) == 26
+    fire_k = int(np.argmin(np.linalg.norm(offsets - [0.5 * H, 0, 0], axis=1)))
+    threshold = _reaction_define("WOOD_IGNITE_EXPOSURE")
+    heat_exchange = float(build_interaction_matrix()[MAT_WOOD][MAT_FIRE]["heat_exchange"])
+
+    def run(offs, fire_idx):
+        n = len(offs) + 1
+        pos = np.zeros((n, 4), np.float32)
+        pos[:, 3] = 1.0
+        pos[1:, :3] = offs
+        packed = np.full(n, PACKED_WOOD, np.uint32)
+        packed[1 + fire_idx] = PACKED_FIRE
+        temp = np.full(n, 293.0, np.float32)
+        temp[1 + fire_idx] = 1200.0
+        w = _w_var(offs)
+        expected = heat_exchange * (1200.0 - 293.0) * w[fire_idx] / w.sum()
+        return expected, _exposure_both_kernels(pos, packed, temp)
+
+    expected, results = run(offsets, fire_k)
+    for name, (exp_h, _, _) in zip(("K_Step1", "K_Step1_BuildNL"), results):
+        print(f"  {name}: exposure_heat {exp_h:.1f} K, expected {expected:.1f}, "
+              f"threshold {threshold}")
+        assert abs(exp_h - expected) <= 0.05 * expected, (name, exp_h, expected)
+        assert threshold / 10.0 <= exp_h <= threshold * 10.0
+        assert exp_h > threshold
+
+    # Move the FIRE particle out to 0.85h: it now holds about 0.5% of the support.
+    far = offsets.copy()
+    far[fire_k] = [0.85 * H, 0.0, 0.0]
+    expected, results = run(far, fire_k)
+    for name, (exp_h, _, _) in zip(("K_Step1", "K_Step1_BuildNL"), results):
+        assert abs(exp_h - expected) <= 0.05 * expected, (name, exp_h, expected)
+        assert exp_h < threshold, (name, exp_h)
+
+
 def main() -> None:
     test_compilation()
     test_block_size()
@@ -1057,6 +1185,8 @@ def main() -> None:
     test_acid_metal_exposure_corrode()
     test_fire_wood_exposure_heat()
     test_water_water_no_exposure()
+    test_exposure_corrode_is_support_fraction()
+    test_exposure_heat_one_fire_neighbour_near_wood_threshold()
     test_500k_no_errors()
     print("\n=== ALL CHECKS PASSED ===")
 

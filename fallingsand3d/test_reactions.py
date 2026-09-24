@@ -4,10 +4,16 @@ Acceptance criteria:
   - ICE (mat=11, temp > 273K) -> WATER (mat=5, FLUID)
   - LAVA (mat=7, temp < 900K) -> STONE (mat=1, STATIC)
   - WATER (mat=5, temp > 373K) -> set SPAWN_GAS flag
-  - WOOD (mat=9, exposure_heat > 0.5) -> FIRE (mat=14, GAS, T=1200K, lifetime=1.0s)
-  - OIL (mat=6, exposure_heat > 0.3) -> FIRE (mat=14, GAS, T=1200K, lifetime=1.5s)
-  - GUNPOWDER (mat=15, exposure_heat > 0.1) -> FIRE + explosion velocity
+  - WOOD (mat=9, exposure_heat > 500 K) -> FIRE (mat=14, GAS, T=1200K, lifetime=1.0s)
+  - OIL (mat=6, exposure_heat > 300 K) -> FIRE (mat=14, GAS, T=1200K, lifetime=1.5s)
+  - GUNPOWDER (mat=15, exposure_heat > 100 K) -> FIRE + explosion velocity
   - Corrosion: health -= exposure_corrode * dt; health <= 0 -> DEAD
+
+Exposure scale (bd-r5-review-n28.48): Step1 divides the exposure sums by the
+neighbour kernel support weight. exposure_corrode = reaction_rate * reacting
+support fraction, in 1/s, at most the largest rate (1.0). exposure_heat =
+heat_exchange * max(T_j - T_i, 0) weighted the same way, in K. Tests that feed
+exposure directly use values on that scale.
   - GAS lifetime: lifetime -= dt; lifetime <= 0 -> DEAD
   - STEAM (mat=12, temp < 373K) -> WATER (mat=5, FLUID)
   - Exposure accumulators reset to 0 after use (inherent: sorted ephemeral arrays)
@@ -89,7 +95,11 @@ def setup_params(dt=DT):
 
 def make_particles(n, mat_id, behavior, temp=293.0, health=1.0, lifetime=0.0,
                    vel=None, exposure_heat=0.0, exposure_corrode=0.0):
-    """Create sorted particle arrays for testing reactions kernel."""
+    """Create sorted particle arrays for testing reactions kernel.
+
+    exposure_heat (K) and exposure_corrode (1/s) are the normalised Step1
+    outputs described in the module docstring.
+    """
     packed_info = np.full(n, MAKE_PACKED(mat_id, behavior), dtype=np.uint32)
     temperature = np.full(n, temp, dtype=np.float32)
     hlth = np.full(n, health, dtype=np.float32)
@@ -233,9 +243,9 @@ def test_steam_stays_gas():
 
 
 def test_wood_ignites():
-    """WOOD with exposure_heat > 0.5 transitions to FIRE (GAS, T=1200K, lifetime=1.0s)."""
+    """WOOD with exposure_heat > 500 K transitions to FIRE (GAS, T=1200K, lifetime=1.0s)."""
     setup_params()
-    d = make_particles(100, WOOD, STATIC, exposure_heat=0.6)
+    d = make_particles(100, WOOD, STATIC, exposure_heat=600.0)
     compute_reactions(**d)
 
     pi = d["sorted_packed_info"].get()
@@ -250,9 +260,9 @@ def test_wood_ignites():
 
 
 def test_wood_no_ignite():
-    """WOOD with exposure_heat < 0.5 stays as WOOD."""
+    """WOOD with exposure_heat < 500 K stays as WOOD."""
     setup_params()
-    d = make_particles(100, WOOD, STATIC, exposure_heat=0.3)
+    d = make_particles(100, WOOD, STATIC, exposure_heat=300.0)
     compute_reactions(**d)
 
     pi = d["sorted_packed_info"].get()
@@ -262,9 +272,9 @@ def test_wood_no_ignite():
 
 
 def test_oil_ignites():
-    """OIL with exposure_heat > 0.3 transitions to FIRE (GAS, T=1200K, lifetime=1.5s)."""
+    """OIL with exposure_heat > 300 K transitions to FIRE (GAS, T=1200K, lifetime=1.5s)."""
     setup_params()
-    d = make_particles(100, OIL, FLUID, exposure_heat=0.4)
+    d = make_particles(100, OIL, FLUID, exposure_heat=400.0)
     compute_reactions(**d)
 
     pi = d["sorted_packed_info"].get()
@@ -279,9 +289,9 @@ def test_oil_ignites():
 
 
 def test_gunpowder_explodes():
-    """GUNPOWDER with exposure_heat > 0.1 transitions to FIRE + random velocity burst."""
+    """GUNPOWDER with exposure_heat > 100 K transitions to FIRE + random velocity burst."""
     setup_params()
-    d = make_particles(100, GUNPOWDER, GRANULAR, exposure_heat=0.2)
+    d = make_particles(100, GUNPOWDER, GRANULAR, exposure_heat=200.0)
     compute_reactions(**d, frame=42)
 
     pi = d["sorted_packed_info"].get()
@@ -832,6 +842,60 @@ def test_wood_next_to_dead_slot_gets_no_heat_exposure():
     assert exp_h == 0.0, f"WOOD exposure_heat {exp_h} from dead slots"
 
 
+def test_stone_in_acid_survives_about_one_over_rate():
+    """bd-r5-review-n28.48: STONE fully surrounded by ACID gets exposure_corrode
+    equal to the ACID/STONE rate (0.15/s) from step1, so it survives about
+    1/0.15 = 6.7 s instead of dying in one substep."""
+    from materials import ACID
+    packed = [MAKE_PACKED(STONE, STATIC)] + [MAKE_PACKED(ACID, FLUID)] * 6
+    _, exp_c = _step1_exposure(packed, [293.0] * 7, _ring_masses(0.0208), _RING)
+    assert abs(exp_c - 0.15) < 1e-4, f"STONE exposure_corrode {exp_c}, expected 0.15"
+
+    dt = 0.01
+    setup_params(dt=dt)
+    d = make_particles(1, STONE, STATIC, exposure_corrode=exp_c)
+    for step in range(640):  # 6.4 s
+        compute_reactions(**d, frame=step)
+    assert GET_MATERIAL_ID(int(d["sorted_packed_info"].get()[0])) == STONE, \
+        "STONE died before 6.4 s in full acid contact"
+    for step in range(640, 700):  # to 7.0 s
+        compute_reactions(**d, frame=step)
+    assert GET_MATERIAL_ID(int(d["sorted_packed_info"].get()[0])) == DEAD, \
+        "STONE still alive after 7.0 s in full acid contact"
+
+
+def test_sand_wetting_is_graded_by_water_fraction():
+    """bd-r5-review-n28.48: with normalised exposure, SAND needs more than half
+    of its kernel support in WATER to wet, and WET_SAND needs more than 83% to
+    turn to MUD. One WATER neighbour among six no longer wets sand."""
+    def exposure(centre, n_water):
+        packed = ([MAKE_PACKED(centre, GRANULAR)]
+                  + [MAKE_PACKED(WATER, FLUID)] * n_water
+                  + [MAKE_PACKED(SAND, GRANULAR)] * (6 - n_water))
+        _, exp_c = _step1_exposure(packed, [293.0] * 7, _ring_masses(0.0111), _RING)
+        return exp_c
+
+    def after(mat, exp_c):
+        setup_params(dt=0.001)
+        d = make_particles(1, mat, GRANULAR, exposure_corrode=exp_c)
+        compute_reactions(**d)
+        return GET_MATERIAL_ID(int(d["sorted_packed_info"].get()[0]))
+
+    e1 = exposure(SAND, 1)
+    assert abs(e1 - 0.4 / 6) < 1e-4, e1
+    assert after(SAND, e1) == SAND
+    e4 = exposure(SAND, 4)
+    assert abs(e4 - 0.4 * 4 / 6) < 1e-4, e4
+    assert after(SAND, e4) == WET_SAND
+
+    w4 = exposure(WET_SAND, 4)
+    assert abs(w4 - 0.6 * 4 / 6) < 1e-4, w4
+    assert after(WET_SAND, w4) == WET_SAND, "WET_SAND at 67% water must not turn to MUD"
+    w6 = exposure(WET_SAND, 6)
+    assert abs(w6 - 0.6) < 1e-4, w6
+    assert after(WET_SAND, w6) == MUD
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,
@@ -868,6 +932,8 @@ if __name__ == "__main__":
         test_step1_ice_in_water_has_no_corrode_exposure,
         test_step1_metal_by_lava_and_acid_in_water_have_no_corrode_exposure,
         test_wood_next_to_dead_slot_gets_no_heat_exposure,
+        test_stone_in_acid_survives_about_one_over_rate,
+        test_sand_wetting_is_graded_by_water_fraction,
     ]
 
     passed = 0
