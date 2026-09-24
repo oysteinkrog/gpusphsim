@@ -320,6 +320,7 @@ Clamped: `|v| <= velocity_limit = velocity_limit_factor * h / dt`, recomputed in
 | WCSPH, accuracy 0.2 | 0.9 | 0.5 ms | 72 m/s |
 | PBF | 0.9 | 1/120 s | 4.3 m/s |
 | DFSPH | 0.4 | 1/300 s | 4.8 m/s |
+| DFSPH (Fast) | 0.4 | 1/200 s | 3.2 m/s |
 
 **WCSPH timestep** (`Simulation._compute_adaptive_dt`, adaptive mode only):
 
@@ -1224,7 +1225,7 @@ Switching solvers resets the scene (avoids "physics shock" from different densit
 |--------|-----------|---------------|-----------------|----------|
 | WCSPH | Weakly Compressible SPH | 10-25 at dt=0.001 | N/A | Accuracy, multi-material |
 | PBF | Position Based Fluids | 1-2 at dt=1/60 | 4 constraint iters | Fast fluids |
-| DFSPH | Divergence-Free SPH | 5 at dt=1/300 | 2 div + 8 dens iters | Quality + speed |
+| DFSPH | Divergence-Free SPH | 5 at dt=1/300 | 3 div + 4 dens iters | Quality + speed |
 
 Each solver has its own CuPy RawModule with separate constant memory.
 Shared constants (`c_grid`, `c_sim`, `c_precalc`, `c_materials`) are uploaded
@@ -1543,7 +1544,7 @@ Per substep:
   4. Predict velocity: v* = v + dt * a_nonpressure   (gravity + viscosity/rho_i)
   5. Divergence-free solver (warm-started kappa_v from prev frame, scaled by 0.5):
      Apply warm-started kappa_v correction, then N_div iterations:
-     kappa_v_i = -div(v*_i) * alpha_i / dt
+     kappa_v_i = max(div(v*_i), 0) * omega * alpha_i / dt   [unilateral]
      v*_i -= dt * SUM_j m_j * (kappa_v_i/rho_i + kappa_v_j/rho_j) * grad_W_ij
   6. Density solver (Jacobi iteration on pressure, N_dens iterations):
      Initialize p_rho2 from warm-start (previous frame, scaled by 0.5)
@@ -1573,8 +1574,19 @@ The alpha factor encodes how much a particle's density responds to pressure corr
 grad_sum = SUM_j (m_j/rho_j) * grad_W_spiky(x_ij)     [vector sum]
 grad_norm_sum = SUM_j (m_j/rho_j)^2 * |grad_W_spiky(x_ij)|^2    [scalar sum]
 
-alpha_i = 1 / max(|grad_sum|^2 + grad_norm_sum, 1e-6)
+denom   = |grad_sum|^2 + grad_norm_sum
+alpha_i = denom > 1e-6 ? min(1 / denom, alpha_limit * h^2) : 0
 ```
+
+**Alpha cap (bd-r5-review-n28.37).** `alpha_limit` is in units of `h^2` and does not
+depend on dt: the Jacobi displacement per iteration is `residual * alpha * |gradW|`, which
+has no dt in it. Interior alpha is `1.09e-3 = 0.68 h^2` (denom about 915 at h = 0.04,
+spacing 0.02), and both shipped profiles use `alpha_limit = 1.0`, so the cap sits at about
+1.5x the interior value. It binds only on particles with few neighbours (small denom).
+A cap of 3 h^2 or more lets those surface particles take full-size Jacobi steps and the
+free surface boils (KE of a settling 36K block at 3 s: 100 at 3 h^2, 23 at 1 h^2).
+`test_dfsph_retune.py::test_dfsph_interior_alpha_not_capped` checks that interior alpha
+equals 1/denom at both profiles.
 
 The first term (`|grad_sum|^2`) is the squared norm of the vector sum of gradients.
 The second term is the sum of squared norms. Both are accumulated in a single neighbor loop.
@@ -1588,8 +1600,8 @@ some compression for granular packing without destabilizing the solver.
 
 Enforces divergence-free velocity field:
 ```
-div_v_i = SUM_j (m_j/rho_j) * (v*_i - v*_j) . grad_W_ij
-kappa_v_i = -div_v_i * alpha_i / dt
+div_v_i = SUM_j (m_j/rho_j) * (v*_i - v*_j) . grad_W_ij     [> 0 = compressing]
+kappa_v_i = max(div_v_i, 0) * omega * alpha_i / dt
 dv_i = -dt * SUM_j m_j * (kappa_v_i/rho_i + kappa_v_j/rho_j) * grad_W_ij
 v*_i += dv_i
 ```
@@ -1601,11 +1613,22 @@ corrections ~rho times too weak (a critical bug we fixed).
 
 Note: kappa_v **multiplies** by alpha (not divides). Since alpha = 1/denom, dividing
 by alpha would multiply by the full denominator, producing astronomical corrections
-for well-connected particles. The negative sign ensures positive divergence (expanding)
-produces negative kappa, which drives an inward velocity correction.
+for well-connected particles. `div_v` has the same sign as `drho` in 13.4: positive
+means the particle is being compressed, and a positive kappa_v pushes the pair apart.
 
-Default: 2 iterations. Each iteration requires two neighbor passes (compute kappa_v,
-then correct velocity).
+**Unilateral (bd-r5-review-n28.37).** `K_DFSPH_ComputeKappaV` clamps `div_v` to `>= 0`, as
+SPlisHSPlasH does (`densityAdv = max(densityAdv, 0)`). Only compressing flow is corrected;
+separating particles (splashes, a thinning sheet, the free surface) are left alone.
+With the bilateral form and alpha at 1/denom the Jacobi iteration diverged: on a settling
+36K WATER block the mean |div_v| rose by 50 to 170 percent per substep and KE stayed above
+1400 (a boiling surface). The neighbour-count gate (`normal.w < 20`) that SPlisHSPlasH
+also applies is bead bd-r5-review-n28.71.
+
+Iterations: 3 (Stable) or 2 (Fast). Each iteration requires two neighbor passes (compute
+kappa_v, then correct velocity). On a settling 36K block at the Stable profile the
+positive divergence drops by 72 to 81 percent per substep (warm start plus 3 iterations).
+Jacobi removes local modes fast but the block-wide mode slowly: 8 iterations reach 91
+percent and 16 reach 94 percent.
 
 **Warm-starting:** kappa_v values are persisted across substeps through the sort-reorder
 pipeline (kappa_v → sorted_kappa_v). At the start of each divergence solve, the
@@ -1676,16 +1699,9 @@ p_rho2 *= warm_start     (default 0.5 = carry 50% from previous frame)
 Warm-starting reduces the number of iterations needed: 2 iters with warm-start ≈ 4 iters
 without. Values above 0.8 cause pressure accumulation (particles ejected to boundaries).
 
-**Alpha cap as Jacobi relaxation:** Interior particles have actual alpha ≈ 1.1e-3
-(denom ≈ 915), but alpha is capped at `alpha_limit * dt^2` in K_DFSPH_ComputeDensityAlpha:
-```
-alpha_cap = alpha_limit * dt^2
-fraction of the exact Jacobi step per iteration = omega * alpha_cap / alpha_true
-```
-With alpha_limit=10, dt=1/300: alpha_cap ≈ 1.1e-4, so each iteration of the Stable
-profile (omega=0.7) applies about 0.07 of the exact diagonal step. The solver converges
-but is strongly under-relaxed. Re-tuning the cap, omega, iteration counts and the
-velocity limit for the corrected density prediction is bead bd-r5-review-n28.37.
+**Alpha is not capped in the interior** (13.2): each Jacobi iteration takes `omega` of the
+exact diagonal step. Before bd-r5-review-n28.37 the cap was `alpha_limit * dt^2`, which at
+dt = 1/300 held interior alpha at 0.1x of 1/denom.
 
 **Uncapped behaviour** (alpha_limit=1e9, 9x9x9 WATER block, uniform compression
 `v = -k (x - c)` with `3 k dt = 0.1`, mean complementarity residual over all particles):
@@ -1701,7 +1717,8 @@ On a 20x20x20 block the smooth (block-wide) mode converges more slowly, because 
 uniform `p_rho2` produces no net acceleration inside the fluid: at omega=0.7 the
 residual falls from 7.8% to 2.1% in 8 iterations.
 
-**Measured effect in the full step** (Stable and Fast profiles as shipped, 36K WATER cube
+**Measured effect of the density formula fix** (bd-r5-review-n28.26, with the old
+dt^2 alpha cap and 12 / 8 iterations of the profiles at that time, 36K WATER cube
 from `eval_review_fixes.py` test A, mean `|rho/rho0 - 1|` over FLUID particles):
 
 | profile      | formula              | 1 s (impact) | 2 s   | 3 s  | 5 s (settled) |
@@ -1715,14 +1732,44 @@ No NaN in either case. `eval_solvers.py` gives 67/72 with both formulas; the sam
 checks fail with both (WCSPH Fluid Settles, PBF and DFSPH Sand Friction, Dam Break COM_y,
 KE Decay Ratio).
 
-**Stability settings (2026-03-08)**: omega 0.7 (under-relaxation), velocity limit
-0.4*h/dt (was 0.9*h/dt), and pressure acceleration clamped to h/dt^2 in
-K_DFSPH_ApplyPressureVelocity. These were tuned before the density prediction fix and
-are re-evaluated in bd-r5-review-n28.37.
+**Profiles (bd-r5-review-n28.37).** omega 0.7 for both solvers (omega 1.0 still overshoots
+the short-wavelength modes, 13.4 table above), velocity limit 0.4*h/dt (0.9 left surface
+particles at 9.9 m/s after 3 s), pressure acceleration clamped to h/dt^2 in
+K_DFSPH_ApplyPressureVelocity, warm start 0.5 for both solvers, alpha_limit 1.0.
 
-Default stable profile: 12 iterations, alpha_limit=10.0, omega=0.7, warm_start=0.5,
-velocity_limit_factor=0.4 at dt=1/300.
-Default fast profile: 8 iterations, alpha_limit=5.0, omega=0.7, velocity_limit_factor=0.4.
+| profile      | dt    | div + dens iters | sweeps / substep | sweeps / sim s | ms / sim s at 1M |
+|--------------|-------|------------------|------------------|----------------|------------------|
+| DFSPH        | 1/300 | 3 + 4            | 18               | 5400           | 11600            |
+| DFSPH (Fast) | 1/200 | 2 + 3            | 14               | 2800           | 6500             |
+| old DFSPH    | 1/300 | 3 + 12, dt^2 cap | 34               | 10200          | 20100            |
+| old Fast     | 1/300 | 2 + 8, dt^2 cap  | 24               | 7200           | 13400            |
+
+Sweeps count density/alpha, non-pressure forces, the div warm-start pass, 2 per div
+iteration, the initial a_press pass and 2 per density iteration. The ms column is the
+median substep time from `bench_substep.py` at 992K particles divided by dt, on a GPU shared
+with other jobs, so treat it as about +-10 percent. `SolverProfile(solver_type=DFSPH)`
+defaults to the Stable values, and `velocity_limit_factor` defaults to 0.4 for DFSPH.
+
+Settling 36K WATER block (`run_dfsph_retune.py`, 0.6 x 0.8 x 0.6 m dropped 0.1 m).
+comp is the mean of `max(rho/rho0 - 1, 0)` over FLUID; KE in J:
+
+| profile      | comp 1 s | comp 3 s | KE 1 s | KE 3 s | div reduction 3 s |
+|--------------|----------|----------|--------|--------|-------------------|
+| DFSPH        | 0.89%    | 0.35%    | 284    | 23     | 81%               |
+| DFSPH (Fast) | 3.51%    | 0.89%    | 292    | 24     | 77%               |
+| old DFSPH    | 0.49%    | 0.40%    | 432    | 98     | 62%               |
+| old Fast     | 1.41%    | 0.70%    | 447    | 127    | 37%               |
+
+The sweep over dt {1/300, 1/200, 1/150}, div {2, 3, 4} and dens {3, 4, 6} showed that dt
+sets the compression error: 0.3 to 0.4% at 1/300, 0.8 to 1.2% at 1/200, 1.7 to 2.5% at
+1/150, with little change from more density iterations. dt = 1/120 to 1/150 (PROBLEMS.md C3)
+needs more than 6 iterations to stay under 1%. Fast trades a 3.5% peak at impact for half
+the cost.
+
+`eval_solvers.py` goes from 67/72 to 69/72: DFSPH Sand Friction and Dam Break COM_y now
+pass (DFSPH COM_y -0.498 to -0.603, WCSPH -0.601). Still failing: WCSPH Fluid Settles,
+PBF Sand Friction and KE Decay Ratio (DFSPH 5.71 to 2.89, PBF 2.58; the ratio compares
+final KE with the peak over the first 0.3 s, before the block lands).
 
 **Source**: `dfsph_solver.cu:K_DFSPH_ComputePressureAccel`, `K_DFSPH_DensitySolverUpdate`,
 `K_DFSPH_ApplyPressureVelocity`, `simulation.py` (step 5, density solver loop)
