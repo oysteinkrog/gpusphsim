@@ -195,6 +195,7 @@ void K_Step1(
                             if (mat_id_j != MAT_RIGID) {
                                 // --- Heat diffusion ---
                                 float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
+                                if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                                 float lap_var = h - rlen;
                                 float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
                                 sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
@@ -492,6 +493,7 @@ void K_Step1_BuildNL(
 
                             if (mat_id_j != MAT_RIGID) {
                                 float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
+                                if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                                 float lap_var = h - rlen;
                                 float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
                                 sum_dTdt += m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;

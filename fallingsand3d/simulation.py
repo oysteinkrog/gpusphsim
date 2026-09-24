@@ -783,12 +783,19 @@ class Simulation:
         # so it accumulates across substeps since the last full sort.
         self._run_grid_setup(n)
 
+        # Snapshot the previous-substep density (packed into position.w by the last
+        # K_Step1, carried permutation-correctly through the position reorder) into a
+        # dedicated read buffer.  This keeps density_in distinct from density_out
+        # (sorted_density), breaking the __restrict__ aliasing race; the kernel
+        # value-guards any zero entry (frame 1 / fresh spawns) to 1000 (bd-r4fix-uup.14).
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
+
         # Step1: density + strain-rate + heat diffusion + exposure + vorticity + normal + dye
         step1.compute_step1(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
             w.sorted_mass[:n],
-            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_density_prev[:n],
             w.sorted_packed_info[:n],
             w.sorted_temperature[:n],
             self._cell_start,
@@ -915,6 +922,11 @@ class Simulation:
             w.sorted_predicted_position,
         )
 
+        # Snapshot previous-substep density into a dedicated read buffer so density_in
+        # is not aliased with the density_out target (sorted_density); the kernel
+        # value-guards zero entries to 1000 (bd-r4fix-uup.14).
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
+
         # 2. Initial density + lambda + heat diffusion + exposure (first call only)
         pbf_solver.pbf_compute_lambda(
             w.sorted_predicted_position[:n], w.sorted_mass[:n],
@@ -923,7 +935,7 @@ class Simulation:
             w.sorted_density, w.sorted_lambda_pbf,
             w.sorted_pressure_normal,
             temperature_in=w.sorted_temperature[:n],
-            density_in=w.sorted_density if hasattr(w, '_density_initialized') else None,
+            density_in=w.sorted_density_prev[:n],
             dTdt_out=w.sorted_dTdt,
             exposure_heat_out=w.sorted_exposure_heat,
             exposure_corrode_out=w.sorted_exposure_corrode,
@@ -997,16 +1009,15 @@ class Simulation:
         self._run_grid_setup(n)
 
         # 1. Density + alpha precompute (also computes shear_rate for GRANULAR)
-        # density_in aliasing note: sorted_density is both density_in and density_out.
-        # It's not reordered during sort, but the in-place race means threads may read
-        # either the previous or current frame's density for neighbors — both are
-        # acceptable for the volume weighting used in alpha/heat/dye computation.
-        # Using None (rho_j=1000 fallback) is worse because it underestimates surface
-        # particle volumes, making alpha too large and increasing boundary oscillation.
+        # Snapshot previous-substep density into a dedicated read buffer so density_in
+        # is not the same buffer as the density_out target (sorted_density).  The old
+        # in-place aliasing was a __restrict__ read/write race; the kernel value-guards
+        # any zero entry (frame 1 / fresh spawns) to 1000 (bd-r4fix-uup.14).
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
         dfsph_solver.compute_density_alpha(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_mass[:n],
-            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_density_prev[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
             w.sorted_density, w.sorted_alpha_dfsph,
@@ -1208,9 +1219,6 @@ class Simulation:
         # Update device substep counter for RNG seeding (unique per substep)
         self._frame_counter_d.fill(self._substep_counter)
 
-        # Mark density as initialized (needed for step1 prev_density path)
-        w._density_initialized = True
-
         # --- Spawn velocity damping ramp ---
         self._apply_damping_ramp()
 
@@ -1350,7 +1358,6 @@ class Simulation:
         mark("start")
 
         self._frame_counter_d.fill(self._substep_counter)
-        w._density_initialized = True
 
         # --- Spawn velocity damping ramp (bd-r4-epic-x2j.3: was missing from timed path) ---
         self._apply_damping_ramp()
@@ -1365,11 +1372,14 @@ class Simulation:
         self._run_grid_setup(n)
         mark("sort")
 
+        # Snapshot previous-substep density from position.w (bd-r4fix-uup.14; see _run_wcsph_body)
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
+
         # 5. Step1
         step1.compute_step1(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_mass[:n],
-            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_density_prev[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
             density_out=w.sorted_density,

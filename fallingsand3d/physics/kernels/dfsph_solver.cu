@@ -179,6 +179,7 @@ void K_DFSPH_ComputeDensityAlpha(
                     if (j != i && r_sq > 1e-12f) {
                         float rlen = sqrtf(r_sq);
                         float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                        if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
 
                         // Skip MAT_RIGID for heat/exposure/dye/vorticity/strain
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);

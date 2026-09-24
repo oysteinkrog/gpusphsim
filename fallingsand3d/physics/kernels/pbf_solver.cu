@@ -288,6 +288,7 @@ void K_PBF_ComputeLambda(
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         if (do_heat && mat_id_j != MAT_RIGID) {
                             float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                            if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                             float T_j = __ldg(&temperature_in[j]);
 
                             float lap_var = h - rlen;
@@ -311,6 +312,7 @@ void K_PBF_ComputeLambda(
                         // Vorticity + surface normal (FLUID only, skip MAT_RIGID)
                         if ((do_vort || do_normal) && mat_id_j != MAT_RIGID) {
                             float rho_j_v = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                            if (rho_j_v <= 0.0f) rho_j_v = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                             float vol_jv = m_j / fmaxf(rho_j_v, 1.0f);
                             if (do_vort) {
                                 float4 vj4 = __ldg(&velocity_in[j]);

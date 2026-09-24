@@ -93,6 +93,11 @@ class World:
         self.sorted_sph_force = cp.zeros((n, 4), dtype=cp.float32)
         self.sorted_color = cp.zeros((n, 4), dtype=cp.float32)
         self.sorted_density = cp.zeros(n, dtype=cp.float32)
+        # Previous-substep density snapshot, read as density_in for strain-rate
+        # m_j/rho_j weighting.  Kept separate from sorted_density (the density_out
+        # target) to break the density_in==density_out __restrict__ aliasing race
+        # (bd-r4fix-uup.14).  Populated per-substep in simulation.py.
+        self.sorted_density_prev = cp.zeros(n, dtype=cp.float32)
         self.sorted_mass = cp.zeros(n, dtype=cp.float32)
         self.sorted_temperature = cp.zeros(n, dtype=cp.float32)
         self.sorted_health = cp.zeros(n, dtype=cp.float32)
