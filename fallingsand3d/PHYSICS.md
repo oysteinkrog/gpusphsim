@@ -3393,24 +3393,39 @@ if (lane_id == 0) atomicAdd(&d_rigid_forces[body_id*4 + k], f_k);
 
 ### 22.7 Rigid Body Integration
 
-Symplectic Euler with world-frame inertia tensor:
+Symplectic Euler. Rotation is integrated through the world-frame angular
+momentum `L`, so Euler's equation `I dω/dt + ω × (I ω) = τ` keeps its
+gyroscopic term (bd-r5-review-n28.114):
 
 ```
 // Linear
 v += (F/m + g) * dt
 x += v * dt
 
-// Angular (world-frame inertia)
+// Angular (momentum form, world-frame inertia)
+I_world     = R * diag(I_body)     * R^T      // I_body = 1/I_body_inv, 0 where I_body_inv = 0
 I_world_inv = R * diag(I_body_inv) * R^T
-alpha = I_world_inv * tau
-omega += alpha * dt
+L      = I_world(q) * omega
+L      = (L + tau * dt) * ang_damp
+omega  = I_world_inv(q) * L                   // drives the pose update
 
 // Quaternion update
-q += 0.5 * dt * (0, omega) * q
-q = normalize(q)
+q' = normalize(q + 0.5 * dt * (0, omega) * q)
+
+// Stored angular velocity, from the same L at the new rotation
+omega' = I_world_inv(q') * L
 ```
 
-Velocity damping: linear 1-0.01*dt, angular 1-0.05*dt. Angular velocity clamped to 20 rad/s. Force clamped to 1000*mass.
+With no torque `L` is conserved, and re-deriving `omega` from `L` at the new
+rotation gives the `-I_world_inv * (omega × I_world omega)` term. A non-cubic
+body therefore tumbles correctly. The Submarine box (half extents 0.15, 0.04,
+0.06) has `Ixx < Izz < Iyy`, so z is its intermediate axis. A spin about z with a
+small perturbation flips, and a spin about y stays stable. Over 1000 substeps
+at dt = 1e-3, `|L|` matches `|L0| * ang_damp^1000` within 0.1 percent and the
+direction of `L` does not change (`test_rigid_gyro.py`). For a cube `I_world`
+is isotropic and the update reduces to `omega = (omega + I_inv * tau * dt) * ang_damp`.
+
+Velocity damping: linear 1-0.01*dt, angular 1-0.05*dt (applied to L). Angular velocity clamped to 20 rad/s (L is scaled by the same factor). Force clamped to 1000*mass.
 
 **Kinematic bodies (bd-r5-review-n28.105)**: a body with `is_kinematic` (or
 `inv_mass <= 0`) skips gravity, fluid force and torque, damping, the clamps and
