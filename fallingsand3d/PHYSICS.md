@@ -1216,6 +1216,44 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
 `simulation.py:_run_reactions_spawn`, `world.py:kill_in_sphere`,
 `dfsph_solver.cu:K_DFSPH_DensitySolverUpdate`, `pbf_solver.cu:K_PBF_ComputeLambda`
 
+### 10.21 Spawned steam: child placement and slot state
+
+`K_SpawnGas` runs after the density pass and before the force or solver pass,
+on sorted arrays, so every per-slot value a later kernel reads in the same
+substep must be written for the claimed slot. Otherwise the child inherits the
+dead occupant's values. (bd-r5-review-n28.42)
+
+- **Placement.** The `SPAWN_N = 3` children sit on a horizontal ring of radius
+  `0.3 * particle_spacing` around the source, 120 degrees apart, so pairwise
+  distance is `0.52 * particle_spacing`. The ring rotation is hashed from the
+  source index and position. Coincident children would never separate, because
+  every neighbour loop skips pairs with `r^2 < 1e-12`.
+- **Velocity.** Each child gets `v_src + (0, 2, 0) m/s` plus `0.1 m/s` along its
+  ring direction. The three spreads sum to zero, so total momentum is
+  `m_src * (v_src + (0, 2, 0))`. Mass is `m_src / 3` each.
+- **Density.** `position.w` and `density` get the steam rest density. WCSPH
+  step2 reads `position.w` as `rho_i`; before, it held the source water density.
+- **WCSPH.** `pressure[slot] = 0` (gas EOS `k * max(rho - rho0, 0)` at rest
+  density) and the FP16 mirror `velocity_h[slot]` gets the child velocity, so
+  step2 in the spawn substep sees the child's real velocity.
+- **PBF.** `K_PBF_Predict` runs before spawn and leaves the dead slot's old
+  position in `predicted_position[slot]`. `K_SpawnGas` writes
+  `x* = x_child + dt * v_child` (clamped to the world box) there, so
+  `K_PBF_Finalize` gives the child `v = (x* - x) / dt = v_child` and keeps it at
+  the source. It also zeroes `lambda`.
+- **DFSPH.** `kappa` and `kappa_v` are zeroed. DFSPH skips GAS in its pressure
+  solvers, so the slot's `alpha` from the pre-spawn density pass is not used.
+  `predicted_position` is not written: DFSPH reuses it as `a_press` scratch.
+- **All solvers.** Dye and angular velocity are zeroed. The spawn writes the
+  `+inf` bits into `max_displacement`, so the next grid-reuse decision forces a
+  full sort (see 20.5 on the readback lag).
+- **Blast wave.** `K_BlastWave` adds impulses to `velocity` between step1 and
+  step2 but does not refresh `velocity_h`, so WCSPH neighbours see a blasted
+  particle's pre-blast velocity for one substep.
+
+**Source**: `spawn.cu:K_SpawnGas`, `spawn.py:compute_spawn`,
+`simulation.py:_run_reactions_spawn`, `simulation.py:_run_pbf_body`
+
 ## 11. Multi-Solver Architecture
 
 Three solver backends are available, selectable at runtime via UI dropdown.
@@ -1378,6 +1416,8 @@ Applied in K_PBF_Finalize.
   High artificial viscosity prevents granular from flowing like water.
 - **GAS**: Skips PBF constraints (lambda=0, delta=0) in all kernels.
   Predict uses gravity + buoyancy + drag. GAS is a compressible phase.
+  Steam spawned by `K_SpawnGas` after Predict gets its predicted position
+  written by the spawn (`x + dt * v`, see 10.21).
 - **STATIC**: Lambda always forced to 0 (Akinci one-way boundary). STATIC
   contributes to neighbor density sums. On do_heat path, exposure/heat/dye
   are accumulated but lambda is still 0.
