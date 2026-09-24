@@ -206,3 +206,93 @@ def test_zoom_large_delta_stays_positive_and_off_limits():
     cam = OrbitCamera(distance=3.0)
     cam.zoom(1.0)
     assert abs(cam.distance - 3.0 * (1.0 - cam.zoom_sensitivity)) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# (f) Save / Load panel scans the saves directory once, not every frame
+#     (bd-r5-review-n28.13)
+# ---------------------------------------------------------------------------
+
+class _StubImgui:
+    """Minimal imgui stand-in for UI._draw_save_load_panel."""
+
+    class Cond_:
+        first_use_ever = 0
+
+    class WindowFlags_:
+        always_auto_resize = 0
+
+    def __init__(self):
+        self.pressed = set()
+        self.input_text_args = []
+
+    @staticmethod
+    def ImVec2(x, y):
+        return (x, y)
+
+    def set_next_window_pos(self, *a):
+        pass
+
+    def set_next_window_size(self, *a):
+        pass
+
+    def begin(self, *a):
+        return (True, True)
+
+    def end(self):
+        pass
+
+    def input_text(self, *args):
+        self.input_text_args.append(args)
+        return False, args[1]
+
+    def button(self, label, size=None):
+        return label in self.pressed
+
+    def text(self, *a):
+        pass
+
+    def separator(self):
+        pass
+
+    def combo(self, label, idx, items):
+        return False, idx
+
+
+def test_save_panel_scans_saves_once_then_on_refresh_and_save(monkeypatch):
+    pytest.importorskip("imgui_bundle")
+    ui = pytest.importorskip("ui")
+    stub = _StubImgui()
+    monkeypatch.setattr(ui, "imgui", stub)
+    calls = []
+    monkeypatch.setattr(ui, "list_saves", lambda: calls.append(1) or [])
+    monkeypatch.setattr(ui, "save_scene", lambda w, s, c, name: f"/x/{name}.fs3d")
+
+    u = ui.UI.__new__(ui.UI)
+    u._save_filename = "scene"
+    u._save_status = ""
+    u._load_files = []
+    u._load_files_scanned = False
+    u._load_selected = 0
+    u._camera_ref = object()
+
+    for _ in range(100):
+        u._draw_save_load_panel(None, None, {})
+    assert len(calls) == 1
+
+    stub.pressed = {"Refresh"}
+    u._draw_save_load_panel(None, None, {})
+    stub.pressed = set()
+    for _ in range(10):
+        u._draw_save_load_panel(None, None, {})
+    assert len(calls) == 2
+
+    stub.pressed = {"Save"}
+    u._draw_save_load_panel(None, None, {})
+    stub.pressed = set()
+    for _ in range(10):
+        u._draw_save_load_panel(None, None, {})
+    assert len(calls) == 3
+
+    # No flags argument: 64 would be InputTextFlags_.enter_returns_true.
+    assert all(args == ("Name", "scene") for args in stub.input_text_args)
