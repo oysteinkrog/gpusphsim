@@ -760,10 +760,13 @@ def test_acid_corrodes():
     metal_mask = (pi_h & 0xFF) == METAL
     dead_mask = (pi_h & 0xFF) == DEAD
 
+    # Exposure is rate * acid support fraction (bd-r5-review-n28.48), so metal
+    # loses at most 0.3 health per second and only the metal at the interface
+    # loses much. Check the most-damaged metal, not the mean.
     if np.any(metal_mask):
-        mean_metal_health = np.mean(health_h[metal_mask])
-        assert mean_metal_health < 0.95, \
-            f"Metal health not reduced by acid: mean={mean_metal_health:.4f}"
+        min_metal_health = np.min(health_h[metal_mask])
+        assert min_metal_health < 0.95 or np.any(dead_mask), \
+            f"Metal health not reduced by acid: min={min_metal_health:.4f}"
     # Some metal should have died
     dead_from_metal = np.sum(dead_mask)
     total_damage = int(np.sum(health_h[n_acid:] < 1.0)) + int(dead_from_metal)
