@@ -166,6 +166,16 @@ MAT_RIGID = 18
 #   - rest_density in kg/m^3 (approximate real-world). FLUID and GRANULAR
 #     particles spawn with mass 0.02 * rest_density / 2500 (world.spawn_mass),
 #     so they rest at rest_density at spacing 0.02.
+#   - GAS rest_density is in kernel-sum units, not real gas density
+#     (bd-r5-review-n28.80). GAS particles keep mass 0.02 (0.02/3 for
+#     boiling children), so the Poly6 self term alone is 490 (163).
+#     A real-world rho0 (0.2-0.6) sits below that, so the gas EOS
+#     p = k * max(rho - rho0, 0) was always on. Rule: rho0_gas is the
+#     kernel-sum density of a mass-0.02 cubic lattice at the target gas
+#     spacing, at least 2x the 490 self term. STEAM 1200 (spacing about 0.025),
+#     SMOKE 1100 (0.026), FIRE 1000 (0.027). A cloud at the spawn spacing
+#     0.02 reads rho about 2525, so rho/rho0 is 2.1-2.5 and pressure pushes
+#     it apart until it reaches rho0; an isolated particle has p = 0.
 #   - eos_stiffness: Tait EOS pressure coefficient (game-tuned)
 #   - eos_gamma: 7 for FLUID/GRANULAR, 1 for GAS, 0 for STATIC/DEAD
 #   - base_viscosity: FLUID/GAS dynamic viscosity mu in Pa*s (scaled for game
@@ -295,7 +305,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     STEAM: MaterialDef(
         id=STEAM, name="STEAM",
-        rest_density=0.6, eos_stiffness=3.0, eos_gamma=1.0,
+        rest_density=1200.0, eos_stiffness=3.0, eos_gamma=1.0,
         base_viscosity=0.01, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.01, thermal_conductivity=10.0, heat_capacity=2010.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=0.0,
@@ -304,7 +314,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     SMOKE: MaterialDef(
         id=SMOKE, name="SMOKE",
-        rest_density=0.3, eos_stiffness=2.5, eos_gamma=1.0,
+        rest_density=1100.0, eos_stiffness=2.5, eos_gamma=1.0,
         base_viscosity=0.01, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.005, thermal_conductivity=5.0, heat_capacity=1000.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=0.0,
@@ -313,7 +323,7 @@ MATERIALS: Dict[int, MaterialDef] = {
     ),
     FIRE: MaterialDef(
         id=FIRE, name="FIRE",
-        rest_density=0.2, eos_stiffness=4.0, eos_gamma=1.0,
+        rest_density=1000.0, eos_stiffness=4.0, eos_gamma=1.0,
         base_viscosity=0.01, friction_coeff=0.0, cohesion=0.0,
         buoyancy_extra=0.02, thermal_conductivity=500.0, heat_capacity=1000.0,
         temp_melt=0.0, temp_boil=0.0, temp_ignite=0.0,

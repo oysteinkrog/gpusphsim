@@ -192,7 +192,8 @@ void K_SpawnGas(
 
         // Position: on the ring around the source. position.w carries the
         // density WCSPH step2 reads as rho_i, so give it the steam rest
-        // density instead of the source water's ~1000.
+        // density (1200 in kernel-sum units) instead of the source water's
+        // 2500. The next Step1 replaces it with the measured density.
         float3 cpos = spawn_clamp(make_float3(src_pos.x + ring_r * c_k,
                                               src_pos.y,
                                               src_pos.z + ring_r * s_k));

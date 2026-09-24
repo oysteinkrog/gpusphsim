@@ -307,8 +307,9 @@ void K_Step1(
     }
 
     // --- PostCalc: density ---
-    // Behavior-aware floor: GAS has rho0 ~ 0.2-0.6, so floor at 0.01 to allow
-    // expansion. FLUID/GRANULAR have rho0 ~ 2500, floor at 1.0 is a safety net.
+    // Safety floor only: a live particle's own Poly6 self term (163-490 for
+    // GAS, whose rho0 is 1000-1200 in kernel-sum units, bd-r5-review-n28.80)
+    // is always above either floor.
     float density = c_precalc.poly6_coeff * sum_density;
     float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
     density_out[index_i] = fmaxf(density, rho_floor);
