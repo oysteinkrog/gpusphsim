@@ -1000,6 +1000,18 @@ class Simulation:
             max_displacement=w.max_displacement,
         )
 
+        # Wake propagation: without this, sleeping GRANULAR piles under PBF never
+        # wake from a disturbance (bd-r4fix-uup.15).  Operates on the unsorted
+        # arrays the finalize just scattered back.
+        wake.run_wake_propagation(
+            w.position[:n],
+            w.velocity[:n],
+            w.packed_info[:n],
+            w.sleep_counter[:n],
+            self._cell_wake_flags,
+            num_particles=n,
+        )
+
     def _run_dfsph_body(self, n: int) -> None:
         """DFSPH pipeline: Grid -> DensityAlpha -> NonPressure -> DivSolve -> PredictPos -> DensAdv -> DensSolve -> Finalize."""
         import dfsph_solver
@@ -1151,6 +1163,17 @@ class Simulation:
             max_displacement=w.max_displacement,
         )
 
+        # Wake propagation: sleeping GRANULAR piles under DFSPH otherwise never
+        # wake from a disturbance (bd-r4fix-uup.15).  Unsorted arrays from finalize.
+        wake.run_wake_propagation(
+            w.position[:n],
+            w.velocity[:n],
+            w.packed_info[:n],
+            w.sleep_counter[:n],
+            self._cell_wake_flags,
+            num_particles=n,
+        )
+
     def _apply_damping_ramp(self) -> None:
         """Apply spawn velocity-damping ramp (shared by _sim_step and _sim_step_timed).
 
@@ -1214,8 +1237,6 @@ class Simulation:
         so sort-skip decisions don't invalidate graphs. When n changes, fall back
         to direct kernel launches (no graph capture overhead).
         """
-        w = self.world
-
         # Update device substep counter for RNG seeding (unique per substep)
         self._frame_counter_d.fill(self._substep_counter)
 
@@ -1316,7 +1337,7 @@ class Simulation:
             w.foam_velocity,
             w.foam_count,
             n,
-            self._frame_counter,
+            self._substep_counter,  # per-substep RNG seed; _frame_counter repeats across a frame's substeps -> correlated/duplicated foam (bd-r4fix-uup.15)
         )
 
         # 3. Compact dead particles every 8th frame (amortize cost)
