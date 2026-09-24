@@ -209,6 +209,10 @@ class Simulation:
         # PBF/DFSPH: tighter threshold (0.15*h) and lower max skip count
         self._sort_skip_threshold_sq_tight = (0.15 * 0.04) ** 2  # 0.000036
         self._sort_skipped_count = 0  # stats for UI
+        # n of the last full sort (-1: none yet, or invalidated by a scene change)
+        self._last_full_sort_n = -1
+        # True when the last _run_grid_setup took the full-sort branch
+        self._last_setup_was_full_sort = True
         self._sort_skip_consecutive = 0  # consecutive frames with sort skipped
         # True when _update_rigid_boundary already cleared max_displacement
         # for this substep's full sort, so _run_grid_setup must not clear it
@@ -743,6 +747,10 @@ class Simulation:
         sorted_velocity_h = None if is_pbf else w.sorted_velocity_h
         sorted_temperature_h = None if is_pbf else w.sorted_temperature_h
         sorted_dye_h = None if is_pbf else w.sorted_dye_h
+
+        # Host-side record of the branch taken, read by _capture_graph to check
+        # that a gather-only graph never bakes in a full sort.
+        self._last_setup_was_full_sort = not (self._sort_skip_next and not force_sort)
 
         if self._sort_skip_next and not force_sort:
             # Grid reuse: just re-gather unsorted -> sorted using old sort_perm
@@ -1453,18 +1461,30 @@ class Simulation:
         self._graph_full_sort_n = 0
         self._graph_gather_only_n = 0
 
-    def _capture_graph(self, n: int, gather_only: bool) -> cupy.cuda.Graph:
+    def _capture_graph(self, n: int, gather_only: bool) -> cupy.cuda.Graph | None:
         """Capture the graph-body into a CUDA graph for replay.
 
         Creates a non-default capture stream, records all ops, and returns
         the resulting Graph object for repeated launch().
+
+        A gather-only graph is only valid when the last full sort was for n.
+        If it was not (for example after a same-n notify_scene_changed), the
+        body would take the forced full-sort branch and every later replay of
+        the "gather" graph would run a full counting sort. In that case the
+        body runs directly, nothing is captured, and None is returned; the
+        next gather substep captures instead (bd-r5-review-n28.84).
         """
+        if gather_only and self._last_full_sort_n != n:
+            self._run_graph_body(n)
+            return None
         s = cupy.cuda.Stream(non_blocking=True)
         with s:
             s.begin_capture()
             self._run_graph_body(n)
             graph = s.end_capture()
         if gather_only:
+            assert not self._last_setup_was_full_sort, (
+                "gather-only graph captured a full sort")
             self._graph_gather_only = graph
             self._graph_gather_only_n = n
         else:
@@ -1512,10 +1532,17 @@ class Simulation:
         elif graph is None:
             # n stable but no graph yet — capture then launch
             g = self._capture_graph(n, gather_only=is_gather)
-            g.launch()
+            if g is not None:
+                g.launch()
         else:
             # n stable, graph exists — fast replay
             graph.launch()
+            if not is_gather:
+                # The full-sort graph sorts for n, but the host-side
+                # bookkeeping in _run_grid_setup does not run on replay.
+                # Record it here so a same-n notify_scene_changed (which sets
+                # -1) cannot leave the value stale (bd-r5-review-n28.84).
+                self._last_full_sort_n = n
 
         self._substep_epilogue(n)
 
