@@ -1217,3 +1217,79 @@ def test_step1_fire_in_water_goes_out_fire_on_wood_does_not():
     _, exp_c = _step1_exposure(packed, [1200.0] + [293.0] * 6,
                                _ring_masses(0.0081), _RING)
     assert exp_c == 0.0, f"FIRE on WOOD exposure_corrode {exp_c}"
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.95: boiled steam condenses and conserves mass
+# ---------------------------------------------------------------------------
+
+def _setup_params_mass(particle_mass):
+    sim_params = build_sim_params(
+        smoothing_length=H, particle_mass=particle_mass, particle_spacing=SPACING,
+        gravity=(0.0, -9.8, 0.0), dt=DT, restitution=0.3, wall_friction=0.5,
+        world_min=(-1.0, -1.0, -1.0), world_max=(1.0, 1.0, 1.0),
+    )
+    upload_sim_params(sim_params)
+    upload_materials(build_material_array())
+
+
+def test_condensed_boiled_steam_keeps_water_mass_in_expectation():
+    """3000 boiled STEAM children (mass m/3) condense: about 1/3 survive as
+    WATER with mass m, the rest are DEAD with mass 0 and on the freelist."""
+    from world import PARTICLE_MASS, spawn_mass
+    _setup_params_mass(PARTICLE_MASS)
+    n = 3000
+    d = make_particles(n, STEAM, GAS, temp=350.0, lifetime=5.0)
+    mass = cupy.full(n, PARTICLE_MASS / 3.0, dtype=cupy.float32)
+    dead_indices = cupy.zeros(n, dtype=cupy.uint32)
+    dead_count = cupy.zeros(1, dtype=cupy.uint32)
+    compute_reactions(**d, sorted_mass=mass, dead_indices=dead_indices,
+                      dead_count=dead_count, frame=7)
+    pi = d["sorted_packed_info"].get()
+    m = mass.get()
+    mats = pi & 0xFF
+    water = mats == WATER
+    dead = pi == MAKE_PACKED(DEAD, STATIC)
+    assert np.all(water | dead), "every condensed STEAM must be WATER or DEAD"
+    np.testing.assert_allclose(m[water], spawn_mass(WATER), rtol=1e-6)
+    assert np.all(((pi[water] >> 8) & 0x3) == FLUID)
+    assert np.all(m[dead] == 0.0)
+    frac = water.sum() / n
+    assert abs(frac - 1.0 / 3.0) < 0.02, f"survivor fraction {frac:.3f}"
+    cnt = int(dead_count.get()[0])
+    assert cnt == int(dead.sum())
+    assert set(dead_indices.get()[:cnt].tolist()) == set(np.nonzero(dead)[0].tolist())
+    # Mass is conserved to within the sampling noise.
+    total_in = n * PARTICLE_MASS / 3.0
+    assert abs(m.sum() - total_in) / total_in < 0.06
+
+
+def test_condensed_full_mass_steam_always_survives():
+    """Brush steam carries PARTICLE_MASS, so every particle condenses to WATER."""
+    from world import PARTICLE_MASS
+    _setup_params_mass(PARTICLE_MASS)
+    n = 500
+    d = make_particles(n, STEAM, GAS, temp=350.0, lifetime=5.0)
+    mass = cupy.full(n, PARTICLE_MASS, dtype=cupy.float32)
+    compute_reactions(**d, sorted_mass=mass, frame=3)
+    pi = d["sorted_packed_info"].get()
+    assert np.all((pi & 0xFF) == WATER)
+    np.testing.assert_allclose(mass.get(), PARTICLE_MASS, rtol=1e-6)
+
+
+def _cu_define(path, name):
+    import re
+    src = open(os.path.join(os.path.dirname(__file__), "physics", "kernels", path)).read()
+    return float(re.search(rf"#define\s+{name}\s+([0-9.]+)f", src).group(1))
+
+
+def test_boiled_steam_cools_to_condense_before_expiry():
+    """Still-air steam cools only by ambient relaxation; it must reach the
+    condensation temperature before its spawn lifetime ends."""
+    t_spawn = _cu_define("spawn.cu", "SPAWN_TEMP")
+    life = _cu_define("spawn.cu", "SPAWN_LIFETIME")
+    t_cond = _cu_define("reactions.cu", "STEAM_CONDENSE_TEMP")
+    t_amb = _cu_define("sph_shared.cuh", "T_AMBIENT")
+    k = _cu_define("sph_shared.cuh", "COOL_RATE")
+    t_hit = -np.log((t_cond - t_amb) / (t_spawn - t_amb)) / k
+    assert t_hit < life - 1.0, f"steam reaches {t_cond} K at {t_hit:.1f} s, lifetime {life} s"
