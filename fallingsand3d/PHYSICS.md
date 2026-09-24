@@ -1218,8 +1218,9 @@ External algorithmic review by GPT 5.2 Pro identified 9 issues. Fixes applied:
    for heat/exposure accumulation, it computed a non-zero lambda. Now force lambda=0
    after the neighbor loop for STATIC (Akinci one-way boundary convention).
 4. **PBF GAS doesn't skip constraints** (HIGH → FIXED): GAS was going through full
-   lambda+delta computation. Now early-returns with lambda=0, delta=0 in both
-   ComputeLambda and ComputeDelta.
+   lambda+delta computation. GAS now has no density constraint. Its lambda slot
+   holds the gas EOS term p/rho^2 and ComputeDelta applies only the GAS-GAS
+   pressure delta (see 12.5).
 5. **PBF s_corr_n hardcoded to 4** (MEDIUM): Documented in code. At h=0.04, s_corr is
    disabled (k=0) so this has no practical impact.
 6. **DFSPH K_DFSPH_ComputeKappaFromVelocity uses m_j not m_j/rho_j** (HIGH if used):
@@ -1611,6 +1612,7 @@ All three solvers now support the complete material behavior set:
 | Viscosity (GRANULAR) | mu(I) in Step2 | XSPH*10 + DP friction | mu(I) in NonPressure |
 | XSPH smoothing | Step2, FLUID only (eps=0.8, profile) | Finalize (c=0.05) | NonPressure (eps=0.1) |
 | GAS buoyancy | Integrate | Predict (v+=) | NonPressure (accel) |
+| GAS pressure (gas EOS, GAS pairs, x force_scale) | Step2 | ComputeDelta (dx = dt^2 a / iters) | NonPressure (accel) |
 | GAS phase separation | Step1 (skip GAS) | ComputeLambda (skip GAS) | DensityAlpha (skip GAS) |
 | Heat diffusion | Step1 | ComputeLambda | DensityAlpha |
 | Cross-material heat | Step1 (heat_boost) | ComputeLambda (heat_boost) | DensityAlpha (heat_boost) |
@@ -1822,8 +1824,19 @@ Applied in K_PBF_Finalize.
   Drucker-Prager friction is applied in K_PBF_Finalize (velocity-space, once per
   substep) using pressure normals from K_PBF_ComputeLambda (see §12.7).
   High artificial viscosity prevents granular from flowing like water.
-- **GAS**: Skips PBF constraints (lambda=0, delta=0) in all kernels.
-  Predict uses gravity + buoyancy + drag. GAS is a compressible phase.
+- **GAS**: No density constraint. Predict uses gravity + buoyancy + drag.
+  GAS is a compressible phase and gets the WCSPH gas EOS pressure inside its
+  own phase (bd-r5-review-n28.91). The first (do_heat) K_PBF_ComputeLambda
+  call writes `lambda_i = p_i / rho_i^2`, with `p_i = k * max(rho_i - rho0, 0)`
+  from `compute_pressure`, into the GAS lambda slot; later iterations keep it.
+  K_PBF_ComputeDelta spreads the step2 acceleration over the iterations:
+  ```
+  a_i  = -fs * SUM_j(GAS) m_j * (lambda_i + lambda_j) * grad_spiky(x*_ij)
+  dx_i = dt^2 * a_i / num_iterations        (fs = c_granular.force_scale = 0.02)
+  ```
+  so Finalize's `(x* - x) / dt` adds `dt * a_i` to the velocity, as WCSPH
+  does. The 0.5h delta clamp still applies. GAS never pairs with FLUID,
+  GRANULAR or STATIC here, so their lambda and delta are unchanged.
   Steam spawned by `K_SpawnGas` after Predict gets its predicted position
   written by the spawn (`x + dt * v`, see 10.21).
 - **STATIC**: Lambda always forced to 0 (Akinci one-way boundary). STATIC
@@ -2262,7 +2275,15 @@ GRANULAR: a_i = gravity + (1/rho_i) * [45/(pi*h^6)] * SUM_j eta_ij * m_j*(v_j-v_
                                  (compute_muI_eta from shear_rate, pressure, density)
           non-GRANULAR neighbor: eta_ij = mu_0
 GAS:      a_i = gravity + buoyancy - drag * v_i + viscosity (same as FLUID)
+          - fs * SUM_j(GAS) m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky(r_ij)
+          p = k * max(rho - rho0, 0)   (gas EOS, compute_pressure)
+          fs = c_granular.force_scale = 0.02
 ```
+
+The GAS pressure term is the WCSPH step2 gas pressure (bd-r5-review-n28.91).
+`grad_spiky` carries the negative coefficient, so `-grad_spiky` points away
+from j and the term is repulsive. `fs` keeps the magnitude equal to WCSPH;
+without it the repulsion would be 50x stronger. The ACCEL_MAX clamp applies.
 
 The `1/rho_i` factor is critical: without it, viscosity is ~2500x too strong (at rho≈2500),
 making the fluid behave like a solid. With WATER `base_viscosity = 1.0` and `rho_i ≈ 2500`,
@@ -2281,7 +2302,11 @@ Velocity updated: `v*_i = v_i + dt * a_i`
 - **FLUID**: Full DFSPH (divergence + density solvers)
 - **GRANULAR**: Participates in both solvers. Alpha multiplied by 0.7 compliance factor.
   mu(I) viscosity in non-pressure forces. Shear_rate computed in ComputeDensityAlpha.
-- **GAS**: Skips pressure solvers. Non-pressure forces include buoyancy + drag.
+- **GAS**: Skips the divergence and density solvers. Non-pressure forces
+  include buoyancy, drag and the WCSPH gas EOS pressure from GAS neighbours
+  (13.5). A 1000-particle SMOKE cloud at zero gravity reaches the same density
+  and radius under WCSPH, DFSPH and PBF within 2% after 2 s
+  (`eval_gas_repulsion.py --free`).
 - **STATIC**: Skips all solver kernels, contributes to neighbor density sums.
 
 ### 13.7 DFSPH Sleep System
