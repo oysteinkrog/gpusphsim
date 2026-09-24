@@ -141,9 +141,10 @@ def test_decision_lag_is_one_frame(world):
         assert latched[1] == Simulation._MAX_DISP_UNKNOWN
         for k in range(2, len(actual)):
             assert latched[k] == actual[k - 1], (k, latched, actual)
-        # Every latch found the copy done.
+        # With the host in step, every frame after the first latched the
+        # previous frame's copy.
         assert sim._readback_not_ready == 0
-        assert sim._readback_latched == len(actual) - 2
+        assert sim._readback_latched == len(actual) - 1
     finally:
         sim.close()
 
@@ -182,28 +183,53 @@ def test_resting_scene_skips_and_push_is_seen(world):
         sim.close()
 
 
-def test_not_ready_copy_keeps_values_and_sorts(world):
-    """A copy that has not landed is not latched and does not allow a skip."""
+class _FakeEvent:
+    def __init__(self, done):
+        self.done = done
+
+    def record(self, stream=None):
+        pass
+
+
+def test_not_landed_copy_keeps_previous_values(world):
+    """A copy that has not landed is not latched; the old value is kept."""
     sim = _make_sim(world)
     try:
-        class _PendingEvent:
-            done = False
-
-            def record(self, stream=None):
-                pass
-
-        sim._readback_stale = False
-        sim._last_max_disp_uint = 0  # would skip if trusted
+        sim._last_max_disp_uint = 0x3F800000  # 1.0: never skips
         sim._last_foam_count = 7
-        sim._readback_done = _PendingEvent()
+        ctypes_write(sim._pinned_displacement.ptr, 0)
+        sim._readback_pending.append((_FakeEvent(False), sim._readback_epoch))
         sim._update_sort_skip_decision()
         assert sim._sort_skip_next is False
-        assert sim._last_max_disp_uint == 0
+        assert sim._last_max_disp_uint == 0x3F800000
         assert sim._last_foam_count == 7
         assert sim._readback_not_ready == 1
     finally:
-        sim._readback_done = cp.cuda.Event()
+        cp.cuda.Device().synchronize()
+        sim._readback_pending.clear()
         sim.close()
+
+
+def test_copy_from_before_scene_change_is_not_latched(world):
+    """A landed copy launched before notify_scene_changed() is dropped."""
+    sim = _make_sim(world)
+    try:
+        cp.cuda.Device().synchronize()
+        sim._readback_pending.append((_FakeEvent(True), sim._readback_epoch))
+        sim.notify_scene_changed()
+        ctypes_write(sim._pinned_displacement.ptr, 0)
+        sim._update_sort_skip_decision()
+        assert sim._last_max_disp_uint == Simulation._MAX_DISP_UNKNOWN
+        assert sim._sort_skip_next is False
+    finally:
+        cp.cuda.Device().synchronize()
+        sim._readback_pending.clear()
+        sim.close()
+
+
+def ctypes_write(ptr, value):
+    import ctypes
+    ctypes.c_uint32.from_address(ptr).value = value
 
 
 def test_wait_event_issued_before_first_substep(world, monkeypatch):
@@ -236,27 +262,27 @@ def test_wait_event_issued_before_first_substep(world, monkeypatch):
             return real_step(n)
 
         sim._sim_step = _step
+        _frame(sim)  # launches a copy, so the next frame has one to wait on
+        calls.clear()
+        expected = sim._readback_done
         _frame(sim)
         monkeypatch.undo()
         first_step = calls.index(("step", None))
         waits = [i for i, c in enumerate(calls[:first_step])
-                 if c[0] == "wait" and c[1] is sim._readback_done]
+                 if c[0] == "wait" and c[1] is expected]
         assert waits, calls
     finally:
         sim.close()
 
 
-def test_notify_scene_changed_drops_in_flight_copy(world):
+def test_notify_scene_changed_resets_to_unknown(world):
     sim = _make_sim(world)
     try:
         sim._last_max_disp_uint = 0
-        sim._readback_stale = False
+        epoch = sim._readback_epoch
         sim.notify_scene_changed()
         assert sim._last_max_disp_uint == Simulation._MAX_DISP_UNKNOWN
-        assert sim._readback_stale is True
-        sim._update_sort_skip_decision()
-        assert sim._sort_skip_next is False
-        assert sim._last_max_disp_uint == Simulation._MAX_DISP_UNKNOWN
+        assert sim._readback_epoch == epoch + 1
     finally:
         sim.close()
 

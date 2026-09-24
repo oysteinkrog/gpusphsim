@@ -13,6 +13,7 @@ Each render frame:
 
 from __future__ import annotations
 
+import collections
 import math
 import time
 from typing import Callable, Optional
@@ -135,19 +136,26 @@ class Simulation:
         import ctypes as _ctypes
         self._readback_stream = cupy.cuda.Stream(non_blocking=True)
         self._readback_event = cupy.cuda.Event()  # for cross-stream sync
-        # Recorded on _readback_stream after the two D2H copies. The host
-        # latches the pinned buffers only when it is done (a non-blocking
-        # cudaEventQuery), and the compute stream waits on it at the top of
-        # step_frame so the next full-sort memset of max_displacement and the
-        # foam kernels cannot run before or during the copy. An explicit wait
-        # is used rather than a blocking readback stream, so the ordering is
-        # visible here and does not depend on legacy-stream rules.
-        self._readback_done = cupy.cuda.Event()
-        self._readback_latched = 0      # latches that found the copy done
-        self._readback_not_ready = 0    # latches skipped: copy not done yet
-        # True while the pinned buffers hold data from before the last
-        # notify_scene_changed() (or from before the first frame).
-        self._readback_stale = True
+        # Each frame's pair of D2H copies gets an event recorded on
+        # _readback_stream after them, queued with the scene epoch it was
+        # launched in. The host latches the pinned buffers once a copy from
+        # the current epoch is done (non-blocking cudaEventQuery). Copies on
+        # one stream land in order, so the pinned value is then that copy or
+        # a newer one. The compute stream waits on the newest event at the
+        # top of step_frame, so the next full-sort memset of
+        # max_displacement and the foam kernels cannot run before or during
+        # the copy. An explicit wait is used rather than a blocking readback
+        # stream, so the ordering is visible here and does not depend on
+        # legacy-stream rules.
+        self._readback_pending: collections.deque = collections.deque()
+        self._readback_free_events: list = []
+        # Newest copy's event. A never-recorded event counts as done.
+        self._readback_done = cupy.cuda.Event(disable_timing=True)
+        # Bumped by notify_scene_changed(): copies launched before a change
+        # describe the old particle set and are not latched.
+        self._readback_epoch = 0
+        self._readback_latched = 0      # latches of the previous frame's copy
+        self._readback_not_ready = 0    # latches where that copy had not landed
         # Pinned host buffers for async D2H copy
         self._pinned_displacement = cupy.cuda.alloc_pinned_memory(4)
         self._pinned_foam_count = cupy.cuda.alloc_pinned_memory(4)
@@ -664,10 +672,10 @@ class Simulation:
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
         self._last_full_sort_n = -1
-        # The copy in flight describes the old particle set: drop it and treat
+        # Copies in flight describe the old particle set: drop them and treat
         # the displacement as unknown until a copy from after this change lands.
         self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
-        self._readback_stale = True
+        self._readback_epoch += 1
         # Check the parked DEAD reserve on the next frame (bd-r5-review-n28.27).
         self._dead_reserve_check_pending = True
 
@@ -1546,39 +1554,42 @@ class Simulation:
 
         Called once per rendered frame that ran substeps, after the substeps.
         Order (bd-r5-review-n28.46):
-          1. Latch the pinned values copied at the end of the previous frame,
-             but only if _readback_done says that copy has landed (a
-             non-blocking cudaEventQuery, no host sync).
-          2. Decide from the latched displacement. The decision made at the
-             end of frame k uses the displacement at the end of frame k-1,
-             so the lag is one frame.
-          3. Launch this frame's D2H copies and record _readback_done after
-             them.
-        If the copy has not landed, or the pinned data predates the last
-        notify_scene_changed(), the previous values are kept and the next
-        frames do a full sort. bench_substep.py --grid-reuse calls this too.
+          1. Latch the pinned values if a copy launched since the last
+             notify_scene_changed() has landed (non-blocking event queries,
+             no host sync). When the host keeps pace with the GPU, the
+             landed copy is the one from the end of the previous frame, so
+             the decision at the end of frame k uses the displacement at the
+             end of frame k-1. When the host runs ahead, it is the newest
+             copy that has landed. If none has, the previous value is kept.
+          2. Decide from the latched displacement.
+          3. Launch this frame's D2H copies and queue an event after them.
+        bench_substep.py --grid-reuse calls this too.
         """
         import struct
         import ctypes as _ctypes
 
-        # --- 1. Latch the previous frame's async copy, if it has landed ---
-        # The stale check must come first: after notify_scene_changed() the
-        # copy in flight describes the old particle set and is discarded.
-        copy_done = self._readback_done.done
-        if self._readback_stale:
-            self._readback_stale = False
-        elif copy_done:
-            self._last_max_disp_uint = _ctypes.c_uint32.from_address(
-                self._pinned_displacement.ptr).value
+        # --- 1. Latch the newest landed copy from the current scene ---
+        landed_epoch = None
+        while self._readback_pending and self._readback_pending[0][0].done:
+            ev, landed_epoch = self._readback_pending.popleft()
+            self._readback_free_events.append(ev)
+        if landed_epoch is not None:
+            if self._readback_pending:
+                self._readback_not_ready += 1
+            else:
+                self._readback_latched += 1
             self._last_foam_count = _ctypes.c_uint32.from_address(
                 self._pinned_foam_count.ptr).value
-            self._readback_latched += 1
-        else:
+            if landed_epoch == self._readback_epoch:
+                self._last_max_disp_uint = _ctypes.c_uint32.from_address(
+                    self._pinned_displacement.ptr).value
+        elif self._readback_pending:
             self._readback_not_ready += 1
 
         # --- 2. Grid reuse decision for the next frame ---
         # max_displacement holds the float bits of the largest squared
-        # displacement since the last full sort (atomicMax over all substeps).
+        # per-substep displacement since the last full sort (K_Integrate
+        # atomicMax over all substeps).
         # Positive float bits order like uints; anything at or above the +inf
         # bits (K_SpawnGas teleport, or the unknown sentinel) never skips.
         max_disp_sq_uint = self._last_max_disp_uint
@@ -1594,10 +1605,7 @@ class Simulation:
         else:
             threshold = self._sort_skip_threshold_sq_tight
             max_consec = self._MAX_SORT_SKIP_FRAMES_TIGHT
-        # A copy that has not landed means the value may be two or more
-        # frames old: do not skip on it.
-        can_skip = (copy_done
-                    and max_disp_sq < threshold
+        can_skip = (max_disp_sq < threshold
                     and self._sort_skip_consecutive < max_consec)
         if can_skip:
             self._sort_skip_next = True
@@ -1608,7 +1616,7 @@ class Simulation:
 
         # --- 3. Launch this frame's copies for the next frame's latch ---
         # Record on the compute stream so the copies start after this frame's
-        # kernels, then record _readback_done after the copies.
+        # kernels, then queue an event after the copies.
         self._readback_event.record()
         self._readback_stream.wait_event(self._readback_event)
         cupy.cuda.runtime.memcpyAsync(
@@ -1623,7 +1631,11 @@ class Simulation:
             4, cupy.cuda.runtime.memcpyDeviceToHost,
             self._readback_stream.ptr,
         )
-        self._readback_done.record(self._readback_stream)
+        ev = (self._readback_free_events.pop() if self._readback_free_events
+              else cupy.cuda.Event(disable_timing=True))
+        ev.record(self._readback_stream)
+        self._readback_pending.append((ev, self._readback_epoch))
+        self._readback_done = ev
 
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
@@ -1867,6 +1879,8 @@ class Simulation:
         try:
             self._readback_event = None
             self._readback_done = None
+            self._readback_pending = None
+            self._readback_free_events = None
             self._readback_stream = None
         except Exception:
             pass
