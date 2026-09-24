@@ -1965,18 +1965,6 @@ GAS reset their counter every substep. Before 2026-07-11 the PBF sleep block had
 no behavior gate, so smoke froze mid-air and patches of a still water surface
 froze.
 
-GRANULAR anti-creep runs just before the sleep counter. It zeroes the velocity when
-all three hold:
-```
-|v_new| < 0.01 m/s  AND  rho > 0.98 * rho_0  AND  |v_new| <= |v_prev|
-```
-`v_prev` is the previous substep's final velocity, read from the unsorted velocity
-array before Finalize overwrites it. The third test lets a packed grain that is
-speeding up from rest keep its velocity, so it can pass 1 cm/s and start sliding.
-Creep from PBF position corrections is still zeroed on the substeps where it slows
-down. Without the third test a grain with acceleration below 0.01 / dt = 1.2 m/s^2
-(dt = 1/120) was reset to zero every substep and could never move.
-
 **Source**: `pbf_solver.cu:K_PBF_Finalize`
 
 ### 12.7 Drucker-Prager Friction for GRANULAR (PBF)
@@ -2463,20 +2451,6 @@ sleep, matching WCSPH and PBF. FLUID and GAS reset their counter every substep.
 A FLUID or GAS particle that arrives with the SLEEPING bit set (older build or
 loaded snapshot) wakes in the same substep; a sleeping GRANULAR particle stays
 asleep while `|v| <= V_WAKE`.
-
-GRANULAR anti-creep runs just before the sleep counter. It zeroes the velocity when
-all three hold:
-```
-|v| < 0.01 m/s  AND  rho > 0.95 * rho_0  AND  |v| <= |v_prev|
-```
-`v_prev` is the previous substep's final velocity, read from the unsorted velocity
-array before Finalize overwrites it. Without the third test a packed grain with
-acceleration below 0.01 / dt = 3 m/s^2 (dt = 1/300) was reset to zero every substep.
-At |g| = 4 that includes a grain on a 45 degree slope (2.83 m/s^2 along the slope).
-With it, the grain goes 0, 0.0094, 0.0189 m/s and escapes, and residual creep is
-still zeroed on the substeps where it slows down. In a Sand Castle run the sand is
-still flowing at 5 s (median |v| 0.06 m/s, none asleep) with or without the third
-test, so the change does not alter settling there.
 
 Box-wall friction is 0 for FLUID and `c_sim.wall_friction` for other behaviours,
 as in the other two solvers (§4.5).

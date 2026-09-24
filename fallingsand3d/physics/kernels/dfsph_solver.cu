@@ -1564,18 +1564,12 @@ void K_DFSPH_Finalize(
         vel_sq = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
     }
 
-    // GRANULAR anti-creep: zero velocity when nearly at rest, well-packed and
-    // not gaining speed (bd-r5-review-n28.93). velocity_out[orig_idx] still
-    // holds the previous substep's final velocity because this thread has not
-    // written it yet. A grain accelerating from rest (slope, weak gravity) has
-    // vel_sq > vprev_sq and escapes; residual creep is caught on the substeps
-    // where it decelerates.
+    // GRANULAR anti-creep: zero velocity when nearly at rest and well-packed
+    // (matches WCSPH integrate.cu behavior -- prevents slow spreading)
     if (behavior == GRANULAR && vel_sq < 0.01f * 0.01f) {
         float rho_i = sorted_density[i];
         float rho0_i = c_materials[mat_id].rest_density;
-        float4 vprev = velocity_out[orig_idx];
-        float vprev_sq = vprev.x * vprev.x + vprev.y * vprev.y + vprev.z * vprev.z;
-        if (rho_i > 0.95f * rho0_i && vel_sq <= vprev_sq) {
+        if (rho_i > 0.95f * rho0_i) {
             vel.x = 0.0f;
             vel.y = 0.0f;
             vel.z = 0.0f;
