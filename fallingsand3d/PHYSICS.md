@@ -243,8 +243,9 @@ KE decay (final/peak 0.003 to 0.004) and v_max at 5 s of 1.1 to 1.5 m/s for both
 at dt 1 ms and 0.5 ms (bd-r5-review-n28.25), so the value was left at 0.8.
 
 **FLUID only**: XSPH accumulation in the inner loop is guarded by `is_fluid_i` (bd-mzc.34).
-GRANULAR position is advected with `vel_new` in `integrate.cu`, not `veleval_xsph`, so
-computing XSPH for GRANULAR would produce a correction that is immediately discarded.
+`integrate.cu` adds the XSPH delta `veleval - v` only for FLUID. GRANULAR is advected
+with plain `vel_new`, so computing XSPH for GRANULAR would produce a correction that is
+immediately discarded.
 Non-FLUID particles write plain velocity to `veleval_out`.
 
 **Source**: `step2.cu:370-381` (accumulation, FLUID guard), `step2.cu:448-461` (output)
@@ -342,15 +343,24 @@ set `v_new = 0`
 ### 4.3 Position Update
 
 ```
-FLUID:   pos_new = pos + dt * veleval_xsph     (XSPH-smoothed velocity)
+FLUID:   pos_new = pos + dt * (v_new + (veleval_xsph - v_old))
+                 = pos + dt * (v_new + epsilon * xsph_sum)
 Others:  pos_new = pos + dt * v_new
 ```
 
-FLUID uses XSPH-corrected velocity (`veleval_xsph = v_old + epsilon * xsph_sum`)
-for position advection. This smooths compression artifacts at larger dt (Game SPH).
-All other behaviors use `v_new` directly.
+All behaviors use symplectic Euler: the position moves with `v_new`, after gravity,
+SPH forces, the velocity clamp, spawn damping, GAS drag and anti-creep. FLUID adds the
+XSPH correction on top. Step2 writes `veleval_xsph = v_old + epsilon * xsph_sum`, so
+`veleval_xsph - v_old` is exactly the XSPH delta and no extra buffer is needed. This
+smooths compression artifacts at larger dt (Game SPH). A FLUID and a GRANULAR particle
+in free fall stay at the same height (`test_fluid_granular_freefall_match`,
+bd-r5-review-n28.44).
 
-**Source**: `integrate.cu:378-392`
+PBF and DFSPH do their own position update in their Finalize kernels (PBF from the
+predicted position, DFSPH from the post-solve velocity plus XSPH), so they do not read
+`sorted_veleval` for advection.
+
+**Source**: `integrate.cu:279-294`
 
 ### 4.4 Parent Integration (Leapfrog)
 
@@ -468,7 +478,7 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | FLUID-GRANULAR pair scale | pressure: force_scale; viscosity: harmonic mean of force_scale*base_viscosity*rho0 and mu | N/A | Same value on both sides, so pair forces are antisymmetric (3.2, 3.3) |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
 | integrate | accel = sph + g | accel = sph + g | Both treat step2 output as acceleration |
-| position update | FLUID: pos += veleval_xsph * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
+| position update | FLUID: pos += (vel_new + eps*xsph_sum) * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
 | boundaries | impulse SDF | penalty springs | Fundamentally different |
 | velocity_limit | 0.9 * h / dt (36 m/s at 1 ms, 72 m/s at 0.5 ms) | 200 | CFL-derived per solver, see 4.2 |
 | accel_max | 200 | N/A | Prevents shockwave-level accelerations (FLUID + GRANULAR) |
@@ -662,12 +672,11 @@ The parent multiplies step2 output by `m_j = 0.02` and uses mass=0.02 for densit
    This matches the parent's `output * m_j` convention.
 **Source**: `world.py:27`, `step2.cu:48,393`, `step2.py:49,101`
 
-### 10.3 CHANGED: XSPH re-enabled for FLUID position update (Game SPH)
-Previously XSPH was removed from position update to match parent convention.
-Re-enabled for FLUID only as part of Game SPH approach: FLUID particles use
-`pos += veleval_xsph * dt` which smooths compression artifacts at larger dt.
-Other behaviors still use `pos += vel_new * dt`.
-**Source**: `integrate.cu:378-392`
+### 10.3 CHANGED: XSPH in the FLUID position update (Game SPH)
+The parent advects with the new velocity only. Here FLUID adds the XSPH delta:
+`pos += (vel_new + epsilon * xsph_sum) * dt`, which smooths compression artifacts at
+larger dt. Other behaviors use `pos += vel_new * dt`. Both are symplectic Euler (4.3).
+**Source**: `integrate.cu:279-294`
 
 ### 10.4 FIXED: Viscous CFL using mu_max from inactive materials
 The adaptive timestep computed viscous CFL from ALL materials in the table,
@@ -944,7 +953,7 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 - I5: BOUNDARY_MARGIN=1e-4 prevents particles sitting exactly at wall positions
 
 **Design decisions (Phase 6, intentionally kept):**
-- I1: XSPH pre-integration lag (standard Euler, <0.008s lag)
+- I1: FLUID advects with `vel_new` plus the XSPH delta (symplectic Euler, 4.3); there is no pre-integration lag
 - I3: Grid reuse: WCSPH (0.25*h threshold, 4-frame cap), PBF/DFSPH (0.15*h threshold, 2-frame cap)
 - F1: force_scale=0.02 (co-adapted WCSPH convention). It applies per pair: FLUID-GRANULAR pairs use force_scale on both sides (3.2)
 - F2: WCSPH viscosity convention (force_scale absorbs 1/rho for FLUID-FLUID). FLUID-GRANULAR pairs use the symmetric dynamic form of 3.3
@@ -1489,7 +1498,10 @@ Jacobi iteration (read from old, write to new).
 
 Runs between Step2 (force computation) and Integrate in the WCSPH pipeline.
 Modifies `sorted_velocity` in-place before integration uses it. Uses
-`sorted_veleval` as scratch buffer for ping-pong (overwritten by integrate).
+`sorted_veleval` as scratch buffer for ping-pong. Known issue: K_Integrate reads
+`sorted_veleval - sorted_velocity` as the FLUID XSPH delta (4.3), so with IST on the
+XSPH delta is lost (odd iteration count, the default 5) or replaced by the difference
+of the last two IST iterates (even count). IST needs its own scratch buffer.
 
 **Source**: `implicit_st.cu:K_IST_Iterate`, `implicit_st.py`, `simulation.py`
 
