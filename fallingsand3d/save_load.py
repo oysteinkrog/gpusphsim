@@ -333,12 +333,51 @@ def _validate_scene_arrays(data, n: int) -> dict:
     return arrays
 
 
-def load_scene(world, sim, camera, filename: str) -> int:
+def _validate_header(header: dict) -> None:
+    """Check the header values load_scene applies after the world is written.
+
+    world_half_size, gravity_y and sim_time are optional (old test files and
+    hand-made saves may omit them), but when present they must be finite
+    numbers, and world_half_size must be positive. Raises ValueError naming
+    the bad key, before any world array is modified. (bd-r5-review-n28.78)
+    """
+    import math
+
+    for key in ("world_half_size", "gravity_y", "sim_time"):
+        if key not in header:
+            continue
+        v = header[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"Save file header '{key}' is not a finite number: {v!r}")
+    if "world_half_size" in header and header["world_half_size"] <= 0:
+        raise ValueError(
+            f"Save file header 'world_half_size' must be positive, "
+            f"got {header['world_half_size']!r}"
+        )
+
+
+def load_scene(world, sim, camera, filename: str, report: dict | None = None) -> int:
     """Load scene from saves/<filename>. Returns particle count.
 
     Resets world, restores all particle arrays, SDF collision geometry
     (including kinematic motions), rigid bodies, and camera.
+
+    Header values and particle arrays are checked before the world is
+    touched, so a bad file raises and leaves the current scene intact. The
+    optional parts (SDF geometry, rigid bodies, camera) are applied in their
+    own try/except: a failure there adds a message to report["warnings"] and
+    the particles still load.
+
+    report, when given, is filled in place:
+      report["world_modified"]: True once any world array was written. The
+        caller must then run its scene-loaded handling even if this function
+        raised afterwards.
+      report["warnings"]: list of messages for optional parts that failed.
     """
+    if report is None:
+        report = {}
+    report["world_modified"] = False
+    warnings = report.setdefault("warnings", [])
     if not filename.endswith(".fs3d"):
         filename += ".fs3d"
     path = os.path.join(SAVE_DIR, filename)
@@ -361,6 +400,7 @@ def load_scene(world, sim, camera, filename: str) -> int:
     # ids) before touching the world, so a corrupt or hand-edited file raises
     # a clean ValueError and leaves the current scene intact.
     arrays = _validate_scene_arrays(data, n)
+    _validate_header(header)
 
     # Drop any rigid boundary particles in the file: the RigidBodyManager
     # rebuilds its block from the bodies on the next substep, so keeping them
@@ -372,6 +412,7 @@ def load_scene(world, sim, camera, filename: str) -> int:
         n = int(np.count_nonzero(keep))
 
     # Reset world
+    report["world_modified"] = True
     world.packed_info[:] = 0
     world._high_water = 0
 
@@ -379,7 +420,10 @@ def load_scene(world, sim, camera, filename: str) -> int:
     # dispatched during the same frame see the correct constant memory state.
     sdf_data = header.get("sdf", {})
     if sdf_data and hasattr(sim, "sdf_manager"):
-        _restore_sdf_manager(sim.sdf_manager, sdf_data)
+        try:
+            _restore_sdf_manager(sim.sdf_manager, sdf_data)
+        except Exception as e:
+            warnings.append(f"SDF geometry not restored: {e!r}")
 
     # Restore arrays
     world.position[:n] = cp.asarray(arrays["position"])
@@ -404,6 +448,17 @@ def load_scene(world, sim, camera, filename: str) -> int:
 
     world._high_water = n
 
+    # The particle set was replaced: force a full sort and a graph recapture
+    # on the next substep, and drop stale foam, before any later step can
+    # raise. The UI also calls these on success; calling them twice is
+    # harmless. (bd-r5-review-n28.78)
+    if hasattr(sim, "notify_scene_changed"):
+        sim.notify_scene_changed()
+    if hasattr(sim, "_invalidate_graphs"):
+        sim._invalidate_graphs()
+    if hasattr(world, "foam_count"):
+        world.foam_count.fill(0)
+
     # The save holds no color, so rebuild it from the material table; a
     # paused load would otherwise show the slots' old colors
     # (bd-r5-review-n28.63).
@@ -419,9 +474,19 @@ def load_scene(world, sim, camera, filename: str) -> int:
     # subset that would silently leave any other module with a stale count.
     rb_data = header.get("rigid_bodies", {})
     if rb_data and hasattr(sim, "rigid_body_manager"):
-        _restore_rigid_body_manager(
-            sim.rigid_body_manager, rb_data, sim.get_all_modules()
-        )
+        try:
+            _restore_rigid_body_manager(
+                sim.rigid_body_manager, rb_data, sim.get_all_modules()
+            )
+        except Exception as e:
+            warnings.append(f"Rigid bodies not restored: {e!r}")
+            # A half-built manager is worse than none: clear it so the
+            # loaded fluid runs without bodies.
+            try:
+                sim.rigid_body_manager.reset()
+                sim.rigid_body_manager.upload(sim.get_all_modules())
+            except Exception as e2:
+                warnings.append(f"Rigid body reset failed: {e2!r}")
 
     # Restore simulation params
     if "world_half_size" in header:
@@ -432,10 +497,18 @@ def load_scene(world, sim, camera, filename: str) -> int:
     # Restore camera
     cam = header.get("camera")
     if cam:
-        camera.target = np.array(cam["target"], dtype=np.float32)
-        camera.distance = cam["distance"]
-        camera.azimuth = cam["azimuth"]
-        camera.elevation = cam["elevation"]
+        try:
+            target = np.array(cam["target"], dtype=np.float32).reshape(3)
+            distance = float(cam["distance"])
+            azimuth = float(cam["azimuth"])
+            elevation = float(cam["elevation"])
+        except Exception as e:
+            warnings.append(f"Camera not restored: {e!r}")
+        else:
+            camera.target = target
+            camera.distance = distance
+            camera.azimuth = azimuth
+            camera.elevation = elevation
 
     # bd-unl.14: restore sim_time from save so kinematic SDF objects resume at
     # their saved positions rather than snapping to t=0.  Falls back to 0.0 for

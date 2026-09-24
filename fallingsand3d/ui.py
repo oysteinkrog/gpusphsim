@@ -668,12 +668,22 @@ class UI:
                 if imgui.button("Load", imgui.ImVec2(100, 28)):
                     camera = self._camera_ref
                     if camera is not None and self._load_selected < len(file_list):
+                        # load_scene may raise after it replaced the world
+                        # arrays; main.py must still reset the spawner, foam,
+                        # sort state and renderer count (bd-r5-review-n28.78).
+                        report = {}
                         try:
-                            n = load_scene(world, sim, camera, file_list[self._load_selected])
+                            n = load_scene(world, sim, camera,
+                                           file_list[self._load_selected], report)
                             self._save_status = f"Loaded: {n:,} particles"
-                            changes['_scene_loaded'] = True
+                            if report.get("warnings"):
+                                self._save_status += (
+                                    " (warning: " + "; ".join(report["warnings"]) + ")")
                         except Exception as e:
                             self._save_status = f"Error: {e}"
+                        finally:
+                            if report.get("world_modified"):
+                                changes['_scene_loaded'] = True
             else:
                 imgui.text("No saves found")
         imgui.end()
