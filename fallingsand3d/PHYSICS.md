@@ -1646,10 +1646,23 @@ write `max(rest_density, 1)` for STATIC.
 ### 12.3 Position Correction (Mass-Weighted Delta)
 
 ```
-dx_i = (m_j / rho_0) * SUM_j (lambda_i + lambda_j + s_corr) * grad_W_spiky(x*_ij)
+dx_i = SUM_j m_j * (lambda_i / rho0_i + lambda_j / rho0_j + s_corr / rho0_i) * grad_W_spiky(x*_ij)
 
 |dx_i| = min(|dx_i|, 0.5 * h)    [safety clamp, rarely hit]
 ```
+
+**Each lambda uses its own rest density (bd-r5-review-n28.81).** `lambda_j`
+belongs to `C_j = rho_j / rho0_j - 1`, so its term divides by `rho0_j`. The
+kernel computes it as `m_j * (lambda_i + lambda_j * rho0_i / rho0_j + s_corr) / rho0_i`.
+For each pair, `m_i * dx_i + m_j * dx_j = 0` for any masses, so a WATER/SAND or
+LAVA/WATER contact gets no net momentum from the correction. Dividing both
+terms by `rho0_i` left `m_i m_j (lambda_i + lambda_j) (1/rho0_i - 1/rho0_j) gradW`
+per pair: in one ComputeDelta on a compressed WATER/SAND block, `|SUM m_i dx_i|`
+was 4.6% of `SUM |m_i dx_i|`, and it is now about 1e-9. Pairs with equal rest
+density keep the ratio at exactly 1, so same-material scenes are unchanged. A
+STATIC neighbour mirrors `lambda_i` and uses `rho0_i` for both terms. The
+`s_corr` term still divides by `rho0_i` only, which is not momentum-free across
+materials, but `s_corr_k = 0` by default. Test: `test_pbf_delta_rho0.py`.
 
 **Critical: the mass factor m_j is required.** The original Macklin & Muller paper
 omits mass (assuming m=1 convention where density = SUM W). Our density uses
@@ -1907,10 +1920,12 @@ Per substep:
   2. Compute density rho_i + precompute alpha_i factor
   3. Compute non-pressure forces: f_visc, f_gravity
   4. Predict velocity: v* = v + dt * a_nonpressure   (gravity + viscosity/rho_i)
-  5. Divergence-free solver (warm-started kappa_v from prev frame, scaled by 0.5):
-     Apply warm-started kappa_v correction, then N_div iterations:
-     kappa_v_i = max(div(v*_i), 0) * omega * alpha_i / dt   [unilateral]
-     v*_i -= dt * SUM_j m_j * (kappa_v_i/rho_i + kappa_v_j/rho_j) * grad_W_ij
+  5. Divergence-free solver (warm-started from the previous substep's
+     accumulated kappa_v, scaled by 0.5):
+     Apply the warm-start correction, then N_div iterations:
+     dkappa_v_i = max(div(v*_i), 0) * omega * alpha_i / dt   [unilateral]
+     v*_i -= dt * SUM_j m_j * (dkappa_v_i/rho_i + dkappa_v_j/rho_j) * grad_W_ij
+     kappa_v_i += dkappa_v_i                                  [warm-start total]
   6. Density solver (Jacobi iteration on pressure, N_dens iterations):
      Initialize p_rho2 from warm-start (previous frame, scaled by 0.5)
      Compute initial a_press from warm-started p_rho2
@@ -2005,11 +2020,24 @@ positive divergence drops by 72 to 81 percent per substep (warm start plus 3 ite
 Jacobi removes local modes fast but the block-wide mode slowly: 8 iterations reach 91
 percent and 16 reach 94 percent.
 
-**Warm-starting:** kappa_v values are persisted across substeps through the sort-reorder
-pipeline (kappa_v → sorted_kappa_v). At the start of each divergence solve, the
-warm-started values are scaled by `dfsph_div_warm_start` (default 0.5) and an initial
-velocity correction is applied before the iteration loop. Written back to unsorted
-buffer in K_DFSPH_Finalize.
+**Warm-starting (bd-r5-review-n28.83):** the warm start is the accumulated stiffness,
+as in SPlisHSPlasH. `sorted_kappa_v` holds the running total and is persisted across
+substeps through the sort-reorder pipeline (kappa_v → sorted_kappa_v). At the start of
+each divergence solve the total is scaled by `dfsph_div_warm_start` (default 0.5) and
+applied once as a velocity correction (with warm start 0 it is zeroed instead). Each
+iteration then writes its increment `dkappa_v` to a scratch buffer
+(`Simulation._kappa_v_delta`, allocated outside the CUDA graph body),
+`K_DFSPH_CorrectVelocityDiv` applies only that increment, and `K_DFSPH_ComputeKappaV`
+adds it to the total at the particle's own index (no race, one extra 4 B write per
+particle per iteration). STATIC, GAS and sleeping particles get a total of 0.
+K_DFSPH_Finalize writes the total back to the unsorted buffer.
+
+Measured on a 36K WATER block dropped to the floor, Stable profile, 2 s, mean positive
+`div_v` left after the warm-start pass (t >= 1 s): 3.54 with no warm start, 3.36 when the
+warm start was the last increment only (the previous behaviour), 3.01 / 2.69 / 2.38 with
+the accumulated total at warm start 0.25 / 0.35 / 0.5. No NaN and no v_max growth at any
+of these; 0.5 stays the default. In `eval_solvers.py` the DFSPH Dam Break spread moved
+from max_x = -0.157 to -0.180 (WCSPH -0.226); the pass count is unchanged.
 
 **Source**: `dfsph_solver.cu:K_DFSPH_ComputeKappaV`, `K_DFSPH_CorrectVelocityDiv`
 
@@ -2618,9 +2646,10 @@ Pipeline: Step1 → K_ComputePressure → Step2
 
 The DFSPH divergence solver's kappa_v is carried through the counting sort
 pipeline (K_ScatterReorder, K_GatherReorder), persisted via K_DFSPH_Finalize
-writeback, and warm-started at the beginning of each substep. It is scaled by
-`dfsph_div_warm_start` (default 0.5), then applied as an initial velocity
-correction before the divergence solver iterations.
+writeback, and warm-started at the beginning of each substep. The stored value is
+the sum of the scaled warm start and every divergence iteration's increment
+(13.3). It is scaled by `dfsph_div_warm_start` (default 0.5), then applied as an
+initial velocity correction before the divergence solver iterations.
 
 PBF has no warm-start state (see 12.4). PBF also never reads kappa, kappa_v or
 the FP16 mirrors (sorted_velocity_h, sorted_temperature_h, sorted_dye_h), so
