@@ -1,7 +1,7 @@
 """Render and UI math tests that need no GL context and no GPU work (bd-r5-review-n28.4).
 
 (a) OrbitCamera projection round-trips through _unproject_mouse_ray.
-(b) Renderer._build_sdf_model_matrix: plane normal, box and sphere rotation.
+(b) _build_sdf_model_matrix: plane normal, box and sphere rotation; plane raycast.
 (c) Simulation.copy_to_vbos returns the drawn particle count, rigid tail included.
 (d) UI._on_mouse_button forwards a release and blocks a press under ImGui capture.
 (e) OrbitCamera.zoom with a large delta stays positive and above min_distance.
@@ -88,25 +88,68 @@ def _model_matrix(sdf_type, pos, rot, size):
     return renderer.Renderer._build_sdf_model_matrix(sdf_type, pos, rot, size).astype(np.float64)
 
 
-_PLANE_XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason="Renderer draws every plane with normal +Y; the kernel uses normalize(size). "
-    "Fix bead (8-plane-normal) not landed yet. Remove this marker when it does.",
-)
-
-
 @pytest.mark.parametrize(
     "size",
     [
         [0.0, 1.0, 0.0],
-        pytest.param([1.0, 1.0, 0.0], marks=_PLANE_XFAIL),
-        pytest.param([0.0, 0.2, -1.0], marks=_PLANE_XFAIL),
+        [1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.7, 0.7, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 0.2, -1.0],
+        [-0.3, -0.8, 0.5],
     ],
 )
 def test_sdf_plane_model_matrix_matches_kernel_normal(size):
-    m = _model_matrix(3, [0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 1.0], size)
-    up = m[:3, :3] @ np.array([0.0, 1.0, 0.0])
-    assert np.allclose(_normalize(up), _normalize(size), atol=1e-5)
+    # The plane kernel uses normalize(size) and ignores rotation, so a non-identity
+    # quaternion must not move the drawn normal (bd-r5-review-n28.33).
+    rot = _quat_axis_angle([0.3, 1.0, -0.4], 70.0)
+    renderer = pytest.importorskip("renderer")
+    m = renderer._build_sdf_model_matrix(3, [0.1, 0.2, 0.3], rot, size).astype(np.float64)
+    up = m @ np.array([0.0, 1.0, 0.0, 0.0])
+    assert np.allclose(up[:3], _normalize(size), atol=1e-5)
+    assert abs(up[3]) < 1e-12
+    assert np.allclose(m[:3, 3], [0.1, 0.2, 0.3], atol=1e-6)
+    # The static method on Renderer stays a thin wrapper.
+    assert np.allclose(_model_matrix(3, [0.1, 0.2, 0.3], rot, size), m)
+
+
+def test_raycast_hits_tilted_plane_at_expected_distance():
+    ui = pytest.importorskip("ui")
+    normal = _normalize([0.7, 0.7, 0.0])
+    center = np.array([0.2, 0.1, 0.0])
+    plane = {"id": 7, "type": ui.SDF_PLANE, "position": list(center),
+             "rotation": [0.0, 0.0, 0.0, 1.0], "size": [0.7, 0.7, 0.0]}
+    mgr = SimpleNamespace(get_sdf_objects=lambda: [plane])
+
+    origin = np.array([2.0, 2.0, 0.5], dtype=np.float32)
+    direction = np.array([-1.0, 0.0, 0.0], dtype=np.float32)
+    expected_t = float(np.dot(center - origin, normal) / np.dot(direction, normal))
+
+    hit_id, hit_t = ui._raycast_sdf_objects(origin, direction, mgr)
+    assert hit_id == 7
+    assert hit_t == pytest.approx(expected_t, abs=1e-5)
+    hit = origin + hit_t * direction
+    assert float(np.dot(hit - center, normal)) == pytest.approx(0.0, abs=1e-5)
+
+
+@pytest.mark.parametrize(
+    "vals, expected",
+    [
+        ([0.0, 2.0, 0.0], [0.0, 1.0, 0.0]),
+        ([0.7, 0.7, 0.0], list(_normalize([1.0, 1.0, 0.0]))),
+        ([0.0, 0.0, 0.0], None),
+        ([1e-7, 0.0, 0.0], None),
+    ],
+)
+def test_plane_normal_slider_value_is_normalised(vals, expected):
+    ui = pytest.importorskip("ui")
+    n = ui._normalize_plane_normal(vals)
+    if expected is None:
+        assert n is None
+    else:
+        assert np.allclose(n, expected, atol=1e-7)
+        assert np.linalg.norm(n) == pytest.approx(1.0, abs=1e-7)
 
 
 @pytest.mark.parametrize("sdf_type", [0, 1])
