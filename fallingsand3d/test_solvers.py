@@ -1262,3 +1262,65 @@ def test_dfsph_fluid_has_no_wall_friction(world, sim):
     assert v[w, 1] >= 0.0 and v[s, 1] >= 0.0, "normal velocity should reflect"
     assert abs(v[w, 0] - 1.0) < 0.02, f"WATER tangential {v[w, 0]:.4f}, want 1.0"
     assert v[s, 0] < 0.5, f"SAND tangential {v[s, 0]:.4f}, want < 0.5 (Coulomb)"
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.34: a brush kill inside DFSPH or PBF water stays finite
+# ---------------------------------------------------------------------------
+
+def _kill_center_and_run(world, sim, profile_name, old_encoding=False, substeps=30):
+    """Spawn a water block, kill a sphere at its centre, run substeps.
+
+    With old_encoding the killed slots are rewritten to packed_info 0 (DEAD
+    with FLUID behavior and mass 0.02), the state the brush left before the
+    fix, so only the rest density floor in the kernels protects the solver.
+    Returns host copies of position, velocity, p_rho2 (sorted_kappa),
+    packed_info and mass.
+    """
+    world.packed_info[:] = 0
+    world._high_water = 0
+    n = world.spawn_cube((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2), WATER, spacing=0.02)
+    sim.set_solver_profile(PROFILES[profile_name])
+    sim._spawn_substep = sim._damping_duration
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+    sim._sim_step(n)  # settle the grid once before the kill
+    before = world.packed_info[:n].copy()
+    world.kill_in_sphere((0.0, 0.0, 0.0), 0.06)
+    if old_encoding:
+        killed = (world.packed_info[:n] & cp.uint32(0xFF)) == 0
+        killed &= (before & cp.uint32(0xFF)) != 0
+        world.packed_info[:n][killed] = cp.uint32(0)
+        world.mass[:n][killed] = cp.float32(0.02)
+    killed_idx = cp.nonzero(((before & cp.uint32(0xFF)) != 0)
+                            & ((world.packed_info[:n] & cp.uint32(0xFF)) == 0))[0]
+    for _ in range(substeps):
+        sim._sim_step(n)
+    return (cp.asnumpy(world.position[:n]), cp.asnumpy(world.velocity[:n]),
+            cp.asnumpy(world.sorted_kappa[:n]), cp.asnumpy(world.packed_info[:n]),
+            cp.asnumpy(world.mass[:n]), cp.asnumpy(killed_idx))
+
+
+@pytest.mark.parametrize("profile_name", ["DFSPH", "PBF"])
+def test_kill_in_sphere_stays_finite(world, sim, profile_name):
+    """Killed slots are STATIC DEAD with mass 0, and the solver stays finite."""
+    from materials import STATIC
+    pos, vel, p_rho2, pi, mass, killed = _kill_center_and_run(world, sim, profile_name)
+    assert killed.size > 50, f"only {killed.size} particles killed"
+    assert (pi[killed] == (STATIC << 8)).all(), "killed slots must be MAKE_PACKED(DEAD, STATIC)"
+    assert (mass[killed] == 0.0).all()
+    assert np.isfinite(pos).all(), f"{profile_name}: non-finite position"
+    assert np.isfinite(vel).all(), f"{profile_name}: non-finite velocity"
+    assert np.isfinite(p_rho2).all(), f"{profile_name}: non-finite p_rho2"
+
+
+@pytest.mark.parametrize("profile_name", ["DFSPH", "PBF"])
+def test_old_dead_encoding_stays_finite(world, sim, profile_name):
+    """packed_info 0 with mass left in place must not produce inf or NaN
+    (rest density of DEAD is 0; the kernels floor it)."""
+    pos, vel, p_rho2, _, _, killed = _kill_center_and_run(
+        world, sim, profile_name, old_encoding=True)
+    assert killed.size > 50
+    assert np.isfinite(pos).all(), f"{profile_name}: non-finite position"
+    assert np.isfinite(vel).all(), f"{profile_name}: non-finite velocity"
+    assert np.isfinite(p_rho2).all(), f"{profile_name}: non-finite p_rho2"

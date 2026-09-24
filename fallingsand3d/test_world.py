@@ -138,11 +138,21 @@ def test_kill_in_sphere():
     assert before == 10_000
     # kill_in_sphere returns 0 (count is unused by all callers; bd-mzc.39 removes the sync)
     w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
-    # Verify particles inside sphere are actually zeroed
+    # Killed slots are MAKE_PACKED(DEAD, STATIC) with zero mass, health,
+    # velocity and color (bd-r5-review-n28.34).
     n = w._high_water
-    dead_mask = w.packed_info[:n] == 0
+    dead_mask = (w.packed_info[:n] & 0xFF) == 0
     dead_count = int(cp.sum(dead_mask))
     assert dead_count > 0, "Expected some particles to be killed inside sphere"
+    assert bool(cp.all(w.packed_info[:n][dead_mask] == 0x300))
+    assert bool(cp.all(w.mass[:n][dead_mask] == 0.0))
+    assert bool(cp.all(w.health[:n][dead_mask] == 0.0))
+    assert bool(cp.all(w.velocity[:n][dead_mask] == 0.0))
+    assert bool(cp.all(w.color[:n][dead_mask] == 0.0))
+    # Particles outside the sphere are untouched.
+    r2 = cp.sum(w.position[:n, :3] ** 2, axis=1)
+    assert bool(cp.all(dead_mask == (r2 <= 0.25 * 0.25)))
+    assert bool(cp.all(w.mass[:n][~dead_mask] > 0.0))
     print(f"PASS: kill_in_sphere ({dead_count} killed)")
 
 
