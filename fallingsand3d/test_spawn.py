@@ -591,16 +591,16 @@ def test_multiple_spawns():
 
 
 def test_reactions_populates_freelist():
-    """Reactions kernel behavior on corrosion death: corrosion produces a FIRE spark,
-    not a DEAD particle -- so dying-from-corrosion particles do NOT enter the freelist.
-    Freelist is populated when ACID particles exhaust themselves (mat=ACID, not METAL).
+    """Reactions kernel behavior on corrosion death: a fully corroded particle
+    becomes DEAD/STATIC and its slot goes on the spawn freelist
+    (bd-r5-review-n28.38; it used to become a FIRE spark).
     """
     setup_params(dt=0.1)
 
     n = 10
     # Metal particles with health that will go to zero from corrosion.
-    # After corrosion death, kernel transitions METAL -> FIRE spark (not DEAD),
-    # so dead_count stays 0.
+    # After corrosion death, the kernel marks each one DEAD and pushes its slot
+    # onto the freelist.
     packed_info = np.full(n, MAKE_PACKED(METAL, STATIC), dtype=np.uint32)
     temperature = np.full(n, 293.0, dtype=np.float32)
     health = np.full(n, 0.05, dtype=np.float32)  # low health
@@ -625,15 +625,16 @@ def test_reactions_populates_freelist():
         dead_count=dead_count,
     )
 
-    # Corrosion death creates FIRE sparks -- freelist stays empty
+    # Corrosion death frees every slot
     dc = int(dead_count.get()[0])
-    assert dc == 0, f"Expected 0 entries in freelist (corrosion -> spark, not DEAD), got {dc}"
+    assert dc == n, f"Expected {n} entries in freelist after corrosion death, got {dc}"
+    assert sorted(dead_indices.get()[:dc].tolist()) == list(range(n))
 
-    # All 10 particles should now be FIRE sparks (GAS, not DEAD)
+    # All 10 particles should now be DEAD
     pi_result = pi_out.get()
     for idx in range(n):
         mat_id = GET_MATERIAL_ID(int(pi_result[idx]))
-        assert mat_id == FIRE, f"Particle {idx}: expected FIRE spark, got mat_id={mat_id}"
+        assert mat_id == DEAD, f"Particle {idx}: expected DEAD, got mat_id={mat_id}"
 
     print("PASS: test_reactions_populates_freelist")
 
