@@ -47,6 +47,7 @@ def _write(path: str, arrays: dict, header: dict) -> None:
 class _RecordingRBM:
     def __init__(self) -> None:
         self.max_bodies = 8
+        self.num_bodies = 0
         self.resets = 0
         self.reinjections = 0
 
