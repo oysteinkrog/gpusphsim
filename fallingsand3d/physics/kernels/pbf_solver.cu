@@ -922,9 +922,16 @@ void K_PBF_Finalize(
 
                 float tang_sq = vc_t.x*vc_t.x + vc_t.y*vc_t.y + vc_t.z*vc_t.z;
 
+                // Friction slope: the material's friction_coeff, or the
+                // profile's tan_phi_f when the table value is 0
+                // (bd-r5-review-n28.89).  Cohesion stays global: it is a
+                // per-step position allowance in metres, and the table's
+                // cohesion column is not a length.
+                float fc = c_materials[mat_id].friction_coeff;
+                float tan_phi = (fc > 0.0f) ? fc : c_granular.tan_phi_f;
                 // Static friction dead zone: below minimum normal velocity, zero tangential
                 float max_tang = (vn_mag < 5e-4f) ? 0.0f
-                               : c_granular.tan_phi_f * vn_mag + c_granular.cohesion * inv_dt;
+                               : tan_phi * vn_mag + c_granular.cohesion * inv_dt;
 
                 if (tang_sq > max_tang * max_tang) {
                     if (max_tang > 0.0f && tang_sq > 1e-12f) {

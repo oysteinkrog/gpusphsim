@@ -205,15 +205,31 @@ __device__ inline float compute_pressure(float rho_i, int behavior, uint mat_id)
  * (bd-r5-review-n28.107). */
 #define MUI_GAMMA_DOT_FLOOR 0.1f
 
-__device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho) {
+/* mu(I) with a caller-supplied static friction mu_s. mu_2 keeps the global
+ * gap: mu_2 = mu_s + (c_granular.mu_2 - c_granular.mu_s)
+ * (bd-r5-review-n28.89). */
+__device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho,
+                                        float mu_s) {
     float spacing = c_granular.particle_spacing;
     float I_number = gamma_dot * spacing / sqrtf(p_eff / rho);
-    float mu_I = c_granular.mu_s
+    float mu_I = mu_s
                + (c_granular.mu_2 - c_granular.mu_s)
                  / (1.0f + c_granular.I0 / fmaxf(I_number, 1e-8f));
     return fminf(c_granular.mu_max,
                  c_granular.mu0
                  + mu_I * p_eff / fmaxf(gamma_dot, MUI_GAMMA_DOT_FLOOR));
+}
+
+/* mu(I) with the global c_granular.mu_s. */
+__device__ inline float compute_muI_eta(float gamma_dot, float p_eff, float rho) {
+    return compute_muI_eta(gamma_dot, p_eff, rho, c_granular.mu_s);
+}
+
+/* Per-material static friction: MaterialProps.friction_coeff, or the global
+ * c_granular.mu_s when the table value is 0 (bd-r5-review-n28.89). */
+__device__ inline float granular_mu_s(uint mat_id) {
+    float mu = c_materials[mat_id].friction_coeff;
+    return (mu > 0.0f) ? mu : c_granular.mu_s;
 }
 
 /* ======================================================================

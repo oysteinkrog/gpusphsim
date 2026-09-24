@@ -11,8 +11,9 @@
  * mu(I) rheology (GRANULAR only):
  *   - gamma_dot read from shear_rate_in (Step1's tensor-based computation)
  *   - I = gamma_dot * spacing / sqrt(p_eff / rho_i)
- *   - mu_I = mu_s + (mu_2 - mu_s) / (1 + I0 / max(I, 1e-8))
- *   - eta_i = min(mu_max, mu0 + mu_I * p_eff / (gamma_dot + 1e-6))
+ *   - mu_s = c_materials[mat].friction_coeff (c_granular.mu_s when 0)
+ *   - mu_I = mu_s + (mu_2 - mu_s)_global / (1 + I0 / max(I, 1e-8))
+ *   - eta_i = min(mu_max, mu0 + mu_I * p_eff / max(gamma_dot, 0.1))
  *   - Harmonic mean eta_ij for GRANULAR-GRANULAR pairs
  *
  * Skips STATIC (behavior_class == 3) and SLEEPING particles (early return).
@@ -223,7 +224,8 @@ void K_Step2(
         float rho0_i = c_materials[mat_id_i].rest_density;
         float p_floor = rho0_i * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
         float p_eff_i = fmaxf(p_i, p_floor);
-        eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
+        // Per-material static friction (bd-r5-review-n28.89).
+        eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i, granular_mu_s(mat_id_i));
     }
 
     // Vorticity eta accumulator (FLUID only, folded into main loop -- PERF-002)
@@ -448,7 +450,8 @@ void K_Step2(
                         float rho0_j = c_materials[mat_id_j].rest_density;
                         float p_floor_j = rho0_j * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
                         float p_eff_j = fmaxf(p_j, p_floor_j);
-                        float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j);
+                        float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j,
+                                                      granular_mu_s(mat_id_j));
 
                         // Harmonic mean viscosity
                         float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);

@@ -46,15 +46,20 @@
  * Reaction thresholds
  * ====================================================================== */
 
-#define ICE_MELT_TEMP         273.0f   // ICE -> WATER above this
-#define WATER_FREEZE_TEMP     263.0f   // WATER -> ICE below this (10K hysteresis below melt)
+/* Phase-change temperatures come from the material table (bd-r5-review-n28.89):
+ *   ICE -> WATER above      c_materials[MAT_ICE].temp_melt           (273 K)
+ *   WATER -> ICE below      c_materials[MAT_WATER].temp_melt - 10 K  (263 K)
+ *   WATER boils above       c_materials[MAT_WATER].temp_boil         (373 K)
+ *   STEAM -> WATER below    c_materials[MAT_WATER].temp_boil - 13 K  (360 K)
+ * The condense point is keyed to WATER's boil point: STEAM has no temp_boil
+ * of its own (0 in the table).  The two hysteresis gaps are fixed here. */
+#define WATER_FREEZE_HYSTERESIS  10.0f   // freeze this far below the ICE melt point
 /* ICE is STATIC, so only slow water freezes; a particle in a moving stream
  * would otherwise stop dead in mid-air.  Same speed as V_WAKE in
  * sph_shared.cuh (this file includes only common.cuh). */
 #define WATER_FREEZE_MAX_SPEED 0.02f
 // LAVA solidify uses c_materials[MAT_LAVA].temp_melt at runtime
-#define WATER_BOIL_TEMP       373.0f   // WATER -> SPAWN_GAS flag above this
-#define STEAM_CONDENSE_TEMP   360.0f   // STEAM -> WATER below this (13K hysteresis below boil; see SPAWN_LIFETIME in spawn.cu)
+#define STEAM_CONDENSE_HYSTERESIS 13.0f  // condense this far below the WATER boil point (see SPAWN_LIFETIME in spawn.cu)
 
 /* Exposure from Step1 is normalised by the neighbour kernel support weight
  * (bd-r5-review-n28.48):
@@ -207,11 +212,12 @@ void K_Reactions(
     // (bd-r5-review-n28.64).  No per-particle latent-energy store.
 
     // ICE (mat=11, temp > 273K) -> WATER (in-place, small density ratio)
-    if (mat_id == MAT_ICE && temp > ICE_MELT_TEMP) {
+    const float ice_melt_temp = c_materials[MAT_ICE].temp_melt;
+    if (mat_id == MAT_ICE && temp > ice_melt_temp) {
         pi = MAKE_PACKED(MAT_WATER, FLUID);
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_ICE, MAT_WATER);
-        temperature[i] = ICE_MELT_TEMP;
+        temperature[i] = ice_melt_temp;
         return;  // done with this particle
     }
 
@@ -246,7 +252,8 @@ void K_Reactions(
     }
 
     // WATER (mat=5, temp > 373K) -> set SPAWN_GAS flag (large density ratio, US-023)
-    if (mat_id == MAT_WATER && temp > WATER_BOIL_TEMP) {
+    const float water_boil_temp = c_materials[MAT_WATER].temp_boil;
+    if (mat_id == MAT_WATER && temp > water_boil_temp) {
         pi = SET_SPAWN_FLAG(pi);
         packed_info[i] = pi;
         return;
@@ -255,7 +262,8 @@ void K_Reactions(
     // WATER (mat=5, temp < 263K, sleeping or |v| < 0.02 m/s) -> ICE (STATIC)
     // Temperature is set to the freeze point: the deficit below it is taken
     // as released latent heat, as for the other melt/solidify transitions.
-    if (mat_id == MAT_WATER && temp < WATER_FREEZE_TEMP) {
+    const float water_freeze_temp = c_materials[MAT_WATER].temp_melt - WATER_FREEZE_HYSTERESIS;
+    if (mat_id == MAT_WATER && temp < water_freeze_temp) {
         float4 v = velocity[i];
         float v_sq = v.x * v.x + v.y * v.y + v.z * v.z;
         if (IS_SLEEPING(pi) ||
@@ -263,7 +271,7 @@ void K_Reactions(
             pi = MAKE_PACKED(MAT_ICE, STATIC);
             packed_info[i] = pi;
             rescale_mass(mass, i, MAT_WATER, MAT_ICE);
-            temperature[i] = WATER_FREEZE_TEMP;
+            temperature[i] = water_freeze_temp;
             velocity[i] = make_float4(0.0f, 0.0f, 0.0f, v.w);
             return;
         }
@@ -277,7 +285,7 @@ void K_Reactions(
     // p = m_steam / m_water (1/3 for boiled steam, 1 for brush steam with
     // mass PARTICLE_MASS), and otherwise dies and returns its slot to the
     // freelist.  The expected water mass equals the steam mass.
-    if (mat_id == MAT_STEAM && temp < STEAM_CONDENSE_TEMP) {
+    if (mat_id == MAT_STEAM && temp < water_boil_temp - STEAM_CONDENSE_HYSTERESIS) {
         if (mass != 0) {
             float water_mass = c_sim.particle_mass * spawn_mass_scale(MAT_WATER);
             float p_keep = mass[i] / water_mass;
