@@ -8,7 +8,8 @@
  *   2. Symplectic Euler: vel_new = vel + dt * accel
  *   3. GAS drag: vel_new *= (1 - c_drag * dt)
  *   4. Velocity clamp: |vel| <= velocity_limit
- *   5. Position update: pos_new = pos + dt * (vel_new + xsph) for FLUID,
+ *   5. Position update: pos_new = pos + dt * (vel_new + eps*xsph_sum) for FLUID,
+ *      where eps*xsph_sum = veleval - vel from step2;
  *      pos_new = pos + dt * vel_new for others
  *   6. Impulse SDF boundary: 6 planes of box, project out, reflect normal vel
  *      with restitution, apply Coulomb friction to tangential vel
@@ -56,7 +57,7 @@ void K_Integrate(
     // --- Sorted inputs (read) ---
     const float4*   __restrict__ sorted_position,      // sorted positions
     const float4*   __restrict__ sorted_velocity,      // sorted velocities
-    const float4*   __restrict__ sorted_veleval,       // sorted veleval (XSPH-corrected for FLUID)
+    const float4*   __restrict__ sorted_veleval,       // sorted veleval (vel + eps*xsph_sum for FLUID)
     const float4*   __restrict__ sorted_sph_force,     // sorted SPH force from Step2
     const float*    __restrict__ sorted_mass,           // sorted per-particle mass
     const uint*     __restrict__ sorted_packed_info,    // sorted packed_info
@@ -275,14 +276,16 @@ void K_Integrate(
         }
     }
 
-    // --- Position update ---
-    // FLUID: use XSPH-corrected velocity for smoother advection (Game SPH).
-    // Others: use actual velocity.
-    float3 advect_vel;
+    // --- Position update (symplectic Euler) ---
+    // All behaviors advect with vel_new. FLUID adds the XSPH correction on top:
+    // step2 writes veleval = vel + eps * xsph_sum, so (veleval - vel) is exactly
+    // the XSPH delta. Using vel_new (not veleval) means this substep's forces,
+    // clamps, damping and drag reach the position in the same substep.
+    float3 advect_vel = vel_new;
     if (behavior == FLUID) {
-        advect_vel = veleval_xsph;
-    } else {
-        advect_vel = vel_new;
+        advect_vel.x += veleval_xsph.x - vel.x;
+        advect_vel.y += veleval_xsph.y - vel.y;
+        advect_vel.z += veleval_xsph.z - vel.z;
     }
     float3 pos_new = make_float3(
         pos.x + dt * advect_vel.x,
