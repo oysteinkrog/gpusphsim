@@ -707,12 +707,36 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
 5. **Dye diffusion**: STATIC neighbors skipped to prevent color bleeding from stone.
 6. **GAS phase separation preserved**: GAS particles still skip STATIC neighbors.
 
+7. **Position push** (`static_particle_boundary`, `sph_shared.cuh`): after
+   integration, a FLUID or GRANULAR particle closer than `min_dist = 0.5 h`
+   (one rest spacing, 0.02 m) to a STATIC particle gets one correction:
+   `n = normalise(sum_j (min_dist - r_j) * r_hat_j)`,
+   `pos += max_j (min_dist - r_j) * n`. The push length is the deepest
+   penetration, not a sum over neighbours, so a particle over a flat floor
+   moves at most `min_dist - y`. Velocity is reflected with restitution along
+   `n` only, and only when moving into the wall. A particle resting one
+   spacing from the wall is not touched. Called from WCSPH `K_Integrate`, PBF
+   Finalize and DFSPH Finalize. (bd-r5-review-n28.43)
+
+   Measured on a 1500-particle water column in a closed STONE box (bottom
+   layer after 5 s, old 0.8 h summed push vs this version): PBF gap
+   1.58 dx to 0.96 dx, bottom vy std 0.114 to 0.030 m/s, max per-substep
+   displacement 0.036 m to 0.0044 m (under the 0.15 h grid-reuse threshold in
+   100% of substeps, was 1.2%). DFSPH gap 1.49 dx to 0.77 dx, jitter unchanged.
+   No leaks in either.
+
+   Known gap: the integrate module never receives `c_grid` (simulation.py
+   uploads only `c_sim` and `c_materials` to it), so in WCSPH `calcGridCell`
+   and `spatialHash` see zeros and this push scans one wrong bucket. It has
+   no effect in WCSPH until that upload is added.
+
 Additional FLUID boundary improvements (unchanged):
 - **XSPH position advection for FLUID**: Smooths compression artifacts.
 - **Zero wall friction for FLUID**: Prevents domain-wall sticking.
 - **All FLUID pressure clamped >= 0**: No tensile/negative pressure.
 
-**Source**: step1.cu, step2.cu, pbf_solver.cu, dfsph_solver.cu
+**Source**: step1.cu, step2.cu, pbf_solver.cu, dfsph_solver.cu,
+sph_shared.cuh:static_particle_boundary
 
 ### 10.7a FIXED: SPH stability overhaul (Tait EOS + safety clamps)
 With force_scale=0.02, SPH pressure forces are 50x weaker than gravity.
@@ -1166,7 +1190,7 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   Integrate and the PBF and DFSPH Finalize kernels scatter sorted mass back, so
   the zero survives the next sort.
 - **No position push.** `static_particle_boundary` (`sph_shared.cuh`) pushes a
-  moving particle out to `0.8 h` from each STATIC neighbour,
+  moving particle out to `0.5 h` from STATIC neighbours (see 10.6),
   and that push has no mass factor. It skips `MAT_DEAD` as well as `MAT_RIGID`.
 - `MAT_DEAD = 0` is defined in `common.cuh` next to `MAT_RIGID`.
 - **Brush kill.** `World.kill_in_sphere` runs one kernel (`K_KillSphere`, no
