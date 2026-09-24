@@ -29,11 +29,12 @@ Force accumulation
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import cupy
 import numpy as np
+
+from kernel_loader import load_module
 
 # ---------------------------------------------------------------------------
 # Default physical parameters
@@ -129,42 +130,9 @@ def build_granular_params(
 # CuPy RawModule compilation
 # ---------------------------------------------------------------------------
 
-_module: Optional[object] = None
-
-
-def _ensure_ptx_if_needed() -> None:
-    """Force PTX compilation when GPU arch exceeds NVRTC's max sm target."""
-    from cupy.cuda import compiler as _compiler
-    from cupy.cuda import device as _device
-
-    gpu_cc = _device.Device().compute_capability
-    nvrtc_max = _compiler._get_max_compute_capability()
-    if int(gpu_cc) > int(nvrtc_max):
-        _compiler._use_ptx = True
-        if hasattr(_compiler._get_arch_for_options_for_nvrtc, "_cache"):
-            _compiler._get_arch_for_options_for_nvrtc._cache = {}
-        if hasattr(_compiler._get_arch, "_cache"):
-            _compiler._get_arch._cache = {}
-
-
 def _get_module() -> "object":
     """Compile (or return cached) CuPy RawModule from step2.cu."""
-    global _module
-    if _module is not None:
-        return _module
-
-    _ensure_ptx_if_needed()
-
-    kernel_dir = os.path.join(os.path.dirname(__file__), "physics", "kernels")
-    cu_path = os.path.join(kernel_dir, "step2.cu")
-    with open(cu_path) as f:
-        source = f.read()
-
-    _module = cupy.RawModule(
-        code=source,
-        options=("--std=c++11", "--use_fast_math", f"-I{kernel_dir}"),
-    )
-    return _module
+    return load_module("step2.cu")
 
 
 def get_module() -> "object":
