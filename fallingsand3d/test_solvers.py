@@ -1178,3 +1178,86 @@ def test_dfsph_module_has_only_live_kernels():
     for gone in ("predict_position", "compute_density_adv", "compute_kappa",
                  "compute_kappa_from_velocity", "correct_velocity_dens"):
         assert not hasattr(dfsph_solver, gone)
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.30: K_DFSPH_Finalize sleep gate and FLUID wall friction
+# ---------------------------------------------------------------------------
+
+_SLEEP_BIT = 0x400  # SET_SLEEPING in common.cuh
+
+
+def _dfsph_zero_g(world, sim):
+    """DFSPH profile, zero gravity, no spawn damping ramp."""
+    sim.set_solver_profile(PROFILES["DFSPH"])
+    sim.set_gravity(0.0)
+    sim._spawn_substep = sim._damping_duration
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+
+
+def test_dfsph_sleep_is_granular_only(world, sim):
+    """A still DFSPH water block never sleeps; a still sand block does.
+
+    Every particle starts with its sleep counter past SLEEP_THRESHOLD, and half
+    the water starts with a stale SLEEPING bit. Before the fix, K_DFSPH_Finalize
+    counted sleep for every behaviour, so the water froze.
+    """
+    from materials import GRANULAR
+    world.packed_info[:] = 0
+    world._high_water = 0
+    n_water = world.spawn_cube((-0.6, -0.2, -0.2), (-0.2, 0.2, 0.2), WATER, spacing=0.02)
+    n_sand = world.spawn_cube((0.2, -0.2, -0.2), (0.6, 0.2, 0.2), SAND, spacing=0.02)
+    n = n_water + n_sand
+    _dfsph_zero_g(world, sim)
+    world.sleep_counter[:n] = 200
+    world.velocity[:n] = 0.0
+    world.packed_info[0:n_water:2] |= cp.uint32(_SLEEP_BIT)
+    try:
+        for _ in range(20):
+            sim._sim_step(n)
+        pi = cp.asnumpy(world.packed_info[:n])
+        sc = cp.asnumpy(world.sleep_counter[:n])
+    finally:
+        sim.set_gravity(-4.0)
+    mat = pi & 0xFF
+    beh = (pi >> 8) & 0x3
+    sleeping = (pi & _SLEEP_BIT) != 0
+    water = mat == WATER
+    sand = mat == SAND
+    assert water.sum() == n_water and sand.sum() == n_sand
+    assert not sleeping[water].any(), f"{sleeping[water].sum()} WATER particles asleep"
+    assert (sc[water] == 0).all(), f"WATER sleep_counter max {sc[water].max()}"
+    assert (beh[sand] == GRANULAR).all()
+    assert sleeping[sand].any(), "still SAND block should have sleepers"
+
+
+def test_dfsph_fluid_has_no_wall_friction(world, sim):
+    """A lone WATER particle sliding into the floor keeps its tangential speed;
+    a lone SAND particle loses mu_wall * |v_n| of it (wall_friction = 0.5)."""
+    world.packed_info[:] = 0
+    world._high_water = 0
+    y = -1.0 + 0.001  # just above the floor (world_half_size = 1)
+    vel = (1.0, -2.0, 0.0)
+    n_w = world.spawn_cube((-0.51, y - 0.005, -0.01), (-0.49, y + 0.005, 0.01),
+                           WATER, spacing=0.02, velocity=vel)
+    n_s = world.spawn_cube((0.49, y - 0.005, -0.01), (0.51, y + 0.005, 0.01),
+                           SAND, spacing=0.02, velocity=vel)
+    assert n_w == 1 and n_s == 1
+    n = 2
+    _dfsph_zero_g(world, sim)
+    try:
+        sim._sim_step(n)
+        pi = cp.asnumpy(world.packed_info[:n])
+        v = cp.asnumpy(world.velocity[:n])
+        p = cp.asnumpy(world.position[:n])
+    finally:
+        sim.set_gravity(-4.0)
+    mat = pi & 0xFF
+    w = int(np.nonzero(mat == WATER)[0][0])
+    s = int(np.nonzero(mat == SAND)[0][0])
+    # Both hit the floor this substep (moved at least |v_y| * dt > 1 mm).
+    assert p[w, 1] < y and p[s, 1] < y
+    assert v[w, 1] >= 0.0 and v[s, 1] >= 0.0, "normal velocity should reflect"
+    assert abs(v[w, 0] - 1.0) < 0.02, f"WATER tangential {v[w, 0]:.4f}, want 1.0"
+    assert v[s, 0] < 0.5, f"SAND tangential {v[s, 0]:.4f}, want < 0.5 (Coulomb)"
