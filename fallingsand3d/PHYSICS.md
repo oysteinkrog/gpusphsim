@@ -70,7 +70,8 @@ rho_i = max(rho_i, 1.0)
 - **STATIC neighbors included** in density (Akinci boundary model, Phase 13)
 - Per-particle mass `m_j` from sorted mass array (supports multi-material)
 - Density clamped to minimum 1.0
-- Heat diffusion and exposure also skip STATIC neighbors
+- Heat diffusion and exposure skip MAT_RIGID neighbors (exposure still counts
+  them in its normalising weight, see §9.4)
 
 **Source**: `step1.cu:138-150` (inner loop), `step1.cu:224-225` (PostCalc)
 
@@ -655,6 +656,48 @@ cooling term (293 K environment) would otherwise push a freshly-spawned 293 K IC
 particle above its `temp_melt=273 K` threshold in the first substep.
 
 **Source**: `world.py:_DEFAULT_TEMPS`
+
+### 9.4 Reaction Exposure (Step1 → K_Reactions)
+
+Step1 gives each particle two exposure values that K_Reactions compares with
+thresholds. Both are normalised by the kernel support weight of the whole
+neighbourhood, so they do not depend on `h` or on how many neighbours there are:
+
+```
+W_ij = (h^2 - r_ij^2)^3          (poly6 shape; poly6_coeff cancels)
+S_i  = SUM_j W_ij                over every non-self, non-DEAD neighbour in range,
+                                 including cross-phase GAS and MAT_RIGID
+exposure_corrode_i = SUM_j reaction_rate_ij * W_ij / S_i                    [1/s]
+exposure_heat_i    = SUM_j heat_exchange_ij * max(T_j - T_i, 0) * W_ij / S_i  [K]
+```
+
+(0 when the particle has no neighbours.) `exposure_corrode` is the reaction rate
+times the share of the kernel support held by reacting neighbours, so it lies in
+[0, max reaction_rate] = [0, 1.0]. `exposure_heat` is `heat_exchange` times a
+temperature difference, weighted the same way.
+
+Magnitudes at `h = 0.04`, spacing `0.5h` (26 neighbours, `S = 4.16 W(0)`):
+- one nearest neighbour holds about 10% of the support; a neighbour at 0.85h
+  holds about 0.5%.
+- one FIRE neighbour (1200 K) next to 293 K WOOD at `h/2`: `25 * 907 * 0.10 = 2300 K`.
+  At 0.85h: about 115 K.
+
+Thresholds in `reactions.cu`:
+
+| Reaction | Threshold | Meaning |
+|----------|-----------|---------|
+| WOOD → FIRE | exposure_heat > 500 K | one FIRE neighbour within about 0.75h |
+| OIL → FIRE | exposure_heat > 300 K | |
+| GUNPOWDER → FIRE | exposure_heat > 100 K | almost any FIRE neighbour in range |
+| Corrosion | health -= exposure_corrode * dt | full acid contact kills in 1/rate s (STONE 6.7 s, METAL 3.3 s, WOOD 5 s) |
+| ACID self-consumption | health -= 0.5 * exposure_corrode * dt | |
+| Sand wetting | see §21.1 | thresholds are rate × water fraction |
+
+K_Step1 and K_Step1_BuildNL use this definition. The PBF and DFSPH density
+kernels and the benchmark-only `K_Step1_NL` (`neighbor_list.cu`) still output
+the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
+
+**Source**: `step1.cu` (K_Step1, K_Step1_BuildNL PostCalc), `reactions.cu` thresholds
 
 ---
 
@@ -2393,14 +2436,27 @@ Three discrete sand states driven by water exposure:
 
 ### 21.1 State Transitions (reactions.cu)
 
-Transitions are driven by `exposure_corrode`, accumulated via the interaction
-matrix reaction_rate for SAND-WATER and WET_SAND-WATER pairs:
+Transitions are driven by `exposure_corrode` (§9.4), which is the pair's
+reaction_rate times the share of the kernel support held by WATER neighbours:
 
 ```
 SAND  --[exp_corrode > 0.2]--> WET_SAND --[exp_corrode > 0.5]--> MUD
 SAND  <--[exp_corrode < 0.02]-- WET_SAND <--[exp_corrode < 0.1]-- MUD
           (drying)                          (drying)
 ```
+
+With the rates in §21.2 these are water fractions:
+
+| Transition | Rate | Water fraction |
+|------------|------|----------------|
+| SAND → WET_SAND | 0.4 | above 50% |
+| WET_SAND → MUD | 0.6 | above 83% |
+| MUD → WET_SAND (drying) | 0.3 | below 33% |
+| WET_SAND → SAND (drying) | 0.6 | below 3.3% |
+| DIRT → MUD | 0.5 | above 40% |
+
+A sand castle touched by a few water particles stays SAND; only sand that
+water mostly surrounds turns wet, and only near-submerged wet sand turns to MUD.
 
 Drying is accelerated by temperature above 293K:
 ```
@@ -2428,7 +2484,7 @@ Hysteresis prevents oscillation (wet threshold >> dry threshold).
 | LAVA + METAL | 0.0 | 30.0 | Heat only: lava heats metal |
 | WATER + ACID | 0.0 | 5.0 | Heat only: acid is not consumed by water |
 
-Rule: `exposure_corrode` sums `reaction_rate * W` over every neighbour pair, and
+Rule: `exposure_corrode` is the W-weighted mean of `reaction_rate` over every neighbour (§9.4), and
 K_Reactions reads it as acid damage, wetting and acid self-consumption. So a
 pair has a non-zero `reaction_rate` only when ACID, WATER, MUD or a combustible
 (WOOD, OIL, GUNPOWDER) is on one side. Heat-only pairs use rate 0 and a
@@ -2441,7 +2497,9 @@ health damage path. Their `exposure_corrode` signal is used only for wetting
 transitions, not health reduction.
 
 Corrosion damage (`health -= exposure_corrode * dt`) applies only to STONE,
-METAL, WOOD, GRAVEL, OIL and GUNPOWDER. ICE is not on the list: it changes
+METAL, WOOD, GRAVEL, OIL and GUNPOWDER. `exposure_corrode` is rate × acid
+support fraction, so a particle fully surrounded by acid dies after 1/rate
+seconds (STONE 0.15 → 6.7 s, METAL 0.3 → 3.3 s). ICE is not on the list: it changes
 only by melting to WATER above 273 K. With the heat-only pairs above at rate 0,
 these materials get corrode exposure only from ACID (and, for the combustibles,
 from FIRE and LAVA, whose ignition check runs first).
