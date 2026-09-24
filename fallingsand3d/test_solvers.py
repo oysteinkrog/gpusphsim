@@ -1239,9 +1239,10 @@ def test_dfsph_fluid_has_no_wall_friction(world, sim):
     world._high_water = 0
     y = -1.0 + 0.001  # just above the floor (world_half_size = 1)
     vel = (1.0, -2.0, 0.0)
-    n_w = world.spawn_cube((-0.51, y - 0.005, -0.01), (-0.49, y + 0.005, 0.01),
+    # spawn_cube puts one particle at min_corner + spacing/2 per axis.
+    n_w = world.spawn_cube((-0.51, y - 0.01, -0.01), (-0.49, y + 0.01, 0.01),
                            WATER, spacing=0.02, velocity=vel)
-    n_s = world.spawn_cube((0.49, y - 0.005, -0.01), (0.51, y + 0.005, 0.01),
+    n_s = world.spawn_cube((0.49, y - 0.01, -0.01), (0.51, y + 0.01, 0.01),
                            SAND, spacing=0.02, velocity=vel)
     assert n_w == 1 and n_s == 1
     n = 2
