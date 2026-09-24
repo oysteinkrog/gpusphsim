@@ -2511,20 +2511,68 @@ substep, shared GPU): the sort stage median went from about 4.0 ms to about
 `dfsph_solver.cu:K_DFSPH_Finalize`, `simulation.py:_run_grid_setup`,
 `simulation.py:_run_dfsph_body` (warm-start application)
 
-### 20.5 Grid Reuse for PBF/DFSPH (PERF-009)
+### 20.5 Grid Reuse (all solvers, PERF-009)
 
-Extended the WCSPH grid-reuse optimization to PBF and DFSPH. Both finalize
-kernels now track max_displacement via atomicMax. Sort-skip decision uses
-solver-specific thresholds:
+A gather-only substep (`K_GatherReorder`) re-gathers the unsorted arrays
+through the last sort permutation and reuses `cell_start`/`cell_end`, so
+particles stay binned by their position at the last full sort. K_Integrate,
+K_PBF_Finalize and K_DFSPH_Finalize track the drift since that sort in
+`max_displacement` via atomicMax. The sort-skip decision uses solver-specific
+thresholds:
 
-- **WCSPH**: (0.25*h)² threshold, max 4 consecutive skips
-- **PBF/DFSPH**: (0.15*h)² threshold, max 2 consecutive skips (tighter for
-  constraint solver convergence quality)
+- **WCSPH**: (0.25*h)² threshold, max 4 consecutive skipped frames
+- **PBF/DFSPH**: (0.15*h)² threshold, max 2 consecutive skipped frames
+  (tighter for constraint solver convergence quality)
+
+**Drift anchor (bd-r5-review-n28.54).** On each full sort `K_ScatterReorder`
+writes the sorted position into `sorted_anchor` (float4, N). `K_GatherReorder`
+never writes it, and the sort permutation is frozen between full sorts, so
+`sorted_anchor[i]` stays the sort-time position of the particle in sorted slot
+i. Any change of n or of the particle set forces a full sort, which rewrites
+the anchor. The finalize kernels compute
+
+```
+disp_sq = |x_new - sorted_anchor[i]|^2
+max_displacement = atomicMax over particles and substeps since the last full sort
+```
+
+so `max_displacement` is the largest drift of any particle from the position
+it was binned at. A full sort zeroes it; resting particles read exactly 0.
+PBF bins by the predicted position x* but measures drift on x; the two differ
+by dt*(v - v_sort), which is small next to the threshold. Cost: one coalesced
+16 B read per particle per substep (about +23 us in integrate at 1M) and one
+16 B store per particle per full sort.
+
+**Miss bound.** Cell size equals h and the search covers the 27 cells around
+the current position of particle i, which reaches at least h from x_i. A
+neighbour j is binned at its anchor, within d of x_j, so it is found whenever
+r_ij + d <= h. With d < 0.25h only pairs with r_ij > 0.75h can be missed; W_poly6
+there is at most (1 - 0.75²)³ = 8.4% of its peak.
+
+**Prediction.** The latched drift is up to two frames old: it was copied at the
+end of the previous frame, and the decision covers the next frame. The host
+counts substeps since the last full sort (`_count_substep_sort`, from the skip
+flag and the n guard, so graph replays are covered) and stores the count with
+each copy. The decision scales the drift to the end of the next frame:
+
+```
+k_copy = substeps since the last sort when the copy was taken
+k_next = substeps since the last sort now + substeps of this frame
+predicted_sq = max_disp_sq * (k_next / k_copy)^2
+skip if predicted_sq < threshold and the frame cap is not reached
+```
+
+A settled scene keeps a near-zero rate and skips. A front moving faster than
+about 0.25h per frame (0.6 m/s at 60 fps and dt = 1e-3) sorts every frame.
+Measured with `bench_substep.py` (WCSPH, 992K dam break, 17 substeps per
+frame, first 300 substeps): skip rate 55% (83% before the anchor, when only
+the frame cap ended a skip run), and the final position checksum matches the
+sort-every-substep run.
 
 **Decision data (bd-r5-review-n28.46).** `max_displacement` holds the float
-bits of the largest squared per-substep displacement since the last full sort.
-At the end of each frame `_update_sort_skip_decision` does three things in this
-order, with no host sync:
+bits of the largest squared drift since the last full sort. At the end of each
+frame `_update_sort_skip_decision` does three things in this order, with no
+host sync:
 
 1. Latch. Each frame's D2H copy of `max_displacement` and `foam_count` has its
    own event, queued with a scene epoch. The host pops every event that is done
@@ -2533,7 +2581,8 @@ order, with no host sync:
    previous frame's copy, so the lag is exactly one frame. When the host runs
    ahead it is the newest copy that has landed. If none has landed, the
    previous value is kept.
-2. Decide. A value at or above the +inf bits (`0x7F800000`) never skips. The
+2. Decide, using the prediction above. A value at or above the +inf bits
+   (`0x7F800000`) never skips. The
    startup value and the value after `notify_scene_changed()` is the sentinel
    `0xFFFFFFFF`, and `notify_scene_changed()` bumps the epoch, so copies
    launched before a scene change are never used.
@@ -2546,9 +2595,12 @@ At the top of `step_frame` the compute stream waits on the newest copy's event
 because the spawned slots jump to the source position without Integrate
 seeing it, so the next frame does a full sort.
 
-**Source**: `pbf_solver.cu:K_PBF_Finalize` (max_displacement_out),
-`dfsph_solver.cu:K_DFSPH_Finalize` (max_displacement_out),
-`simulation.py:_update_sort_skip_decision` (latch and threshold logic),
+**Source**: `counting_sort.cu:K_ScatterReorder` (anchor_out),
+`integrate.cu:K_Integrate`, `pbf_solver.cu:K_PBF_Finalize`,
+`dfsph_solver.cu:K_DFSPH_Finalize` (max_displacement_out, displacement_anchor),
+`world.py` (`sorted_anchor`),
+`simulation.py:_count_substep_sort` and `_update_sort_skip_decision` (latch,
+prediction and threshold logic),
 `spawn.cu:K_SpawnGas` (+inf on spawn)
 
 ## 10.13 Micropolar SPH (Phase 8, item 5.2)

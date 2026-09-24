@@ -306,15 +306,26 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
   DFSPH at dt=1/300 gives 0.83*h (barely safe). WCSPH at DT_MAX=0.001 gives 0.25*h (safe).
 - **Fix:** Either reduce PBF velocity_limit, reduce PBF dt, or add CFL check.
 
-### I3. INVESTIGATE: Grid reuse tracks max single-step displacement, not cumulative drift
-- **File:** `integrate.cu:346-356`, `simulation.py:1216-1238`
-- **Severity:** MEDIUM-HIGH
-- **Problem:** `atomicMax(max_displacement, disp_sq)` gives the largest single-substep movement
-  since last sort. A particle drifting 0.009m/substep (below 0.01m threshold) for 40 substeps
-  could drift 0.36m = 9*h without triggering a resort.
-- **Mitigating factor:** Safety limit of 4 consecutive skipped frames caps total drift.
-  At 0.009m/substep * ~20 substeps * 4 frames = 0.72m worst case.
-- **Fix:** Store reference position at last sort, compute drift against reference.
+### I3. FIXED: Grid reuse measures drift since the last full sort
+- **File:** `counting_sort.cu:K_ScatterReorder`, `integrate.cu:K_Integrate`,
+  `pbf_solver.cu:K_PBF_Finalize`, `dfsph_solver.cu:K_DFSPH_Finalize`,
+  `simulation.py:_update_sort_skip_decision`
+- **Severity:** MEDIUM-HIGH (was)
+- **Problem:** `max_displacement` held the largest single-substep move since the last sort, so
+  the (0.25h)^2 WCSPH test needed about 10 m/s at dt = 1e-3 to trip. Only the 4-frame cap
+  forced a sort. A 2 m/s block drifted about 3 cells on a stale grid, lost its neighbours and
+  fell to the 1.0 kg/m^3 density floor before the forced sort.
+- **Fix (bd-r5-review-n28.54):** `K_ScatterReorder` writes `sorted_anchor[i]` (the position at
+  the full sort) and `K_GatherReorder` leaves it alone. The three finalize kernels measure
+  `|x_new - anchor[i]|^2`. The host scales the latched drift, which is up to two frames old,
+  to the end of the next frame before it allows a skip (PHYSICS.md 20.5).
+  Measured with `bench_substep.py` (WCSPH, 992K dam break, 17 substeps per frame): skip rate
+  83% to 55%, total 9.18 to 9.84 ms per substep. With reuse on, the final position checksum
+  now matches the sort-every-substep run (328179.85 vs 328179.31; it was 326174.88).
+- **Follow-up:** coherent flow still loses reuse. Computing the cell of particle i from
+  `anchor[i]` in step1/step2 (Verlet style, one extra 16 B read per kernel) would let pure
+  translation keep the grid. Rigid boundary particles do not feed the tracker yet
+  (bd-r5-review-n28.65).
 
 ### I4. FIXED: Frame counter increments per substep, not per frame
 - **File:** `simulation.py:984`
