@@ -31,11 +31,21 @@ new issues in the parent gpusphsim project.
 This is a WSL-like environment — use `cmd.exe` to launch via Windows Python,
 which has access to the CUDA GPU and native OpenGL/GLFW.
 
-Requires: Python 3.13+, CUDA GPU, and these packages:
-- cupy (CUDA array library)
+Requires: Python 3.13+, CUDA GPU, and these packages (pinned in
+`requirements.txt`):
+- cupy, built for your CUDA version (cupy-cuda12x for CUDA 12)
 - glfw (windowing)
 - PyOpenGL (rendering)
-- imgui[glfw] (UI)
+- imgui-bundle 1.92.x (UI; ui.py uses its `input_text` signature)
+- Pillow (skybox cubemap loading in renderer.py)
+- numpy
+- pytest (tests only)
+
+Install them once with Windows Python:
+
+```
+/c/Windows/System32/cmd.exe /c "cd /d C:\WORK\gpusphsim\fallingsand3d && python -m pip install -r requirements.txt"
+```
 
 Presets (Sand Castle, Volcano, Dam Break, Acid Rain, Water Drop) are loaded
 via the ImGui UI at runtime. There are no command-line arguments.

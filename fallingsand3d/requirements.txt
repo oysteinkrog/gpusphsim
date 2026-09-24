@@ -1,6 +1,13 @@
-cupy-cuda12x
-glfw
-PyOpenGL
-PyOpenGL-accelerate
-imgui-bundle
-numpy
+# Versions installed on the dev box (Windows, Python 3.13.1, CUDA 12.x).
+# cupy must match the CUDA major version: cupy-cuda12x for CUDA 12.
+cupy-cuda12x==13.6.0
+glfw==2.10.0
+PyOpenGL==3.1.10
+PyOpenGL-accelerate==3.1.10
+# ui.py relies on the imgui-bundle 1.92.x input_text signature.
+imgui-bundle==1.92.5
+# renderer.py loads the skybox cubemap with PIL at startup.
+Pillow==11.3.0
+numpy==2.2.6
+# Tests only.
+pytest==9.0.2
