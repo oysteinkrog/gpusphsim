@@ -1565,3 +1565,63 @@ def test_pbf_lambda_sees_trailing_neighbour(world, sim):
         f"lambda_i did not see j: rho gain {rho_pair - rho_alone:.4g}, "
         f"expected about {expected:.4g}"
     )
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.49: gunpowder burst and blast wave survive PBF Finalize
+# ---------------------------------------------------------------------------
+
+def test_pbf_gunpowder_blast_moves_water(world, sim, monkeypatch):
+    """One gunpowder particle inside a water block ignites during a PBF
+    substep. K_PBF_Predict has already consumed velocity, so the burst and
+    blast must reach x* or Finalize's (x* - x)/dt drops them."""
+    from materials import GUNPOWDER
+    world.packed_info[:] = 0
+    world._high_water = 0
+    sim.set_solver_profile(PROFILES["PBF"])
+    sim._spawn_substep = sim._damping_duration
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+    tiny = ((-0.001, -0.001, -0.001), (0.001, 0.001, 0.001))
+    n_w = world.spawn_cube((-0.06, -0.06, -0.06), (0.06, 0.06, 0.06), WATER,
+                           spacing=0.02, exclude_box=tiny)
+    n_g = world.spawn_cube((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), GUNPOWDER,
+                           spacing=0.02)
+    assert n_g == 1
+    n = n_w + n_g
+    g_idx = n - 1
+    h = 0.04
+
+    # Ignite the gunpowder: Reactions reads sorted_exposure_heat, which the
+    # first lambda pass has just written. Force it above the threshold.
+    orig = sim._run_reactions_spawn
+
+    def ignite(n_, mark=None, predicted_position=None):
+        gp = (world.sorted_packed_info[:n_] & cp.uint32(0xFF)) == cp.uint32(GUNPOWDER)
+        world.sorted_exposure_heat[:n_][gp] = cp.float32(200.0)
+        if mark is None:
+            return orig(n_, predicted_position=predicted_position)
+        return orig(n_, mark, predicted_position=predicted_position)
+
+    monkeypatch.setattr(sim, "_run_reactions_spawn", ignite)
+
+    pos0 = cp.asnumpy(world.position[:n])[:, :3]
+    sim._sim_step(n)
+
+    pi = cp.asnumpy(world.packed_info[:n])
+    vel = cp.asnumpy(world.velocity[:n])[:, :3]
+    from materials import FIRE
+    assert (pi[g_idx] & 0xFF) == FIRE, "gunpowder did not ignite"
+
+    r = pos0[:n_w] - pos0[g_idx]
+    d = np.linalg.norm(r, axis=1)
+    near = d < h
+    assert near.sum() >= 20, f"only {near.sum()} water neighbours within h"
+    radial = (vel[:n_w][near] * (r[near] / d[near, None])).sum(axis=1)
+    mean_radial = float(radial.mean())
+    fire_speed = float(np.linalg.norm(vel[g_idx]))
+    print(f"  PBF blast: mean radial water speed {mean_radial:.3f} m/s, "
+          f"fire speed {fire_speed:.3f} m/s")
+    assert mean_radial > 1.0, (
+        f"PBF lost the blast: mean outward water speed {mean_radial:.3f} m/s")
+    assert fire_speed > 5.0, f"PBF lost the gunpowder burst: {fire_speed:.3f} m/s"
