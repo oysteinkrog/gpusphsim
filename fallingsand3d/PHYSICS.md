@@ -1161,11 +1161,26 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   moving particle out to `0.8 h` from each STATIC neighbour,
   and that push has no mass factor. It skips `MAT_DEAD` as well as `MAT_RIGID`.
 - `MAT_DEAD = 0` is defined in `common.cuh` next to `MAT_RIGID`.
+- **Brush kill.** `World.kill_in_sphere` runs one kernel (`K_KillSphere`, no
+  host sync). Each live, non-rigid particle in the sphere gets
+  `MAKE_PACKED(DEAD, STATIC)` (`world.DEAD_PACKED`, 0x300) and zero mass,
+  health, velocity and color. As STATIC it skips every solver's fluid path.
+  `World.compact()` fills the dead tail with the same encoding. The alive test
+  everywhere is `material_id != 0`, so a bare `packed_info = 0` also counts as
+  dead. (bd-r5-review-n28.34)
+- **Rest density floor.** DEAD has `rest_density = 0`. DFSPH
+  (`K_DFSPH_DensitySolverUpdate`) and PBF (`K_PBF_ComputeLambda`,
+  `K_PBF_ComputeDelta`) use `rho0 = max(rest_density, 1)`, so a DEAD slot that
+  still has FLUID behavior cannot divide by zero. The density both solvers
+  write for STATIC particles is floored at 1 too, so `V_j = m_j / rho_j` stays
+  finite. The Akinci rigid pressure term floors `rho0_i` at `RHO_EPSILON`
+  (0.01), which leaves GAS (0.2 to 0.6) unchanged.
 - The corrosion flash path (STATIC material turns into a short-lived FIRE
   particle) keeps its mass, since that particle is still alive.
 
 **Source**: `reactions.cu:K_Reactions`, `sph_shared.cuh:static_particle_boundary`,
-`simulation.py:_run_reactions_spawn`
+`simulation.py:_run_reactions_spawn`, `world.py:kill_in_sphere`,
+`dfsph_solver.cu:K_DFSPH_DensitySolverUpdate`, `pbf_solver.cu:K_PBF_ComputeLambda`
 
 ## 11. Multi-Solver Architecture
 
