@@ -171,6 +171,9 @@ def main():
         # Ctrl+Z = undo (restore previous snapshot)
         if key == glfw.KEY_Z and (_mods & glfw.MOD_CONTROL):
             if snapshots.restore(world):
+                # The restored arrays may hold the boundary block at an old
+                # offset; rebuild it next substep (bd-r5-review-n28.22).
+                sim.rigid_body_manager.mark_for_reinjection()
                 renderer.num_active = world._high_water
                 sim._invalidate_graphs()
                 sim.notify_scene_changed()  # stale sort perm after restore (CRIT-5)
@@ -190,6 +193,9 @@ def main():
             world.packed_info[:] = 0
             world._high_water = 0
             world.foam_count.fill(0)  # reset foam pool
+            # The boundary block was wiped with the rest; rebuild it next
+            # substep so its offset never points into new fluid (bd-r5-review-n28.22).
+            sim.rigid_body_manager.mark_for_reinjection()
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.sim_time = 0.0
@@ -356,8 +362,6 @@ def main():
             world._high_water = 0
             world.foam_count.fill(0)  # reset foam pool
             sim.rigid_body_manager.reset()
-            if hasattr(sim, '_rigid_boundary_initialized'):
-                del sim._rigid_boundary_initialized
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
             sim.set_solver_profile(profile)
@@ -381,8 +385,6 @@ def main():
             print(f"Loading preset: {preset_name}")
             sim.sdf_manager.clear()  # reset SDF objects before preset
             sim.rigid_body_manager.reset()  # reset rigid bodies before preset
-            if hasattr(sim, '_rigid_boundary_initialized'):
-                del sim._rigid_boundary_initialized
             n_spawned, spawner_cfg = load_fn(world)
             sim.rigid_body_manager.finalize_boundary_data()  # wire up rigid body pipeline
             sim.rigid_body_manager.upload(sim.get_all_modules())  # upload body data + count to GPU constant memory
@@ -422,6 +424,9 @@ def main():
 
         # Handle scene loaded from save file or undo restore
         if '_scene_loaded' in ui_changes:
+            # Save load and timeline restore both replace the world arrays;
+            # rebuild the boundary block next substep (bd-r5-review-n28.22).
+            sim.rigid_body_manager.mark_for_reinjection()
             renderer.num_active = world._high_water
             sim._invalidate_graphs()
             sim.notify_scene_changed()  # stale sort perm after scene load (CRIT-5)

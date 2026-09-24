@@ -532,8 +532,6 @@ class Simulation:
         self._sort_skip_consecutive = 0
         # Reset spawn damping for new solver
         self._spawn_substep = 0
-        # Reset rigid boundary injection flag
-        self._rigid_boundary_initialized = False
 
     def _upload_solver_constants(self, solver_module) -> None:
         """Upload all shared constants (grid, sim, precalc, materials, interactions) to a solver module."""
@@ -563,40 +561,33 @@ class Simulation:
         if hasattr(self, 'sdf_manager'):
             self.sdf_manager.force_upload()
 
-    def _update_rigid_boundary(self, n_fluid: int) -> int:
-        """Update rigid body boundary particles in unsorted arrays.
+    def _update_rigid_boundary(self, n: int) -> int:
+        """Keep the rigid boundary block in the unsorted arrays up to date.
 
-        On first call (before any integration), uses inject_boundary_particles
-        to set up initial positions. On subsequent calls, uses
-        K_UpdateBoundaryParticles GPU kernel for fast position/velocity update.
+        The block lives at [rbm.boundary_offset, +num_boundary_particles)
+        inside world._high_water. When rbm.boundary_injected is False (new
+        preset, scene load, undo, R, or a block broken by compaction) the block
+        is written once by inject_boundary_particles(), which syncs. Every
+        substep then runs K_UpdateBoundaryParticles at the stored offset, so
+        positions, velocities and psi come from the current GPU body state.
 
-        Returns n_total = n_fluid + n_boundary.
+        Returns world._high_water (the new n when injection grew the range).
         """
         rbm = self.rigid_body_manager
         w = self.world
-        n_boundary = rbm.num_boundary_particles
-        n_total = n_fluid + n_boundary
-
-        if n_total > w.max_particles:
-            return n_fluid  # not enough room
-
-        if not hasattr(self, '_rigid_boundary_initialized'):
-            # First substep: inject via Python (sets up packed_info, color, etc.)
+        if not rbm.boundary_injected:
             rbm.inject_boundary_particles(w)
-            self._rigid_boundary_initialized = True
-        else:
-            # Subsequent substeps: GPU kernel updates positions + velocities
+        if rbm.boundary_offset >= 0:
             integrate.update_boundary_particles(
                 rbm.boundary_data,
                 rbm.d_rigid_bodies,
                 w.position,
                 w.velocity,
                 w.mass,
-                offset=n_fluid,
-                num_boundary=n_boundary,
+                offset=rbm.boundary_offset,
+                num_boundary=rbm.num_boundary_particles,
             )
-
-        return n_total
+        return w._high_water
 
     def notify_scene_changed(self) -> None:
         """Signal that the particle set was mutated outside the substep loop

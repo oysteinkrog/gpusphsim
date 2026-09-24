@@ -87,6 +87,17 @@ def save_scene(world, sim, camera, filename: str) -> str:
 
     n = world._high_water
 
+    # Rigid boundary particles are topology owned by the RigidBodyManager and
+    # are rebuilt from the bodies on load, so they are not saved.
+    # (bd-r5-review-n28.22)
+    from materials import MAT_RIGID
+    packed_host = world.packed_info[:n].get()
+    keep = (packed_host & 0xFF) != MAT_RIGID
+    n_saved = int(np.count_nonzero(keep))
+
+    def _host(arr):
+        return arr[:n].get()[keep]
+
     # Collect SDF and rigid-body state (read-only access to sim internals)
     sdf_data = {}
     if hasattr(sim, "sdf_manager"):
@@ -98,7 +109,7 @@ def save_scene(world, sim, camera, filename: str) -> str:
 
     header = {
         "version": VERSION,
-        "particle_count": int(n),
+        "particle_count": n_saved,
         "solver": sim._profile.name if hasattr(sim._profile, "name") else str(sim._profile.solver_type),
         "world_half_size": float(sim.world_half_size),
         "gravity_y": float(sim.gravity_y),
@@ -115,15 +126,15 @@ def save_scene(world, sim, camera, filename: str) -> str:
 
     arrays = {
         "header": np.frombuffer(json.dumps(header).encode(), dtype=np.uint8),
-        "position": world.position[:n].get(),
-        "velocity": world.velocity[:n].get(),
-        "packed_info": world.packed_info[:n].get(),
-        "temperature": world.temperature[:n].get(),
-        "health": world.health[:n].get(),
-        "lifetime": world.lifetime[:n].get(),
-        "mass": world.mass[:n].get(),
-        "particle_dye": world.particle_dye[:n].get(),
-        "density": world.density[:n].get(),
+        "position": _host(world.position),
+        "velocity": _host(world.velocity),
+        "packed_info": packed_host[keep],
+        "temperature": _host(world.temperature),
+        "health": _host(world.health),
+        "lifetime": _host(world.lifetime),
+        "mass": _host(world.mass),
+        "particle_dye": _host(world.particle_dye),
+        "density": _host(world.density),
     }
     # Write through a file object: given a path, NumPy appends ".npz", so the
     # file became "<name>.fs3d.npz" and list_saves/load_scene never found it.
@@ -302,6 +313,15 @@ def load_scene(world, sim, camera, filename: str) -> int:
     # a clean ValueError and leaves the current scene intact.
     arrays = _validate_scene_arrays(data, n)
 
+    # Drop any rigid boundary particles in the file: the RigidBodyManager
+    # rebuilds its block from the bodies on the next substep, so keeping them
+    # would leave a second, orphaned block. (bd-r5-review-n28.22)
+    from materials import MAT_RIGID
+    keep = (arrays["packed_info"] & 0xFF) != MAT_RIGID
+    if not np.all(keep):
+        arrays = {k: v[keep] for k, v in arrays.items()}
+        n = int(np.count_nonzero(keep))
+
     # Reset world
     world.packed_info[:] = 0
     world._high_water = 0
@@ -371,10 +391,10 @@ def load_scene(world, sim, camera, filename: str) -> int:
     sim._last_frame_time = None
     sim.reset_spawn_damping()
 
-    # bd-r4-epic-x2j.2: clear rigid boundary init flag so next step re-initialises
-    # boundary particles at correct positions (preset-load and solver-switch paths
-    # already do this; load_scene was the missing case).
-    if hasattr(sim, '_rigid_boundary_initialized'):
-        del sim._rigid_boundary_initialized
+    # The world arrays were replaced, so the boundary block is gone. Keep the
+    # bodies (reset() would drop them) and rebuild the block on the next
+    # substep from the restored body state. (bd-r5-review-n28.22)
+    if hasattr(sim, "rigid_body_manager"):
+        sim.rigid_body_manager.mark_for_reinjection()
 
     return n

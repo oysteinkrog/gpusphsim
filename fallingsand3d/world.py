@@ -15,7 +15,7 @@ from typing import Tuple
 import cupy as cp
 import numpy as np
 
-from materials import MATERIALS, FLUID, GRANULAR, GAS, STATIC
+from materials import MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID
 
 # packed_info bitfield macros (mirrors common.cuh)
 _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
@@ -269,6 +269,8 @@ class World:
             # No dead particles, nothing to do
             return n
 
+        self._shift_rigid_boundary_block(alive_mask)
+
         if num_alive == 0:
             # All dead
             self._high_water = 0
@@ -332,6 +334,29 @@ class World:
 
         self._high_water = num_alive
         return num_alive
+
+    def _shift_rigid_boundary_block(self, alive_mask) -> None:
+        """Move the rigid boundary offset to where compaction puts the block.
+
+        alive_idx is ascending, so the block stays contiguous and its new start
+        is the number of alive slots below the old start. If any block slot is
+        dead, the block is broken: ask the manager to rebuild it on the next
+        substep instead. compact() already syncs, so the one readback here
+        adds no new sync point. (bd-r5-review-n28.22)
+        """
+        rbm = getattr(self, 'rigid_body_manager', None)
+        if rbm is None or not rbm.boundary_injected or rbm.boundary_offset < 0:
+            return
+        off = rbm.boundary_offset
+        nb = rbm.num_boundary_particles
+        counts = cp.stack([
+            cp.count_nonzero(alive_mask[:off]),
+            cp.count_nonzero(alive_mask[off:off + nb]),
+        ]).get()
+        if int(counts[1]) == nb:
+            rbm.boundary_offset = int(counts[0])
+        else:
+            rbm.mark_for_reinjection()
 
     def spawn_sphere(
         self,
@@ -797,8 +822,10 @@ class World:
         dist_sq = dx * dx + dy * dy + dz * dz
 
         mask = dist_sq <= (radius * radius)
-        # Only kill non-DEAD particles
-        mask = mask & (self.packed_info[:n] != 0)
+        # Only kill non-DEAD particles, and never rigid boundary particles:
+        # the rigid body manager owns that block (bd-r5-review-n28.22).
+        packed = self.packed_info[:n]
+        mask = mask & (packed != 0) & ((packed & cp.uint32(0xFF)) != cp.uint32(MAT_RIGID))
 
         # Apply mask; return 0 (count unused by any caller -- removing the
         # int(cp.sum(mask)) sync that stalled the GPU pipeline on every brush kill).

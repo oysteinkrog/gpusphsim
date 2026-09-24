@@ -367,15 +367,37 @@ class RigidBodyManager:
         # Combined boundary particle data (set after all bodies added)
         # Columns: x_local, y_local, z_local, psi, body_id, nx, ny, nz
         self.boundary_data = None  # cupy (N, 8) float32
-        # Guard: inject_boundary_particles must only be called ONCE per preset load.
-        # It contains GPU-CPU syncs (masked-index len() and flatnonzero + int())
-        # which are acceptable as a one-time preset-load cost.  If it were called
-        # per-substep, those syncs would violate CLAUDE.md's no-per-frame-sync rule.
-        self._boundary_particles_injected: bool = False
+        # One-shot injection state (bd-r5-review-n28.22). This flag is the single
+        # source of truth for "the boundary block exists in the world arrays".
+        # inject_boundary_particles() sets it; reset() and mark_for_reinjection()
+        # clear it. Injection contains GPU-CPU syncs, so it must run only on
+        # scene events (preset load, scene load, undo, R, broken block after
+        # compaction), never every substep.
+        self._boundary_injected: bool = False
+        # First unsorted slot of the boundary block, or -1 when no block is in
+        # the world. The block is [boundary_offset, boundary_offset + N) and is
+        # counted inside world._high_water. World.compact() keeps it current.
+        self.boundary_offset: int = -1
 
     @property
     def num_bodies(self) -> int:
         return self._num_bodies
+
+    @property
+    def boundary_injected(self) -> bool:
+        """True once the boundary block has been written into the world arrays."""
+        return self._boundary_injected
+
+    def mark_for_reinjection(self) -> None:
+        """Ask for the boundary block to be rebuilt on the next substep.
+
+        Keeps the bodies (unlike reset()). Use after anything that rewrote the
+        world arrays behind the manager's back: scene load, undo restore, R
+        reset. inject_boundary_particles() drops any MAT_RIGID particles still
+        in the world before appending a fresh block, so this never duplicates it.
+        """
+        self._boundary_injected = False
+        self.boundary_offset = -1
 
     def add_rigid_body_with_particles(
         self,
@@ -527,45 +549,43 @@ class RigidBodyManager:
         return self.d_rigid_bodies[:self._num_bodies].get()
 
     def inject_boundary_particles(self, world) -> int:
-        """Inject boundary particles into world arrays for hash/sort.
+        """Write the boundary block into the world arrays at world._high_water.
 
-        Transforms local-space boundary positions to world-space using
-        each rigid body's current position and rotation, then appends
-        them to the world's particle arrays.
+        Transforms local-space boundary positions to world space from each
+        body's CPU-side state, then appends them as MAT_RIGID STATIC particles.
+        The block becomes part of the live range: world._high_water grows by
+        num_boundary_particles and self.boundary_offset records the first slot,
+        so later brush spawns land after the block and compaction can track it.
 
-        IMPORTANT: Must be called exactly ONCE per preset load (not per-substep).
-        This method contains GPU-CPU synchronisation points:
-          - bd[mask, :] masked fancy-indexing (line ~568): requires knowing mask
-            count -> GPU sync
-          - len(psi) (line ~571): len() on a masked CuPy array -> GPU sync
-          - cupy.flatnonzero(mask) + int(indices[0]) (line ~596): flatnonzero is
-            a GPU-to-CPU gather -> GPU sync
-        These are acceptable ONLY because inject_boundary_particles fires once at
-        preset load time, never in the per-substep hot path. Subsequent substeps
-        use update_boundary_particles (a GPU-only kernel) instead.
+        Any MAT_RIGID particles already in [0, _high_water) (a stale block
+        restored by undo, or a block broken by compaction) are killed and
+        compacted away first, so the world holds exactly one block.
 
-        See CLAUDE.md: no GPU-CPU sync in per-frame/substep paths.
-
-        Parameters
-        ----------
-        world : World
-            The particle world to inject into.
+        Runs only on scene events, never every substep. It contains GPU-CPU
+        syncs (the MAT_RIGID scan, masked fancy-indexing, flatnonzero + int()),
+        which CLAUDE.md allows only outside the per-substep path.
 
         Returns
         -------
         int
-            Total particle count (fluid + boundary).
+            world._high_water after injection.
         """
-        # Guard: calling this more than once per preset load would introduce
-        # per-substep GPU-CPU syncs, violating the no-sync-in-hot-path rule.
-        assert not self._boundary_particles_injected, (
-            "inject_boundary_particles() called more than once — this path "
-            "contains GPU-CPU syncs that must not run per-substep. "
-            "Use update_boundary_particles() for subsequent substeps."
+        assert not self._boundary_injected, (
+            "inject_boundary_particles() called while the block is already in "
+            "the world. Call mark_for_reinjection() or reset() first."
         )
-        self._boundary_particles_injected = True
+        self._boundary_injected = True
+        self.boundary_offset = -1
 
         from materials import MAT_RIGID, STATIC
+
+        # Drop any stale boundary particles so the world holds one block only.
+        hw = world._high_water
+        if hw > 0:
+            stale = (world.packed_info[:hw] & cupy.uint32(0xFF)) == cupy.uint32(MAT_RIGID)
+            if bool(stale.any()):  # one-time sync on a scene event
+                world.packed_info[:hw][stale] = cupy.uint32(0)
+                world.compact()
 
         if self.boundary_data is None or self.num_boundary_particles == 0:
             return world._high_water
@@ -575,7 +595,9 @@ class RigidBodyManager:
         total = n_fluid + n_boundary
 
         if total > world.max_particles:
-            # Silently skip if not enough room
+            print(f"WARNING: no room for {n_boundary:,} rigid boundary particles "
+                  f"({n_fluid:,} of {world.max_particles:,} slots used); "
+                  f"rigid bodies get no fluid coupling")
             return n_fluid
 
         # boundary_data columns: x_local, y_local, z_local, psi, body_id, nx, ny, nz
@@ -655,6 +677,8 @@ class RigidBodyManager:
             world.color[sl, 2] = 0.65
             world.color[sl, 3] = 0.75  # STATIC alpha
 
+        self.boundary_offset = n_fluid
+        world._high_water = total
         return total
 
     def reset(self) -> None:
@@ -667,8 +691,9 @@ class RigidBodyManager:
         self.d_rigid_bodies.fill(0)
         self.rigid_forces.fill(0)
         self.rigid_torques.fill(0)
-        # Reset injection guard so the next preset load can call inject_boundary_particles
-        self._boundary_particles_injected = False
+        # Next preset load injects a fresh block.
+        self._boundary_injected = False
+        self.boundary_offset = -1
 
 
 # ---------------------------------------------------------------------------
