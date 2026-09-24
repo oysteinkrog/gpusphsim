@@ -57,10 +57,9 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 - **Status:** DEFERRED — s_corr is disabled (k=0) at h=0.04, no practical impact
 - **Note:** `c_pbf.s_corr_n` parameter exists but kernel uses hardcoded n=4
 
-### A8. Documented: Legacy DFSPH kernels (3 kernels)
-- **Files:** `dfsph_solver.cu` — K_DFSPH_ComputeDensityAdv, K_DFSPH_ComputeKappaFromVelocity, K_DFSPH_CorrectVelocityDens
-- **Status:** DEFERRED — Marked as LEGACY/UNUSED, not called from Python
-- **Risk:** ComputeKappaFromVelocity uses m_j (not m_j/rho_j), inconsistent with active Jacobi solver
+### A8. FIXED: Legacy DFSPH kernels deleted
+- **Files:** `dfsph_solver.cu`, `dfsph_solver.py`
+- **Fix:** Deleted the five kernels that were never launched (K_DFSPH_PredictPosition, ComputeDensityAdv, ComputeKappa, ComputeKappaFromVelocity, CorrectVelocityDens) and their Python wrappers. The Jacobi solver on p/rho^2 is the only DFSPH density solver (bd-r5-review-n28.11).
 
 ---
 

@@ -793,9 +793,9 @@ External algorithmic review by GPT 5.2 Pro identified 9 issues. Fixes applied:
 5. **PBF s_corr_n hardcoded to 4** (MEDIUM): Documented in code. At h=0.04, s_corr is
    disabled (k=0) so this has no practical impact.
 6. **DFSPH K_DFSPH_ComputeKappaFromVelocity uses m_j not m_j/rho_j** (HIGH if used):
-   Legacy kernel, not called from Python. Marked as LEGACY/UNUSED.
-7. **DFSPH K_DFSPH_ComputeDensityAdv uses stale grid** (MEDIUM): Legacy kernel, not
-   called from Python. Marked as LEGACY/UNUSED.
+   Kernel deleted (it was never launched).
+7. **DFSPH K_DFSPH_ComputeDensityAdv uses stale grid** (MEDIUM): Kernel deleted (it was
+   never launched).
 8. **W_poly6 can go negative from FP rounding** (LOW → HARDENED): Added `fmaxf(diff, 0)`
    clamp for safety.
 9. **EOS powf overflow at extreme densities** (MEDIUM → HARDENED): Added `ratio` cap at
@@ -1342,6 +1342,14 @@ Per substep:
   8. Boundary handling, color, writeback (kappa + kappa_v written back for warm-start)
 ```
 
+Kernels (`dfsph_solver.cu`, 8 in total): ComputeDensityAlpha (step 2),
+NonPressureForces (3-4), ComputeKappaV and CorrectVelocityDiv (5),
+ComputePressureAccel, DensitySolverUpdate and ApplyPressureVelocity (6), Finalize (7-8).
+The Jacobi loop on p/rho^2 is the only density solver; the velocity-space density
+solver (ComputeDensityAdv, ComputeKappa, ComputeKappaFromVelocity, CorrectVelocityDens,
+PredictPosition) was removed. Iteration counts N_div and N_dens are host-side loop
+counts in simulation.py and are not uploaded to `c_dfsph`.
+
 ### 13.2 Alpha Factor (Diagonal Preconditioner)
 
 The alpha factor encodes how much a particle's density responds to pressure corrections:
@@ -1486,8 +1494,12 @@ Default fast profile: 8 iterations, alpha_limit=5.0, omega=0.7, velocity_limit_f
 ### 13.5 Non-Pressure Forces
 
 ```
-FLUID:    a_i = gravity + (mu_0 / rho_i) * [45/(pi*h^6)] * SUM_j m_j*(v_j-v_i)/rho_j*(h-|r|)
-GRANULAR: a_i = gravity + (mu_0 / rho_i) * [45/(pi*h^6)] * SUM_j m_j*(v_j-v_i)/rho_j*(h-|r|)
+FLUID:    a_i = gravity + (1/rho_i) * [45/(pi*h^6)] * SUM_j mu_ij * m_j*(v_j-v_i)/rho_j*(h-|r|)
+          mu_ij = 2*mu_i*mu_j/(mu_i+mu_j)   (per-material base_viscosity)
+GRANULAR: a_i = gravity + (1/rho_i) * [45/(pi*h^6)] * SUM_j eta_ij * m_j*(v_j-v_i)/rho_j*(h-|r|)
+          GRANULAR neighbor:     eta_ij = harmonic mean of mu(I) eta_i, eta_j
+                                 (compute_muI_eta from shear_rate, pressure, density)
+          non-GRANULAR neighbor: eta_ij = mu_0
 GAS:      a_i = gravity + buoyancy - drag * v_i + viscosity (same as FLUID)
 ```
 
@@ -1871,8 +1883,7 @@ for (uint j = start; j < end_idx; j++) {
 Applied to: `step1.cu` (K_Step1), `step2.cu` (K_Step2 + vorticity loop),
 `pbf_solver.cu` (K_PBF_ComputeLambda, K_PBF_ComputeDelta),
 `dfsph_solver.cu` (NonPressureForces, ComputeKappaV, CorrectVelocityDiv,
-ComputeKappaFromVelocity, ComputePressureAccel, DensitySolverUpdate,
-CorrectVelocityDens)
+ComputePressureAccel, DensitySolverUpdate)
 
 ### 20.3 Pre-computed Pressure Array (PERF-007)
 
