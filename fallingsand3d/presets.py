@@ -182,9 +182,9 @@ def load_volcano(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Fire particles above the lava
+    # Fire particles above the lava (starts at the lava surface, y=0.1)
     n = world.spawn_cube(
-        min_corner=(-0.4, 0.0, -0.3),
+        min_corner=(-0.4, 0.1, -0.3),
         max_corner=(0.4, 0.4, 0.3),
         material_id=FIRE,
         spacing=0.035,
@@ -249,7 +249,7 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Metal pillar 1 (center)
     n = world.spawn_cube(
-        min_corner=(-0.08, -0.9, -0.08),
+        min_corner=(-0.08, -0.85, -0.08),
         max_corner=(0.08, 0.3, 0.08),
         material_id=METAL,
         spacing=pillar_spacing,
@@ -258,7 +258,7 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Metal pillar 2 (front-left)
     n = world.spawn_cube(
-        min_corner=(-0.5, -0.9, 0.3),
+        min_corner=(-0.5, -0.85, 0.3),
         max_corner=(-0.34, 0.1, 0.46),
         material_id=METAL,
         spacing=pillar_spacing,
@@ -267,7 +267,7 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Metal pillar 3 (front-right)
     n = world.spawn_cube(
-        min_corner=(0.34, -0.9, 0.3),
+        min_corner=(0.34, -0.85, 0.3),
         max_corner=(0.5, 0.1, 0.46),
         material_id=METAL,
         spacing=pillar_spacing,
@@ -276,7 +276,7 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Metal pillar 4 (back-left)
     n = world.spawn_cube(
-        min_corner=(-0.5, -0.9, -0.46),
+        min_corner=(-0.5, -0.85, -0.46),
         max_corner=(-0.34, 0.1, -0.3),
         material_id=METAL,
         spacing=pillar_spacing,
@@ -285,7 +285,7 @@ def load_acid_rain(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Metal pillar 5 (back-right)
     n = world.spawn_cube(
-        min_corner=(0.34, -0.9, -0.46),
+        min_corner=(0.34, -0.85, -0.46),
         max_corner=(0.5, 0.1, -0.3),
         material_id=METAL,
         spacing=pillar_spacing,
@@ -537,9 +537,9 @@ def load_gunpowder_trail(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     )
     total += n
 
-    # Fire at the start of the trail
+    # Fire at the start of the trail, resting on the trail top (y=-0.82)
     n = world.spawn_cube(
-        min_corner=(-0.85, -0.85, -0.1),
+        min_corner=(-0.85, -0.82, -0.1),
         max_corner=(-0.7, -0.6, 0.1),
         material_id=FIRE,
         spacing=0.03,
