@@ -191,10 +191,13 @@ def foam_physics(
 ) -> None:
     """Launch K_FoamPhysics: simple physics for each foam particle.
 
-    Grid is bounded by max(last_foam_count, _MIN_FOAM_GRID_SIZE) rather than
-    always max_foam (bd-mzc.44).  last_foam_count is the 1-frame-deferred CPU
-    readback available in Simulation._last_foam_count -- zero on the first frame,
-    which triggers the MIN_FOAM_GRID_SIZE fallback.  max_foam is kept as a cap.
+    Grid is bounded by min(2 * last_foam_count + _MIN_FOAM_GRID_SIZE, max_foam)
+    rather than always max_foam (bd-mzc.44).  last_foam_count is the deferred
+    CPU readback in Simulation._last_foam_count.  It describes the end of the
+    frame before the previous one, so foam made since then is not in it; the
+    2x headroom plus the fixed pad covers a splash that grows during those
+    frames (bd-r5-review-n28.46).  It is zero on the first frame, which gives
+    the _MIN_FOAM_GRID_SIZE launch.
 
     No GPU->CPU sync required: the kernel reads the actual count from the
     foam_count device pointer and early-exits for out-of-bounds threads.
@@ -214,8 +217,8 @@ def foam_physics(
     """
     module = _get_module()
     kernel = module.get_function("K_FoamPhysics")
-    # Use deferred count to bound the grid; pad up to MIN to avoid tiny launches.
-    effective = max(int(last_foam_count), _MIN_FOAM_GRID_SIZE)
+    # Use the deferred count with headroom for growth since that readback.
+    effective = 2 * int(last_foam_count) + _MIN_FOAM_GRID_SIZE
     # Never exceed the actual capacity.
     effective = min(effective, max_foam)
     grid = ((effective + _BLOCK - 1) // _BLOCK,)

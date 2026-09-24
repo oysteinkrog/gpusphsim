@@ -49,6 +49,7 @@
  *   3. Write spawned steam particles to those slots
  *   4. Mark source water particle as DEAD
  *   5. Clear SPAWN_GAS flag
+ *   6. Set max_displacement to +inf bits so the next frame does a full sort
  *
  * If the freelist has fewer than N entries, restore the subtracted N
  * and skip (the water particle stays liquid; retried next substep).
@@ -72,7 +73,9 @@ void K_SpawnGas(
     float*          __restrict__ shear_rate,
     // --- Freelist (shared with Reactions) ---
     uint*           __restrict__ dead_indices,   // array of dead particle indices
-    uint*           __restrict__ dead_count       // atomic counter
+    uint*           __restrict__ dead_count,      // atomic counter
+    // --- Grid reuse tracker (may be NULL) ---
+    uint*           __restrict__ max_displacement // float bits of max |dx|^2 since last sort
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -168,6 +171,15 @@ void K_SpawnGas(
 
         // Material info
         packed_info[slot] = steam_pi;
+    }
+
+    // The spawned slots jump from wherever the dead particle was parked to
+    // the source position, and Integrate does not see that jump. Write the
+    // bits of +inf into the displacement tracker so the next grid-reuse
+    // decision forces a full sort (bd-r5-review-n28.46). Positive float bits
+    // order like uints, so +inf beats any finite displacement.
+    if (max_displacement != NULL) {
+        atomicMax(max_displacement, 0x7F800000u);
     }
 
     // Mark source water particle as DEAD.

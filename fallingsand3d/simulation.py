@@ -85,6 +85,10 @@ class Simulation:
         Maximum substeps per render frame to prevent spiral-of-death.
     """
 
+    # _last_max_disp_uint value meaning "no trustworthy readback yet". Any
+    # uint at or above the +inf float bits (0x7F800000) never allows a skip.
+    _MAX_DISP_UNKNOWN = 0xFFFFFFFF
+
     def __init__(
         self,
         world: World,
@@ -131,14 +135,28 @@ class Simulation:
         import ctypes as _ctypes
         self._readback_stream = cupy.cuda.Stream(non_blocking=True)
         self._readback_event = cupy.cuda.Event()  # for cross-stream sync
+        # Recorded on _readback_stream after the two D2H copies. The host
+        # latches the pinned buffers only when it is done (a non-blocking
+        # cudaEventQuery), and the compute stream waits on it at the top of
+        # step_frame so the next full-sort memset of max_displacement and the
+        # foam kernels cannot run before or during the copy. An explicit wait
+        # is used rather than a blocking readback stream, so the ordering is
+        # visible here and does not depend on legacy-stream rules.
+        self._readback_done = cupy.cuda.Event()
+        self._readback_latched = 0      # latches that found the copy done
+        self._readback_not_ready = 0    # latches skipped: copy not done yet
+        # True while the pinned buffers hold data from before the last
+        # notify_scene_changed() (or from before the first frame).
+        self._readback_stale = True
         # Pinned host buffers for async D2H copy
         self._pinned_displacement = cupy.cuda.alloc_pinned_memory(4)
         self._pinned_foam_count = cupy.cuda.alloc_pinned_memory(4)
         # Zero-init pinned buffers
         _ctypes.memset(self._pinned_displacement.ptr, 0, 4)
         _ctypes.memset(self._pinned_foam_count.ptr, 0, 4)
-        # Previous frame values (used for decisions while async copy is in-flight)
-        self._last_max_disp_uint = 0
+        # Previous frame values (used for decisions while async copy is in-flight).
+        # The displacement starts at the "unknown" sentinel, which never skips.
+        self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
         self._last_foam_count = 0
 
         # --- Counting sort scratch buffers (allocated in _upload_constants) ---
@@ -646,6 +664,10 @@ class Simulation:
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
         self._last_full_sort_n = -1
+        # The copy in flight describes the old particle set: drop it and treat
+        # the displacement as unknown until a copy from after this change lands.
+        self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
+        self._readback_stale = True
         # Check the parked DEAD reserve on the next frame (bd-r5-review-n28.27).
         self._dead_reserve_check_pending = True
 
@@ -814,6 +836,7 @@ class Simulation:
             w.sorted_shear_rate[:n],
             self._dead_indices,
             self._dead_count,
+            max_displacement=w.max_displacement,
         )
         mark("spawn")
 
@@ -1521,19 +1544,47 @@ class Simulation:
     def _update_sort_skip_decision(self) -> None:
         """Decide whether the next substeps may skip the full sort (grid reuse).
 
-        Called once per rendered frame that ran substeps.  Uses the async
-        readback of max_displacement from the previous frame, so it never
-        waits on the GPU.  bench_substep.py --grid-reuse calls it too.
+        Called once per rendered frame that ran substeps, after the substeps.
+        Order (bd-r5-review-n28.46):
+          1. Latch the pinned values copied at the end of the previous frame,
+             but only if _readback_done says that copy has landed (a
+             non-blocking cudaEventQuery, no host sync).
+          2. Decide from the latched displacement. The decision made at the
+             end of frame k uses the displacement at the end of frame k-1,
+             so the lag is one frame.
+          3. Launch this frame's D2H copies and record _readback_done after
+             them.
+        If the copy has not landed, or the pinned data predates the last
+        notify_scene_changed(), the previous values are kept and the next
+        frames do a full sort. bench_substep.py --grid-reuse calls this too.
         """
-        # --- Grid reuse decision for next frame (uses 1-frame-old async readback) ---
-        # max_displacement accumulates since the last full sort (atomicMax across all
-        # substeps). We use last frame's async readback value — safe because the
-        # 0.25h threshold is conservative and 1-frame lag is negligible.
         import struct
         import ctypes as _ctypes
-        # Read last frame's async readback result (no sync needed)
+
+        # --- 1. Latch the previous frame's async copy, if it has landed ---
+        # The stale check must come first: after notify_scene_changed() the
+        # copy in flight describes the old particle set and is discarded.
+        copy_done = self._readback_done.done
+        if self._readback_stale:
+            self._readback_stale = False
+        elif copy_done:
+            self._last_max_disp_uint = _ctypes.c_uint32.from_address(
+                self._pinned_displacement.ptr).value
+            self._last_foam_count = _ctypes.c_uint32.from_address(
+                self._pinned_foam_count.ptr).value
+            self._readback_latched += 1
+        else:
+            self._readback_not_ready += 1
+
+        # --- 2. Grid reuse decision for the next frame ---
+        # max_displacement holds the float bits of the largest squared
+        # displacement since the last full sort (atomicMax over all substeps).
+        # Positive float bits order like uints; anything at or above the +inf
+        # bits (K_SpawnGas teleport, or the unknown sentinel) never skips.
         max_disp_sq_uint = self._last_max_disp_uint
-        if max_disp_sq_uint > 0:
+        if max_disp_sq_uint >= 0x7F800000:
+            max_disp_sq = float('inf')
+        elif max_disp_sq_uint > 0:
             max_disp_sq = struct.unpack('f', struct.pack('I', max_disp_sq_uint))[0]
         else:
             max_disp_sq = 0.0
@@ -1543,7 +1594,10 @@ class Simulation:
         else:
             threshold = self._sort_skip_threshold_sq_tight
             max_consec = self._MAX_SORT_SKIP_FRAMES_TIGHT
-        can_skip = (max_disp_sq < threshold
+        # A copy that has not landed means the value may be two or more
+        # frames old: do not skip on it.
+        can_skip = (copy_done
+                    and max_disp_sq < threshold
                     and self._sort_skip_consecutive < max_consec)
         if can_skip:
             self._sort_skip_next = True
@@ -1552,17 +1606,11 @@ class Simulation:
             self._sort_skip_next = False
             self._sort_skip_consecutive = 0
 
-        # Latch the pinned values from the PREVIOUS frame's async copy
-        # (by now that copy has completed — a full frame of GPU work elapsed)
-        self._last_max_disp_uint = _ctypes.c_uint32.from_address(
-            self._pinned_displacement.ptr).value
-        self._last_foam_count = _ctypes.c_uint32.from_address(
-            self._pinned_foam_count.ptr).value
-
-        # Record event on default stream so readback stream waits for kernels
+        # --- 3. Launch this frame's copies for the next frame's latch ---
+        # Record on the compute stream so the copies start after this frame's
+        # kernels, then record _readback_done after the copies.
         self._readback_event.record()
         self._readback_stream.wait_event(self._readback_event)
-        # Launch async D2H copy of THIS frame's data for NEXT frame's decision
         cupy.cuda.runtime.memcpyAsync(
             self._pinned_displacement.ptr,
             self.world.max_displacement.data.ptr,
@@ -1575,6 +1623,7 @@ class Simulation:
             4, cupy.cuda.runtime.memcpyDeviceToHost,
             self._readback_stream.ptr,
         )
+        self._readback_done.record(self._readback_stream)
 
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
@@ -1614,6 +1663,12 @@ class Simulation:
         self._time_accumulator = min(self._time_accumulator, self.dt * 2.0)
 
         step_fn = self._sim_step_timed if self.timing_enabled else self._sim_step
+        if sim_steps > 0:
+            # Device-side wait (no host sync): this frame's kernels, including
+            # the full-sort memset of max_displacement and the foam kernels
+            # that write foam_count, start only after the previous frame's
+            # readback copies have finished (bd-r5-review-n28.46).
+            cupy.cuda.get_current_stream().wait_event(self._readback_done)
         for _ in range(sim_steps):
             step_fn(n)
 
@@ -1811,6 +1866,7 @@ class Simulation:
         #    makes the intent explicit and helps GC run promptly).
         try:
             self._readback_event = None
+            self._readback_done = None
             self._readback_stream = None
         except Exception:
             pass

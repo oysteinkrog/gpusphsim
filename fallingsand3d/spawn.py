@@ -142,6 +142,7 @@ def compute_spawn(
     sorted_shear_rate: cupy.ndarray,
     dead_indices: cupy.ndarray,
     dead_count: cupy.ndarray,
+    max_displacement: cupy.ndarray | None = None,
 ) -> None:
     """Launch K_SpawnGas kernel.
 
@@ -168,6 +169,10 @@ def compute_spawn(
         Freelist of dead particle indices.
     dead_count : cupy.ndarray, (1,) uint32
         Atomic counter for freelist size.
+    max_displacement : cupy.ndarray, (1,) uint32, optional
+        Grid reuse tracker. When given, a successful spawn writes the bits of
+        +inf into it, so the next grid-reuse decision forces a full sort.
+        None passes NULL and the kernel skips the write.
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
@@ -198,5 +203,6 @@ def compute_spawn(
             sorted_shear_rate,
             dead_indices,
             dead_count,
+            max_displacement if max_displacement is not None else np.intp(0),
         ),
     )
