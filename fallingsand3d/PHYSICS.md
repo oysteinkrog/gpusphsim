@@ -3391,6 +3391,12 @@ Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
   body list and re-uploads the count, so the block is rebuilt at the restored
   poses. If the body count changed since capture, the rigid state is not
   restored and a warning is printed.
+- The undo ring (`SnapshotRing`) is sized to a 256 MB VRAM budget, 62 B per
+  particle per slot, clamped to 2..12 slots (4 slots at 1M particles, 8 at
+  500K). All slots are allocated at construction. Health, lifetime and mass
+  are stored as float16 in a slot (relative error under 0.05% after
+  restore); position, velocity, packed_info, temperature and dye stay
+  float32, so temperature comes back exact.
 - The R key, the solver switch and preset load call
   `Simulation.reset_scene_objects()`. It clears SDF objects, calls
   `rbm.reset()` and uploads a body count of 0. The default scene that R and
