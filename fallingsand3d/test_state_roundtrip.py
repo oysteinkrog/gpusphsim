@@ -48,6 +48,9 @@ SAVED = ("position", "velocity", "packed_info", "temperature", "health",
 # Arrays a SnapshotRing slot holds.
 SNAPPED = ("position", "velocity", "packed_info", "temperature", "health",
            "lifetime", "mass", "particle_dye")
+# Slot fields stored as float16 (bd-r5-review-n28.113). A restore gives the
+# float16 rounding of the captured value, still compared bit for bit.
+SNAPPED_FP16 = ("health", "lifetime", "mass")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -86,12 +89,15 @@ def _host_state(world, names) -> dict:
     return {k: getattr(world, k)[:n].get() for k in names}
 
 
-def _assert_state_equal(world, expected: dict, names) -> None:
+def _assert_state_equal(world, expected: dict, names, fp16=()) -> None:
     n = world._high_water
     for k in names:
         got = getattr(world, k)[:n].get()
-        assert got.shape == expected[k].shape, k
-        assert np.array_equal(_bits(got), _bits(expected[k])), k
+        want = expected[k]
+        if k in fp16:
+            want = want.astype(np.float16).astype(np.float32)
+        assert got.shape == want.shape, k
+        assert np.array_equal(_bits(got), _bits(want)), k
 
 
 def _mixed_world():
@@ -242,7 +248,7 @@ def test_snapshot_capture_restore_live_world():
         assert ring.restore(world, steps_back=1, sim=sim)
         cp.cuda.Device().synchronize()
         assert world._high_water == hw
-        _assert_state_equal(world, expected, SNAPPED)
+        _assert_state_equal(world, expected, SNAPPED, SNAPPED_FP16)
         assert world._spawned_material_ids == mats
         _assert_fresh_warm_start(world)
         _assert_color_matches_material(world)
@@ -260,7 +266,7 @@ def test_snapshot_capture_restore_live_world():
     assert ring2.restore(world2, steps_back=2, sim=sim2)
     cp.cuda.Device().synchronize()
     assert world2._high_water == first[0]
-    _assert_state_equal(world2, first[1], SNAPPED)
+    _assert_state_equal(world2, first[1], SNAPPED, SNAPPED_FP16)
     assert ring2.num_snapshots == 0
 
 
