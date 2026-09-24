@@ -81,8 +81,10 @@ __constant__ Interaction   c_interactions[32][32];
  *
  * Uses a spatial hash with fixed-size table (power of 2) instead of
  * dense arrays sized grid_res^3.  This enables arbitrarily large worlds
- * without memory blowup.  Hash collisions cause extra (harmless) distance
- * checks in neighbor loops but never miss neighbors.
+ * without memory blowup.  Two far-apart cells can share a bucket; that
+ * costs extra distance checks in neighbor loops but never misses or
+ * double-counts a neighbor, because spatialHash() maps the 27 cells of
+ * any 3x3x3 stencil to 27 distinct buckets (see spatialHash below).
  *
  * 40 bytes total (10 fields x 4 bytes).
  * ====================================================================== */
@@ -116,17 +118,24 @@ __device__ inline int3 calcGridCell(float3 p) {
     );
 }
 
-__device__ inline uint spatialHash(int3 cell) {
+/* Additive combiner, not XOR.  With addition,
+ *   h(c + d1) - h(c + d2) = (d1 - d2) . P  (mod table_size)
+ * does not depend on the cell c, and no difference d1 - d2 in {-2..2}^3
+ * is 0 mod 2^18, 2^19 or 2^20, so every 27-cell stencil hits 27 distinct
+ * buckets.  The old XOR combiner broke this: P ^ (-P) has the same low
+ * 18 bits for all three primes, so near coordinate 0 (the first in-world
+ * layer) two stencil cells shared a bucket and its particles were
+ * counted twice.  Multiply in uint so negative cells wrap without
+ * signed-overflow UB. */
+__device__ inline uint spatialHash(int cx, int cy, int cz) {
     // Large primes for spatial hashing (widely used in GPU SPH literature)
-    return ((uint)(cell.x * 73856093)
-          ^ (uint)(cell.y * 19349669)
-          ^ (uint)(cell.z * 83492791)) & c_grid.table_mask;
+    return ((uint)cx * 73856093u
+          + (uint)cy * 19349669u
+          + (uint)cz * 83492791u) & c_grid.table_mask;
 }
 
-__device__ inline uint spatialHash(int cx, int cy, int cz) {
-    return ((uint)(cx * 73856093)
-          ^ (uint)(cy * 19349669)
-          ^ (uint)(cz * 83492791)) & c_grid.table_mask;
+__device__ inline uint spatialHash(int3 cell) {
+    return spatialHash(cell.x, cell.y, cell.z);
 }
 
 /* ======================================================================
