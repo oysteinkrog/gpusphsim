@@ -1446,3 +1446,118 @@ def test_add_dead_reserve_color_is_culled():
     added = w.add_dead_reserve(64)
     assert added == 64
     assert (cp.asnumpy(w.color[start:start + added, 3]) < 0.0).all()
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.55: PBF grid is bucketed by predicted positions
+# ---------------------------------------------------------------------------
+
+def _stencil_hashes(sim, pos):
+    """Hashes of the 27 cells around each position, matching common.cuh."""
+    gp = sim._grid_params[0]
+    gmin = np.array(gp["grid_min"], dtype=np.float32)
+    gdel = np.array(gp["grid_delta"], dtype=np.float32)
+    mask = np.uint64(gp["table_mask"])
+    cell = np.floor((pos.astype(np.float32) - gmin) * gdel).astype(np.int64)
+    offs = np.array([(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1)
+                     for c in (-1, 0, 1)], dtype=np.int64)
+    primes = np.array([73856093, 19349669, 83492791], dtype=np.uint64)
+    stencil = (cell[:, None, :] + offs[None, :, :]).astype(np.uint64)
+    return ((stencil * primes).sum(axis=2) & mask).astype(np.uint32)
+
+
+def _pbf_sort_and_predict(sim, world, n):
+    import pbf_solver
+    sim._run_grid_setup(n, force_sort=True)
+    pbf_solver.pbf_predict(
+        world.sorted_position[:n], world.sorted_velocity[:n],
+        world.sorted_packed_info[:n], world.sorted_temperature[:n],
+        world.sorted_predicted_position,
+    )
+
+
+def test_pbf_grid_finds_every_predicted_pair(world, sim):
+    """Every pair with |x*_i - x*_j| < h is reachable from the 27-cell
+    stencil of cell(x*_i) after a full sort, on a block moving at 2 m/s."""
+    world.packed_info[:] = 0
+    world._high_water = 0
+    sim.set_solver_profile(PROFILES["PBF"])
+    n = world.spawn_cube(
+        min_corner=(-0.15, -0.15, -0.15), max_corner=(0.15, 0.15, 0.15),
+        material_id=WATER, spacing=0.02, velocity=(2.0, 0.6, -1.0),
+    )
+    h = 0.04
+    _pbf_sort_and_predict(sim, world, n)
+
+    pred = cp.asnumpy(world.sorted_predicted_position[:n])[:, :3]
+    stencil_d = cp.asarray(_stencil_hashes(sim, pred))        # (n, 27)
+    shash_d = world.sorted_hashes[:n]
+    pred_d = cp.asarray(pred)
+    pairs = 0
+    missed = 0
+    for s in range(0, n, 512):
+        e = min(n, s + 512)
+        d = pred_d[s:e, None, :] - pred_d[None, :, :]
+        close = (d * d).sum(axis=2) < h * h
+        close[cp.arange(e - s), cp.arange(s, e)] = False
+        reach = (shash_d[None, :, None] == stencil_d[s:e, None, :]).any(axis=2)
+        pairs += int(close.sum())
+        missed += int((close & ~reach).sum())
+    assert pairs > 10 * n, f"scene too sparse: {pairs} pairs for {n} particles"
+    assert missed == 0, f"{missed} of {pairs} predicted-position pairs not in the stencil"
+
+
+def test_pbf_lambda_sees_trailing_neighbour(world, sim):
+    """Two particles both move 0.6h in one substep; j trails i by 0.95h after
+    predict. Bucketed by x, j would sit 2 cells behind x*_i and be skipped."""
+    import pbf_solver
+    world.packed_info[:] = 0
+    world._high_water = 0
+    sim.set_solver_profile(PROFILES["PBF"])
+    spawned = world.spawn_cube(
+        min_corner=(-0.01, -0.01, -0.01), max_corner=(0.01, 0.01, 0.01),
+        material_id=WATER, spacing=0.02,
+    )
+    assert spawned >= 2
+    n = 2
+    h = 0.04
+    dt = float(sim.dt)
+    speed = 0.6 * h / dt
+    gp = sim._grid_params[0]
+    gmin_x = float(gp["grid_min"][0])
+    cs = 1.0 / float(gp["grid_delta"][0])
+    # x*_i sits 0.05h past a cell edge, so x*_j = x*_i - 0.95h is one cell
+    # behind and x_j = x*_j - 0.6h is two cells behind.
+    k = int(np.floor((0.0 - gmin_x) / cs))
+    pred_ix = gmin_x + k * cs + 0.05 * h
+
+    def density_i(gap):
+        pos = cp.asnumpy(world.position[:n]).copy()
+        vel = np.zeros((n, 4), dtype=np.float32)
+        vel[:, 0] = speed
+        pos[0, :3] = (pred_ix - 0.6 * h, 0.0, 0.0)
+        pos[1, :3] = (pred_ix - gap - 0.6 * h, 0.0, 0.0)
+        world.position[:n] = cp.asarray(pos)
+        world.velocity[:n] = cp.asarray(vel)
+        _pbf_sort_and_predict(sim, world, n)
+        pbf_solver.pbf_compute_lambda(
+            world.sorted_predicted_position[:n], world.sorted_mass[:n],
+            world.sorted_packed_info[:n], sim._cell_start, sim._cell_end,
+            world.sorted_density, world.sorted_lambda_pbf,
+        )
+        perm = cp.asnumpy(sim._sort_perm[:n])
+        s_i = int(np.nonzero(perm == 0)[0][0])
+        pred = cp.asnumpy(world.sorted_predicted_position[:n])
+        gap_pred = pred[s_i, 0] - pred[1 - s_i, 0]
+        return float(cp.asnumpy(world.sorted_density[:n])[s_i]), gap_pred
+
+    rho_alone, _ = density_i(10.0 * h)
+    rho_pair, gap_pred = density_i(0.95 * h)
+    assert abs(gap_pred - 0.95 * h) < 1e-4, f"predicted gap {gap_pred / h:.3f}h"
+    mass = float(cp.asnumpy(world.sorted_mass[:n])[0])
+    w_poly6 = 315.0 / (64.0 * np.pi * h ** 9) * (h * h - (0.95 * h) ** 2) ** 3
+    expected = mass * w_poly6
+    assert rho_pair - rho_alone > 0.5 * expected, (
+        f"lambda_i did not see j: rho gain {rho_pair - rho_alone:.4g}, "
+        f"expected about {expected:.4g}"
+    )
