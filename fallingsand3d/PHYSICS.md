@@ -1113,6 +1113,30 @@ boils. (bd-r5-review-n28.27)
 **Source**: `world.py:add_dead_reserve`, `world.py:park_positions`,
 `simulation.py:_maybe_compact`, `reactions.cu:K_Reactions`, `spawn.cu:K_SpawnGas`
 
+### 10.20 Dead slots have mass 0 and are not boundary particles
+
+A dead slot keeps its position until compaction or until a spawn reuses it.
+Since 10.6, every STATIC neighbour counts as an Akinci boundary particle, so a
+dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
+
+- **Mass 0.** `K_Reactions` takes the sorted mass buffer and writes
+  `mass[i] = 0` when acid is consumed, when a gas other than FIRE expires, and
+  for every slot that is already DEAD. `K_SpawnGas` and `add_dead_reserve` do
+  the same. With `m_j = 0`, every neighbour term is zero: density
+  `m_j W`, the WCSPH Akinci pressure mirror and boundary drag, the PBF lambda
+  mirror `m_j (lambda_i + lambda_i) / rho0`, DFSPH volumes and heat diffusion.
+  Integrate and the PBF and DFSPH Finalize kernels scatter sorted mass back, so
+  the zero survives the next sort.
+- **No position push.** `static_particle_boundary` (`sph_shared.cuh`) pushes a
+  moving particle out to `0.8 h` from each STATIC neighbour,
+  and that push has no mass factor. It skips `MAT_DEAD` as well as `MAT_RIGID`.
+- `MAT_DEAD = 0` is defined in `common.cuh` next to `MAT_RIGID`.
+- The corrosion flash path (STATIC material turns into a short-lived FIRE
+  particle) keeps its mass, since that particle is still alive.
+
+**Source**: `reactions.cu:K_Reactions`, `sph_shared.cuh:static_particle_boundary`,
+`simulation.py:_run_reactions_spawn`
+
 ## 11. Multi-Solver Architecture
 
 Three solver backends are available, selectable at runtime via UI dropdown.
