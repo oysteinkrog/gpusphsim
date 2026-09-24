@@ -21,3 +21,13 @@ ipch
 /SPHSimOgreApp/ReleaseDebug_Win32
 /SPHSimOgreApp/ReleaseDebug_x64
 /_ReSharper.gpusphsim
+
+# Python bytecode and tool caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# ralph-tui agent session state and logs
+.ralph-tui/
