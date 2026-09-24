@@ -1466,6 +1466,26 @@ Per substep:
   6. Boundary handling + writeback
 ```
 
+**Grid from predicted positions.** Steps 1 and 2 run in this order on a full
+sort: `_run_grid_setup` runs `K_PBF_Predict` on the unsorted arrays into
+`world.predicted_position` and hashes that, so the cell table is bucketed by
+x*. After the sort, `K_PBF_Predict` runs again on the sorted arrays. It gives
+the same x* per particle, so every x*_i lies in the cell it was sorted into and
+every pair with |x*_i - x*_j| < h is inside the 27-cell stencil of cell(x*_i).
+The extra predict reads about 40 B and writes 16 B per particle, on full-sort
+substeps only. WCSPH and DFSPH still hash x.
+
+What this does not cover:
+- The N solver iterations move x* further (each dx is clamped at 0.5h, typical
+  corrections are far smaller). The table is not rebuilt between iterations.
+- Grid-reuse substeps (`K_GatherReorder`) keep the permutation and cell table
+  of the last full sort, so their x* is compared against cells built from an
+  older x*. The skip test uses the displacement `K_PBF_Finalize` measures
+  (final x* vs x), under the 0.15h PBF threshold.
+- `compute_blast_wave` (GUNPOWDER) walks the same table with the current
+  position x, which is up to one substep of motion (at most 0.9h) away from
+  the x* the cells were built from.
+
 ### 12.2 Density Constraint
 
 ```
