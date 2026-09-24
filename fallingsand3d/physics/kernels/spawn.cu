@@ -36,7 +36,12 @@
 
 #define SPAWN_N          3        // number of steam particles per water particle
 #define SPAWN_TEMP     373.0f     // steam temperature (K)
-#define SPAWN_LIFETIME   5.0f     // steam lifetime (seconds)
+/* Steam lifetime.  In still air steam cools only by ambient relaxation,
+ * T(t) = 293 + 80 exp(-COOL_RATE t) with COOL_RATE 0.02 /s, so it reaches
+ * STEAM_CONDENSE_TEMP (360 K, reactions.cu) after 8.9 s.  12 s leaves a
+ * 3 s margin, so boiled steam condenses back to water before it expires
+ * (bd-r5-review-n28.95).  Steam heated by hot neighbours can still expire. */
+#define SPAWN_LIFETIME  12.0f     // steam lifetime (seconds)
 #define SPAWN_UPKICK     2.0f     // upward velocity kick (m/s)
 #define SPAWN_OFFSET_FRAC 0.3f    // child offset radius / particle_spacing
 #define SPAWN_VEL_SPREAD 0.1f     // outward child velocity spread (m/s)

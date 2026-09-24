@@ -54,7 +54,7 @@
 #define WATER_FREEZE_MAX_SPEED 0.02f
 // LAVA solidify uses c_materials[MAT_LAVA].temp_melt at runtime
 #define WATER_BOIL_TEMP       373.0f   // WATER -> SPAWN_GAS flag above this
-#define STEAM_CONDENSE_TEMP   360.0f   // STEAM -> WATER below this (13K hysteresis below boil)
+#define STEAM_CONDENSE_TEMP   360.0f   // STEAM -> WATER below this (13K hysteresis below boil; see SPAWN_LIFETIME in spawn.cu)
 
 /* Exposure from Step1 is normalised by the neighbour kernel support weight
  * (bd-r5-review-n28.48):
@@ -269,11 +269,36 @@ void K_Reactions(
         }
     }
 
-    // STEAM (mat=12, temp < 373K) -> WATER (in-place)
+    // STEAM (mat=12, temp < 360K) -> WATER, conserving mass in expectation
+    // (bd-r5-review-n28.95).  Boiled steam carries 1/SPAWN_N of the source
+    // water mass.  Converting it in place would give water at 1/3 of rho0,
+    // which has zero Tait pressure and clumps.  Instead the particle survives
+    // as WATER with full water spawn mass with probability
+    // p = m_steam / m_water (1/3 for boiled steam, 1 for brush steam with
+    // mass PARTICLE_MASS), and otherwise dies and returns its slot to the
+    // freelist.  The expected water mass equals the steam mass.
     if (mat_id == MAT_STEAM && temp < STEAM_CONDENSE_TEMP) {
+        if (mass != 0) {
+            float water_mass = c_sim.particle_mass * spawn_mass_scale(MAT_WATER);
+            float p_keep = mass[i] / water_mass;
+            uint frame = *frame_ptr;
+            uint h = wang_hash(wang_hash(i ^ 0x5bd1e995u) + frame * 0x9E3779B9u);
+            float u = (float)(h >> 8) * (1.0f / 16777216.0f);  // [0, 1)
+            if (u >= p_keep) {
+                packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+                lifetime[i] = 0.0f;
+                health[i] = 0.0f;
+                mass[i] = 0.0f;
+                if (dead_indices != 0 && dead_count != 0) {
+                    uint idx = atomicAdd(dead_count, 1u);
+                    dead_indices[idx] = i;
+                }
+                return;
+            }
+            mass[i] = water_mass;
+        }
         pi = MAKE_PACKED(MAT_WATER, FLUID);
         packed_info[i] = pi;
-        rescale_mass(mass, i, MAT_STEAM, MAT_WATER);
         temperature[i] = temp;
         return;
     }
