@@ -4,6 +4,8 @@ Compiles physics/kernels/wake.cu via CuPy RawModule and provides functions
 to launch the wake propagation pipeline:
 
   Phase 1 (K_MarkWakeCells):  Just-woke particles mark 3x3x3 neighbor cells.
+  Phase 1b (K_MarkWakeCellsRigid): Moving rigid bodies mark the cells
+                              around them.
   Phase 2 (K_WakeSleepers):   Sleeping particles in flagged cells wake up.
   Phase 3 (K_ClearJustWoke):  Clear JUST_WOKE flag from all particles.
 
@@ -140,6 +142,41 @@ def mark_wake_cells(
     kernel(grid, block, (np.uint32(n), position, velocity, packed_info, cell_wake_flags))
 
 
+RIGID_BLOCK_SIZE = 128
+
+
+def mark_wake_cells_rigid(
+    rigid_bodies: cupy.ndarray,
+    num_bodies: int,
+    cell_wake_flags: cupy.ndarray,
+) -> None:
+    """Launch K_MarkWakeCellsRigid (Phase 1b), one block per body.
+
+    A body whose fastest point can move faster than V_WAKE marks every cell
+    of its bounding cube grown by one cell, so sleeping sand next to a
+    moving body wakes and feels the rigid coupling (bd-r5-review-n28.87).
+    Rigid boundary particles are STATIC, so K_MarkWakeCells never marks
+    for them. A body at rest marks nothing.
+
+    Parameters
+    ----------
+    rigid_bodies : cupy.ndarray, RIGID_BODY_DTYPE
+        Device body state (RigidBodyManager.d_rigid_bodies).
+    num_bodies : int
+        Number of live bodies (host-side count, no sync).
+    cell_wake_flags : cupy.ndarray, (num_cells,) uint32
+        Cell flags array (already cleared for this substep).
+    """
+    if num_bodies <= 0:
+        return
+    module = _get_module()
+    kernel = module.get_function("K_MarkWakeCellsRigid")  # type: ignore[union-attr]
+    kernel(
+        (int(num_bodies),), (RIGID_BLOCK_SIZE,),
+        (rigid_bodies, np.int32(num_bodies), cell_wake_flags),
+    )
+
+
 def wake_sleepers_and_clear_just_woke(
     position: cupy.ndarray,
     packed_info: cupy.ndarray,
@@ -189,12 +226,16 @@ def run_wake_propagation(
     sleep_counter: cupy.ndarray,
     cell_wake_flags: cupy.ndarray,
     num_particles: Optional[int] = None,
+    rigid_bodies: Optional[cupy.ndarray] = None,
+    num_bodies: int = 0,
 ) -> None:
     """Run the 2-phase wake propagation pipeline.
 
     1. Clear cell_wake_flags to 0
     2. K_MarkWakeCells (Phase 1)
-    3. K_WakeSleepersAndClearJustWoke (Phase 2+3 fused)
+    3. K_MarkWakeCellsRigid (Phase 1b), when rigid_bodies is given and
+       num_bodies > 0
+    4. K_WakeSleepersAndClearJustWoke (Phase 2+3 fused)
 
     Parameters
     ----------
@@ -210,6 +251,10 @@ def run_wake_propagation(
         Pre-allocated cell flags array.
     num_particles : int, optional
         Number of active particles.
+    rigid_bodies : cupy.ndarray, optional
+        Device rigid body state. Moving bodies wake sleepers near them.
+    num_bodies : int
+        Number of live rigid bodies (host-side count).
     """
     n = num_particles if num_particles is not None else position.shape[0]
     if n == 0:
@@ -220,6 +265,10 @@ def run_wake_propagation(
 
     # Phase 1: mark cells near just-woke and fast-moving particles
     mark_wake_cells(position, velocity, packed_info, cell_wake_flags, n)
+
+    # Phase 1b: moving rigid bodies mark the cells around them
+    if rigid_bodies is not None and num_bodies > 0:
+        mark_wake_cells_rigid(rigid_bodies, num_bodies, cell_wake_flags)
 
     # Phase 2+3 fused: wake sleepers + clear JUST_WOKE flag
     wake_sleepers_and_clear_just_woke(

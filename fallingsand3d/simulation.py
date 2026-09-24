@@ -1109,8 +1109,21 @@ class Simulation:
             w.sleep_counter[:n],
             self._cell_wake_flags,
             num_particles=n,
+            **self._wake_rigid_kwargs(),
         )
         mark("wake")
+
+    def _wake_rigid_kwargs(self) -> dict:
+        """Rigid bodies for run_wake_propagation (bd-r5-review-n28.87).
+
+        Moving bodies wake the sleeping particles near them, so a body
+        dropped on a sleeping pile gets the pile's support. Host-side count,
+        no device sync.
+        """
+        rbm = self.rigid_body_manager
+        if rbm.num_bodies <= 0:
+            return {}
+        return {"rigid_bodies": rbm.d_rigid_bodies, "num_bodies": rbm.num_bodies}
 
     def _rigid_kwargs(self) -> dict:
         """Rigid-body buffers for solver kernels that add the fluid-body reaction.
@@ -1241,6 +1254,7 @@ class Simulation:
             w.sleep_counter[:n],
             self._cell_wake_flags,
             num_particles=n,
+            **self._wake_rigid_kwargs(),
         )
         mark("wake")
 
@@ -1445,6 +1459,7 @@ class Simulation:
             w.sleep_counter[:n],
             self._cell_wake_flags,
             num_particles=n,
+            **self._wake_rigid_kwargs(),
         )
         mark("wake")
 

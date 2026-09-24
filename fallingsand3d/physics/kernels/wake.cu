@@ -4,6 +4,9 @@
  * Phase 1 (K_MarkWakeCells): Particles with HAS_JUST_WOKE flag set
  * mark their own grid cell and 26 neighboring cells via atomicOr(1).
  *
+ * Phase 1b (K_MarkWakeCellsRigid): Moving rigid bodies mark every cell
+ * their bounding cube (grown by one cell) covers.
+ *
  * Phase 2 (K_WakeSleepers): Sleeping particles in flagged cells wake up
  * (CLEAR_SLEEPING, reset sleep_counter to 0).
  *
@@ -70,6 +73,57 @@ void K_MarkWakeCells(
                 atomicOr(&cell_wake_flags[hash], 1u);
             }
         }
+    }
+}
+
+/* ======================================================================
+ * K_MarkWakeCellsRigid -- Phase 1b: moving rigid bodies mark every cell
+ *                        they can touch (bd-r5-review-n28.87).
+ *
+ * Rigid boundary particles are STATIC, so K_MarkWakeCells skips them, and
+ * a sleeping particle returns from step2 before the rigid coupling. Without
+ * this kernel a body dropped on a sleeping pile gets no force and falls
+ * through it. One block per body. A body marks when the fastest point on
+ * it can exceed V_WAKE: |v| + |omega| * r > V_WAKE, where r = |half_extents|
+ * bounds the body (box of any rotation, or sphere). It then marks every
+ * cell of the axis-aligned cube [c - r - cell, c + r + cell], so a sleeper
+ * within one smoothing length of the surface wakes. A body at rest marks
+ * nothing. Same marking primitive as K_MarkWakeCells.
+ * ====================================================================== */
+
+extern "C" __global__
+void K_MarkWakeCellsRigid(
+    const RigidBody* __restrict__ bodies,        // [num_bodies] device body state
+    int                            num_bodies,
+    uint*            __restrict__ cell_wake_flags
+) {
+    int b = blockIdx.x;
+    if (b >= num_bodies) return;
+
+    RigidBody body = bodies[b];
+    float3 he = make_float3(body.half_extents.x, body.half_extents.y, body.half_extents.z);
+    float r = sqrtf(he.x*he.x + he.y*he.y + he.z*he.z);
+    float3 v = make_float3(body.lin_vel.x, body.lin_vel.y, body.lin_vel.z);
+    float3 w = make_float3(body.ang_vel.x, body.ang_vel.y, body.ang_vel.z);
+    float speed = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z)
+                + sqrtf(w.x*w.x + w.y*w.y + w.z*w.z) * r;
+    if (!(speed > V_WAKE)) return;
+
+    float pad = r + 1.0f / c_grid.grid_delta.x;   // one cell (~h) past the body
+    float3 c = make_float3(body.position.x, body.position.y, body.position.z);
+    int3 lo = calcGridCell(make_float3(c.x - pad, c.y - pad, c.z - pad));
+    int3 hi = calcGridCell(make_float3(c.x + pad, c.y + pad, c.z + pad));
+    int nx = hi.x - lo.x + 1;
+    int ny = hi.y - lo.y + 1;
+    int nz = hi.z - lo.z + 1;
+    int total = nx * ny * nz;
+
+    for (int k = threadIdx.x; k < total; k += blockDim.x) {
+        int ix = k % nx;
+        int iy = (k / nx) % ny;
+        int iz = k / (nx * ny);
+        uint hash = spatialHash(lo.x + ix, lo.y + iy, lo.z + iz);
+        atomicOr(&cell_wake_flags[hash], 1u);
     }
 }
 

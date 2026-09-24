@@ -114,10 +114,15 @@ void K_Integrate(
 
     // --- Skip STATIC particles ---
     if (behavior == STATIC) {
-        // Write position unchanged, zero velocity, compute color
+        // Write position unchanged, zero velocity, compute color.
+        // MAT_RIGID boundary particles keep the body surface velocity that
+        // K_UpdateBoundaryParticles wrote, so the unsorted array matches the
+        // body for later readers such as wake (bd-r5-review-n28.87).
         float4 pos4 = sorted_position[i];
         position_out[orig_idx] = pos4;
-        velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        velocity_out[orig_idx] = (mat_id == MAT_RIGID)
+            ? sorted_velocity[i]
+            : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         float temp = sorted_temperature[i];
         // STATIC particles still conduct heat
         float dTdt = sorted_dTdt[i];
