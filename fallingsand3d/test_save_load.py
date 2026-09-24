@@ -649,6 +649,160 @@ def test_save_load_with_rigid_body_reinjects_once(tmp_path, monkeypatch) -> None
     assert int(np.count_nonzero(mat == MAT_RIGID)) == nb
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.57: save files carry rigid body topology
+# ---------------------------------------------------------------------------
+
+_POOL_BODIES = (
+    ((-0.3, 0.3, 0.0), 2.0),
+    ((0.0, 0.3, 0.0), 4.3),
+    ((0.3, 0.3, 0.0), 12.0),
+)
+
+
+def _pool_sim(with_bodies: bool):
+    """Water box plus, optionally, the three Archimedes Pool boxes."""
+    from materials import WATER
+    from simulation import Simulation
+    from world import World
+
+    world = World(60_000)
+    world.spawn_cube((-0.3, -0.3, -0.3), (0.3, 0.0, 0.3), WATER, 0.03)
+    sim = Simulation(world, dt=0.001, fixed_dt=True)
+    rbm = sim.rigid_body_manager
+    if with_bodies:
+        for pos, mass in _POOL_BODIES:
+            rbm.add_rigid_body_with_particles(
+                position=pos, half_extents=(0.06, 0.06, 0.06), mass=mass,
+                restitution=0.3, friction=0.4,
+            )
+    rbm.finalize_boundary_data()
+    rbm.upload(sim.get_all_modules())
+    return world, sim, rbm
+
+
+def _empty_rbm(sim) -> None:
+    """What loading a preset without bodies does to the manager."""
+    rbm = sim.rigid_body_manager
+    rbm.reset()
+    rbm.finalize_boundary_data()
+    rbm.upload(sim.get_all_modules())
+
+
+def _rigid_count(world) -> int:
+    from materials import MAT_RIGID
+    mat = world.packed_info[:world._high_water].get() & 0xFF
+    return int(np.count_nonzero(mat == MAT_RIGID))
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_load_rebuilds_rigid_bodies_into_empty_session(tmp_path, monkeypatch) -> None:
+    """Save with 3 bodies, empty the manager, load: all 3 come back."""
+    import cupy as cp
+    import save_load as sl
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    world, sim, rbm = _pool_sim(with_bodies=True)
+    nb = rbm.num_boundary_particles
+    assert nb > 0
+    for _ in range(3):
+        sim._sim_step(world._high_water)
+    saved_bodies = rbm.download_bodies()
+    saved_params = [rbm.build_params(i) for i in range(3)]
+
+    sl.save_scene(world, sim, _stub_camera(), "pool")
+    with np.load(str(tmp_path / "pool.fs3d"), allow_pickle=False) as z:
+        header = json.loads(z["header"].tobytes())
+    assert header["version"] >= 4
+    assert all("build" in b for b in header["rigid_bodies"]["bodies"])
+
+    _empty_rbm(sim)
+    assert rbm.num_bodies == 0
+
+    n_fluid = sl.load_scene(world, sim, _stub_camera(), "pool")
+    assert rbm.num_bodies == 3
+    assert rbm.num_boundary_particles == nb
+    assert [rbm.build_params(i) for i in range(3)] == saved_params
+    loaded = rbm.download_bodies()
+    for key in ("position", "rotation", "lin_vel", "ang_vel",
+                "half_extents", "inertia_inv"):
+        np.testing.assert_allclose(loaded[key], saved_bodies[key], atol=1e-6,
+                                   err_msg=key)
+
+    sim._sim_step(world._high_water)
+    cp.cuda.Device().synchronize()
+    assert rbm.boundary_injected
+    assert rbm.boundary_offset == n_fluid
+    assert world._high_water == n_fluid + nb
+    assert _rigid_count(world) == nb
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_load_without_bodies_empties_session(tmp_path, monkeypatch) -> None:
+    """Save with 0 bodies, load into a session with 3: none remain."""
+    import cupy as cp
+    import save_load as sl
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    world, sim, rbm = _pool_sim(with_bodies=False)
+    sim._sim_step(world._high_water)
+    sl.save_scene(world, sim, _stub_camera(), "plain")
+
+    for pos, mass in _POOL_BODIES:
+        rbm.add_rigid_body_with_particles(
+            position=pos, half_extents=(0.06, 0.06, 0.06), mass=mass,
+        )
+    rbm.finalize_boundary_data()
+    rbm.upload(sim.get_all_modules())
+    assert rbm.num_bodies == 3
+
+    n_fluid = sl.load_scene(world, sim, _stub_camera(), "plain")
+    assert rbm.num_bodies == 0
+    assert rbm.num_boundary_particles == 0
+    sim._sim_step(world._high_water)
+    cp.cuda.Device().synchronize()
+    assert world._high_water == n_fluid
+    assert _rigid_count(world) == 0
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_old_format_rigid_save_still_loads(tmp_path, monkeypatch, capsys) -> None:
+    """A pre-v4 save (no "build" keys) patches existing bodies and warns."""
+    import cupy as cp
+    import save_load as sl
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    world, sim, rbm = _pool_sim(with_bodies=True)
+    sim._sim_step(world._high_water)
+    sl.save_scene(world, sim, _stub_camera(), "pool")
+
+    # Rewrite the header the way a v3 save looked.
+    with np.load(str(tmp_path / "pool.fs3d"), allow_pickle=False) as z:
+        arrays = {k: z[k] for k in z.files}
+    header = json.loads(arrays["header"].tobytes())
+    header["version"] = 3
+    for b in header["rigid_bodies"]["bodies"]:
+        del b["build"]
+    header["rigid_bodies"]["bodies"][0]["position"][1] = 0.123
+    arrays["header"] = np.frombuffer(json.dumps(header).encode(), dtype=np.uint8)
+    _write_npz(str(tmp_path / "old.fs3d"), arrays)
+
+    # Same bodies in the session: state is patched in place, no warning.
+    sl.load_scene(world, sim, _stub_camera(), "old")
+    assert rbm.num_bodies == 3
+    assert abs(float(rbm.download_bodies()["position"][0, 1]) - 0.123) < 1e-6
+    assert "WARNING" not in capsys.readouterr().out
+
+    # Empty session: the old path cannot rebuild, so it loads and warns.
+    _empty_rbm(sim)
+    n_fluid = sl.load_scene(world, sim, _stub_camera(), "old")
+    assert rbm.num_bodies == 0
+    assert "old save format" in capsys.readouterr().out
+    sim._sim_step(world._high_water)
+    cp.cuda.Device().synchronize()
+    assert world._high_water == n_fluid
+
+
 def main() -> None:
     test_serialize_empty_sdf_manager()
     test_sdf_round_trip_single_box()
