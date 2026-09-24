@@ -26,6 +26,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 # Import helpers directly without importing the full save_load module
 # (which pulls in cupy at the module level and requires a CUDA GPU).
 # We patch cupy with a minimal stub so the module-level import succeeds.
+# bd-r5-review-n28.12: prefer the real CuPy when it imports, so the GPU
+# load_scene tests below can run. The stub is only a fallback for CPU-only boxes.
+if "cupy" not in sys.modules:
+    try:
+        import cupy  # noqa: F401
+    except Exception:
+        pass
 if "cupy" not in sys.modules:
     import types
     _cupy_stub = types.ModuleType("cupy")
@@ -447,6 +454,147 @@ def test_main_solver_switch_calls_rbm_upload() -> None:
     )
     print("[OK] main.py solver-switch calls sim.rigid_body_manager.upload(sim.get_all_modules()) "
           "after set_solver_profile")
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.12: load_scene validates arrays before touching the world
+# ---------------------------------------------------------------------------
+
+_HAS_REAL_CUPY = getattr(sys.modules.get("cupy"), "asarray", None) is not None
+
+
+class _StubSim:
+    """Just enough of Simulation for save_scene and load_scene."""
+
+    def __init__(self) -> None:
+        self._profile = types_ns(name="WCSPH")
+        self.world_half_size = 1.0
+        self.gravity_y = -9.81
+        self.sim_time = 0.0
+        self._last_frame_time = None
+
+    def set_world_size(self, v) -> None:
+        self.world_half_size = v
+
+    def set_gravity(self, g) -> None:
+        self.gravity_y = g
+
+    def reset_spawn_damping(self) -> None:
+        pass
+
+    def get_all_modules(self) -> list:
+        return []
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
+def _stub_camera():
+    return types_ns(target=np.zeros(3, dtype=np.float32), distance=2.0,
+                    azimuth=0.0, elevation=0.3)
+
+
+def _write_npz(path: str, arrays: dict) -> None:
+    # Write through a file object so NumPy does not append ".npz".
+    with open(path, "wb") as fh:
+        np.savez(fh, **arrays)
+
+
+def _valid_arrays(n: int) -> dict:
+    from materials import WATER
+    header = {"version": 3, "particle_count": n, "sdf": {}, "rigid_bodies": {}}
+    return {
+        "header": np.frombuffer(json.dumps(header).encode(), dtype=np.uint8),
+        "position": np.zeros((n, 4), np.float32),
+        "velocity": np.zeros((n, 4), np.float32),
+        "packed_info": np.full(n, WATER, np.uint32),
+        "temperature": np.zeros(n, np.float32),
+        "health": np.ones(n, np.float32),
+        "lifetime": np.zeros(n, np.float32),
+        "mass": np.ones(n, np.float32),
+        "particle_dye": np.zeros((n, 4), np.float32),
+        "density": np.ones(n, np.float32),
+    }
+
+
+_CORRUPTIONS = {
+    "short_position": lambda a: a.__setitem__("position", a["position"][:-1]),
+    "wrong_dtype": lambda a: a.__setitem__("mass", a["mass"].astype(np.float64)),
+    "wrong_ndim": lambda a: a.__setitem__("particle_dye", a["particle_dye"][:, :3]),
+    "bad_material": lambda a: a["packed_info"].__setitem__(3, np.uint32(40)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CORRUPTIONS))
+def test_load_corrupt_file_raises_before_world_write_cpu(tmp_path, monkeypatch, case) -> None:
+    """CPU check: corrupt arrays raise ValueError and no world field changes.
+
+    The world here holds NumPy arrays; validation raises before any CuPy call,
+    so this runs without a GPU.
+    """
+    import save_load as sl
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+
+    arrays = _valid_arrays(8)
+    _CORRUPTIONS[case](arrays)
+    _write_npz(str(tmp_path / "bad.fs3d"), arrays)
+
+    world = types_ns(
+        position=np.full((16, 4), 7.0, np.float32),
+        packed_info=np.full(16, 5, np.uint32),
+        _high_water=16,
+    )
+    with pytest.raises(ValueError):
+        sl.load_scene(world, _StubSim(), _stub_camera(), "bad.fs3d")
+    assert world._high_water == 16
+    assert np.all(world.packed_info == 5)
+    assert np.all(world.position == 7.0)
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_load_corrupt_file_leaves_world_untouched(tmp_path, monkeypatch) -> None:
+    """GPU: a real save with one array edited must not wipe the live world."""
+    import cupy as cp
+    import save_load as sl
+    from materials import WATER
+    from world import World
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    sim, cam = _StubSim(), _stub_camera()
+
+    world = World(10_000)
+    n = world.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), WATER, 0.02)
+    assert n > 1
+    sl.save_scene(world, sim, cam, "good")
+
+    with np.load(str(tmp_path / "good.fs3d"), allow_pickle=False) as z:
+        good = {k: z[k] for k in z.files}
+
+    hw_before = world._high_water
+    packed_before = world.packed_info.get()
+    pos_before = world.position[:n].get()
+
+    for case in ("short_position", "bad_material"):
+        arrays = {k: v.copy() for k, v in good.items()}
+        _CORRUPTIONS[case](arrays)
+        _write_npz(str(tmp_path / f"{case}.fs3d"), arrays)
+        with pytest.raises(ValueError):
+            sl.load_scene(world, sim, cam, f"{case}.fs3d")
+        assert world._high_water == hw_before, case
+        assert np.array_equal(world.packed_info.get(), packed_before), case
+        assert np.array_equal(world.position[:n].get(), pos_before), case
+
+    # A valid save still loads as before.
+    world.packed_info[:] = 0
+    world._high_water = 0
+    loaded = sl.load_scene(world, sim, cam, "good")
+    assert loaded == n
+    assert world._high_water == n
+    assert np.array_equal(world.packed_info.get(), packed_before)
+    assert np.array_equal(world.position[:n].get(), pos_before)
+    cp.cuda.Device().synchronize()
 
 
 def main() -> None:
