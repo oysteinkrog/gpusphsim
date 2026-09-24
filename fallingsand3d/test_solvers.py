@@ -548,121 +548,187 @@ def test_surface_tension_cohesion_pbf(world, sim):
 
 
 def test_dfsph_density_convergence(world, sim):
-    """bd-mzc.22 / bd-unl.10: DFSPH density_adv formula must be dimensionally consistent.
+    """bd-r5-review-n28.26: the DFSPH Jacobi density solve must feel its own pressure.
 
-    The fix changes: density_adv = rho_i/rho0 + dt*drho
-    to:              density_adv = rho_i/rho0 + dt*drho/rho0
-    making both terms dimensionless ratios. The buggy formula had drho at the
-    wrong magnitude (off by rho0 ≈ 1000x), causing the Jacobi solver to converge
-    to the wrong density and produce a persistent 20-40% error.
+    K_DFSPH_DensitySolverUpdate predicts rho*/rho0 = (rho_i/rho0) * (1 + dt*drho),
+    where drho = SUM_j V_j (vt_i - vt_j) . gradW is already a relative rate (1/s).
+    An extra /rho0 on the drho term (bd-mzc.22) made the A*p feedback rho0 times
+    too small (2500x for WATER): the solver ignored both the velocity divergence
+    and the pressure it had applied, and p_rho2 grew linearly with iterations.
 
-    Sub-test 1 (zero-velocity): with all particles at rest, drho=0, so
-    density_adv=rho_i/rho0 and residual≈0. p_rho2 must stay ≈ 0 (no spurious
-    pressure). If the buggy /rho0-missing formula were active, it would produce
-    a drho term off by rho0 even when particles move; with zero velocity it
-    doesn't matter, but the threshold (100*rho0) would catch it when v≠0.
+    Scene: one isolated 9x9x9 WATER block (spacing 0.02), alpha uncapped
+    (dfsph_alpha_limit = 1e9) and velocity limit raised so the vt clamps stay off.
 
-    Sub-test 2 (large velocity): inject vel_limit*0.5 on all particles. The
-    correct formula keeps p_rho2 < 100*rho0 (here rho0=2500 → threshold 250000).
-    The buggy formula would produce p_rho2 off by ~rho0 per iteration and blow
-    past this threshold.
+    Sub-test 1 (zero velocity): p_rho2 stays small at rest.
+    Sub-test 2 (diagonal): a unit p_rho2 on the centre particle alone must lower
+      its own predicted residual by about dt^2 / alpha_i, because alpha is the
+      inverse diagonal of this residual. The old formula gave about 1/rho0 of that.
+    Sub-test 3 (compression, omega = 1): v = -k (x - c), a uniform divergence of
+      -3k. One Jacobi iteration must cut the residual by more than 50%.
+    Sub-test 4 (convergence, omega = 0.7): after 8 iterations the residual is
+      under 2% and the p_rho2 increments have shrunk. omega = 1 with the exact
+      diagonal overshoots the short-wavelength modes and the residual grows back
+      after about 4 iterations; picking omega and the alpha cap is bead
+      bd-r5-review-n28.37.
 
-    Threshold: 100 * rho0 ≈ 250000 (tight enough to catch a 20-40% density
-    error, since the buggy formula compounds by ~rho0 per Jacobi step).
+    The residual is read from the Jacobi increment itself:
+    p_new - p_old = omega * residual * alpha / dt^2 wherever p_new > 0. Where the
+    clamp holds p_new at 0 the constraint rho <= rho0 is inactive and the
+    complementarity residual is 0.
     """
+    import dataclasses
     import dfsph_solver
-    from materials import WATER
-
-    profile = PROFILES["DFSPH"]
-    n = spawn_scene(world)
-    sim.set_solver_profile(profile)
-
-    import hash_sort
-    w = world
-    hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-    sort_perm = cp.argsort(hashes).astype(cp.uint32)
-    sim._sort_perm[:n] = sort_perm
-    w._density_initialized = True
-    sim._run_grid_setup(n)
-
-    dfsph_solver.compute_density_alpha(
-        w.sorted_position[:n], w.sorted_velocity[:n],
-        w.sorted_mass[:n], None,
-        w.sorted_packed_info[:n], w.sorted_temperature[:n],
-        sim._cell_start, sim._cell_end,
-        w.sorted_density, w.sorted_alpha_dfsph,
-        w.sorted_shear_rate, w.sorted_dTdt,
-        w.sorted_exposure_heat, w.sorted_exposure_corrode,
-    )
-    cp.cuda.Device().synchronize()
-
-    accel_zero = cp.zeros((n, 4), dtype=cp.float32)
-
-    # --- Sub-test 1: zero velocity --- at rest, drho=0 → p_rho2 must stay ≈ 0.
-    vel_zero = cp.zeros((n, 4), dtype=cp.float32)
-    p_rho2_zero = cp.zeros(n, dtype=cp.float32)
-
-    for _ in range(20):
-        dfsph_solver.density_solver_update(
-            vel_zero, accel_zero,
-            w.sorted_position[:n], w.sorted_density[:n],
-            w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
-            w.sorted_packed_info[:n],
-            sim._cell_start, sim._cell_end,
-            p_rho2_zero,
-        )
-    cp.cuda.Device().synchronize()
-
-    p_zero = p_rho2_zero.get()
-    # Use WATER rest density from the materials module
     from materials import MATERIALS
+
+    w = world
     rho0 = float(MATERIALS[WATER].rest_density)
-    # At rest, density_adv = rho_i/rho0; if rho_i <= rho0 residual <=0 → p_rho2 clamped to 0.
-    # If rho_i > rho0 slightly (over-compressed at spawn), residual is small but positive.
-    # p_rho2 must stay near zero — threshold 0.5*rho0 to catch any formula error.
-    at_rest_threshold = 0.5 * rho0
-    max_p_zero = float(np.abs(p_zero).max())
-    print(f"  DFSPH density solver (zero vel): max_p_rho2={max_p_zero:.4e}  "
-          f"threshold={at_rest_threshold:.4e}")
-    assert not np.isnan(p_zero).any(), "DFSPH density solver (zero vel) produced NaN"
-    assert not np.isinf(p_zero).any(), "DFSPH density solver (zero vel) produced Inf"
-    assert max_p_zero < at_rest_threshold, (
-        f"DFSPH density solver (zero vel) has spurious pressure: "
-        f"max_p_rho2={max_p_zero:.4e} > {at_rest_threshold:.4e}. "
-        f"At rest drho=0, so p_rho2 should remain ≈ 0."
-    )
 
-    # --- Sub-test 2: large velocity --- p_rho2 must stay < 100*rho0.
-    # With the correct formula drho/rho0 is dimensionless; with the bug drho is
-    # off by ~rho0 per iteration, blowing past 100*rho0 quickly.
-    vel_limit = float(sim._sim_params[0]["velocity_limit"])
-    vel_large = cp.zeros((n, 4), dtype=cp.float32)
-    vel_large[:, 0] = vel_limit * 0.5   # half the velocity limit — large but valid
-    p_rho2 = cp.zeros(n, dtype=cp.float32)
+    def _setup(omega):
+        w.packed_info[:] = 0
+        w._high_water = 0
+        half = 0.09
+        n = w.spawn_cube(
+            min_corner=(-half, 0.3 - half, -half),
+            max_corner=(half, 0.3 + half, half),
+            material_id=WATER,
+            spacing=0.02,
+        )
+        profile = dataclasses.replace(
+            PROFILES["DFSPH"], dfsph_omega=omega, dfsph_alpha_limit=1.0e9,
+            velocity_limit_factor=50.0,
+        )
+        sim.set_solver_profile(profile)
+        w._density_initialized = True
+        sim._run_grid_setup(n, force_sort=True)
+        # Two passes: the second uses the first pass's density for V_j = m_j/rho_j,
+        # as the real step does with sorted_density_prev.
+        for pass_idx in range(2):
+            density_in = None if pass_idx == 0 else w.sorted_density[:n].copy()
+            dfsph_solver.compute_density_alpha(
+                w.sorted_position[:n], w.sorted_velocity[:n],
+                w.sorted_mass[:n], density_in,
+                w.sorted_packed_info[:n], w.sorted_temperature[:n],
+                sim._cell_start, sim._cell_end,
+                w.sorted_density, w.sorted_alpha_dfsph,
+                w.sorted_shear_rate, w.sorted_dTdt,
+                w.sorted_exposure_heat, w.sorted_exposure_corrode,
+            )
+        cp.cuda.Device().synchronize()
+        return n, profile
 
-    for _ in range(20):
+    def _update(n, vel, accel, p):
         dfsph_solver.density_solver_update(
-            vel_large, accel_zero,
+            vel, accel,
             w.sorted_position[:n], w.sorted_density[:n],
             w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
             w.sorted_packed_info[:n],
             sim._cell_start, sim._cell_end,
-            p_rho2,
+            p,
         )
-    cp.cuda.Device().synchronize()
 
-    p = p_rho2.get()
-    assert not np.isnan(p).any(), "DFSPH density solver produced NaN in p_rho2"
-    assert not np.isinf(p).any(), "DFSPH density solver produced Inf in p_rho2"
-    max_p = float(np.abs(p).max())
-    # Tight threshold: 100 * rho0. With the correct formula p_rho2 is bounded;
-    # with the bug (missing /rho0 in density_adv) it diverges past this quickly.
-    threshold_p = 100.0 * rho0
-    print(f"  DFSPH density solver (large vel): max_p_rho2={max_p:.4e}  "
-          f"threshold={threshold_p:.4e}  (rho0={rho0:.1f})")
-    assert max_p < threshold_p, (
-        f"DFSPH density solver p_rho2 diverged: max={max_p:.4e} > {threshold_p:.4e}. "
-        f"Check density_adv = rho_i/rho0 + dt*drho/rho0 (unit mismatch fix)."
+    def _accel(n, p, accel):
+        dfsph_solver.compute_pressure_accel(
+            p, w.sorted_position[:n],
+            w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n],
+            sim._cell_start, sim._cell_end,
+            accel,
+        )
+
+    def _compression_run(omega, n_updates=9):
+        n, profile = _setup(omega)
+        dt = float(profile.dt)
+        pos = w.sorted_position[:n, :3].get()
+        alpha = w.sorted_alpha_dfsph[:n].get()
+        active = alpha > 0.0
+        assert active.sum() > 500, f"alpha is zero for most particles ({active.sum()}/{n})"
+        centre = pos.mean(axis=0)
+        k = 0.1 / (3.0 * dt)  # one-substep compression dt * 3k = 10%
+        vel = cp.zeros((n, 4), dtype=cp.float32)
+        vel[:, :3] = cp.asarray((-k * (pos - centre)).astype(np.float32))
+        p = cp.zeros(n, dtype=cp.float32)
+        accel = cp.zeros((n, 4), dtype=cp.float32)
+        history = [p.copy()]
+        for _ in range(n_updates):
+            _update(n, vel, accel, p)
+            _accel(n, p, accel)
+            history.append(p.copy())
+        cp.cuda.Device().synchronize()
+        hist = np.stack([hp.get() for hp in history])
+        assert np.isfinite(hist).all(), "DFSPH density solver produced NaN/Inf in p_rho2"
+        residuals, increments = [], []
+        a = alpha[active]
+        for kk in range(n_updates):
+            p_new = hist[kk + 1][active]
+            dp = p_new - hist[kk][active]
+            r = np.where(p_new > 0.0, dp * dt * dt / (omega * a), 0.0)
+            residuals.append(float(np.mean(np.abs(r))))
+            increments.append(float(np.mean(np.abs(dp))))
+        print(f"  DFSPH compression omega={omega}: n={n} active={int(active.sum())}")
+        for kk, (r, d) in enumerate(zip(residuals, increments)):
+            print(f"    before update {kk}: mean residual={r:.5f}  mean|dp|={d:.4e}")
+        return residuals, increments
+
+    # --- Sub-test 1: zero velocity: p_rho2 must stay small at rest ---
+    n, profile = _setup(1.0)
+    dt = float(profile.dt)
+    zero4 = cp.zeros((n, 4), dtype=cp.float32)
+    p_zero = cp.zeros(n, dtype=cp.float32)
+    for _ in range(20):
+        _update(n, zero4, zero4, p_zero)
+    cp.cuda.Device().synchronize()
+    p_zero_h = p_zero.get()
+    max_p_zero = float(np.abs(p_zero_h).max())
+    print(f"  DFSPH density solver (zero vel): max_p_rho2={max_p_zero:.4e}")
+    assert np.isfinite(p_zero_h).all(), "DFSPH density solver (zero vel) produced NaN/Inf"
+    assert max_p_zero < 0.5 * rho0, (
+        f"DFSPH density solver (zero vel) has spurious pressure: max_p_rho2={max_p_zero:.4e}"
+    )
+
+    # --- Sub-test 2: diagonal feedback of a single particle's pressure ---
+    pos = w.sorted_position[:n, :3].get()
+    alpha = w.sorted_alpha_dfsph[:n].get()
+    rho = w.sorted_density[:n].get()
+    i = int(np.argmin(np.linalg.norm(pos - pos.mean(axis=0), axis=1)))
+    assert alpha[i] > 0.0, "centre particle has alpha = 0"
+    p_single = cp.zeros(n, dtype=cp.float32)
+    p_single[i] = 1.0
+    accel = cp.zeros((n, 4), dtype=cp.float32)
+    _accel(n, p_single, accel)
+    # Probe with a large offset so the >= 0 clamp never fires; omega = 1 here.
+    offset = 1.0e6
+    probe = cp.full(n, offset, dtype=cp.float32)
+    _update(n, zero4, accel, probe)
+    cp.cuda.Device().synchronize()
+    r_with_p = (float(probe[i].get()) - offset) * dt * dt / float(alpha[i])
+    r_rest = float(rho[i]) / rho0 - 1.0
+    ratio = (r_with_p - r_rest) / (dt * dt / float(alpha[i]))
+    print(f"  DFSPH diagonal: rho_i/rho0={rho[i] / rho0:.4f} residual change per unit "
+          f"p_rho2 = {ratio:.4f} x (dt^2/alpha_i)  (expect about -1; old /rho0 bug gave about -0.02)")
+    assert -1.3 < ratio < -0.7, (
+        f"a unit p_rho2 on particle {i} changed its predicted residual by {ratio:.4f} "
+        f"x dt^2/alpha (expect about -1). Check density_adv = (rho_i/rho0) * (1 + dt*drho)."
+    )
+
+    # --- Sub-test 3: one Jacobi iteration at omega = 1 halves the residual ---
+    res1, _ = _compression_run(1.0)
+    assert res1[0] > 0.02, f"compression setup too weak: initial residual {res1[0]:.4f}"
+    assert res1[1] < 0.5 * res1[0], (
+        f"one Jacobi iteration only cut the residual from {res1[0]:.4f} to {res1[1]:.4f} "
+        f"(need > 50%). Check density_adv = (rho_i/rho0) * (1 + dt*drho)."
+    )
+
+    # --- Sub-test 4: 8 iterations at omega = 0.7 converge ---
+    res7, inc7 = _compression_run(0.7)
+    assert res7[8] < 0.02, (
+        f"residual after 8 iterations is {res7[8]:.4f} (need < 0.02). "
+        f"The Jacobi density solve is not converging."
+    )
+    # Increments are omega*residual*alpha/dt^2, so they shrink with the residual.
+    # With the old /rho0 bug they stay constant (p_rho2 grows linearly).
+    assert inc7[7] < 0.2 * inc7[0] and inc7[8] < 0.2 * inc7[0], (
+        f"p_rho2 still growing linearly: increments {inc7[0]:.4e} (update 0), "
+        f"{inc7[7]:.4e} (update 7), {inc7[8]:.4e} (update 8)."
     )
 
 
