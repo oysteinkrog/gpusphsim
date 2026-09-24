@@ -668,7 +668,9 @@ def load_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     _clear_world(world)
     total = 0
 
-    lava_box = ((-0.23, -0.85, -0.23), (0.23, -0.53, 0.23))
+    # Lava box edges sit halfway between water lattice points (odd
+    # hundredths), so the two lattices stay 0.02 apart at the faces.
+    lava_box = ((-0.22, -0.86, -0.22), (0.22, -0.52, 0.22))
 
     # Water filling most of the domain, with a hole where the lava goes
     n = world.spawn_cube(
