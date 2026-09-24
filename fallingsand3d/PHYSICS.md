@@ -990,9 +990,10 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
   MUD (wetting transition), not corrosion damage. This check runs before the acid
   corrosion whitelist so DIRT is redirected to the wetting path rather than being
   "corroded" by water.
-- DIRT was removed from the acid-corrosion whitelist. The corrosion path (`health -= damage`)
-  now applies only to: STONE, METAL, WOOD, GRAVEL, ICE, OIL, GUNPOWDER. DIRT reaches
-  MUD via the wetting path (`exp_corrode > SAND_WET_THRESHOLD`) instead.
+- DIRT is not on the acid-corrosion whitelist. The corrosion path (`health -= damage`)
+  applies only to: STONE, METAL, WOOD, GRAVEL, OIL, GUNPOWDER (ICE is excluded too,
+  see 21.3). DIRT reaches MUD via the wetting path (`exp_corrode > SAND_WET_THRESHOLD`)
+  instead.
 
 **Source**: `reactions.cu:225-261`
 
@@ -1207,8 +1208,8 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   write for STATIC particles is floored at 1 too, so `V_j = m_j / rho_j` stays
   finite. The Akinci rigid pressure term floors `rho0_i` at `RHO_EPSILON`
   (0.01), which leaves GAS (0.2 to 0.6) unchanged.
-- The corrosion flash path (STATIC material turns into a short-lived FIRE
-  particle) keeps its mass, since that particle is still alive.
+- A fully corroded particle becomes DEAD/STATIC with mass 0 and joins the
+  freelist, the same as consumed acid (see 21.3).
 
 **Source**: `reactions.cu:K_Reactions`, `sph_shared.cuh:static_particle_boundary`,
 `simulation.py:_run_reactions_spawn`, `world.py:kill_in_sphere`,
@@ -2273,12 +2274,40 @@ Hysteresis prevents oscillation (wet threshold >> dry threshold).
 | MUD + LAVA | 0.0 | 40.0 | Lava dries mud |
 | MUD + WATER | 0.3 | 3.0 | Mud stays wet near water |
 | MUD + ACID | 0.05 | 3.0 | Acid corrodes mud |
+| WATER + ICE | 0.0 | 20.0 | Heat only: water warms ice |
+| LAVA + ICE | 0.0 | 60.0 | Heat only: lava melts ice |
+| FIRE + ICE | 0.0 | 25.0 | Heat only: fire melts ice |
+| ICE + STEAM | 0.0 | 15.0 | Heat only: steam melts ice |
+| LAVA + METAL | 0.0 | 30.0 | Heat only: lava heats metal |
+| WATER + ACID | 0.0 | 5.0 | Heat only: acid is not consumed by water |
+
+Rule: `exposure_corrode` sums `reaction_rate * W` over every neighbour pair, and
+K_Reactions reads it as acid damage, wetting and acid self-consumption. So a
+pair has a non-zero `reaction_rate` only when ACID, WATER, MUD or a combustible
+(WOOD, OIL, GUNPOWDER) is on one side. Heat-only pairs use rate 0 and a
+`heat_exchange`. `test_reactions.py` checks this rule on the full matrix.
 
 ### 21.3 Corrosion Guard
 
 Sand family materials (SAND, WET_SAND, MUD) are excluded from the corrosion
 health damage path. Their `exposure_corrode` signal is used only for wetting
 transitions, not health reduction.
+
+Corrosion damage (`health -= exposure_corrode * dt`) applies only to STONE,
+METAL, WOOD, GRAVEL, OIL and GUNPOWDER. ICE is not on the list: it changes
+only by melting to WATER above 273 K. With the heat-only pairs above at rate 0,
+these materials get corrode exposure only from ACID (and, for the combustibles,
+from FIRE and LAVA, whose ignition check runs first).
+
+When health reaches 0 the particle becomes DEAD/STATIC with health 0, mass 0
+and lifetime 0, and its index goes on the spawn freelist. It does not turn
+into FIRE: `exposure_heat` has no temperature threshold, so any hot FIRE
+particle next to WOOD, OIL or GUNPOWDER ignites it. A DEAD slot has an
+all-zero interaction row, so it gives neighbours no heat exposure.
+
+Known limit: the corrosion branch still depends on the table keeping rate 0
+for non-acid pairs on the whitelist. A separate acid exposure channel would
+remove that dependence.
 
 ### 21.4 Cross-Solver Behavior
 
