@@ -901,7 +901,10 @@ class UI:
                     if imgui.button("Restore##undo", imgui.ImVec2(100, 28)):
                         steps = getattr(self, '_undo_steps', 1)
                         if snaps.restore(world, steps_back=steps, sim=sim):
-                            changes['_scene_loaded'] = True
+                            # Not '_scene_loaded': that clears the ring and
+                            # drops the older slots restore() kept.
+                            changes['_snapshot_restored'] = True
+                            self._undo_steps = 1
 
             # Solver dropdown
             imgui.separator()

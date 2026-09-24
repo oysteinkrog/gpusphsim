@@ -145,7 +145,7 @@ def main():
     ui.set_sdf_drag_refs(camera, sim.sdf_manager)
 
     # Snapshot ring buffer for undo
-    from snapshot import SnapshotRing
+    from snapshot import SnapshotRing, after_restore
     snapshots = SnapshotRing(max_snapshots=12, max_particles=MAX_PARTICLES)
     ui.snapshots = snapshots  # expose to UI for timeline display
 
@@ -161,6 +161,17 @@ def main():
     middle_pressed = False
     last_mx, last_my = 0.0, 0.0
 
+    def _after_restore():
+        """Sync sim, renderer and spawner after a snapshot restore.
+
+        Used by Ctrl+Z and the timeline Restore button. Keeps the snapshot
+        ring so older slots stay reachable (bd-r5-review-n28.85).
+        """
+        nonlocal active_spawner, spawner_frame_counter
+        after_restore(world, sim, renderer)
+        active_spawner = None
+        spawner_frame_counter = 0
+
     def key_callback(_win, key, _scancode, action, _mods):
         nonlocal num_active, active_spawner, spawner_frame_counter
         # Let UI handle material shortcuts first
@@ -171,21 +182,7 @@ def main():
         # Ctrl+Z = undo (restore previous snapshot)
         if key == glfw.KEY_Z and (_mods & glfw.MOD_CONTROL):
             if snapshots.restore(world, sim=sim):
-                # The restored arrays may hold the boundary block at an old
-                # offset; rebuild it next substep (bd-r5-review-n28.22).
-                sim.rigid_body_manager.mark_for_reinjection()
-                renderer.num_active = world._high_water
-                sim._invalidate_graphs()
-                sim.notify_scene_changed()  # stale sort perm after restore (CRIT-5)
-                sim.reset_spawn_damping()
-                # Foam is not in the snapshot; clear it so no stale spray
-                # floats over the rewound scene (bd-r5-review-n28.61).
-                world.foam_count.fill(0)
-                sim._last_foam_count = 0
-                active_spawner = None
-                spawner_frame_counter = 0
-                with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
-                    sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+                _after_restore()
                 print(f"Undo: restored to {world._high_water:,} particles")
             return
         if key == glfw.KEY_ESCAPE:
@@ -314,8 +311,11 @@ def main():
         sim.sdf_manager.upload_if_dirty()
         substeps = sim.step_frame()
 
-        # --- Snapshot tick (auto-capture every N frames) ---
-        snapshots.tick(world, sim=sim)
+        # --- Snapshot tick (auto-capture every few seconds of sim time) ---
+        # Only frames that advanced the sim, so a pause keeps undo history
+        # (bd-r5-review-n28.85).
+        if substeps > 0:
+            snapshots.tick(world, sim=sim)
 
         # --- Copy to VBOs (once per frame) ---
         vel_ctx = renderer.cuda_vel if renderer.motion_blur_enabled else None
@@ -433,10 +433,15 @@ def main():
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
-        # Handle scene loaded from save file or undo restore
+        # Timeline Restore: same as Ctrl+Z, keeps the snapshot ring
+        # (bd-r5-review-n28.85).
+        if '_snapshot_restored' in ui_changes:
+            _after_restore()
+
+        # Handle scene loaded from save file
         if '_scene_loaded' in ui_changes:
-            # Save load and timeline restore both replace the world arrays;
-            # rebuild the boundary block next substep (bd-r5-review-n28.22).
+            # A save load replaces the world arrays; rebuild the boundary
+            # block next substep (bd-r5-review-n28.22).
             sim.rigid_body_manager.mark_for_reinjection()
             renderer.num_active = world._high_water
             sim._invalidate_graphs()

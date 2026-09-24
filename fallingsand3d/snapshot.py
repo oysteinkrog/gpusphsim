@@ -25,8 +25,16 @@ class SnapshotRing:
         self._slots: list[dict | None] = [None] * max_snapshots
         self._write_idx = 0  # next slot to write
         self._count = 0      # how many valid snapshots
-        self._frame_interval = 300  # capture every N frames
+        # Cadence. With a sim time, capture every snapshot_interval_s seconds
+        # of simulated time, so paused frames add nothing and the spacing is
+        # the same at any speed. Without one (tests), fall back to counting
+        # frames (bd-r5-review-n28.85).
+        self.snapshot_interval_s = 5.0  # = 300 frames at 60 fps and 1x speed
+        self._frame_interval = 300  # fallback: capture every N frames
         self._frame_counter = 0
+        self._time_accum = 0.0
+        self._last_tick_time: float | None = None
+        self._last_capture_time: float | None = None
 
     def _alloc_slot(self) -> dict:
         n = self.max_particles
@@ -48,16 +56,24 @@ class SnapshotRing:
             "sdf_state": None,
         }
 
-    def capture(self, world, sim=None) -> None:
+    def capture(self, world, sim=None, sim_time: float | None = None) -> None:
         """GPU-GPU snapshot of current world state into next ring slot.
 
         With ``sim``, also copies the rigid body array on the GPU and deep
         copies the SDF object list on the CPU. No host sync: the body count is
         a Python int and the rigid copy is device to device.
+
+        With ``sim_time``, the capture is skipped when it equals the time of
+        the last capture, so a paused sim never fills the ring with copies of
+        one state.
         """
         n = world._high_water
         if n == 0:
             return
+        if sim_time is not None:
+            if sim_time == self._last_capture_time:
+                return
+            self._last_capture_time = sim_time
 
         slot = self._slots[self._write_idx]
         if slot is None:
@@ -80,12 +96,32 @@ class SnapshotRing:
         self._write_idx = (self._write_idx + 1) % self.max_snapshots
         self._count = min(self._count + 1, self.max_snapshots)
 
-    def tick(self, world, sim=None) -> None:
-        """Call every frame. Captures snapshot every _frame_interval frames."""
-        self._frame_counter += 1
-        if self._frame_counter >= self._frame_interval:
-            self._frame_counter = 0
-            self.capture(world, sim=sim)
+    def tick(self, world, sim=None, sim_time: float | None = None) -> None:
+        """Call on frames that ran a substep.
+
+        ``sim_time`` defaults to ``sim.sim_time`` when ``sim`` has one. With a
+        time, a snapshot is taken every ``snapshot_interval_s`` of simulated
+        time; a tick with the same time as the last one (paused) adds nothing,
+        and a time that went backwards (scene reset) restarts the count.
+        Without a time, a snapshot is taken every ``_frame_interval`` ticks.
+        """
+        if sim_time is None:
+            sim_time = getattr(sim, "sim_time", None)
+        if sim_time is None:
+            self._frame_counter += 1
+            if self._frame_counter >= self._frame_interval:
+                self._frame_counter = 0
+                self.capture(world, sim=sim)
+            return
+        sim_time = float(sim_time)
+        last = self._last_tick_time
+        self._last_tick_time = sim_time
+        if last is None or sim_time <= last:
+            return
+        self._time_accum += sim_time - last
+        if self._time_accum >= self.snapshot_interval_s:
+            self._time_accum = 0.0
+            self.capture(world, sim=sim, sim_time=sim_time)
 
     @property
     def num_snapshots(self) -> int:
@@ -160,6 +196,9 @@ class SnapshotRing:
         # the same slot and multi-undo is broken.
         self._write_idx = (self._write_idx - steps_back) % self.max_snapshots
         self._count = max(0, self._count - steps_back)
+        # Start the next interval from the restore, not from the old capture.
+        self._time_accum = 0.0
+        self._frame_counter = 0
 
         return True
 
@@ -168,6 +207,31 @@ class SnapshotRing:
         self._count = 0
         self._write_idx = 0
         self._frame_counter = 0
+        self._time_accum = 0.0
+        self._last_tick_time = None
+        self._last_capture_time = None
+
+
+def after_restore(world, sim, renderer) -> None:
+    """Bring the sim and renderer in line with a world just restored from the ring.
+
+    Shared by Ctrl+Z and the timeline Restore button. It keeps the snapshot
+    ring: restore() already rewound it, so older slots stay reachable
+    (bd-r5-review-n28.85). The caller resets its own spawner state.
+    """
+    # The restored arrays may hold the boundary block at an old offset;
+    # rebuild it next substep (bd-r5-review-n28.22).
+    sim.rigid_body_manager.mark_for_reinjection()
+    renderer.num_active = world._high_water
+    sim._invalidate_graphs()
+    sim.notify_scene_changed()  # stale sort perm after restore (CRIT-5)
+    sim.reset_spawn_damping()
+    # Foam is not in the snapshot; clear it so no stale spray floats over the
+    # rewound scene (bd-r5-review-n28.61).
+    world.foam_count.fill(0)
+    sim._last_foam_count = 0
+    with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+        sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
 
 
 def _copy_device_bytes(dst, src, nbytes: int) -> None:
