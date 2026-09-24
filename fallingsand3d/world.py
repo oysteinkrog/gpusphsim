@@ -15,7 +15,7 @@ from typing import Tuple
 import cupy as cp
 import numpy as np
 
-from materials import MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID
+from materials import MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER, ICE
 
 # packed_info bitfield macros (mirrors common.cuh)
 _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
@@ -44,6 +44,19 @@ T_AMBIENT = 293.0
 # Default max foam particles
 MAX_FOAM_PARTICLES = 200_000
 
+# --- Parked DEAD reserve for the spawn freelist (bd-r5-review-n28.27) ---
+# K_SpawnGas can only turn boiling water into steam by claiming DEAD slots,
+# and the freelist is rebuilt each substep from DEAD slots only. A scene where
+# nothing has died yet has no DEAD slots, so water never boils. World keeps a
+# reserve of placeholder DEAD particles (mass 0) while a boilable material is
+# present. They are parked on a lattice far below the world box, beyond the
+# camera far plane (100), one per grid cell, so no hash bucket gets more than
+# a few of them.
+DEAD_RESERVE_DEFAULT = 15_000
+BOILABLE_MATERIAL_IDS = frozenset({WATER, ICE})  # ICE melts to WATER
+PARK_ORIGIN = (0.0, -1000.0, 0.0)
+PARK_SPACING_DEFAULT = 0.04  # default smoothing length h
+
 
 class World:
     """Manages all per-particle SoA arrays on GPU.
@@ -58,6 +71,9 @@ class World:
         self.max_particles: int = max_particles
         self._high_water: int = 0  # one past last allocated slot
         self._spawned_material_ids: set = set()  # CPU-side tracking for conditional skip
+        # Parked DEAD slots kept for the spawn freelist (see DEAD_RESERVE_DEFAULT).
+        # 0 turns the reserve off.
+        self.dead_reserve: int = DEAD_RESERVE_DEFAULT
         self._allocate()
 
     def _allocate(self) -> None:
@@ -357,6 +373,67 @@ class World:
             rbm.boundary_offset = int(counts[0])
         else:
             rbm.mark_for_reinjection()
+
+    @property
+    def needs_dead_reserve(self) -> bool:
+        """True when a boilable material was spawned and the reserve is on.
+
+        CPU-side only (reads _spawned_material_ids), so it costs no GPU sync.
+        """
+        return (self.dead_reserve > 0
+                and not BOILABLE_MATERIAL_IDS.isdisjoint(self._spawned_material_ids))
+
+    def park_positions(self, slots, spacing: float = PARK_SPACING_DEFAULT):
+        """Parking positions (float4, w=0) for DEAD reserve slot indices.
+
+        Each slot index maps to its own site on a cube lattice of side
+        ceil(cbrt(max_particles)) at the given spacing, placed under
+        PARK_ORIGIN. Distinct slots never share a site, so with spacing = h
+        every parked particle sits in its own grid cell. Sites are cell
+        centred so float rounding cannot push two into one cell.
+        """
+        slots = cp.asarray(slots, dtype=cp.int64)
+        side = max(1, int(np.ceil(self.max_particles ** (1.0 / 3.0))))
+        while side ** 3 < self.max_particles:
+            side += 1
+        ix = slots % side
+        iy = (slots // side) % side
+        iz = slots // (side * side)
+        ox, oy, oz = PARK_ORIGIN
+        pos = cp.zeros((slots.shape[0], 4), dtype=cp.float32)
+        pos[:, 0] = ox + (ix - side * 0.5 + 0.5) * spacing
+        pos[:, 1] = oy - (iy + 0.5) * spacing
+        pos[:, 2] = oz + (iz - side * 0.5 + 0.5) * spacing
+        return pos
+
+    def add_dead_reserve(self, count: int, spacing: float = PARK_SPACING_DEFAULT) -> int:
+        """Append up to `count` parked DEAD particles at [_high_water, ...).
+
+        They have packed_info 0 (DEAD, STATIC), mass 0 and zero state, so
+        every kernel early-returns on them and K_Reactions offers them to the
+        spawn freelist. Does not change _spawned_material_ids or num_active.
+        Returns the number added (capped by max_particles). The caller must
+        call Simulation.notify_scene_changed() so the sort is rebuilt.
+        """
+        count = min(int(count), self.max_particles - self._high_water)
+        if count <= 0:
+            return 0
+        start = self._high_water
+        sl = slice(start, start + count)
+        self.position[sl] = self.park_positions(
+            cp.arange(start, start + count), spacing)
+        for arr in (self.velocity, self.veleval, self.sph_force, self.color,
+                    self.particle_dye, self.angular_velocity):
+            arr[sl] = 0.0
+        self.temperature[sl] = T_AMBIENT
+        for arr in (self.density, self.mass, self.health, self.lifetime, self.shear_rate, self.exposure_heat,
+                    self.exposure_corrode, self.kappa, self.kappa_v,
+                    self.lambda_pbf):
+            arr[sl] = 0.0
+        self.packed_info[sl] = cp.uint32(0)
+        self.sleep_counter[sl] = 0
+        self._high_water += count
+        return count
 
     def spawn_sphere(
         self,

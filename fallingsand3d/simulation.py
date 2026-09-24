@@ -109,6 +109,8 @@ class Simulation:
         self._time_accumulator = 0.0  # fractional time carried between frames
         self.sim_time = 0.0
         self._frame_counter = 0
+        # First frame checks the parked DEAD reserve (see _maybe_compact).
+        self._dead_reserve_check_pending = True
         self._substep_counter = 0  # unique per-substep counter for GPU RNG seeding
         self.compact_interval = compact_interval
         self.compact_threshold = compact_threshold
@@ -602,6 +604,8 @@ class Simulation:
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
         self._last_full_sort_n = -1
+        # Check the parked DEAD reserve on the next frame (bd-r5-review-n28.27).
+        self._dead_reserve_check_pending = True
 
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
@@ -1586,31 +1590,62 @@ class Simulation:
         return sim_steps
 
     def _maybe_compact(self) -> int:
-        """Run compaction if due and enough dead particles exist.
+        """Run compaction if due, and keep the parked DEAD reserve topped up.
 
-        Returns the current _high_water (possibly reduced by compaction).
+        Runs every compact_interval frames, and on the first frame after
+        notify_scene_changed(), so a freshly loaded scene gets its reserve
+        before any water can boil. While a boilable material is present
+        (World.needs_dead_reserve), compaction only runs once there are more
+        than dead_reserve + compact_threshold dead slots, and afterwards the
+        reserve is refilled with parked DEAD particles so K_SpawnGas always
+        has slots to claim (bd-r5-review-n28.27).
+
+        Returns the current _high_water (possibly changed).
         """
-        n = self.world._high_water
-        if n == 0 or self.compact_interval <= 0:
+        w = self.world
+        n = w._high_water
+        pending = self._dead_reserve_check_pending
+        self._dead_reserve_check_pending = False
+        if n == 0:
             return n
 
-        if self._frame_counter % self.compact_interval != 0:
+        interval_due = (self.compact_interval > 0
+                        and self._frame_counter % self.compact_interval == 0)
+        if not (interval_due or pending):
+            return n
+
+        reserve = w.dead_reserve if w.needs_dead_reserve else 0
+        if not interval_due and reserve == 0:
             return n
 
         # Count dead particles = _high_water - num_active. This is the only
         # per-frame caller of num_active, and it runs only once every
-        # compact_interval frames (gated above), so the ~1 Hz sync is fine.
-        num_alive = self.world.num_active
+        # compact_interval frames (gated above) or once after a scene change,
+        # so the ~1 Hz sync is fine.
+        num_alive = w.num_active
         num_dead = n - num_alive
-        if num_dead < self.compact_threshold:
-            return n
+        changed = False
 
-        # Reuse the count we already paid for so compact() does not sync again.
-        self.world.compact(num_alive=num_alive)
-        # After compaction, n changed — force full sort next time
-        self._sort_skip_next = False
-        self._sort_skip_consecutive = 0
-        return self.world._high_water
+        if reserve > 0:
+            # Keep the reserve: compacting it away would empty the freelist.
+            compact_due = num_dead > reserve + self.compact_threshold
+        else:
+            compact_due = num_dead >= self.compact_threshold
+        if interval_due and compact_due:
+            # Reuse the count we already paid for so compact() does not sync again.
+            w.compact(num_alive=num_alive)
+            num_dead = 0
+            changed = True
+
+        if num_dead < reserve:
+            if w.add_dead_reserve(reserve - num_dead, spacing=self._h) > 0:
+                changed = True
+
+        if changed:
+            # n changed: force a full sort next time
+            self.notify_scene_changed()
+            self._dead_reserve_check_pending = False
+        return w._high_water
 
     def copy_to_vbos(self, cuda_pos, cuda_col, cuda_vel=None) -> None:
         """Copy UNSORTED pos/color/velocity arrays into mapped GL VBOs.
