@@ -1224,6 +1224,13 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   (FLUID 0.0, GRANULAR 0.25, GAS 0.5, STATIC 0.75). The dead vertices are
   still fetched, so they cost vertex work but no fragment work.
   (bd-r5-review-n28.60)
+- **Color outside a substep.** The World spawn paths and `K_SpawnGas` write
+  the behavior code into `color.w` at spawn. Save files and undo snapshots
+  hold no color, so `load_scene` and `SnapshotRing.restore` call
+  `World.refresh_color(n)`: one GPU gather that writes each slot's base
+  material color and `behavior * 0.25` (DEAD `(0, 0, 0, -1)`). Heat glow
+  comes back on the next substep. A paused scene therefore shows the right
+  colors right after spawn, load or undo. (bd-r5-review-n28.63)
 
 **Source**: `reactions.cu:K_Reactions`, `sph_shared.cuh:static_particle_boundary`,
 `sph_shared.cuh:compute_color`, `shaders/particle.vert`,
