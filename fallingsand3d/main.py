@@ -302,6 +302,10 @@ def main():
                 sim.notify_scene_changed()  # spawner grew particle set (CRIT-5)
 
         # --- Simulation substeps ---
+        # Objects panel edits (add, remove, Pos slider) only mark the SDF
+        # manager dirty. Push them to constant memory before the kernels run,
+        # so collision follows the drawn mesh. No-op when nothing changed.
+        sim.sdf_manager.upload_if_dirty()
         substeps = sim.step_frame()
 
         # --- Snapshot tick (auto-capture every N frames) ---

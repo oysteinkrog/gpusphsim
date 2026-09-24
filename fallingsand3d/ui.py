@@ -436,6 +436,8 @@ class UI:
         if action == glfw.RELEASE:
             if button == glfw.MOUSE_BUTTON_LEFT and self._dragging_sdf:
                 self._dragging_sdf = False
+                # The frame loop in main.py also uploads dirty SDF objects
+                # before each step; this makes the release take effect at once.
                 if self._sdf_manager_ref is not None:
                     self._sdf_manager_ref.upload_if_dirty()
             if self._user_mouse_button_cb:
