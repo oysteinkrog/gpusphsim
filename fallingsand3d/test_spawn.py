@@ -4,7 +4,7 @@ Acceptance criteria:
   - GPU freelist: dead_indices (uint32, max_particles) and dead_count (uint32)
   - Reactions kernel populates freelist when particles die
   - K_SpawnGas: for particles with HAS_SPAWN_FLAG, atomicSub N slots to claim
-  - Spawned particles: mass = original/N, T=373K, vel += (0,2,0), lifetime=5.0s
+  - Spawned particles: mass = original/N, T=373K, vel += (0,2,0), lifetime=12.0s
   - Source water particle marked DEAD (material_id=0) and added to freelist
   - Spawned particles get packed_info = MAKE_PACKED(STEAM, GAS)
   - Clear SPAWN_GAS flag after processing
@@ -225,8 +225,8 @@ def test_water_spawns_steam():
         assert abs(vel[idx, 1] - 2.0) < 1e-5, f"Particle {idx}: vy={vel[idx,1]}, expected 2.0"
         assert abs(vel[idx, 2] - 0.0) < 0.1 + 1e-5, f"Particle {idx}: vz={vel[idx,2]}, expected 0.0 +- 0.1"
 
-        # Lifetime should be 5.0s
-        assert abs(lt[idx] - 5.0) < 0.01, f"Particle {idx}: lifetime={lt[idx]}, expected 5.0"
+        # Lifetime should be 12.0s (bd-r5-review-n28.95)
+        assert abs(lt[idx] - 12.0) < 0.01, f"Particle {idx}: lifetime={lt[idx]}, expected 12.0"
 
         # Health should be 1.0
         assert abs(health[idx] - 1.0) < 0.01, f"Particle {idx}: health={health[idx]}, expected 1.0"
