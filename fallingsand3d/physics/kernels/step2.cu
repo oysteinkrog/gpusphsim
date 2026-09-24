@@ -201,6 +201,8 @@ void K_Step2(
     float fs_i = is_granular_i ? 1.0f : c_granular.force_scale;
     float inv_fs_i = 1.0f / fmaxf(fs_i, 1e-6f);
     float cross_p_rescale = fminf(c_granular.force_scale, 1.0f) * inv_fs_i;
+    // Own mass, used for the rigid-body reaction force (loop-invariant).
+    float m_i = __ldg(&mass[index_i]);
 
     // --- Grid cell of particle i ---
     int3 cell_i = calcGridCell(make_float3(pos_i.x, pos_i.y, pos_i.z));
@@ -316,7 +318,9 @@ void K_Step2(
                             // The mass slot holds RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
                             float rho0 = c_materials[mat_id_i].rest_density;
                             float psi_b = m_j * __fdiv_rn(rho0, RIGID_PSI_RHO0);
-                            float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0 * rho0));
+                            // Same pressure mirror as a regular STATIC wall,
+                            // 2 p_i / rho_i^2 (bd-r5-review-n28.106).
+                            float press_akinci = 2.0f * (p_i / (rho_i * rho_i));
                             float3 F_on_fluid = make_float3(
                                 psi_b * press_akinci * grad_s.x,
                                 psi_b * press_akinci * grad_s.y,
@@ -381,7 +385,6 @@ void K_Step2(
                             // Must multiply by fluid particle mass to convert accel -> force.
                             float pp = c_precalc.pressure_precalc;
                             float fs = is_granular_i ? 1.0f : c_granular.force_scale;
-                            float m_i = __ldg(&mass[index_i]);
                             float3 a_on_fluid = make_float3(
                                 (pp * F_on_fluid.x + F_visc_now.x) * fs,
                                 (pp * F_on_fluid.y + F_visc_now.y) * fs,
@@ -554,7 +557,7 @@ void K_Step2(
     f_viscosity.z = f_viscosity.z * visc_s + f_visc_explicit.z;
     if (rb_pend >= 0) {
         // Deferred viscous reaction on the first rigid body, same scale.
-        float k_rb = -__ldg(&mass[index_i]) * fs_i * visc_s;
+        float k_rb = -m_i * fs_i * visc_s;
         warp_reduce_accumulate(d_rigid_forces,
             make_float3(k_rb * rb_fv.x, k_rb * rb_fv.y, k_rb * rb_fv.z), rb_pend);
         warp_reduce_accumulate(d_rigid_torques,
