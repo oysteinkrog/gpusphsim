@@ -477,7 +477,13 @@ if |v| > 0.02:
 
 Hysteresis: 4x ratio between sleep (0.005) and wake (0.02) velocity thresholds.
 
-**Source**: `integrate.cu:54-59, 280-302, 407-418`
+Wake propagation (`wake.run_wake_propagation`, a memset and 2 kernels on the
+unsorted arrays) runs at the end of every substep for all three solvers. Until
+2026-07-11 it ran only for WCSPH, so a sleeping PBF or DFSPH pile never woke
+when something hit it.
+
+**Source**: `integrate.cu:54-59, 280-302, 407-418`, `wake.cu`, `simulation.py`
+(`_run_wcsph_body`, `_run_pbf_body`, `_run_dfsph_body`)
 
 ---
 
@@ -923,6 +929,64 @@ were changed to `fmaxf(rho_j, RHO_EPSILON)` for consistency with GAS densities.
 **Source**: `sph_shared.cuh` (RHO_EPSILON), `step1.cu`, `step2.cu`,
 `dfsph_solver.cu`, `pbf_solver.cu`, `implicit_st.cu`
 
+### 10.17b FIXED: Round-4 review fixes (2026-07-11, branch fix/review-2026-07-11)
+
+Each item names its bead (`bd-r4fix-uup.N`).
+
+- **Akinci rigid-boundary pressure sign (.1).** DFSPH and PBF used `grad_spiky`
+  (which bakes in the negative coefficient `-45/(pi h^6)`) with a `+` sign, so the
+  fluid pulled on rigid bodies instead of pushing. Both now use the step2.cu form:
+  `grad_spiky_variable` times the positive `pressure_precalc`. The magnitude is
+  unchanged; only the sign flips. In DFSPH and PBF this term feeds only the
+  reaction force on the body.
+- **Per-particle mass in rigid coupling (.4).** Three coupling sites used
+  `c_sim.particle_mass` instead of the particle's own mass.
+- **Reaction state carried back to unsorted arrays (.9).** Reactions and spawn
+  edit `health`, `lifetime` and `mass` in sorted space. The next substep's
+  gather re-read the unsorted copies, so every edit was lost: fire never burned
+  out, acid never killed, and gas-spawn mass transfer did nothing. `K_Integrate`,
+  `K_PBF_Finalize` and `K_DFSPH_Finalize` now scatter all three back.
+- **Rigid-body angular acceleration (.10).** The world-frame inverse inertia is
+  `R diag(I_body_inv) R^T`. The kernel applied `R diag(I_body_inv)` and dropped
+  `R^T`, which gave wrong spin for any rotated body that is not a cube. It now
+  computes `R * (diag(I_body_inv) * (R^T * tau))`.
+- **Solver grid constants (.11).** PBF and DFSPH modules got grid constants
+  built separately from the ones WCSPH uses, and `set_world_size` did not
+  re-upload them. All solvers now share one cached `GridParams`.
+- **Stale sort permutation (.12).** Grid reuse re-gathers through the last sort
+  permutation, which is only valid for the particle count that built it. A full
+  sort is now forced whenever `n` changes and on every scene change (brush,
+  spawner, reset, preset, undo, load).
+- **Density buffer lifecycle (.14).** The density kernels read neighbor density
+  (`density_in`, used as `m_j / rho_j` weighting in heat, strain rate,
+  vorticity and normals) from the same buffer they wrote (`density_out`). That
+  was a `__restrict__` read/write race, the buffer was not re-ordered by the
+  sort, and the first substep read zeros, giving `m_j / 0`. Now:
+  - `density_in` is a separate buffer, `sorted_density_prev`.
+  - WCSPH fills it from `position.w`, which holds the previous density and is
+    re-ordered with the position, so the values match the current sort order.
+  - PBF and DFSPH fill it from `sorted_density`. This removes the race, but the
+    values are still in the previous sort order after a full re-sort. The
+    effect is bounded noise in the weighting, not a blow-up.
+  - All five read sites replace a value `<= 0` with 1000, so a never-computed
+    or freshly spawned slot cannot produce `inf`.
+- **Wake for PBF/DFSPH, foam seed, spawn freelist (.15).** See §8.2 and §19.3.
+  The spawn freelist is reset every substep because it stores sorted indices.
+  `K_Reactions` used to add only particles that died in that substep, so dead
+  slots that were not claimed at once were lost for good, and boiling water
+  almost never found a slot for steam. It now adds every DEAD particle each
+  substep. `K_SpawnGas` claims its slots all at once with one `atomicSub`, so a
+  partial claim can no longer corrupt the stack (.8).
+- **Blast wave fires once (.8).** The trigger window around
+  `GUNPOWDER_FIRE_LIFETIME` is now `±0.5*dt`, one substep. It was `±0.01`,
+  about 10 substeps at `dt = 0.001`.
+- **Gravity kept on resize (.15).** `set_world_size` rebuilt the sim constants
+  with gravity `(0,-4,0)` and dropped the user's setting.
+
+**Still open:** the vorticity confinement sign (§16) needs a visual A/B test
+before any change. Step1 adds up `-curl(v)`, which may damp swirl instead of
+amplifying it.
+
 ### 10.18 Rigid Body System Limitations
 
 - **Bounding sphere collisions only**: Body-body and body-SDF collision uses bounding sphere (max of half_extents), not true shape. Elongated bodies leave gaps at corners.
@@ -1107,6 +1171,11 @@ activity = length(v_new)
 sleep_counter = (activity < threshold) ? sleep_counter + 1 : 0
 ```
 
+Only GRANULAR particles can sleep, matching WCSPH in `integrate.cu`. FLUID and
+GAS reset their counter every substep. Before 2026-07-11 the PBF sleep block had
+no behavior gate, so smoke froze mid-air and patches of a still water surface
+froze.
+
 **Source**: `pbf_solver.cu:K_PBF_Finalize`
 
 ### 12.7 Drucker-Prager Friction for GRANULAR (PBF)
@@ -1147,13 +1216,13 @@ decomposed along the pressure normal:
 n = pressure_normal.xyz         (unit normal from ComputeLambda, points into pile)
 v_dot_n = dot(v_new, n)
 
-// Only apply friction when compressing (v_dot_n > 0).
-// Separating particles (v_dot_n <= 0) are in tension -- no friction.
-if v_dot_n > 0:
-    v_n = v_dot_n * n           (normal component: into pile)
+// n points INTO the pile and the PBF corrections push OUT, so a load-bearing
+// (compressed) particle has v_dot_n < 0.  Separating particles skip friction.
+if v_dot_n < 0:
+    v_n = v_dot_n * n           (normal component)
     v_t = v_new - v_n           (tangential component: sliding)
 
-    max_tang = tan(phi_f) * v_dot_n + cohesion / dt
+    max_tang = tan(phi_f) * |v_dot_n| + cohesion / dt
 
     if |v_t| > max_tang:
         v_t = v_t * (max_tang / |v_t|)
@@ -1161,9 +1230,15 @@ if v_dot_n > 0:
     v_new = v_n + v_t
 ```
 
-The expansion guard (`v_dot_n > 0` check) prevents friction from freezing
-particles during free flight or avalanche separation. Without it, `fabsf(v_dot_n)`
-would apply friction symmetrically, zeroing tangential velocity on expansion.
+The sign gate stops friction from freezing particles during free flight or
+avalanche separation. Until 2026-07-11 the gate was `v_dot_n > 0`, which is the
+separating case for this normal direction, so friction almost never fired and
+`tan_phi_f` and `cohesion` had no effect in PBF.
+
+Particles with no usable density gradient get the fallback normal `(0,0,0)`.
+That fails the `n_len_sq > 0.5` validity check, so they skip friction. The old
+fallback `(0,1,0)` passed the check and split velocity against an invented
+up-normal.
 
 #### 12.7.3 Parameters
 
@@ -1702,6 +1777,11 @@ Type selection:
 - SPRAY: `v_y > 0.5` and `speed > 1.0` (fast upward motion)
 - FOAM: `neighbor_count < 15` (surface particle with few neighbors)
 - BUBBLE: otherwise (near-surface interior)
+
+The RNG seed is `Simulation._substep_counter`, which is unique per substep.
+Foam generation runs every substep, and the old seed (`_frame_counter`) repeated
+across all substeps of a frame, so each frame produced correlated, duplicated
+foam at a multiple of the intended rate.
 
 Spawn position: parent position + random jitter (±0.01).
 Spawn velocity: parent velocity × scale (1.2 for spray, 0.5 for others).

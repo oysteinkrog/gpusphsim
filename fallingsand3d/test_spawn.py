@@ -732,15 +732,18 @@ def test_end_to_end_boil_spawn():
     arrays["temperature"][0] = 400.0
     arrays["velocity"][0] = cupy.array([0.5, 0.0, -0.5, 0.0], dtype=cupy.float32)
 
-    # Pre-dead particles at scattered indices 5, 12, 18
+    # Every other slot is a live, non-reactive particle (packed_info 0 would
+    # mean DEAD).  Only indices 5, 12, 18 are dead.
+    for idx in range(1, n):
+        arrays["packed_info"][idx] = MAKE_PACKED(STONE, STATIC)
     for idx in [5, 12, 18]:
         arrays["packed_info"][idx] = MAKE_PACKED(DEAD, STATIC)
 
+    # Empty freelist, as after spawn.reset_freelist() in the real substep.
+    # Reactions must rebuild it from every DEAD slot, including ones that died
+    # in earlier substeps (bd-r4fix-uup.15).
     dead_indices, dead_count = allocate_freelist(n)
-    dead_indices[0] = 5
-    dead_indices[1] = 12
-    dead_indices[2] = 18
-    dead_count[0] = 3
+    dead_count[0] = 0
 
     # Exposure arrays (empty -- boiling is temperature-based, not exposure-based)
     exp_heat = cupy.zeros(n, dtype=cupy.float32)

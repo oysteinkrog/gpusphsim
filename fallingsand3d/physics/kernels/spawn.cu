@@ -43,13 +43,15 @@
  * K_SpawnGas kernel
  *
  * For each particle with HAS_SPAWN_FLAG set:
- *   1. atomicSub(&dead_count, N) to claim N freelist slots
- *   2. If result >= 0, read dead_indices to get target slots
+ *   1. Single atomicSub(&dead_count, N) to claim N freelist slots
+ *      (all-or-nothing; no partial claims)
+ *   2. If old value >= N, read dead_indices at the N claimed positions
  *   3. Write spawned steam particles to those slots
- *   4. Mark source water particle as DEAD and add it to freelist
+ *   4. Mark source water particle as DEAD
  *   5. Clear SPAWN_GAS flag
  *
- * If freelist is exhausted (atomicSub result < 0), restore count and skip.
+ * If the freelist has fewer than N entries, restore the subtracted N
+ * and skip (the water particle stays liquid; retried next substep).
  * ====================================================================== */
 
 extern "C" __global__
@@ -83,39 +85,35 @@ void K_SpawnGas(
     // Clear the flag regardless of whether spawn succeeds
     pi = CLEAR_SPAWN_FLAG(pi);
 
-    // Claim N slots from the freelist one at a time via atomicSub.
-    // Each atomicSub is safe because we check the RETURNED old value:
-    //   - If old_val > 0: we successfully claimed slot at index old_val-1.
-    //   - If old_val <= 0: dead_count was 0, the decrement would wrap uint32
-    //     to 0xFFFFFFFF; we detect this, restore with atomicAdd, and bail.
+    // Claim all SPAWN_N slots with a single all-or-nothing atomicSub.
+    // If the returned old value is >= SPAWN_N, this thread exclusively owns
+    // stack positions [old-SPAWN_N, old-1] and reads its slot indices from
+    // them. If old < SPAWN_N there were not enough entries: restore exactly
+    // what we subtracted and bail.
     //
-    // This avoids the underflow bug where dead_count == 0 and a racing
-    // atomicSub would transiently wrap it to 0xFFFFFFFF, potentially
-    // letting subsequent threads read dead_indices out of bounds.
-    // The pre-check (old_val > 0, not == 0) catches the race: even if two
-    // threads both see dead_count == 1 and both sub, one gets old_val == 1
-    // (ok) and the other gets old_val == 0 (detected, restored immediately).
+    // Why all-or-nothing: a previous version popped slots one at a time and,
+    // on partial success, "restored" the stack with a count-only
+    // atomicAdd(dead_count, n_claimed). That raised the count over positions
+    // whose entries had already been consumed by other racing spawners (or
+    // over positions that never held valid entries), so two spawners could
+    // be handed the same dead slot. A failed single-sub claim never consumes
+    // entries, so the count always stays <= the number of valid (unclaimed)
+    // entries below it.
+    //
+    // dead_count may transiently wrap negative (as int) while several
+    // threads race a nearly-empty freelist; each failing thread adds back
+    // exactly SPAWN_N, so the modular arithmetic always rebalances.
     uint claimed_slots[SPAWN_N];
-    int n_claimed = 0;
-
-    for (int k = 0; k < SPAWN_N; k++) {
-        int old_val = (int)atomicSub(dead_count, 1u);
-        if (old_val <= 0) {
-            // dead_count was 0 (or already wrapped) -- restore and stop
-            atomicAdd(dead_count, 1u);
-            break;
-        }
-        claimed_slots[k] = dead_indices[old_val - 1];
-        n_claimed++;
-    }
-
-    if (n_claimed < SPAWN_N) {
-        // Restore any slots we successfully claimed before running short
-        if (n_claimed > 0) {
-            atomicAdd(dead_count, (uint)n_claimed);
-        }
+    int old_val = (int)atomicSub(dead_count, (uint)SPAWN_N);
+    if (old_val < SPAWN_N) {
+        // Not enough free slots -- restore and skip. The flag was cleared,
+        // but Reactions re-sets it next substep while the water stays hot.
+        atomicAdd(dead_count, (uint)SPAWN_N);
         packed_info[i] = pi;
         return;
+    }
+    for (int k = 0; k < SPAWN_N; k++) {
+        claimed_slots[k] = dead_indices[old_val - SPAWN_N + k];
     }
 
     // All N slots claimed successfully

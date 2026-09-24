@@ -22,7 +22,7 @@ from OpenGL.GL import (
     glGenVertexArrays, glBindVertexArray, glGenBuffers, glBindBuffer,
     glBufferData, glBufferSubData, glEnableVertexAttribArray, glVertexAttribPointer,
     glDrawArrays, glEnable, glDisable, glDeleteBuffers, glDeleteVertexArrays,
-    glDeleteProgram, glDepthFunc, glDepthMask, glBlendFunc, glClear,
+    glDeleteProgram, glDepthFunc, glDepthMask, glColorMask, glBlendFunc, glClear,
     glGenFramebuffers, glBindFramebuffer, glFramebufferTexture2D,
     glCheckFramebufferStatus, glDeleteFramebuffers,
     glGenTextures, glBindTexture, glTexImage2D, glTexParameteri,
@@ -51,79 +51,8 @@ from OpenGL.GL import (
 from OpenGL.GL import shaders as _gl_shaders  # noqa: F401
 
 from gl_cuda_interop import CudaGLBuffer
-import math as _math
 
 _FLOAT4_BYTES = 4 * 4
-
-
-# ---------------------------------------------------------------------------
-# SDF Object mesh generation (unit primitives with normals)
-# ---------------------------------------------------------------------------
-
-def _generate_box_mesh() -> np.ndarray:
-    """Unit box (+-0.5), 36 verts with normals. Returns (36, 6) float32."""
-    faces = [
-        ((0.5,-0.5,-0.5),(0.5,0.5,-0.5),(0.5,0.5,0.5),(0.5,-0.5,-0.5),(0.5,0.5,0.5),(0.5,-0.5,0.5),(1,0,0)),
-        ((-0.5,-0.5,0.5),(-0.5,0.5,0.5),(-0.5,0.5,-0.5),(-0.5,-0.5,0.5),(-0.5,0.5,-0.5),(-0.5,-0.5,-0.5),(-1,0,0)),
-        ((-0.5,0.5,-0.5),(0.5,0.5,-0.5),(0.5,0.5,0.5),(-0.5,0.5,-0.5),(0.5,0.5,0.5),(-0.5,0.5,0.5),(0,1,0)),
-        ((-0.5,-0.5,0.5),(-0.5,-0.5,-0.5),(0.5,-0.5,-0.5),(-0.5,-0.5,0.5),(0.5,-0.5,-0.5),(0.5,-0.5,0.5),(0,-1,0)),
-        ((-0.5,-0.5,0.5),(0.5,-0.5,0.5),(0.5,0.5,0.5),(-0.5,-0.5,0.5),(0.5,0.5,0.5),(-0.5,0.5,0.5),(0,0,1)),
-        ((0.5,-0.5,-0.5),(-0.5,-0.5,-0.5),(-0.5,0.5,-0.5),(0.5,-0.5,-0.5),(-0.5,0.5,-0.5),(0.5,0.5,-0.5),(0,0,-1)),
-    ]
-    verts = []
-    for face in faces:
-        *tri_verts, normal = face
-        for v in tri_verts:
-            verts.append((*v, *normal))
-    return np.array(verts, dtype=np.float32)
-
-
-def _generate_sphere_mesh(stacks: int = 16, slices: int = 16) -> np.ndarray:
-    """Unit sphere triangle mesh with normals. Returns (N, 6) float32."""
-    verts = []
-    for i in range(stacks):
-        t0 = _math.pi * i / stacks
-        t1 = _math.pi * (i + 1) / stacks
-        for j in range(slices):
-            p0 = 2 * _math.pi * j / slices
-            p1 = 2 * _math.pi * (j + 1) / slices
-            v00 = (_math.sin(t0)*_math.cos(p0), _math.cos(t0), _math.sin(t0)*_math.sin(p0))
-            v10 = (_math.sin(t1)*_math.cos(p0), _math.cos(t1), _math.sin(t1)*_math.sin(p0))
-            v01 = (_math.sin(t0)*_math.cos(p1), _math.cos(t0), _math.sin(t0)*_math.sin(p1))
-            v11 = (_math.sin(t1)*_math.cos(p1), _math.cos(t1), _math.sin(t1)*_math.sin(p1))
-            for tri in [(v00,v10,v11),(v00,v11,v01)]:
-                for v in tri:
-                    verts.append((*v, *v))
-    return np.array(verts, dtype=np.float32)
-
-
-def _generate_cylinder_mesh(segments: int = 16) -> np.ndarray:
-    """Unit cylinder (r=0.5, h=1) with normals. Returns (N, 6) float32."""
-    verts = []
-    r, h = 0.5, 0.5
-    for i in range(segments):
-        a0 = 2*_math.pi*i/segments; a1 = 2*_math.pi*(i+1)/segments
-        c0, s0, c1, s1 = _math.cos(a0), _math.sin(a0), _math.cos(a1), _math.sin(a1)
-        # Side
-        for v in [(r*c0,-h,r*s0,c0,0,s0),(r*c0,h,r*s0,c0,0,s0),(r*c1,h,r*s1,c1,0,s1),
-                   (r*c0,-h,r*s0,c0,0,s0),(r*c1,h,r*s1,c1,0,s1),(r*c1,-h,r*s1,c1,0,s1)]:
-            verts.append(v)
-        # Top cap
-        for v in [(0,h,0,0,1,0),(r*c0,h,r*s0,0,1,0),(r*c1,h,r*s1,0,1,0)]:
-            verts.append(v)
-        # Bottom cap
-        for v in [(0,-h,0,0,-1,0),(r*c1,-h,r*s1,0,-1,0),(r*c0,-h,r*s0,0,-1,0)]:
-            verts.append(v)
-    return np.array(verts, dtype=np.float32)
-
-
-def _generate_plane_mesh(size: float = 10.0) -> np.ndarray:
-    """Large XZ quad (normal +Y). Returns (6, 6) float32."""
-    s = size * 0.5
-    return np.array([
-        (-s,0,-s,0,1,0),(s,0,-s,0,1,0),(s,0,s,0,1,0),
-        (-s,0,-s,0,1,0),(s,0,s,0,1,0),(-s,0,s,0,1,0),
-    ], dtype=np.float32)
 
 
 def _quat_to_mat4(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
@@ -1226,7 +1155,7 @@ void main() {
             S[0,0] = S[1,1] = S[2,2] = size[0]
         elif sdf_type == 2:  # CYLINDER: radius for XZ, half_height for Y
             S[0,0] = size[0]  # radius
-            S[1,1] = size[2]  # half_height (stored in size.z)
+            S[1,1] = size[1]  # half_height (size.y, matching sdf_cylinder in sph_shared.cuh)
             S[2,2] = size[0]  # radius
         elif sdf_type == 3:  # PLANE: large flat quad
             S[0,0] = S[2,2] = 5.0  # 10m across

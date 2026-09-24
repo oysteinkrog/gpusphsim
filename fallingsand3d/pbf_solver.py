@@ -298,6 +298,10 @@ def pbf_finalize(
     d_rigid_bodies: "cupy.ndarray | None" = None,
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
+    sorted_lifetime: "cupy.ndarray | None" = None,
+    health_out: "cupy.ndarray | None" = None,
+    lifetime_out: "cupy.ndarray | None" = None,
+    mass_out: "cupy.ndarray | None" = None,
     max_displacement: "cupy.ndarray | None" = None,
 ) -> None:
     n = predicted_pos.shape[0]
@@ -320,6 +324,11 @@ def pbf_finalize(
     rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
     rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null_f
     rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null_f
+    # Reaction-state carry-back (bd-r4fix-uup.9): kernel guards reads/writes on null
+    s_lifetime_ptr = sorted_lifetime if sorted_lifetime is not None else _null
+    health_out_ptr = health_out if health_out is not None else np.intp(0)
+    lifetime_out_ptr = lifetime_out if lifetime_out is not None else np.intp(0)
+    mass_out_ptr = mass_out if mass_out is not None else np.intp(0)
     max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
     module = _get_module()
     kernel = module.get_function("K_PBF_Finalize")
@@ -336,5 +345,6 @@ def pbf_finalize(
         vort_in, norm_in, pn_in,
         s_lambda, lambda_out,
         rb_ptr, rf_ptr, rt_ptr,
+        s_lifetime_ptr, health_out_ptr, lifetime_out_ptr, mass_out_ptr,
         max_disp_ptr,
     ))

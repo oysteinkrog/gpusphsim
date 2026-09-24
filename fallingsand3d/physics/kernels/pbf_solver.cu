@@ -288,6 +288,7 @@ void K_PBF_ComputeLambda(
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         if (do_heat && mat_id_j != MAT_RIGID) {
                             float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                            if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                             float T_j = __ldg(&temperature_in[j]);
 
                             float lap_var = h - rlen;
@@ -311,6 +312,7 @@ void K_PBF_ComputeLambda(
                         // Vorticity + surface normal (FLUID only, skip MAT_RIGID)
                         if ((do_vort || do_normal) && mat_id_j != MAT_RIGID) {
                             float rho_j_v = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                            if (rho_j_v <= 0.0f) rho_j_v = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
                             float vol_jv = m_j / fmaxf(rho_j_v, 1.0f);
                             if (do_vort) {
                                 float4 vj4 = __ldg(&velocity_in[j]);
@@ -373,8 +375,11 @@ void K_PBF_ComputeLambda(
             float inv = 1.0f / grad_len;
             pressure_normal_out[i] = make_float4(grad_ci.x*inv, grad_ci.y*inv, grad_ci.z*inv, grad_len);
         } else {
-            // Fallback to gravity direction when no gradient available
-            pressure_normal_out[i] = make_float4(0.0f, 1.0f, 0.0f, 0.0f);
+            // No usable gradient: emit zero normal so the n_len_sq > 0.5f
+            // validity check in Finalize fails and friction is skipped.
+            // (A fabricated up-normal here would apply friction against a
+            // fictitious contact for free-falling/isolated particles.)
+            pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
     } else {
         pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -606,6 +611,10 @@ void K_PBF_Finalize(
     const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,     // force accumulator (NULL if no bodies)
     float*          __restrict__ d_rigid_torques,    // torque accumulator (NULL if no bodies)
+    const float*    __restrict__ sorted_lifetime,    // reaction-mutated lifetime (sorted), or NULL
+    float*          __restrict__ health_out,         // unsorted health writeback, or NULL
+    float*          __restrict__ lifetime_out,       // unsorted lifetime writeback, or NULL
+    float*          __restrict__ mass_out,           // unsorted mass writeback, or NULL
     uint*           __restrict__ max_displacement_out // [1] atomicMax of displacement^2 (float-as-uint), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -615,6 +624,16 @@ void K_PBF_Finalize(
     int behavior = GET_BEHAVIOR(pi);
     uint mat_id = GET_MATERIAL_ID(pi);
     uint orig_idx = sort_indexes[i];
+
+    // Reaction-state carry-back (bd-r4fix-uup.9): K_Reactions/K_SpawnGas mutate
+    // health/lifetime/mass in SORTED space every substep; scatter them back to
+    // the unsorted arrays or the next substep re-gathers stale values (wiping
+    // fire lifetime decay, acid health loss, gas-spawn mass transfer). None of
+    // these are modified below, so an early unconditional scatter is correct
+    // and also covers the STATIC/sleeping early-return paths.
+    if (health_out)                      health_out[orig_idx]   = health_in[i];
+    if (lifetime_out && sorted_lifetime) lifetime_out[orig_idx] = __ldg(&sorted_lifetime[i]);
+    if (mass_out)                        mass_out[orig_idx]     = mass[i];
 
     float temp = temperature_in[i];
     float hlth = health_in[i];
@@ -714,18 +733,23 @@ void K_PBF_Finalize(
         float n_len_sq = n.x*n.x + n.y*n.y + n.z*n.z;
 
         if (n_len_sq > 0.5f) {  // valid unit normal
-            // Decompose correction velocity along pressure normal
+            // Decompose correction velocity along pressure normal.
+            // n points INTO the pile (direction of increasing density); the PBF
+            // constraint pushes over-dense particles OUT of the pile, so the
+            // load-bearing normal correction has vc_dot_n < 0. Its magnitude is
+            // the Coulomb normal load that bounds the tangential correction.
             float vc_dot_n = v_corr.x*n.x + v_corr.y*n.y + v_corr.z*n.z;
 
-            if (vc_dot_n > 0.0f) {
+            if (vc_dot_n < 0.0f) {
+                float vn_mag = -vc_dot_n;  // normal correction magnitude (> 0)
                 float3 vc_n = make_float3(vc_dot_n*n.x, vc_dot_n*n.y, vc_dot_n*n.z);
                 float3 vc_t = make_float3(v_corr.x - vc_n.x, v_corr.y - vc_n.y, v_corr.z - vc_n.z);
 
                 float tang_sq = vc_t.x*vc_t.x + vc_t.y*vc_t.y + vc_t.z*vc_t.z;
 
                 // Static friction dead zone: below minimum normal velocity, zero tangential
-                float max_tang = (vc_dot_n < 5e-4f) ? 0.0f
-                               : c_granular.tan_phi_f * vc_dot_n + c_granular.cohesion * inv_dt;
+                float max_tang = (vn_mag < 5e-4f) ? 0.0f
+                               : c_granular.tan_phi_f * vn_mag + c_granular.cohesion * inv_dt;
 
                 if (tang_sq > max_tang * max_tang) {
                     if (max_tang > 0.0f && tang_sq > 1e-12f) {
@@ -825,14 +849,20 @@ void K_PBF_Finalize(
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             if (mat_id_j == MAT_RIGID) {
                                 float rlen = sqrtf(r_sq);
-                                float3 gW = grad_spiky(r, rlen, h);
+                                // step2.cu Akinci convention: grad_spiky_variable (no baked
+                                // coefficient) times POSITIVE pressure_precalc, so F_on_fluid
+                                // points along +r = away from the boundary (repulsive).
+                                // grad_spiky's baked-in NEGATIVE spiky_grad_coeff would flip
+                                // the sign and push fluid INTO the boundary.
+                                float3 gW = grad_spiky_variable(r, rlen, h);
+                                float pp = c_precalc.pressure_precalc;
                                 float psi_b = m_j;
                                 float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
-                                float m_i_val = c_sim.particle_mass;
+                                float m_i_val = __ldg(&mass[i]);
                                 float3 F_on_fluid = make_float3(
-                                    m_i_val * psi_b * press_akinci * gW.x,
-                                    m_i_val * psi_b * press_akinci * gW.y,
-                                    m_i_val * psi_b * press_akinci * gW.z
+                                    m_i_val * psi_b * press_akinci * pp * gW.x,
+                                    m_i_val * psi_b * press_akinci * pp * gW.y,
+                                    m_i_val * psi_b * press_akinci * pp * gW.z
                                 );
                                 int body_id = GET_BODY_ID(pi_j);
                                 float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
@@ -1001,8 +1031,9 @@ void K_PBF_Finalize(
     }
 
     // GRANULAR anti-creep: zero velocity when nearly at rest and well-packed.
-    // Higher threshold than WCSPH (0.05 vs 0.01) because PBF position corrections
-    // generate artificial spreading velocity that must be caught here.
+    // Same 0.01 m/s velocity threshold as WCSPH (integrate.cu
+    // GRANULAR_V_THRESHOLD); catches artificial spreading velocity generated
+    // by PBF position corrections.
     if (behavior == GRANULAR) {
         vel_sq = vel_new.x*vel_new.x + vel_new.y*vel_new.y + vel_new.z*vel_new.z;
         if (vel_sq < 0.01f * 0.01f) {
@@ -1017,14 +1048,23 @@ void K_PBF_Finalize(
         }
     }
 
-    // Sleep: velocity-based (replaces shear_rate for PBF)
-    if (vel_sq < V_SLEEP_SQ) {
-        if (sc < 255) sc++;
+    // Sleep: velocity-based (replaces shear_rate for PBF).
+    // GRANULAR only, matching WCSPH (integrate.cu): FLUID and GAS must never
+    // accumulate the sleep counter — sleeping particles get no forces, so a
+    // slow fluid pool (or gas hovering at terminal velocity) would freeze
+    // permanently with no pressure differential left to wake it.
+    if (behavior == GRANULAR) {
+        if (vel_sq < V_SLEEP_SQ) {
+            if (sc < 255) sc++;
+        } else {
+            sc = 0;
+        }
+        if (sc >= SLEEP_THRESHOLD) {
+            pi = SET_SLEEPING(pi);
+        }
     } else {
+        // FLUID/GAS: never accumulate sleep counter (reset if set externally)
         sc = 0;
-    }
-    if (sc >= SLEEP_THRESHOLD) {
-        pi = SET_SLEEPING(pi);
     }
 
     // Temperature integration

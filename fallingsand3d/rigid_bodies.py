@@ -726,6 +726,14 @@ class SDFManager:
         """Remove SDF object by ID and re-pack."""
         if 0 <= obj_id < len(self._objects):
             self._objects.pop(obj_id)
+            # Re-pack motion keys: drop the deleted object's motion and shift
+            # higher-indexed keys down so each motion stays attached to the
+            # same object after the list re-pack above.
+            self._motions = {
+                (k - 1 if k > obj_id else k): v
+                for k, v in self._motions.items()
+                if k != obj_id
+            }
             self._dirty = True
 
     def update_sdf_object(self, obj_id: int, **kwargs) -> None:

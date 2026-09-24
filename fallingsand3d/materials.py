@@ -489,7 +489,7 @@ def _get_module() -> "object":
 
 extern "C" __global__
 void test_read_materials(float* out) {
-    // out[0] = c_materials[5].rest_density   (water -> 1000.0)
+    // out[0] = c_materials[5].rest_density   (water -> 2500.0)
     // out[1] = c_interactions[8][10].reaction_rate  (acid-metal -> 0.3)
     out[0] = c_materials[5].rest_density;
     out[1] = c_interactions[8][10].reaction_rate;

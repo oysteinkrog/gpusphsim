@@ -179,6 +179,7 @@ void K_DFSPH_ComputeDensityAlpha(
                     if (j != i && r_sq > 1e-12f) {
                         float rlen = sqrtf(r_sq);
                         float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                        if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
 
                         // Skip MAT_RIGID for heat/exposure/dye/vorticity/strain
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
@@ -491,7 +492,7 @@ void K_DFSPH_NonPressureForces(
                             // Newton's 3rd law: reaction force on body = -a_visc * m_i
                             //   = -(F_visc / rho_i) * m_i.
                             // Missing the /rho_i would overscale by ~rho_i (~1000-2500x for water).
-                            float m_i = c_sim.particle_mass;
+                            float m_i = __ldg(&mass[i]);
                             float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_on_body = make_float3(
                                 -(F_visc.x * inv_rho) * m_i,
@@ -1547,6 +1548,10 @@ void K_DFSPH_Finalize(
     const RigidBody* __restrict__ d_rigid_bodies,       // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,        // force accumulator (NULL if no bodies)
     float*          __restrict__ d_rigid_torques,       // torque accumulator (NULL if no bodies)
+    const float*    __restrict__ sorted_lifetime,       // reaction-mutated lifetime (sorted), or NULL
+    float*          __restrict__ health_out,            // unsorted health writeback, or NULL
+    float*          __restrict__ lifetime_out,          // unsorted lifetime writeback, or NULL
+    float*          __restrict__ mass_out,              // unsorted mass writeback, or NULL
     uint*           __restrict__ max_displacement_out   // [1] atomicMax of displacement^2 (float-as-uint), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1556,6 +1561,16 @@ void K_DFSPH_Finalize(
     int behavior = GET_BEHAVIOR(pi);
     uint mat_id = GET_MATERIAL_ID(pi);
     uint orig_idx = sort_indexes[i];
+
+    // Reaction-state carry-back (bd-r4fix-uup.9): K_Reactions/K_SpawnGas mutate
+    // health/lifetime/mass in SORTED space every substep; scatter them back to
+    // the unsorted arrays or the next substep re-gathers stale values (wiping
+    // fire lifetime decay, acid health loss, gas-spawn mass transfer). None of
+    // these are modified below, so an early unconditional scatter is correct
+    // and also covers the STATIC/sleeping early-return paths.
+    if (health_out)                      health_out[orig_idx]   = sorted_health[i];
+    if (lifetime_out && sorted_lifetime) lifetime_out[orig_idx] = __ldg(&sorted_lifetime[i]);
+    if (mass_out)                        mass_out[orig_idx]     = sorted_mass[i];
 
     float temp = sorted_temperature[i];
     float hlth = sorted_health[i];
@@ -1653,15 +1668,21 @@ void K_DFSPH_Finalize(
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
                             if (mat_id_j == MAT_RIGID) {
                                 float rlen = sqrtf(r_sq);
-                                float3 gW = grad_spiky(r, rlen, h);
+                                // step2.cu Akinci convention: grad_spiky_variable (no baked
+                                // coefficient) times POSITIVE pressure_precalc, so F_on_fluid
+                                // points along +r = away from the boundary (repulsive).
+                                // grad_spiky's baked-in NEGATIVE spiky_grad_coeff would flip
+                                // the sign and push fluid INTO the boundary.
+                                float3 gW = grad_spiky_variable(r, rlen, h);
+                                float pp = c_precalc.pressure_precalc;
                                 float psi_b = m_j;
                                 float press_akinci = (p_i / (rho_i * rho_i)) + (p_i / (rho0_i * rho0_i));
                                 // Force on fluid from boundary (acceleration * mass)
-                                float m_i = c_sim.particle_mass;
+                                float m_i = __ldg(&sorted_mass[i]);
                                 float3 F_on_fluid = make_float3(
-                                    m_i * psi_b * press_akinci * gW.x,
-                                    m_i * psi_b * press_akinci * gW.y,
-                                    m_i * psi_b * press_akinci * gW.z
+                                    m_i * psi_b * press_akinci * pp * gW.x,
+                                    m_i * psi_b * press_akinci * pp * gW.y,
+                                    m_i * psi_b * press_akinci * pp * gW.z
                                 );
                                 // Newton's 3rd law: reaction on body
                                 int body_id = GET_BODY_ID(pi_j);

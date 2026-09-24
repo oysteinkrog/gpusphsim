@@ -115,8 +115,20 @@ void K_Reactions(
     uint pi = packed_info[i];
     uint mat_id = GET_MATERIAL_ID(pi);
 
-    // Skip DEAD particles
-    if (mat_id == MAT_DEAD) return;
+    // DEAD particles: offer the slot to the spawn freelist, then skip.
+    // The freelist holds sorted indices, which go stale after a re-sort, so it
+    // is reset every substep and must be rebuilt from ALL dead slots here --
+    // not only from particles that die this substep.  Otherwise slots that are
+    // not claimed the substep they die are lost for good and boiling water
+    // almost never finds a slot to spawn steam into (bd-r4fix-uup.15).
+    // Capacity: dead_indices holds max_particles >= numParticles entries.
+    if (mat_id == MAT_DEAD) {
+        if (dead_indices != 0 && dead_count != 0) {
+            uint idx = atomicAdd(dead_count, 1u);
+            dead_indices[idx] = i;
+        }
+        return;
+    }
 
     float temp = temperature[i];
     float hlth = health[i];
@@ -345,8 +357,13 @@ void K_BlastWave(
     // Only process freshly-exploded gunpowder (FIRE with lifetime == GUNPOWDER_FIRE_LIFETIME)
     if (mat_id != MAT_FIRE) return;
     float lt = sorted_lifetime[i];
-    // Accept lifetime close to GUNPOWDER_FIRE_LIFETIME (within 1 dt tolerance)
-    if (lt < GUNPOWDER_FIRE_LIFETIME - 0.01f || lt > GUNPOWDER_FIRE_LIFETIME + 0.01f) return;
+    // Accept lifetime within half a substep of GUNPOWDER_FIRE_LIFETIME so the
+    // blast fires on exactly one substep: the conversion substep leaves
+    // lifetime == GUNPOWDER_FIRE_LIFETIME (Reactions returns before decay),
+    // and every later substep has decayed it by >= dt, outside this window.
+    // (A fixed +-0.01 window spanned ~10 substeps at dt=0.001.)
+    float tol = 0.5f * c_sim.dt;
+    if (lt < GUNPOWDER_FIRE_LIFETIME - tol || lt > GUNPOWDER_FIRE_LIFETIME + tol) return;
 
     float4 pos_i4 = sorted_position[i];
     float3 pos_i = make_float3(pos_i4.x, pos_i4.y, pos_i4.z);

@@ -108,6 +108,7 @@ def integrate(
     sorted_packed_info: cupy.ndarray,
     sorted_temperature: cupy.ndarray,
     sorted_health: cupy.ndarray,
+    sorted_lifetime: "Optional[cupy.ndarray]" = None,
     sorted_density: "Optional[cupy.ndarray]" = None,
     sorted_shear_rate: "Optional[cupy.ndarray]" = None,
     sorted_dTdt: "Optional[cupy.ndarray]" = None,
@@ -125,6 +126,9 @@ def integrate(
     temperature_out: "Optional[cupy.ndarray]" = None,
     particle_dye_out: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
+    health_out: "Optional[cupy.ndarray]" = None,
+    lifetime_out: "Optional[cupy.ndarray]" = None,
+    mass_out: "Optional[cupy.ndarray]" = None,
     max_displacement: "Optional[cupy.ndarray]" = None,
     cell_start: "Optional[cupy.ndarray]" = None,
     cell_end: "Optional[cupy.ndarray]" = None,
@@ -198,6 +202,8 @@ def integrate(
         sorted_vorticity = cupy.zeros((n, 4), dtype=cupy.float32)
     if sorted_angular_velocity is None:
         sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
+    if sorted_lifetime is None:
+        sorted_lifetime = cupy.zeros(n, dtype=cupy.float32)
 
     # Allocate outputs if not provided.
     # sort_indexes is a permutation of [0, n), so max index = n-1 and output
@@ -228,6 +234,11 @@ def integrate(
 
     # Use null pointer (0) when max_displacement not provided
     max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
+    # Reaction-state carry-back outputs: null pointer when not provided
+    # (kernel guards each write with `if (ptr)`).
+    health_out_ptr = health_out if health_out is not None else np.intp(0)
+    lifetime_out_ptr = lifetime_out if lifetime_out is not None else np.intp(0)
+    mass_out_ptr = mass_out if mass_out is not None else np.intp(0)
     # Use null pointer when cell_start/cell_end not provided (disables STATIC repulsion)
     cell_start_ptr = cell_start if cell_start is not None else np.intp(0)
     cell_end_ptr = cell_end if cell_end is not None else np.intp(0)
@@ -245,6 +256,7 @@ def integrate(
             sorted_packed_info,
             sorted_temperature,
             sorted_health,
+            sorted_lifetime,
             sorted_density,
             sorted_shear_rate,
             sorted_dTdt,
@@ -264,6 +276,9 @@ def integrate(
             temperature_out,
             particle_dye_out,
             angular_velocity_out,
+            health_out_ptr,
+            lifetime_out_ptr,
+            mass_out_ptr,
             max_disp_ptr,
         ),
     )

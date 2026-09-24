@@ -145,6 +145,7 @@ def main():
             if snapshots.restore(world):
                 renderer.num_active = world._high_water
                 sim._invalidate_graphs()
+                sim.notify_scene_changed()  # stale sort perm after restore (CRIT-5)
                 sim.reset_spawn_damping()
                 active_spawner = None
                 spawner_frame_counter = 0
@@ -165,6 +166,7 @@ def main():
             renderer.num_active = num_active
             sim.sim_time = 0.0
             sim._last_frame_time = None
+            sim.notify_scene_changed()  # stale sort perm after reset (CRIT-5)
             sim.reset_spawn_damping()  # clear damping ramp so restored particles aren't drag-glitched
             active_spawner = None
             spawner_frame_counter = 0
@@ -243,6 +245,7 @@ def main():
         brush_delta = ui.process_brush_actions(world, camera)
         if brush_delta != 0:
             renderer.num_active = world._high_water
+            sim.notify_scene_changed()  # spawn/kill mutated particle set (CRIT-5)
 
         # --- Periodic spawner (Acid Rain) ---
         if active_spawner is not None and not sim.paused:
@@ -256,6 +259,7 @@ def main():
                     spacing=active_spawner["spacing"],
                 )
                 renderer.num_active = world._high_water
+                sim.notify_scene_changed()  # spawner grew particle set (CRIT-5)
 
         # --- Simulation substeps ---
         substeps = sim.step_frame()
@@ -355,6 +359,7 @@ def main():
             renderer.num_active = world._high_water
             sim.sim_time = 0.0
             sim._last_frame_time = None
+            sim.notify_scene_changed()  # stale sort perm after preset load (CRIT-5)
             sim.reset_spawn_damping()
             snapshots.clear()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
@@ -385,6 +390,7 @@ def main():
         if '_scene_loaded' in ui_changes:
             renderer.num_active = world._high_water
             sim._invalidate_graphs()
+            sim.notify_scene_changed()  # stale sort perm after scene load (CRIT-5)
             sim.reset_spawn_damping()  # clear damping ramp to avoid velocity glitch on first post-load frames
             # bd-r4-epic-x2j.5: reset spawner/foam state on scene load (match preset-load path)
             active_spawner = None

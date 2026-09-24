@@ -323,6 +323,15 @@ class Simulation:
         """Change the world half-extent and re-upload all constants."""
         self._world_half_size = half_size
         self._upload_constants()
+        # Re-upload grid/sim constants to the active non-WCSPH solver module too;
+        # _upload_constants only touches the WCSPH modules, so PBF/DFSPH would
+        # otherwise keep stale grid_min/cell_size after a resize (CRIT-4).
+        if self._profile.solver_type == SolverType.PBF:
+            import pbf_solver
+            self._upload_solver_constants(pbf_solver)
+        elif self._profile.solver_type == SolverType.DFSPH:
+            import dfsph_solver
+            self._upload_solver_constants(dfsph_solver)
         # Invalidate CUDA graphs (grid changed) and reset sort skip
         self._invalidate_graphs()
         self._sort_skip_next = False
@@ -340,6 +349,10 @@ class Simulation:
             num_particles=self.world._high_water,
         )
 
+        # Cache the authoritative grid params so solver modules (PBF/DFSPH) get
+        # the SAME table_size/table_mask as counting_sort uses (CRIT-4).
+        self._grid_params = grid_params
+
         # Reallocate cell arrays if table size changed
         if table_size != self._table_size:
             self._table_size = table_size
@@ -353,11 +366,20 @@ class Simulation:
         # CFL velocity limit: v_max = factor * h / dt
         vlf = getattr(self._profile, 'velocity_limit_factor', 0.9)
         vel_limit = vlf * self._h / max(self.dt, 1e-8)
+        # Preserve the user's current gravity across re-uploads (e.g. world
+        # resize); only fall back to the default on the very first upload.
+        # Previously this hardcoded (0,-4,0) and silently reset user gravity (HIGH-3).
+        prev = getattr(self, '_sim_params', None)
+        if prev is not None:
+            g = prev[0]["gravity"]
+            gravity = (float(g[0]), float(g[1]), float(g[2]))
+        else:
+            gravity = (0.0, -4.0, 0.0)
         sim_params = step1.build_sim_params(
             smoothing_length=self._h,
             particle_mass=0.02,
             particle_spacing=0.02,
-            gravity=(0.0, -4.0, 0.0),
+            gravity=gravity,
             dt=self.dt,
             restitution=0.3,
             wall_friction=0.5,
@@ -505,10 +527,18 @@ class Simulation:
 
     def _upload_solver_constants(self, solver_module) -> None:
         """Upload all shared constants (grid, sim, precalc, materials, interactions) to a solver module."""
-        hs = self._world_half_size
-        wmin = (-hs, -hs, -hs)
-        wmax = (hs, hs, hs)
-        grid_params, _ = hash_sort.build_grid_params_for_world(wmin, wmax, self._h)
+        # Reuse the exact grid params counting_sort/step1/step2 use, so the
+        # solver kernels hash into the same table (matching table_size/mask and
+        # grid_min/cell_size). Rebuilding here without num_particles previously
+        # left the solver on the default 262144-entry table (CRIT-4).
+        grid_params = getattr(self, '_grid_params', None)
+        if grid_params is None:
+            hs = self._world_half_size
+            wmin = (-hs, -hs, -hs)
+            wmax = (hs, hs, hs)
+            grid_params, _ = hash_sort.build_grid_params_for_world(
+                wmin, wmax, self._h, num_particles=self.world._high_water,
+            )
         precalc_params = step1.build_precalc_params(smoothing_length=0.04, viscosity=1.0)
         materials_data = build_material_array()
         interactions_data = build_interaction_matrix()
@@ -558,6 +588,20 @@ class Simulation:
 
         return n_total
 
+    def notify_scene_changed(self) -> None:
+        """Signal that the particle set was mutated outside the substep loop
+        (brush/gas spawn, R reset, preset load, Ctrl+Z undo, timeline restore).
+
+        Forces a full counting sort on the next step and drops any pending
+        grid-reuse skip, so the reuse path never re-gathers through a stale
+        sort permutation (wrong binning when n is unchanged, or out-of-bounds
+        reads when n grew). n-change alone is caught by the guard in
+        _run_grid_setup; this also covers same-n mutations. (CRIT-5)
+        """
+        self._sort_skip_next = False
+        self._sort_skip_consecutive = 0
+        self._last_full_sort_n = -1
+
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
 
@@ -567,6 +611,15 @@ class Simulation:
         cell_end computation.
         """
         w = self.world
+
+        # Safety guard: the grid-reuse gather reads self._sort_perm[:n], which is
+        # only valid for the n that produced it. If the particle count changed
+        # since the last full sort (brush spawn, gas spawn, preset load, reset,
+        # undo, timeline restore), perm entries in [last_n:n] are uninitialised
+        # -> garbage indices -> OOB device reads. Force a full sort on any n
+        # change so no mutation path can leave a stale/undersized perm (CRIT-5).
+        if n != getattr(self, '_last_full_sort_n', -1):
+            force_sort = True
 
         if self._sort_skip_next and not force_sort:
             # Grid reuse: just re-gather unsorted -> sorted using old sort_perm
@@ -608,6 +661,9 @@ class Simulation:
 
         # Full sort: reset max_displacement tracker (fresh baseline for grid reuse)
         w.max_displacement.data.memset_async(0x00, w.max_displacement.nbytes)
+        # Record the count this full sort was built for; grid reuse is only
+        # valid while n stays equal to this (see guard above).
+        self._last_full_sort_n = n
 
         counting_sort.counting_sort_full(
             num_particles=n,
@@ -727,12 +783,19 @@ class Simulation:
         # so it accumulates across substeps since the last full sort.
         self._run_grid_setup(n)
 
+        # Snapshot the previous-substep density (packed into position.w by the last
+        # K_Step1, carried permutation-correctly through the position reorder) into a
+        # dedicated read buffer.  This keeps density_in distinct from density_out
+        # (sorted_density), breaking the __restrict__ aliasing race; the kernel
+        # value-guards any zero entry (frame 1 / fresh spawns) to 1000 (bd-r4fix-uup.14).
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
+
         # Step1: density + strain-rate + heat diffusion + exposure + vorticity + normal + dye
         step1.compute_step1(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
             w.sorted_mass[:n],
-            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_density_prev[:n],
             w.sorted_packed_info[:n],
             w.sorted_temperature[:n],
             self._cell_start,
@@ -808,6 +871,7 @@ class Simulation:
             w.sorted_packed_info[:n],
             w.sorted_temperature[:n],
             w.sorted_health[:n],
+            sorted_lifetime=w.sorted_lifetime[:n],
             sorted_density=w.sorted_density[:n],
             sorted_shear_rate=w.sorted_shear_rate[:n],
             sorted_dTdt=w.sorted_dTdt[:n],
@@ -825,6 +889,9 @@ class Simulation:
             temperature_out=w.temperature,
             particle_dye_out=w.particle_dye,
             angular_velocity_out=w.angular_velocity,
+            health_out=w.health,
+            lifetime_out=w.lifetime,
+            mass_out=w.mass,
             max_displacement=w.max_displacement,
             cell_start=self._cell_start,
             cell_end=self._cell_end,
@@ -855,6 +922,11 @@ class Simulation:
             w.sorted_predicted_position,
         )
 
+        # Snapshot previous-substep density into a dedicated read buffer so density_in
+        # is not aliased with the density_out target (sorted_density); the kernel
+        # value-guards zero entries to 1000 (bd-r4fix-uup.14).
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
+
         # 2. Initial density + lambda + heat diffusion + exposure (first call only)
         pbf_solver.pbf_compute_lambda(
             w.sorted_predicted_position[:n], w.sorted_mass[:n],
@@ -863,7 +935,7 @@ class Simulation:
             w.sorted_density, w.sorted_lambda_pbf,
             w.sorted_pressure_normal,
             temperature_in=w.sorted_temperature[:n],
-            density_in=w.sorted_density if hasattr(w, '_density_initialized') else None,
+            density_in=w.sorted_density_prev[:n],
             dTdt_out=w.sorted_dTdt,
             exposure_heat_out=w.sorted_exposure_heat,
             exposure_corrode_out=w.sorted_exposure_corrode,
@@ -923,7 +995,21 @@ class Simulation:
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            sorted_lifetime=w.sorted_lifetime[:n],
+            health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
+        )
+
+        # Wake propagation: without this, sleeping GRANULAR piles under PBF never
+        # wake from a disturbance (bd-r4fix-uup.15).  Operates on the unsorted
+        # arrays the finalize just scattered back.
+        wake.run_wake_propagation(
+            w.position[:n],
+            w.velocity[:n],
+            w.packed_info[:n],
+            w.sleep_counter[:n],
+            self._cell_wake_flags,
+            num_particles=n,
         )
 
     def _run_dfsph_body(self, n: int) -> None:
@@ -935,16 +1021,15 @@ class Simulation:
         self._run_grid_setup(n)
 
         # 1. Density + alpha precompute (also computes shear_rate for GRANULAR)
-        # density_in aliasing note: sorted_density is both density_in and density_out.
-        # It's not reordered during sort, but the in-place race means threads may read
-        # either the previous or current frame's density for neighbors — both are
-        # acceptable for the volume weighting used in alpha/heat/dye computation.
-        # Using None (rho_j=1000 fallback) is worse because it underestimates surface
-        # particle volumes, making alpha too large and increasing boundary oscillation.
+        # Snapshot previous-substep density into a dedicated read buffer so density_in
+        # is not the same buffer as the density_out target (sorted_density).  The old
+        # in-place aliasing was a __restrict__ read/write race; the kernel value-guards
+        # any zero entry (frame 1 / fresh spawns) to 1000 (bd-r4fix-uup.14).
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
         dfsph_solver.compute_density_alpha(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_mass[:n],
-            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_density_prev[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
             w.sorted_density, w.sorted_alpha_dfsph,
@@ -967,20 +1052,25 @@ class Simulation:
             w.sorted_packed_info[:n], w.sorted_shear_rate[:n],
             w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
-            w.sorted_velocity,  # velocity updated in-place
+            # Write to veleval scratch, not in-place: velocity is a __restrict__
+            # neighbour input here, so aliasing it with the output is UB and a
+            # read/write race (MED-3). K_DFSPH_NonPressureForces writes every
+            # particle in [0,n), so the copy-back below is complete.
+            w.sorted_veleval[:n],
             vorticity_in=w.sorted_vorticity[:n],
             normal_in=w.sorted_normal[:n],
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
         )
+        w.sorted_velocity[:n] = w.sorted_veleval[:n]
 
         # 4. Divergence solver (warm-started kappa_v -- PERF-008)
         # Apply warm-started kappa_v from previous substep (scaled during sort reorder writeback)
         if self._profile.dfsph_div_warm_start > 0.0:
             w.sorted_kappa_v[:n] *= self._profile.dfsph_div_warm_start
             dfsph_solver.correct_velocity_div(
-                w.sorted_velocity, w.sorted_density[:n],
+                w.sorted_velocity[:n], w.sorted_density[:n],
                 w.sorted_mass[:n], w.sorted_kappa_v[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
@@ -994,7 +1084,7 @@ class Simulation:
                 w.sorted_kappa_v,
             )
             dfsph_solver.correct_velocity_div(
-                w.sorted_velocity, w.sorted_density[:n],
+                w.sorted_velocity[:n], w.sorted_density[:n],
                 w.sorted_mass[:n], w.sorted_kappa_v[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
@@ -1068,7 +1158,20 @@ class Simulation:
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            sorted_lifetime=w.sorted_lifetime[:n],
+            health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
+        )
+
+        # Wake propagation: sleeping GRANULAR piles under DFSPH otherwise never
+        # wake from a disturbance (bd-r4fix-uup.15).  Unsorted arrays from finalize.
+        wake.run_wake_propagation(
+            w.position[:n],
+            w.velocity[:n],
+            w.packed_info[:n],
+            w.sleep_counter[:n],
+            self._cell_wake_flags,
+            num_particles=n,
         )
 
     def _apply_damping_ramp(self) -> None:
@@ -1134,13 +1237,8 @@ class Simulation:
         so sort-skip decisions don't invalidate graphs. When n changes, fall back
         to direct kernel launches (no graph capture overhead).
         """
-        w = self.world
-
         # Update device substep counter for RNG seeding (unique per substep)
         self._frame_counter_d.fill(self._substep_counter)
-
-        # Mark density as initialized (needed for step1 prev_density path)
-        w._density_initialized = True
 
         # --- Spawn velocity damping ramp ---
         self._apply_damping_ramp()
@@ -1239,7 +1337,7 @@ class Simulation:
             w.foam_velocity,
             w.foam_count,
             n,
-            self._frame_counter,
+            self._substep_counter,  # per-substep RNG seed; _frame_counter repeats across a frame's substeps -> correlated/duplicated foam (bd-r4fix-uup.15)
         )
 
         # 3. Compact dead particles every 8th frame (amortize cost)
@@ -1281,7 +1379,6 @@ class Simulation:
         mark("start")
 
         self._frame_counter_d.fill(self._substep_counter)
-        w._density_initialized = True
 
         # --- Spawn velocity damping ramp (bd-r4-epic-x2j.3: was missing from timed path) ---
         self._apply_damping_ramp()
@@ -1296,11 +1393,14 @@ class Simulation:
         self._run_grid_setup(n)
         mark("sort")
 
+        # Snapshot previous-substep density from position.w (bd-r4fix-uup.14; see _run_wcsph_body)
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
+
         # 5. Step1
         step1.compute_step1(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_mass[:n],
-            w.sorted_density if hasattr(w, '_density_initialized') else None,
+            w.sorted_density_prev[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
             density_out=w.sorted_density,
@@ -1369,6 +1469,7 @@ class Simulation:
             w.sorted_veleval[:n], w.sorted_sph_force[:n],
             w.sorted_mass[:n], w.sorted_packed_info[:n],
             w.sorted_temperature[:n], w.sorted_health[:n],
+            sorted_lifetime=w.sorted_lifetime[:n],
             sorted_density=w.sorted_density[:n],
             sorted_shear_rate=w.sorted_shear_rate[:n],
             sorted_dTdt=w.sorted_dTdt[:n],
@@ -1384,6 +1485,9 @@ class Simulation:
             temperature_out=w.temperature,
             particle_dye_out=w.particle_dye,
             angular_velocity_out=w.angular_velocity,
+            health_out=w.health,
+            lifetime_out=w.lifetime,
+            mass_out=w.mass,
             max_displacement=w.max_displacement,
         )
         mark("integrate")
