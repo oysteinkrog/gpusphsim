@@ -1020,6 +1020,68 @@ def test_translating_block_no_fp16_viscous_bias(mat_name: str) -> None:
     assert dv_xsph == 0.0, f"XSPH moved veleval off v by {dv_xsph}"
 
 
+# ---------------------------------------------------------------------------
+# Per-material static friction (bd-r5-review-n28.89)
+# ---------------------------------------------------------------------------
+
+SAND_ID, DIRT_ID = 2, 3
+
+
+def _shear_force_y(mu_a: float, mu_b: float) -> float:
+    """|f_y| on particle a of a GRANULAR pair sliding in y.
+
+    Slot 3 (DIRT) is overwritten with SAND's row so the two materials differ
+    only in friction_coeff. mu_max is lifted so the mu(I) cap does not hide
+    the friction difference.
+    """
+    _upload_all_params()
+    mats = build_material_array()
+    mats[DIRT_ID] = mats[SAND_ID]
+    mats[SAND_ID]["friction_coeff"] = mu_a
+    mats[DIRT_ID]["friction_coeff"] = mu_b
+    upload_materials(mats)
+    upload_granular_params(build_granular_params(mu0=VISCOSITY, mu_max=1e9))
+    rho = float(MATERIALS[SAND_ID].rest_density)  # p = 0, so p_eff = p_floor
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[H * 0.3, 0.0, 0.0],
+        vel_a=[0.0, 0.5, 0.0],
+        vel_b=[0.0, 0.0, 0.0],
+        density_a=rho,
+        density_b=rho,
+        mass_a=rho * SPACING**3,
+        mass_b=rho * SPACING**3,
+        mat_id_a=SAND_ID,
+        mat_id_b=DIRT_ID,
+        bclass_a=GRANULAR,
+        bclass_b=GRANULAR,
+    )
+    force, _ = _step2_original_order(data)
+    f = cupy.asnumpy(force)
+    _upload_all_params()
+    assert np.isfinite(f).all()
+    return abs(float(f[0, 1]))
+
+
+def test_granular_friction_coeff_sets_mu_s() -> None:
+    """Higher friction_coeff gives a larger mu(I) shear force; a mixed pair
+    lies between the two uniform pairs (harmonic mean of eta)."""
+    low = _shear_force_y(0.3, 0.3)
+    high = _shear_force_y(0.9, 0.9)
+    mixed = _shear_force_y(0.3, 0.9)
+    print(f"  |f_y|: mu 0.3 {low:.4e}, mu 0.9 {high:.4e}, mixed {mixed:.4e}")
+    assert high > 1.5 * low, f"friction_coeff has no effect: low={low}, high={high}"
+    assert low < mixed < high, f"mixed pair {mixed} not between {low} and {high}"
+
+
+def test_granular_friction_coeff_zero_falls_back_to_global_mu_s() -> None:
+    """friction_coeff = 0 uses c_granular.mu_s."""
+    mu_s = float(build_granular_params()[0]["mu_s"])
+    fallback = _shear_force_y(0.0, 0.0)
+    explicit = _shear_force_y(mu_s, mu_s)
+    np.testing.assert_allclose(fallback, explicit, rtol=1e-5)
+
+
 def main() -> None:
     test_compilation()
     test_struct_sizes()
@@ -1041,6 +1103,8 @@ def main() -> None:
     test_500k_no_errors()
     test_granular_static_drag_matches_pair()
     test_granular_rigid_drag_matches_pair()
+    test_granular_friction_coeff_sets_mu_s()
+    test_granular_friction_coeff_zero_falls_back_to_global_mu_s()
     print("\n=== ALL CHECKS PASSED ===")
 
 

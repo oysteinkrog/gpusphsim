@@ -192,6 +192,37 @@ def test_gpu():
     print("\n=== All GPU tests passed ===")
 
 
+# Fields no kernel reads (bd-r5-review-n28.89). Keep in sync with the
+# MaterialDef comments in materials.py and PHYSICS.md section 6.
+UNUSED_MATERIAL_FIELDS = {
+    "cohesion",     # PBF cohesion is the global c_granular.cohesion (metres)
+    "temp_ignite",  # ignition is exposure-based, see reactions.cu
+    "_pad0",        # struct padding
+}
+
+
+def test_every_materialdef_field_is_read_by_a_kernel():
+    """Each MaterialProps field is read as c_materials[...].<field> by some
+    kernel, or is listed in UNUSED_MATERIAL_FIELDS (and then read by none)."""
+    import glob
+    import os
+    import re
+
+    from materials import MATERIAL_PROPS_DTYPE
+
+    kdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "physics", "kernels")
+    src = ""
+    for path in sorted(glob.glob(os.path.join(kdir, "*.cu")) + glob.glob(os.path.join(kdir, "*.cuh"))):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            src += f.read()
+    for field in MATERIAL_PROPS_DTYPE.names:
+        read = re.search(rf"c_materials\[[^\]]*\]\.{field}\b", src) is not None
+        if field in UNUSED_MATERIAL_FIELDS:
+            assert not read, f"{field} is read by a kernel; drop it from UNUSED_MATERIAL_FIELDS"
+        else:
+            assert read, f"no kernel reads c_materials[...].{field}"
+
+
 def main():
     test_host_side()
     test_gpu()

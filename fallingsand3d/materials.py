@@ -91,17 +91,23 @@ class MaterialDef:
     id: int
     name: str  # human-readable label (not uploaded to GPU)
     rest_density: float  # kg/m^3
-    eos_stiffness: float  # Tait EOS k
-    eos_gamma: float  # Tait EOS exponent (7 for liquid, 1 for gas)
+    eos_stiffness: float  # Tait EOS k (unused for STATIC: Akinci mirrors p_i)
+    eos_gamma: float  # Tait EOS exponent (7 for liquid, 1 for gas; unused for STATIC)
     base_viscosity: float  # Pa*s
-    friction_coeff: float  # mu_s for granular friction
-    cohesion: float  # cohesion coefficient
+    # GRANULAR static friction: WCSPH mu(I) mu_s (mu_2 = mu_s + global gap) and
+    # the PBF Drucker-Prager slope. 0 = use the global value (bd-r5-review-n28.89).
+    friction_coeff: float
+    cohesion: float  # UNUSED by kernels (PBF cohesion is global, in metres)
     buoyancy_extra: float  # extra buoyancy factor for gas
     thermal_conductivity: float  # W/(m*K)
     heat_capacity: float  # J/(kg*K)
-    temp_melt: float  # Kelvin
-    temp_boil: float  # Kelvin
-    temp_ignite: float  # Kelvin (0 = non-flammable)
+    # Kelvin. ICE, STONE and SAND melt, LAVA solidifies, the heat color ramp;
+    # WATER freezes at temp_melt - 10.
+    temp_melt: float
+    # Kelvin. Only WATER's is read: boil point, and STEAM condenses at
+    # WATER.temp_boil - 13.
+    temp_boil: float
+    temp_ignite: float  # Kelvin. UNUSED: ignition is exposure-based (reactions.cu)
     behavior_class: int  # BehaviorClass enum value
     color_r: float  # default material color R [0,1]
     color_g: float  # default material color G [0,1]

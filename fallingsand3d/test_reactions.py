@@ -1062,6 +1062,69 @@ def test_stone_and_sand_melt_clamp_temperature():
             f"mat {mat_id}: expected {t_melt} K after melting, got {temp}")
 
 
+# ---------------------------------------------------------------------------
+# Phase-change temperatures come from the material table (bd-r5-review-n28.89)
+# ---------------------------------------------------------------------------
+
+def _setup_with(overrides):
+    """setup_params, then re-upload materials with (mat, field) -> value set."""
+    setup_params()
+    mats = build_material_array()
+    for (mat_id, field), value in overrides.items():
+        mats[mat_id][field] = value
+    upload_materials(mats)
+
+
+def _run_one(mat_id, behavior, temp):
+    d = make_particles(1, mat_id, behavior, temp=temp)
+    compute_reactions(**d)
+    return int(d["sorted_packed_info"].get()[0]), float(d["sorted_temperature"].get()[0])
+
+
+def test_temp_boil_override_moves_boiling_point():
+    """WATER boils above c_materials[WATER].temp_boil, not a fixed 373 K."""
+    try:
+        _setup_with({(WATER, "temp_boil"): 450.0})
+        pi, _ = _run_one(WATER, FLUID, 400.0)
+        assert HAS_SPAWN_FLAG(pi) == 0, "400 K water boiled with temp_boil = 450 K"
+        pi, _ = _run_one(WATER, FLUID, 455.0)
+        assert HAS_SPAWN_FLAG(pi) == 1, "455 K water did not boil with temp_boil = 450 K"
+        # Condensation follows the boil point: 450 - 13 = 437 K.
+        pi, _ = _run_one(STEAM, GAS, 440.0)
+        assert GET_MATERIAL_ID(pi) == STEAM
+        pi, _ = _run_one(STEAM, GAS, 430.0)
+        assert GET_MATERIAL_ID(pi) == WATER
+    finally:
+        setup_params()
+
+
+def test_temp_melt_override_moves_ice_and_freeze_points():
+    """ICE melts above ICE.temp_melt; WATER freezes 10 K below WATER.temp_melt."""
+    try:
+        _setup_with({(ICE, "temp_melt"): 300.0, (WATER, "temp_melt"): 300.0})
+        pi, _ = _run_one(ICE, STATIC, 290.0)
+        assert GET_MATERIAL_ID(pi) == ICE, "290 K ice melted with temp_melt = 300 K"
+        pi, temp = _run_one(ICE, STATIC, 305.0)
+        assert GET_MATERIAL_ID(pi) == WATER and temp == 300.0
+        pi, temp = _run_one(WATER, FLUID, 285.0)
+        assert GET_MATERIAL_ID(pi) == ICE and temp == 290.0
+    finally:
+        setup_params()
+
+
+def test_default_phase_thresholds_unchanged():
+    """The table reproduces the old fixed values: 273, 263, 373 and 360 K."""
+    setup_params()
+    assert GET_MATERIAL_ID(_run_one(ICE, STATIC, 272.9)[0]) == ICE
+    assert GET_MATERIAL_ID(_run_one(ICE, STATIC, 273.1)[0]) == WATER
+    assert GET_MATERIAL_ID(_run_one(WATER, FLUID, 263.1)[0]) == WATER
+    assert GET_MATERIAL_ID(_run_one(WATER, FLUID, 262.9)[0]) == ICE
+    assert HAS_SPAWN_FLAG(_run_one(WATER, FLUID, 372.9)[0]) == 0
+    assert HAS_SPAWN_FLAG(_run_one(WATER, FLUID, 373.1)[0]) == 1
+    assert GET_MATERIAL_ID(_run_one(STEAM, GAS, 360.1)[0]) == STEAM
+    assert GET_MATERIAL_ID(_run_one(STEAM, GAS, 359.9)[0]) == WATER
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,
@@ -1288,7 +1351,8 @@ def test_boiled_steam_cools_to_condense_before_expiry():
     condensation temperature before its spawn lifetime ends."""
     t_spawn = _cu_define("spawn.cu", "SPAWN_TEMP")
     life = _cu_define("spawn.cu", "SPAWN_LIFETIME")
-    t_cond = _cu_define("reactions.cu", "STEAM_CONDENSE_TEMP")
+    t_cond = (float(build_material_array()[WATER]["temp_boil"])
+              - _cu_define("reactions.cu", "STEAM_CONDENSE_HYSTERESIS"))
     t_amb = _cu_define("sph_shared.cuh", "T_AMBIENT")
     k = _cu_define("sph_shared.cuh", "COOL_RATE")
     t_hit = -np.log((t_cond - t_amb) / (t_spawn - t_amb)) / k
