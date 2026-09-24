@@ -1582,7 +1582,7 @@ Per substep:
      b. Compute lambda_i = -C_i / (SUM_j |grad_pj C_i|^2 + epsilon)
         where C_i = rho_i/rho_0 - 1
      c. Compute dx_i = (1/rho_0) SUM_j (lambda_i + lambda_j + s_corr) grad_W_spiky(x*_ij)
-     d. x* += dx
+     d. x* += dx, then clamp x* to the world box and push it out of SDF objects
   4. v_new = (x* - x_old) / dt
   5. XSPH viscosity: v_new += c SUM (m_j/rho_j) (v_j - v_i) W_poly6
   6. Boundary handling + writeback
@@ -1607,6 +1607,16 @@ What this does not cover:
 - `compute_blast_wave` (GUNPOWDER) walks the same table with the current
   position x, which is up to one substep of motion (at most 0.9h) away from
   the x* the cells were built from.
+
+**SDF projection every iteration.** `K_PBF_Predict` and every
+`K_PBF_ApplyDelta` pass call `push_out_of_sdf`: any x* closer than
+`BOUNDARY_MARGIN` to an SDF object (or inside it) moves along the SDF normal to
+`BOUNDARY_MARGIN` outside. So the density constraint near an SDF collider is
+solved with the collider in place, and Finalize derives v_new from an x* that
+is already outside. Finalize still applies the SDF restitution and friction
+impulse. The loop bound is `c_num_sdf_objects`, so it costs nothing in a scene
+without SDF objects. `test_pbf_sdf_push.py` checks that no iteration leaves
+water more than `BOUNDARY_MARGIN` inside an SDF box.
 
 ### 12.2 Density Constraint
 
