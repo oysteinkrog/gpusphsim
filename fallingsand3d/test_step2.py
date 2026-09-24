@@ -951,6 +951,70 @@ def test_granular_rigid_drag_matches_pair() -> None:
 
 
 # ---------------------------------------------------------------------------
+# bd-r5-review-n28.106: rigid and STATIC walls share one Akinci pressure form
+# ---------------------------------------------------------------------------
+
+
+def _water_wall_push_y(mat_id_b: int, rigid: bool, rho_scale: float) -> tuple:
+    """One still WATER particle at rho_scale * rho0 with one still wall
+    particle along +y. Returns (fy_water, body_fy).
+
+    Both particles are at rest, so the y force is pure pressure. WATER rest
+    density equals RIGID_PSI_RHO0, so the rigid psi_b equals its mass and the
+    two wall types see the same p_i, rho_i, m_j and grad W.
+    """
+    from materials import WATER
+    _upload_all_params()
+    rho0_w = float(MATERIALS[WATER].rest_density)
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[0.0, H * 0.5, 0.0],
+        density_a=rho0_w * rho_scale,
+        density_b=rho0_w,
+        mat_id_a=WATER,
+        mat_id_b=mat_id_b,
+        bclass_a=FLUID,
+        bclass_b=STATIC,
+    )
+    if rigid:
+        from rigid_bodies import RIGID_BODY_DTYPE
+        data["d_rigid_bodies"] = cupy.zeros(1, dtype=RIGID_BODY_DTYPE)
+        data["d_rigid_forces"] = cupy.zeros(4, dtype=cupy.float32)
+        data["d_rigid_torques"] = cupy.zeros(4, dtype=cupy.float32)
+    forces, _ = _step2_original_order(data)
+    cupy.cuda.Device().synchronize()
+    fy = float(cupy.asnumpy(forces)[0, 1])
+    body_fy = float(cupy.asnumpy(data["d_rigid_forces"])[1]) if rigid else 0.0
+    return fy, body_fy
+
+
+@pytest.mark.parametrize("rho_scale", [1.02, 1.05, 1.10])
+def test_rigid_and_static_akinci_pressure_match(rho_scale: float) -> None:
+    """MAT_RIGID and STATIC walls give the same pressure push for the same
+    p_i, rho_i, m_j and grad W (2 p_i / rho_i^2 in both), and the body gets
+    -m_i times the fluid acceleration.
+
+    Before the fix the rigid form was p_i/rho_i^2 + p_i/rho0^2. At 1.05 rho0
+    that is 1.907 against 1.814 for the wall form (units of p_i/rho0^2), so
+    rigid bodies pushed about 5% harder than stone walls.
+    """
+    from materials import STONE, MAT_RIGID
+    fy_static, _ = _water_wall_push_y(STONE, False, rho_scale)
+    fy_rigid, body_fy = _water_wall_push_y(MAT_RIGID, True, rho_scale)
+    print(f"  rho/rho0={rho_scale}  static fy={fy_static:.6e}  "
+          f"rigid fy={fy_rigid:.6e}  body fy={body_fy:.6e}")
+    assert fy_static < 0.0, f"Wall should push the water away (-y), got {fy_static}"
+    assert abs(fy_rigid - fy_static) <= 1e-5 * abs(fy_static), (
+        f"Rigid push {fy_rigid:.6e} != STATIC push {fy_static:.6e} "
+        f"(ratio {fy_rigid / fy_static:.5f})"
+    )
+    expected_body = -float(MASS) * fy_rigid
+    assert abs(body_fy - expected_body) <= 1e-4 * abs(expected_body), (
+        f"Body reaction {body_fy:.6e} != -m_i * a_i = {expected_body:.6e}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # bd-r5-review-n28.69: FP16 pairing rule for pair velocity differences
 # ---------------------------------------------------------------------------
 
@@ -1041,6 +1105,8 @@ def main() -> None:
     test_500k_no_errors()
     test_granular_static_drag_matches_pair()
     test_granular_rigid_drag_matches_pair()
+    for rho_scale in (1.02, 1.05, 1.10):
+        test_rigid_and_static_akinci_pressure_match(rho_scale)
     print("\n=== ALL CHECKS PASSED ===")
 
 
