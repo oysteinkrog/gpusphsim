@@ -1013,6 +1013,125 @@ def test_freelist_underflow_safety():
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Parked DEAD reserve (bd-r5-review-n28.27)
+#
+# The freelist is rebuilt each substep from DEAD slots only. Without a
+# reserve, a scene where nothing has died has no DEAD slots and hot water
+# never boils. These tests drive Simulation._maybe_compact the way
+# step_frame does.
+# ---------------------------------------------------------------------------
+
+def _reserve_sim(max_particles=100_000):
+    from world import World
+    from simulation import Simulation
+    w = World(max_particles=max_particles)
+    w.spawn_cube((-0.2, -0.9, -0.2), (0.2, -0.7, 0.2), WATER, 0.02)
+    sim = Simulation(w, dt=0.001, fixed_dt=True)
+    sim.notify_scene_changed()
+    return w, sim
+
+
+def _count_mat(w, mat_id):
+    n = w._high_water
+    return int(cupy.count_nonzero((w.packed_info[:n] & 0xFF) == mat_id))
+
+
+def test_dead_reserve_fills_freelist_without_deaths():
+    """Fresh WATER world with no deaths has dead_count >= dead_reserve after one K_Reactions pass."""
+    w, sim = _reserve_sim()
+    n_water = w._high_water
+    assert w.needs_dead_reserve
+    n = sim._maybe_compact()
+    assert n == n_water + w.dead_reserve
+    assert _count_mat(w, DEAD) == w.dead_reserve
+    assert w.num_active == n_water
+    sim._sim_step(n)
+    dead_count = int(sim._dead_count.get()[0])
+    assert dead_count >= w.dead_reserve, dead_count
+    # Parked particles stay put and stay massless.
+    parked = w.position[n_water:n, :3].get()
+    assert np.all(parked[:, 1] < -900.0)
+    assert float(cupy.max(w.mass[n_water:n])) == 0.0
+
+
+def test_dead_reserve_boils_one_water_into_three_steam():
+    """With the reserve, one boiling water particle spawns SPAWN_N steam."""
+    w, sim = _reserve_sim()
+    n = sim._maybe_compact()
+    w.temperature[0] = 450.0
+    sim._sim_step(n)
+    assert _count_mat(w, STEAM) == SPAWN_N
+    assert _count_mat(w, WATER) == (n - w.dead_reserve) - 1
+
+
+def test_dead_reserve_survives_compaction():
+    """After compaction the freelist still has at least dead_reserve entries."""
+    w, sim = _reserve_sim()
+    n = sim._maybe_compact()
+    # Add more water and kill enough of it to go past reserve + threshold.
+    w.spawn_cube((-0.5, -0.5, -0.5), (0.5, 0.0, 0.5), WATER, 0.02)
+    killed = w.kill_in_sphere((0.0, -0.25, 0.0), 0.45)
+    assert killed > sim.compact_threshold
+    n_before = w._high_water
+    alive = w.num_active
+    sim._frame_counter = sim.compact_interval  # compaction due
+    n = sim._maybe_compact()
+    assert n < n_before, "compaction did not run"
+    assert n == alive + w.dead_reserve
+    assert _count_mat(w, DEAD) >= w.dead_reserve
+    sim._sim_step(n)
+    assert int(sim._dead_count.get()[0]) >= w.dead_reserve
+
+
+def test_dead_reserve_not_compacted_away():
+    """A few gas deaths on top of the reserve do not trigger compaction."""
+    w, sim = _reserve_sim()
+    n = sim._maybe_compact()
+    sim._frame_counter = sim.compact_interval
+    assert sim._maybe_compact() == n
+
+
+def test_dead_reserve_skipped_without_boilable():
+    """No WATER or ICE: no reserve is added."""
+    from world import World
+    from simulation import Simulation
+    w = World(max_particles=50_000)
+    w.spawn_cube((-0.2, -0.9, -0.2), (0.2, -0.7, 0.2), SAND, 0.02)
+    n0 = w._high_water
+    sim = Simulation(w, dt=0.001, fixed_dt=True)
+    assert not w.needs_dead_reserve
+    assert sim._maybe_compact() == n0
+
+
+def _park_bucket_loads(max_particles, start, count, table_size, h=H, half=1.0):
+    """CPU copy of calcGridCell + spatialHash for parked reserve slots."""
+    from world import World
+    w = World.__new__(World)
+    w.max_particles = max_particles
+    pos = w.park_positions(cupy.arange(start, start + count), h).get()
+    gmin = np.float32(-half)
+    delta = np.float32(1.0 / h)
+    cells = np.floor((pos[:, :3].astype(np.float32) - gmin) * delta).astype(np.int64)
+    uniq = np.unique(cells, axis=0).shape[0]
+    c = cells.astype(np.uint32)
+    with np.errstate(over="ignore"):
+        hsh = (c[:, 0] * np.uint32(73856093) + c[:, 1] * np.uint32(19349669)
+               + c[:, 2] * np.uint32(83492791)) & np.uint32(table_size - 1)
+    return uniq, int(np.bincount(hsh, minlength=table_size).max())
+
+
+def test_dead_reserve_parked_bucket_load():
+    """No hash bucket holds more than 8 parked DEAD particles."""
+    from world import DEAD_RESERVE_DEFAULT
+    for max_p in (100_000, 500_000, 1_000_000, 2_000_000):
+        for start in (0, 12_345, max_p // 2, max_p - DEAD_RESERVE_DEFAULT):
+            for ts in (1 << 18, 1 << 19, 1 << 20):
+                uniq, worst = _park_bucket_loads(max_p, start, DEAD_RESERVE_DEFAULT, ts)
+                assert uniq == DEAD_RESERVE_DEFAULT, (max_p, start, uniq)
+                assert worst <= 8, (max_p, start, ts, worst)
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,
