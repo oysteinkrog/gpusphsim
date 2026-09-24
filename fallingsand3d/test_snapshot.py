@@ -269,7 +269,8 @@ def test_restore_rebuilds_color_on_gpu():
         assert rows.shape[0] > 0
         m = MATERIALS[mat_id]
         np.testing.assert_allclose(
-            rows[:, :3], np.array([[m.color_r, m.color_g, m.color_b]], np.float32))
+            rows[:, :3], np.broadcast_to(
+                np.array([m.color_r, m.color_g, m.color_b], np.float32), rows[:, :3].shape))
         np.testing.assert_array_equal(rows[:, 3], np.float32(beh_w))
 
 

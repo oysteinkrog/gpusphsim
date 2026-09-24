@@ -1447,4 +1447,5 @@ def test_world_spawn_writes_behavior_code_in_color_w():
         mat = MATERIALS[mat_id]
         np.testing.assert_array_equal(col[:, 3], np.float32(expected_w))
         np.testing.assert_allclose(
-            col[:, :3], np.array([[mat.color_r, mat.color_g, mat.color_b]], np.float32))
+            col[:, :3], np.broadcast_to(
+                np.array([mat.color_r, mat.color_g, mat.color_b], np.float32), col[:, :3].shape))
