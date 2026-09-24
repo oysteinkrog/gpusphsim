@@ -321,9 +321,13 @@ void K_DFSPH_ComputeDensityAlpha(
         density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
         alpha_out[i] = 0.0f;
         shear_rate_out[i] = 0.0f;
-        // Still write heat/exposure outputs (computed above)
+        // Still write heat/exposure outputs (computed above). Divide by the
+        // SPH-summed rho, as K_Step1 and K_PBF_ComputeLambda do, not by
+        // rest_density: STONE/METAL rest_density is 2.6x/7.8x the kernel sum,
+        // so a rest_density divisor made walls heat that much slower under
+        // DFSPH (bd-r5-review-n28.103).
         float cp_i_s = c_materials[mat_id_i].heat_capacity;
-        dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(c_materials[mat_id_i].rest_density * cp_i_s, 1.0f);
+        dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i_s, RHO_EPSILON);
         float inv_sum_W_s = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
         exposure_heat_out[i] = sum_exposure_heat * inv_sum_W_s;
         exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W_s;
