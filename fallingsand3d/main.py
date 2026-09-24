@@ -426,6 +426,7 @@ def main():
             sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
             renderer.sdf_manager = sim.sdf_manager
             ui.set_sdf_drag_refs(camera, sim.sdf_manager)
+            ui.sync_from_sim(sim)  # new sim is WCSPH, world 1.0 (bd-r5-review-n28.86)
             active_spawner = None
             spawner_frame_counter = 0
             snapshots = SnapshotRing(max_snapshots=12, max_particles=new_max)
@@ -452,6 +453,7 @@ def main():
             spawner_frame_counter = 0
             world.foam_count.fill(0)
             sim._last_foam_count = 0
+            ui.sync_from_sim(sim)  # load may change world size and SDFs (bd-r5-review-n28.86)
             snapshots.clear()
             with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)

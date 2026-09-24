@@ -421,6 +421,23 @@ class UI:
         self._camera_ref = camera
         self._sdf_manager_ref = sdf_manager
 
+    def sync_from_sim(self, sim) -> None:
+        """Re-read solver, world size and SDF manager from ``sim``.
+
+        Call after main.py replaces the Simulation (Max particles change) or
+        loads a save, so the Solver combo and World size slider show the
+        simulation's real values and no stale SDF selection survives
+        (bd-r5-review-n28.86).
+        """
+        name = getattr(sim._profile, "name", None)
+        if name in PROFILE_NAMES:
+            self._solver_idx = PROFILE_NAMES.index(name)
+        self._pending_solver = None
+        self._world_half_size = float(sim.world_half_size)
+        self._selected_sdf_id = None
+        self._dragging_sdf = False
+        self._sdf_manager_ref = getattr(sim, "sdf_manager", self._sdf_manager_ref)
+
     @property
     def selected_sdf_id(self) -> Optional[int]:
         """Currently selected SDF object ID, or None."""
