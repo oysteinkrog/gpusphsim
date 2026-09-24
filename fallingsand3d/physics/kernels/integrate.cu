@@ -803,11 +803,13 @@ void K_RigidBodyCollisions(
  * K_Integrate and the PBF/DFSPH finalize kernels never record their motion.
  * This kernel records it instead. anchor[i] holds boundary particle i's
  * position at the last full sort. On a substep that runs a full sort the host
- * passes reset_anchor = 1: the kernel stores the new position as the anchor
- * and records nothing (the full sort clears max_displacement anyway). On a
- * gather-only substep it atomicMaxes |x - anchor|^2 into max_displacement, so
- * a moving body forces a full sort just like moving fluid. NULL anchor or
- * NULL max_displacement: no tracking.
+ * passes reset_anchor = 1 (and has already cleared max_displacement): the
+ * kernel stores the new position as the anchor. The fluid records its drift
+ * after it moves, but the body moves after the solver, so the kernel
+ * extrapolates one substep, x_end = x + (x - x_old), and atomicMaxes
+ * |x_end - anchor|^2 into max_displacement on every substep. A moving body
+ * then forces a full sort just like moving fluid. NULL anchor or NULL
+ * max_displacement: no tracking.
  * ====================================================================== */
 
 extern "C" __global__
@@ -852,21 +854,25 @@ void K_UpdateBoundaryParticles(
 
     // Write to main arrays
     int idx = offset + i;
+    const float4 old_pos = position_out[idx];  // last substep's boundary position
     position_out[idx] = make_float4(pos.x, pos.y, pos.z, 0.0f);
     velocity_out[idx] = make_float4(vel.x, vel.y, vel.z, 0.0f);
     mass_out[idx] = psi;  // boundary volume as mass
 
     // Grid-reuse drift since the last full sort (see header).
     if (anchor && max_displacement_out) {
+        float4 a;
         if (reset_anchor) {
-            anchor[i] = make_float4(pos.x, pos.y, pos.z, 0.0f);
+            a = make_float4(pos.x, pos.y, pos.z, 0.0f);
+            anchor[i] = a;
         } else {
-            const float4 a = anchor[i];
-            const float dx = pos.x - a.x;
-            const float dy = pos.y - a.y;
-            const float dz = pos.z - a.z;
-            const float disp_sq = dx * dx + dy * dy + dz * dz;
-            atomicMax(max_displacement_out, __float_as_uint(disp_sq));
+            a = anchor[i];
         }
+        // Position at the end of this substep, assuming the last step repeats.
+        const float dx = 2.0f * pos.x - old_pos.x - a.x;
+        const float dy = 2.0f * pos.y - old_pos.y - a.y;
+        const float dz = 2.0f * pos.z - old_pos.z - a.z;
+        const float disp_sq = dx * dx + dy * dy + dz * dz;
+        atomicMax(max_displacement_out, __float_as_uint(disp_sq));
     }
 }

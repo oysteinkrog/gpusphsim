@@ -415,10 +415,12 @@ def update_boundary_particles(
         (bd-r5-review-n28.65). None turns tracking off.
     max_displacement : cupy.ndarray, (1,) uint32, optional
         Grid-reuse drift tracker (world.max_displacement). The kernel
-        atomicMaxes |x - anchor|^2 into it on gather-only substeps.
+        atomicMaxes the drift from the anchor, extrapolated one substep
+        ahead, into it.
     reset_anchor : bool
         True when this substep runs a full sort: the kernel stores the new
-        positions as the anchor and records no drift.
+        positions as the anchor first. The caller must clear
+        max_displacement before this launch.
     """
     if num_boundary <= 0:
         return

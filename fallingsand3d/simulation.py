@@ -210,6 +210,10 @@ class Simulation:
         self._sort_skip_threshold_sq_tight = (0.15 * 0.04) ** 2  # 0.000036
         self._sort_skipped_count = 0  # stats for UI
         self._sort_skip_consecutive = 0  # consecutive frames with sort skipped
+        # True when _update_rigid_boundary already cleared max_displacement
+        # for this substep's full sort, so _run_grid_setup must not clear it
+        # again and wipe the boundary drift (bd-r5-review-n28.65).
+        self._disp_cleared_for_sort = False
         self._MAX_SORT_SKIP_FRAMES = 4  # force sort after this many frames (WCSPH)
         self._MAX_SORT_SKIP_FRAMES_TIGHT = 2  # force sort after this many frames (PBF/DFSPH)
 
@@ -625,8 +629,12 @@ class Simulation:
         The kernel also feeds the boundary drift since the last full sort into
         world.max_displacement, so a moving body forces a full sort the same
         way moving fluid does (bd-r5-review-n28.65). On a substep that runs a
-        full sort it writes the anchor instead. Until the anchor has been
-        written for the current block this substep is made a full sort.
+        full sort it writes the anchor first. The body moves after the solver,
+        so the kernel extrapolates one substep to match the fluid, which
+        records its drift after it moves. On a full-sort substep the tracker
+        is cleared here, before the kernel, and _run_grid_setup skips its own
+        clear. Until the anchor has been written for the current block this
+        substep is made a full sort.
 
         Returns world._high_water (the new n when injection grew the range).
         """
@@ -641,6 +649,9 @@ class Simulation:
                 self._sort_skip_next = False
                 self._sort_skip_consecutive = 0
                 full_sort = True
+            if full_sort:
+                w.max_displacement.data.memset_async(0x00, w.max_displacement.nbytes)
+                self._disp_cleared_for_sort = True
             integrate.update_boundary_particles(
                 rbm.boundary_data,
                 rbm.d_rigid_bodies,
@@ -769,8 +780,14 @@ class Simulation:
             )
             return
 
-        # Full sort: reset max_displacement tracker (fresh baseline for grid reuse)
-        w.max_displacement.data.memset_async(0x00, w.max_displacement.nbytes)
+        # Full sort: reset max_displacement tracker (fresh baseline for grid reuse).
+        # With rigid bodies _update_rigid_boundary has already cleared it and
+        # recorded the boundary drift for this substep. Bodies disable CUDA
+        # graphs, so a captured graph always takes the memset branch.
+        if self._disp_cleared_for_sort:
+            self._disp_cleared_for_sort = False
+        else:
+            w.max_displacement.data.memset_async(0x00, w.max_displacement.nbytes)
         # Record the count this full sort was built for; grid reuse is only
         # valid while n stays equal to this (see guard above).
         self._last_full_sort_n = n
