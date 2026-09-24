@@ -170,8 +170,9 @@ def test_ice_stays_frozen():
 
 
 def test_water_freezes_to_ice():
-    """WATER at rest below 263 K becomes STATIC ICE at 263 K, with mass
-    rescaled by the spawn-mass rule (FLUID 1000/2500 -> STATIC 1)."""
+    """WATER at rest below 263 K becomes STATIC ICE at 263 K. WATER's
+    rest_density is MASS_REF_DENSITY, so the spawn-mass scale is 1 on both
+    sides and the mass is unchanged."""
     setup_params()
     n = 100
     d = make_particles(n, WATER, FLUID, temp=262.0)
@@ -185,7 +186,7 @@ def test_water_freezes_to_ice():
         assert GET_MATERIAL_ID(int(pi[i])) == ICE, f"Particle {i}: expected ICE"
         assert GET_BEHAVIOR(int(pi[i])) == STATIC, f"Particle {i}: expected STATIC"
     np.testing.assert_allclose(temp, 263.0)
-    np.testing.assert_allclose(m, 0.008 * 2.5, rtol=1e-6)
+    np.testing.assert_allclose(m, 0.008, rtol=1e-6)
 
 
 def test_water_hysteresis_band():
