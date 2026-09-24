@@ -778,9 +778,9 @@ void K_PBF_Finalize(
     const float4*   __restrict__ vorticity_in,     // (omega_x,y,z, |omega|) from ComputeLambda, or NULL
     const float4*   __restrict__ normal_in,         // (n_x,n_y,n_z, neighbor_count) from ComputeLambda, or NULL
     const float4*   __restrict__ pressure_normal_in, // density gradient normal for GRANULAR friction, or NULL
-    const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies); only gates the XSPH skip
-    float*          __restrict__ d_rigid_forces,     // unused: the reaction is accumulated in K_PBF_ComputeDelta
-    float*          __restrict__ d_rigid_torques,    // unused: see d_rigid_forces
+    const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,     // XSPH drag reaction on the body (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques,    // torque of that reaction about the body centre
     const float*    __restrict__ sorted_lifetime,    // reaction-mutated lifetime (sorted), or NULL
     float*          __restrict__ health_out,         // unsorted health writeback, or NULL
     float*          __restrict__ lifetime_out,       // unsorted lifetime writeback, or NULL
@@ -962,6 +962,15 @@ void K_PBF_Finalize(
         float3 xsph = make_float3(0.0f, 0.0f, 0.0f);
         bool do_xsph = (behavior == FLUID || behavior == GRANULAR);
 
+        float c_xsph = fminf(c_pbf.xsph_c * c_materials[mat_id].base_viscosity, 0.5f);
+        if (behavior == GRANULAR) c_xsph = fminf(c_xsph * 3.0f, 0.15f);
+        // Rigid drag reaction: the XSPH change dv on i is a force m_i*dv/dt on
+        // the fluid; the body gets minus it (bd-r5-review-n28.97).
+        float drag_scale = (d_rigid_bodies != 0) ? -mass[i] * c_xsph * inv_dt : 0.0f;
+        // MAT_RIGID mass is RIGID_PSI_RHO0 * V_b. Scaled to rho0_i as in the
+        // density sum, so m_j / rho_i is the Akinci volume weight V_b*rho0_i/rho_i.
+        float rigid_vol_scale = c_materials[mat_id].rest_density / RIGID_PSI_RHO0;
+
         int3 cell_i = get_cell(pred);
         for (int dz = -1; dz <= 1; dz++) {
             for (int dy = -1; dy <= 1; dy++) {
@@ -1013,11 +1022,26 @@ void K_PBF_Finalize(
 
                         float m_j = __ldg(&mass[j]);
 
-                        // Rigid boundary particles get no XSPH. The fluid-body
-                        // reaction is accumulated in K_PBF_ComputeDelta, where
-                        // the constraint pushes the fluid.
+                        // Rigid boundary particle: XSPH toward the body surface
+                        // velocity v_body + omega x r (K_UpdateBoundaryParticles
+                        // stores it in the sorted velocity). This is the PBF
+                        // fluid-body drag; the body gets the opposite momentum.
                         if (bj == STATIC && d_rigid_bodies != 0
                             && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+                            float4 vb = __ldg(&original_vel[j]);
+                            float w = W_poly6(r_sq, h_sq);
+                            float factor = (m_j * rigid_vol_scale / fmaxf(rho_i, 1.0f)) * w;
+                            float3 dvf = make_float3((vb.x - vel_new.x) * factor,
+                                                     (vb.y - vel_new.y) * factor,
+                                                     (vb.z - vel_new.z) * factor);
+                            xsph.x += dvf.x;
+                            xsph.y += dvf.y;
+                            xsph.z += dvf.z;
+                            pbf_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                               pi_j, pred4_j,
+                                               make_float3(drag_scale * dvf.x,
+                                                           drag_scale * dvf.y,
+                                                           drag_scale * dvf.z));
                             continue;
                         }
 
@@ -1040,9 +1064,6 @@ void K_PBF_Finalize(
         }
 
         if (do_xsph) {
-            float c_xsph = c_pbf.xsph_c;
-            c_xsph = fminf(c_xsph * c_materials[mat_id].base_viscosity, 0.5f);
-            if (behavior == GRANULAR) c_xsph = fminf(c_xsph * 3.0f, 0.15f);
             vel_new.x += c_xsph * xsph.x;
             vel_new.y += c_xsph * xsph.y;
             vel_new.z += c_xsph * xsph.z;
