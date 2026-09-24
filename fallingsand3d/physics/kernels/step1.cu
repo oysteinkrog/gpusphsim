@@ -204,7 +204,8 @@ void K_Step1(
                             if (mat_id_j != MAT_DEAD) sum_W += diff * diff * diff;
 
                             // Skip MAT_RIGID neighbors for heat/exposure/vorticity/strain
-                            // (density contribution already included via mass=psi_b)
+                            // (density contribution already included via mass=psi_b; the else
+                            // branch below still adds them to the normal and neighbour count)
                             if (mat_id_j != MAT_RIGID) {
                                 // --- Heat diffusion ---
                                 float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
@@ -250,7 +251,7 @@ void K_Step1(
                                         normal.z += vol_j * gWz;
                                     }
 
-                                    neighbor_count += 1.0f;
+                                    if (m_j > 0.0f) neighbor_count += 1.0f;  // DEAD slots have mass 0
 
                                     if (dye_on && behavior_j != STATIC) {
                                         float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
@@ -276,6 +277,21 @@ void K_Step1(
                                         Dyz += 0.5f * weight * (dvy * gWz + dvz * gWy);
                                     }
                                 }
+                            } else if (r_sq > 1e-12f && m_j > 0.0f) {
+                                // MAT_RIGID neighbour: count it and add it to the colour-field
+                                // normal like a STONE wall, so fluid at a rigid face is not
+                                // classed as surface (bd-r5-review-n28.68). psi_b lives in mass,
+                                // so V_b = psi_b / rho0_i.
+                                float inv_rlen = 1.0f / rlen;
+                                float h_rlen = h - rlen;
+                                float grad_scalar = c_precalc.spiky_grad_coeff * h_rlen * h_rlen * inv_rlen;
+                                if (is_fluid) {
+                                    float vol_b = m_j / c_materials[mat_id_i].rest_density;
+                                    normal.x += vol_b * grad_scalar * r.x;
+                                    normal.y += vol_b * grad_scalar * r.y;
+                                    normal.z += vol_b * grad_scalar * r.z;
+                                }
+                                neighbor_count += 1.0f;
                             } // mat_id_j != MAT_RIGID
                         }
                     }
@@ -558,7 +574,7 @@ void K_Step1_BuildNL(
                                         normal.z += vol_j * gWz;
                                     }
 
-                                    neighbor_count += 1.0f;
+                                    if (m_j > 0.0f) neighbor_count += 1.0f;  // DEAD slots have mass 0
 
                                     if (dye_on && behavior_j != STATIC) {
                                         float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
@@ -584,7 +600,22 @@ void K_Step1_BuildNL(
                                         Dyz += 0.5f * weight * (dvy * gWz + dvz * gWy);
                                     }
                                 }
-                            }
+                            } else if (r_sq > 1e-12f && m_j > 0.0f) {
+                                // MAT_RIGID neighbour: count it and add it to the colour-field
+                                // normal like a STONE wall, so fluid at a rigid face is not
+                                // classed as surface (bd-r5-review-n28.68). psi_b lives in mass,
+                                // so V_b = psi_b / rho0_i.
+                                float inv_rlen = 1.0f / rlen;
+                                float h_rlen = h - rlen;
+                                float grad_scalar = c_precalc.spiky_grad_coeff * h_rlen * h_rlen * inv_rlen;
+                                if (is_fluid) {
+                                    float vol_b = m_j / c_materials[mat_id_i].rest_density;
+                                    normal.x += vol_b * grad_scalar * r.x;
+                                    normal.y += vol_b * grad_scalar * r.y;
+                                    normal.z += vol_b * grad_scalar * r.z;
+                                }
+                                neighbor_count += 1.0f;
+                            } // mat_id_j != MAT_RIGID
                         }
                     }
                 }

@@ -338,7 +338,7 @@ void K_PBF_ComputeLambda(
                             }
                         }
 
-                        // Vorticity + surface normal (FLUID only, skip MAT_RIGID)
+                        // Vorticity + surface normal (FLUID only); MAT_RIGID adds to the normal only
                         if ((do_vort || do_normal) && mat_id_j != MAT_RIGID) {
                             float rho_j_v = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
                             if (rho_j_v <= 0.0f) rho_j_v = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
@@ -357,8 +357,17 @@ void K_PBF_ComputeLambda(
                                 normal.x += vol_jv * gW.x;
                                 normal.y += vol_jv * gW.y;
                                 normal.z += vol_jv * gW.z;
-                                neighbor_count += 1.0f;
+                                if (m_j > 0.0f) neighbor_count += 1.0f;  // DEAD slots have mass 0
                             }
+                        } else if (do_normal && m_j > 0.0f) {
+                            // MAT_RIGID neighbour: count it and add it to the colour-field
+                            // normal like a STONE wall, so fluid at a rigid face is not
+                            // classed as surface (bd-r5-review-n28.68). V_b = psi_b / rho0_i.
+                            float vol_b = m_j / rho0;
+                            normal.x += vol_b * gW.x;
+                            normal.y += vol_b * gW.y;
+                            normal.z += vol_b * gW.z;
+                            neighbor_count += 1.0f;
                         }
                     }
                 }

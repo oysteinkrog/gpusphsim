@@ -241,14 +241,26 @@ void K_DFSPH_ComputeDensityAlpha(
                         grad_sum.z += w_j * gW.z;
                         grad_norm_sum += w_j * w_j * (gW.x * gW.x + gW.y * gW.y + gW.z * gW.z);
 
-                        // Surface normal, vorticity, strain-rate: skip MAT_RIGID neighbors
-                        if (!is_rigid_j) {
+                        // Surface normal and neighbour count include MAT_RIGID
+                        // (bd-r5-review-n28.68); vorticity and strain-rate skip it.
+                        if (is_rigid_j) {
+                            if (m_j > 0.0f) {
+                                if (is_fluid && normal_out != 0) {
+                                    // psi_b lives in mass, so V_b = psi_b / rho0_i
+                                    float vol_b = m_j / c_materials[mat_id_i].rest_density;
+                                    normal.x += vol_b * gW.x;
+                                    normal.y += vol_b * gW.y;
+                                    normal.z += vol_b * gW.z;
+                                }
+                                neighbor_count += 1.0f;
+                            }
+                        } else {
                             if (is_fluid && normal_out != 0) {
                                 normal.x += w_j * gW.x;
                                 normal.y += w_j * gW.y;
                                 normal.z += w_j * gW.z;
                             }
-                            neighbor_count += 1.0f;
+                            if (m_j > 0.0f) neighbor_count += 1.0f;  // DEAD slots have mass 0
 
                             if (need_vel) {
                                 float4 vel4_j = __ldg(&velocity[j]);
