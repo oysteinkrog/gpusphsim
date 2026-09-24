@@ -291,6 +291,26 @@ Side effects:
   added at once).
 - DFSPH `NonPressureForces` and PBF have no implicit scale.
 
+**FP16 pairing rule (bd-r5-review-n28.69)**
+
+Neighbour velocities are read from the FP16 mirror `velocity_h` (OPT-4.3). Every pair
+difference `v_j - v_i` (viscosity and XSPH in step2; vorticity and strain rate in step1)
+also takes `v_i` from `velocity_h`, and the step1 dye difference takes `dye_i` from
+`dye_h`. So two particles with the same true velocity give exactly zero difference.
+Step2 keeps the FP32 `v_i` for `veleval = v_i + eps * xsph` and for the STATIC and
+MAT_RIGID boundary terms, whose other side (`v_b`) is FP32. When `velocity_h` is NULL
+both sides are FP32.
+
+With FP32 `v_i` against FP16 `v_j`, every pair gave `fp16(v) - v`, a half-ulp of up to
+4.9e-4 m/s at |v| in [1, 2), summed into a body force toward the FP16 grid. A 10^3
+lattice moving at (1.3, -0.7, 2.1) m/s got up to 3.3e-3 extra force per particle for
+WATER and 0.18 for LAVA, and vorticity up to 0.012 1/s. It now gets exactly zero.
+Dam Break KE (WCSPH, 0.25 to 1.5 s) is unchanged within 1%.
+
+Tests: `test_step2.py::test_translating_block_no_fp16_viscous_bias`,
+`test_step1.py::test_translating_block_zero_vorticity_strain_dye` (K_Step1 and
+K_Step1_BuildNL). `neighbor_list.cu` K_Step1_NL and K_Step2_NL still use FP32 `v_i`.
+
 Tests: `test_visc_dynamic_form.py` (pair and free-surface block momentum at round-off,
 pair value equals the formula above, K_Step2 and K_Step2_NL), `test_implicit_viscosity.py`.
 
