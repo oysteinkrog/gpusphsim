@@ -417,6 +417,20 @@ class UI:
 
     def _on_mouse_button(self, window, button, action, mods):
         self._imgui_renderer.mouse_button_callback(window, button, action, mods)
+
+        # A release always ends any drag, even over an ImGui panel.
+        # want_capture_mouse is from the last frame, so a press can reach the
+        # camera while the matching release reads True. Gating the release
+        # would leave orbit, pan or an SDF drag stuck on.
+        if action == glfw.RELEASE:
+            if button == glfw.MOUSE_BUTTON_LEFT and self._dragging_sdf:
+                self._dragging_sdf = False
+                if self._sdf_manager_ref is not None:
+                    self._sdf_manager_ref.upload_if_dirty()
+            if self._user_mouse_button_cb:
+                self._user_mouse_button_cb(window, button, action, mods)
+            return
+
         io = imgui.get_io()
         if io.want_capture_mouse:
             return
@@ -462,15 +476,6 @@ class UI:
                     return
                 else:
                     self._selected_sdf_id = None
-
-        # Left release: finish drag, upload to GPU
-        if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.RELEASE:
-            if self._dragging_sdf:
-                self._dragging_sdf = False
-                if self._sdf_manager_ref is not None:
-                    self._sdf_manager_ref.upload_if_dirty()
-                # Don't pass to camera
-                return
 
         # Right click: deselect
         if button == glfw.MOUSE_BUTTON_RIGHT and action == glfw.PRESS:
