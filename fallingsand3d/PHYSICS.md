@@ -178,27 +178,45 @@ balance its upward push is about |g|, not 7x or 50x |g|
 
 ### 3.3 Viscosity Force
 
-**IMPORTANT: FLUID vs GRANULAR use different viscosity formulations (design choice).**
+All pair terms use the dynamic form `/ (rho_i * rho_j)`, so each pair is symmetric in
+i and j and conserves momentum even where the densities differ (free surface).
 
-**FLUID/GAS: Kinematic viscosity form (divides by rho_j only)**
+**FLUID/GAS: dynamic viscosity form, same as DFSPH (bd-r5-review-n28.79)**
 ```
-mu_ij = 2 * mu_i * mu_j / (mu_i + mu_j)     [harmonic mean of base_viscosity]
-a_visc += mu_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / rho_j * (h - |r|)
+mu_ij = 2 * mu_i * mu_j / (mu_i + mu_j)     [harmonic mean of base_viscosity, Pa*s]
+a_visc += mu_ij * [45/(pi*h^6)] * m_j * (v_j - v_i) / (rho_i * rho_j) * (h - |r|)
 ```
+`force_scale` does not apply: the kernel divides the term by `fs_i` before the final
+multiply. WCSPH and DFSPH (13.5) read the same `base_viscosity` and use this same pair
+formula, so the kinematic viscosity is `nu = mu / rho0` in both. WATER: 1.0 / 2500 =
+4e-4 m^2/s. OIL 5.0 / 2125 = 2.4e-3, LAVA 100 / 6500 = 0.015, MUD 50 / 4500 = 0.011,
+ACID 2.0 / 2500 = 8e-4. GAS (mu 0.01, rho0 0.2 to 0.6) gets 0.017 to 0.05.
 
-This is NOT the standard SPH dynamic-viscosity form (which would divide by `rho_i * rho_j`).
-The `base_viscosity` values (WATER=1.0, OIL=5.0, LAVA=100.0, ACID=2.0) are tuned as
-kinematic-like coefficients, not physical dynamic viscosities in Pa*s.
+The `base_viscosity` values were not changed. The old WCSPH form divided by `rho_j`
+only and was scaled by `force_scale`, which gave WATER nu = 0.02 m^2/s (50x DFSPH) and
+F_ij / F_ji = rho_i / rho_j. WCSPH liquids are therefore thinner than before and now
+match DFSPH. PBF uses `base_viscosity` only as its XSPH factor (12.5), so it is not
+affected.
 
-This choice is coupled with `force_scale=0.02` which globally scales all FLUID SPH
-forces. Changing to the dynamic form `/ (rho_i * rho_j)` requires simultaneously
-retuning `force_scale` and all per-material `base_viscosity` values.
+Dam Break check (18000 WATER particles, column x in [-0.95, -0.55], y in [-0.95, -0.35],
+z in [-0.3, 0.3], world [-1, 1], front = 99th percentile of x):
+
+| t | WCSPH front | DFSPH front | difference |
+|---|---|---|---|
+| 0.25 s | -0.568 | -0.514 | 0.054 m |
+| 0.50 s | -0.285 | -0.148 | 0.137 m |
+| 1.00 s | +0.597 | +0.694 to +0.717 | 0.10 to 0.12 m |
+
+With WATER mu scaled to 50 in both solvers (the old WCSPH strength) the fronts at 1 s
+were +0.435 (WCSPH) and +0.428 (DFSPH). The remaining gap at mu = 1 comes from the
+pressure solve, not from viscosity. WCSPH at mu = 1 shows single splash particles up to
+8 m/s near 1 s (DFSPH 3.3 m/s); sum of v^2/2 still decays from 11100 at 1 s to 1200 at 4 s.
 
 **FLUID-GRANULAR pairs: one dynamic form on both sides (bd-r5-review-n28.41)**
 ```
-mu_F    = force_scale * base_viscosity_F * rho0_F     [FLUID effective value, WATER = 50]
+mu_F    = base_viscosity_F                             [FLUID dynamic viscosity, WATER = 1.0]
 mu_G    = mu (step1 `viscosity`, 1.0 in the app)       [same value as viscosity_precalc]
-mu_pair = 2 * mu_F * mu_G / (mu_F + mu_G)              [WATER-SAND: 1.96]
+mu_pair = 2 * mu_F * mu_G / (mu_F + mu_G)              [WATER-SAND: 1.0]
 a_visc += mu_pair * [45/(pi*h^6)] * m_j * (v_j - v_i) / (rho_i * rho_j) * (h - |r|)
 ```
 F is whichever particle of the pair is FLUID. This term already carries its scale, so the
@@ -219,10 +237,11 @@ has true Pa*s units and `force_scale=1.0` (no global scaling).
 The boundary particle b has mass (or psi_b) m_b and velocity v_b (0 for regular STATIC,
 the body surface velocity for MAT_RIGID).
 ```
-FLUID/GAS i:  a_visc += base_viscosity_i * [45/(pi*h^6)] * m_b * (v_b - v_i) / rho_i * (h - |r|)
+FLUID/GAS i:  a_visc += base_viscosity_i * [45/(pi*h^6)] * m_b * (v_b - v_i) / (rho_i * rho0_i) * (h - |r|)
 GRANULAR i:   a_visc += mu0 * [45/(pi*h^6)] * m_b * (v_b - v_i) / (rho_i * rho0_i) * (h - |r|)
 ```
-GRANULAR uses the same dynamic form as its pair code, with the boundary density taken as
+The FLUID/GAS term, like the FLUID pair, is divided by `fs_i` before the final multiply.
+K_Step2_NL uses the same helper. Both behaviours use the same dynamic form as their pair code, with the boundary density taken as
 the rest density `rho0_i` of i's own material (Akinci mirror: the wall stands in for more
 sand). It does not read the STATIC particle's own density. The drag rate per boundary
 neighbour therefore equals the FLUID-GRANULAR pair drag at rest density rescaled from
@@ -242,9 +261,11 @@ a_visc  = fs_i * sum_j c_j (v_j - v_i) / (1 + x)
 ```
 This is backward Euler on `v_i` in the viscous term:
 `v' = (v + dt * fs_i * sum_j c_j v_j) / (1 + x)`. Explicit Euler needs `x < 2`. For
-an interior particle at dt = 1 ms, x is about 18.75 for LAVA (base_viscosity 100),
-9.4 for MUD (50), 0.94 for OIL, 0.19 for WATER, and about 1.9 for resting SAND at
-`mu_max = 500` (rho about 2500). Before this, LAVA and MUD velocities overshot the
+an interior lattice particle at rho = 2500 and dt = 1 ms, x is about 0.375 for LAVA
+(base_viscosity 100), 0.19 for MUD (50), 0.019 for OIL, 0.0038 for WATER, and about 1.9
+for resting SAND at `mu_max = 500`. At their own rest densities LAVA is 0.14 and MUD
+0.10. With the older FLUID form (before bd-r5-review-n28.79) x was 50x larger: 18.75 for
+LAVA, 9.4 for MUD. Before the implicit scale, LAVA and MUD velocities overshot the
 neighbour mean by up to 18x per substep, held back only by `ACCEL_MAX`. That left a
 velocity checkerboard in resting lava and made resting sand flip sign relative to its
 neighbours every substep.
@@ -252,13 +273,13 @@ neighbours every substep.
 With the scale, a mode that alternates between neighbours changes by
 `1 - lambda * x / (1 + x)` per substep, where `lambda * c_tot` is the mode's Laplacian
 eigenvalue (at most 2 c_tot). This is always between -1 and 1. On the lattice
-(`test_implicit_viscosity.py`) one substep gives v'/v = -0.01 (3D checkerboard) and
--0.10 (alternating planes) for LAVA, +0.32 and +0.27 for SAND, +0.84 and +0.83 for
-WATER. Before: -17.2 and -18.8 for LAVA, -0.82 and -0.98 for SAND.
+(`test_implicit_viscosity.py`, rho = 2500 for every material) one substep gives
+v'/v = +0.73 (3D checkerboard) and +0.71 (alternating planes) for LAVA, +0.84 and +0.83
+for MUD, +0.98 for OIL, +0.996 for WATER, +0.32 and +0.27 for SAND.
 
 Side effects:
 - Smooth flows lose some viscous drag: about x/(1+x) of the accel on the stiffest
-  mode, about 16% for WATER and half for OIL. WATER `base_viscosity` was not retuned.
+  mode, under 2% for WATER and OIL and about 27% for LAVA at rho = 2500.
   Dam Break WATER (21504 particles, dt 1 ms) peak KE went from 872 to 878 J
   (+0.7%) and KE at 1 s from 256 to 265 J (+3.4%).
 - A falling LAVA block used to be held back by the clamped checkerboard. It now falls
@@ -268,11 +289,14 @@ Side effects:
   after the loop with the same `1 / (1 + x)` scale, so action equals reaction. A second
   body in the same particle's neighbourhood stays explicit (not in `c_tot`, reaction
   added at once).
-- DFSPH `NonPressureForces` and PBF are unchanged.
+- DFSPH `NonPressureForces` and PBF have no implicit scale.
 
-**Source**: `step2.cu:348-357` (FLUID), `step2.cu:321-340` (GRANULAR), `step2.cu` K_Step2
-implicit scale before PostCalc, `neighbor_list.cu` K_Step2_NL (same scale),
-`dfsph_solver.cu:419-425`
+Tests: `test_visc_dynamic_form.py` (pair and free-surface block momentum at round-off,
+pair value equals the formula above, K_Step2 and K_Step2_NL), `test_implicit_viscosity.py`.
+
+**Source**: `step2.cu` K_Step2 FLUID/GAS pair branch, GRANULAR branch, `cross_pair_visc`,
+`boundary_visc_factor`, implicit scale before PostCalc; `neighbor_list.cu` K_Step2_NL
+(same formulas and scale); `dfsph_solver.cu` K_DFSPH_NonPressureForces
 
 ### 3.4 XSPH Velocity Correction (FLUID only)
 
@@ -521,12 +545,12 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | rho_0 (rest density) | 2500 (WATER), per material | 1000 | Each material rests at its own rho_0 at spacing 0.02 (see 7.3) |
 | k (EOS stiffness) | 500.0 (Water) | 3.0 | High k needed to resist gravity with force_scale=0.02 |
 | gamma (EOS exponent) | 7.0 (all) | 7 | Tait EOS for all materials |
-| mu_0 (viscosity) | 1.0 | 3.5 | Lowered; effective viscosity = mu0 * force_scale |
+| mu_0 (viscosity) | 1.0 | 3.5 | GRANULAR base viscosity. FLUID/GAS use per-material base_viscosity as dynamic mu, nu = mu / rho0 (3.3) |
 | epsilon (XSPH) | 0.8 (WCSPH profile `xsph_epsilon`) | 0.5 | Higher for smoother FLUID advection |
 | gravity | -4.0 | -9.8 | Reduced for miniature-world aesthetic |
 | dt | adaptive | 0.001 (fixed) | DT_MAX * accuracy / 0.4, capped by acoustic CFL, in [1e-5, 0.001] (see 4.2) |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention. FLUID and GAS pairs; GRANULAR pairs use 1.0 |
-| FLUID-GRANULAR pair scale | pressure: force_scale; viscosity: harmonic mean of force_scale*base_viscosity*rho0 and mu | N/A | Same value on both sides, so pair forces are antisymmetric (3.2, 3.3) |
+| FLUID-GRANULAR pair scale | pressure: force_scale; viscosity: harmonic mean of base_viscosity and mu | N/A | Same value on both sides, so pair forces are antisymmetric (3.2, 3.3) |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
 | integrate | accel = sph + g | accel = sph + g | Both treat step2 output as acceleration |
 | position update | FLUID: pos += (vel_new + eps*xsph_sum) * dt; others: pos += vel_new * dt | pos += vel_new * dt | FLUID uses XSPH for smooth advection |
@@ -2107,9 +2131,12 @@ GAS:      a_i = gravity + buoyancy - drag * v_i + viscosity (same as FLUID)
 ```
 
 The `1/rho_i` factor is critical: without it, viscosity is ~2500x too strong (at rho≈2500),
-making the fluid behave like a solid. With `mu_0 = 1.0` and `rho_i ≈ 2500`, the effective
-kinematic viscosity is `nu = mu_0/rho_i = 0.0004 m^2/s` (400x physical water, giving nice
-smooth game fluid behavior).
+making the fluid behave like a solid. With WATER `base_viscosity = 1.0` and `rho_i ≈ 2500`,
+the effective kinematic viscosity is `nu = mu/rho_i = 0.0004 m^2/s` (400x physical water,
+giving smooth game fluid behavior).
+
+The FLUID/GAS term is the same number and pair formula as WCSPH step2 (3.3,
+bd-r5-review-n28.79): `mu_ij * lap * m_j * (v_j - v_i) / (rho_i * rho_j)`.
 
 Velocity updated: `v*_i = v_i + dt * a_i`
 
