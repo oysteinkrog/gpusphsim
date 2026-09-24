@@ -1432,6 +1432,15 @@ density to roughly `2*rho_0`, causing lambda to drive particles away from walls
 (unphysical bounce). With the 2x factor gone, near-wall density is correct and
 wall contact is stable. Lambda and delta gradients also use `m_j` without scaling.
 
+**STATIC and GAS density per substep (bd-r5-review-n28.62)**: STATIC and GAS take
+no part in the constraint (lambda = 0). GAS density is computed once per substep,
+in the first ComputeLambda call (the one that also does heat, exposure and dye),
+as `rho = SUM_j m_j W_poly6`. Later iterations take an early return and leave that
+value in `sorted_density`, so next substep's heat and dye terms use the real
+`vol_j = m_j / rho_j` for GAS neighbours (an isolated STEAM particle has
+`rho = m W(0)`, about 163, where rest_density is 0.6). Those later iterations
+write `max(rest_density, 1)` for STATIC.
+
 **Source**: `pbf_solver.cu:K_PBF_ComputeLambda`
 
 ### 12.3 Position Correction (Mass-Weighted Delta)
