@@ -17,7 +17,7 @@ from typing import Callable, Optional, Tuple
 import cupy as cp
 import numpy as np
 
-from materials import MATERIALS, MAX_MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER, ICE
+from materials import MATERIALS, MAX_MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER, ICE, FIRE, SMOKE, STEAM
 
 # packed_info bitfield macros (mirrors common.cuh)
 _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
@@ -115,6 +115,17 @@ _DEFAULT_TEMPS = {
     12: 373.0,   # STEAM
     13: 500.0,   # SMOKE
     11: 253.0,   # ICE -- well below melt point of 273 K; prevents frame-1 thaw
+}
+
+# Default lifetime in seconds for spawned GAS materials. K_Reactions counts
+# lifetime down only while it is > 0: expired FIRE becomes SMOKE (lifetime
+# 3.0 s), expired SMOKE and STEAM become DEAD. Every other material gets 0.
+# Values match reactions.cu (OIL fire 1.5 s, fire-to-smoke 3.0 s) and
+# spawn.cu (SPAWN_LIFETIME 5.0 s for boiled steam).
+_DEFAULT_LIFETIMES = {
+    FIRE: 1.5,
+    SMOKE: 3.0,
+    STEAM: 5.0,
 }
 
 # Ambient temperature
@@ -587,6 +598,64 @@ class World:
         self._high_water += count
         return count
 
+    def _init_slot_state(
+        self,
+        sl: slice,
+        positions: cp.ndarray,
+        material_id: int,
+        velocity: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        lifetime: Optional[float] = None,
+    ) -> None:
+        """Write every per-particle field of the new spawn slots `sl`.
+
+        All spawn_* functions call this, so no field keeps the value of the
+        slot's previous occupant (bd-r5-review-n28.96). `positions` is an
+        (N, 3) CuPy array of xyz. position.w gets the material rest density,
+        because step1 reads the previous density from there. The DFSPH
+        warm-start fields (kappa, kappa_v) and angular velocity are zeroed.
+        `lifetime` None gives the per-material default from
+        _DEFAULT_LIFETIMES (0 for materials that never expire); an explicit
+        value overrides it, and 0 makes a GAS particle permanent.
+        """
+        mat = MATERIALS[material_id]
+        self.position[sl, 0:3] = positions
+        self.position[sl, 3] = mat.rest_density
+
+        vx, vy, vz = velocity
+        for arr in (self.velocity, self.veleval):
+            arr[sl, 0] = vx
+            arr[sl, 1] = vy
+            arr[sl, 2] = vz
+            arr[sl, 3] = 0.0
+        self.sph_force[sl] = 0.0
+        self.angular_velocity[sl] = 0.0
+
+        self.mass[sl] = spawn_mass(material_id)
+        self.packed_info[sl] = cp.uint32(_MAKE_PACKED(material_id, mat.behavior_class))
+
+        self.temperature[sl] = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
+        self.health[sl] = 1.0
+        if lifetime is None:
+            lifetime = _DEFAULT_LIFETIMES.get(material_id, 0.0)
+        self.lifetime[sl] = lifetime
+        for arr in (self.shear_rate, self.exposure_heat, self.exposure_corrode,
+                    self.kappa, self.kappa_v):
+            arr[sl] = 0.0
+
+        self.color[sl, 0] = mat.color_r
+        self.color[sl, 1] = mat.color_g
+        self.color[sl, 2] = mat.color_b
+        self.color[sl, 3] = mat.behavior_class * 0.25
+
+        # Particle dye starts at the material color
+        self.particle_dye[sl, 0] = mat.color_r
+        self.particle_dye[sl, 1] = mat.color_g
+        self.particle_dye[sl, 2] = mat.color_b
+        self.particle_dye[sl, 3] = 0.0
+
+        self.density[sl] = mat.rest_density
+        self.sleep_counter[sl] = 0
+
     def spawn_sphere(
         self,
         center: Tuple[float, float, float],
@@ -594,8 +663,12 @@ class World:
         material_id: int,
         count: int,
         velocity: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        lifetime: Optional[float] = None,
     ) -> int:
         """Spawn particles with random positions inside a sphere.
+
+        lifetime: seconds until a GAS particle expires. None uses the
+            material default (_DEFAULT_LIFETIMES); 0 makes it permanent.
 
         Returns the number of particles actually spawned (may be less than
         count if max_particles is reached).
@@ -608,7 +681,6 @@ class World:
         if actual <= 0:
             return 0
 
-        mat = MATERIALS[material_id]
         start = self._high_water
 
         # Generate exactly `actual` random positions uniformly inside a unit sphere.
@@ -627,48 +699,7 @@ class World:
         sphere_pts[:, 2] = sphere_pts[:, 2] * radius + cz
 
         sl = slice(start, start + actual)
-        self.position[sl, 0] = sphere_pts[:, 0]
-        self.position[sl, 1] = sphere_pts[:, 1]
-        self.position[sl, 2] = sphere_pts[:, 2]
-        self.position[sl, 3] = 0.0
-
-        vx, vy, vz = velocity
-        self.velocity[sl, 0] = vx
-        self.velocity[sl, 1] = vy
-        self.velocity[sl, 2] = vz
-        self.velocity[sl, 3] = 0.0
-        self.veleval[sl, 0] = vx
-        self.veleval[sl, 1] = vy
-        self.veleval[sl, 2] = vz
-        self.veleval[sl, 3] = 0.0
-        self.sph_force[sl] = 0.0
-
-        self.mass[sl] = spawn_mass(material_id)
-
-        packed = _MAKE_PACKED(material_id, mat.behavior_class)
-        self.packed_info[sl] = cp.uint32(packed)
-
-        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
-        self.temperature[sl] = temp
-        self.health[sl] = 1.0
-        self.lifetime[sl] = 0.0
-        self.shear_rate[sl] = 0.0
-        self.exposure_heat[sl] = 0.0
-        self.exposure_corrode[sl] = 0.0
-
-        self.color[sl, 0] = mat.color_r
-        self.color[sl, 1] = mat.color_g
-        self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = mat.behavior_class * 0.25
-
-        # Initialize particle dye from material color
-        self.particle_dye[sl, 0] = mat.color_r
-        self.particle_dye[sl, 1] = mat.color_g
-        self.particle_dye[sl, 2] = mat.color_b
-        self.particle_dye[sl, 3] = 0.0
-
-        self.density[sl] = mat.rest_density
-        self.sleep_counter[sl] = 0
+        self._init_slot_state(sl, sphere_pts, material_id, velocity, lifetime)
 
         self._high_water += actual
         self._spawned_material_ids.add(material_id)
@@ -684,6 +715,7 @@ class World:
         exclude_box: Optional[Tuple[Tuple[float, float, float],
                                     Tuple[float, float, float]]] = None,
         inside_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        lifetime: Optional[float] = None,
     ) -> int:
         """Spawn particles on a regular grid within a cube.
 
@@ -692,6 +724,8 @@ class World:
             that box without two lattices sharing volume.
         inside_fn: optional filter. Called with the (N, 3) float32 CPU
             positions, it returns a boolean mask of the points to keep.
+        lifetime: seconds until a GAS particle expires. None uses the
+            material default (_DEFAULT_LIFETIMES); 0 makes it permanent.
 
         The lattice is ordered with y slowest, so when the particle budget
         runs out the top layers are dropped and the footprint stays whole.
@@ -743,53 +777,11 @@ class World:
         if actual == 0:
             return 0
 
-        mat = MATERIALS[material_id]
         start = self._high_water
         sl = slice(start, start + actual)
 
         d_positions = cp.asarray(positions)
-        self.position[sl, 0] = d_positions[:, 0]
-        self.position[sl, 1] = d_positions[:, 1]
-        self.position[sl, 2] = d_positions[:, 2]
-        self.position[sl, 3] = 0.0
-
-        vx, vy, vz = velocity
-        self.velocity[sl, 0] = vx
-        self.velocity[sl, 1] = vy
-        self.velocity[sl, 2] = vz
-        self.velocity[sl, 3] = 0.0
-        self.veleval[sl, 0] = vx
-        self.veleval[sl, 1] = vy
-        self.veleval[sl, 2] = vz
-        self.veleval[sl, 3] = 0.0
-        self.sph_force[sl] = 0.0
-
-        self.mass[sl] = spawn_mass(material_id)
-
-        packed = _MAKE_PACKED(material_id, mat.behavior_class)
-        self.packed_info[sl] = cp.uint32(packed)
-
-        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
-        self.temperature[sl] = temp
-        self.health[sl] = 1.0
-        self.lifetime[sl] = 0.0
-        self.shear_rate[sl] = 0.0
-        self.exposure_heat[sl] = 0.0
-        self.exposure_corrode[sl] = 0.0
-
-        self.color[sl, 0] = mat.color_r
-        self.color[sl, 1] = mat.color_g
-        self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = mat.behavior_class * 0.25
-
-        # Initialize particle dye from material color
-        self.particle_dye[sl, 0] = mat.color_r
-        self.particle_dye[sl, 1] = mat.color_g
-        self.particle_dye[sl, 2] = mat.color_b
-        self.particle_dye[sl, 3] = 0.0
-
-        self.density[sl] = mat.rest_density
-        self.sleep_counter[sl] = 0
+        self._init_slot_state(sl, d_positions, material_id, velocity, lifetime)
 
         self._high_water += actual
         self._spawned_material_ids.add(material_id)
@@ -803,6 +795,7 @@ class World:
         thickness: float,
         material_id: int,
         spacing: float = DEFAULT_SPACING,
+        lifetime: Optional[float] = None,
     ) -> int:
         """Spawn a STATIC particle ramp between two 3D points.
 
@@ -857,37 +850,10 @@ class World:
         if actual <= 0:
             return 0
 
-        mat = MATERIALS[material_id]
         start = self._high_water
         sl = slice(start, start + actual)
         d_positions = cp.asarray(pos_arr[:actual])
-        self.position[sl, 0] = d_positions[:, 0]
-        self.position[sl, 1] = d_positions[:, 1]
-        self.position[sl, 2] = d_positions[:, 2]
-        self.position[sl, 3] = 0.0
-        self.velocity[sl] = 0.0
-        self.veleval[sl] = 0.0
-        self.sph_force[sl] = 0.0
-        self.mass[sl] = spawn_mass(material_id)
-        packed = _MAKE_PACKED(material_id, mat.behavior_class)
-        self.packed_info[sl] = cp.uint32(packed)
-        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
-        self.temperature[sl] = temp
-        self.health[sl] = 1.0
-        self.lifetime[sl] = 0.0
-        self.shear_rate[sl] = 0.0
-        self.exposure_heat[sl] = 0.0
-        self.exposure_corrode[sl] = 0.0
-        self.color[sl, 0] = mat.color_r
-        self.color[sl, 1] = mat.color_g
-        self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = mat.behavior_class * 0.25
-        self.particle_dye[sl, 0] = mat.color_r
-        self.particle_dye[sl, 1] = mat.color_g
-        self.particle_dye[sl, 2] = mat.color_b
-        self.particle_dye[sl, 3] = 0.0
-        self.density[sl] = mat.rest_density
-        self.sleep_counter[sl] = 0
+        self._init_slot_state(sl, d_positions, material_id, (0.0, 0.0, 0.0), lifetime)
         self._high_water += actual
         self._spawned_material_ids.add(material_id)
         return actual
@@ -899,6 +865,7 @@ class World:
         thickness: float,
         material_id: int,
         spacing: float = DEFAULT_SPACING,
+        lifetime: Optional[float] = None,
     ) -> int:
         """Spawn a STATIC particle hemisphere bowl (bottom half of sphere shell)."""
         cx, cy, cz = center
@@ -926,37 +893,10 @@ class World:
         if actual <= 0:
             return 0
 
-        mat = MATERIALS[material_id]
         start = self._high_water
         sl = slice(start, start + actual)
         d_positions = cp.asarray(pos_arr[:actual])
-        self.position[sl, 0] = d_positions[:, 0]
-        self.position[sl, 1] = d_positions[:, 1]
-        self.position[sl, 2] = d_positions[:, 2]
-        self.position[sl, 3] = 0.0
-        self.velocity[sl] = 0.0
-        self.veleval[sl] = 0.0
-        self.sph_force[sl] = 0.0
-        self.mass[sl] = spawn_mass(material_id)
-        packed = _MAKE_PACKED(material_id, mat.behavior_class)
-        self.packed_info[sl] = cp.uint32(packed)
-        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
-        self.temperature[sl] = temp
-        self.health[sl] = 1.0
-        self.lifetime[sl] = 0.0
-        self.shear_rate[sl] = 0.0
-        self.exposure_heat[sl] = 0.0
-        self.exposure_corrode[sl] = 0.0
-        self.color[sl, 0] = mat.color_r
-        self.color[sl, 1] = mat.color_g
-        self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = mat.behavior_class * 0.25
-        self.particle_dye[sl, 0] = mat.color_r
-        self.particle_dye[sl, 1] = mat.color_g
-        self.particle_dye[sl, 2] = mat.color_b
-        self.particle_dye[sl, 3] = 0.0
-        self.density[sl] = mat.rest_density
-        self.sleep_counter[sl] = 0
+        self._init_slot_state(sl, d_positions, material_id, (0.0, 0.0, 0.0), lifetime)
         self._high_water += actual
         self._spawned_material_ids.add(material_id)
         return actual
@@ -968,6 +908,7 @@ class World:
         gap_y_range: Tuple[float, float],
         material_id: int,
         spacing: float = DEFAULT_SPACING,
+        lifetime: Optional[float] = None,
     ) -> int:
         """Wall with a rectangular gap for fluid to flow through."""
         gap_lo, gap_hi = gap_y_range
@@ -977,6 +918,7 @@ class World:
             max_corner=(wall_max[0], gap_lo, wall_max[2]),
             material_id=material_id,
             spacing=spacing,
+            lifetime=lifetime,
         )
         # Top section
         n2 = self.spawn_cube(
@@ -984,6 +926,7 @@ class World:
             max_corner=wall_max,
             material_id=material_id,
             spacing=spacing,
+            lifetime=lifetime,
         )
         return n1 + n2
 
@@ -995,6 +938,7 @@ class World:
         thickness: float,
         material_id: int,
         spacing: float = DEFAULT_SPACING,
+        lifetime: Optional[float] = None,
     ) -> int:
         """Hollow cylinder of STATIC particles."""
         cx, cy, cz = center
@@ -1022,37 +966,10 @@ class World:
         if actual <= 0:
             return 0
 
-        mat = MATERIALS[material_id]
         start = self._high_water
         sl = slice(start, start + actual)
         d_positions = cp.asarray(pos_arr[:actual])
-        self.position[sl, 0] = d_positions[:, 0]
-        self.position[sl, 1] = d_positions[:, 1]
-        self.position[sl, 2] = d_positions[:, 2]
-        self.position[sl, 3] = 0.0
-        self.velocity[sl] = 0.0
-        self.veleval[sl] = 0.0
-        self.sph_force[sl] = 0.0
-        self.mass[sl] = spawn_mass(material_id)
-        packed = _MAKE_PACKED(material_id, mat.behavior_class)
-        self.packed_info[sl] = cp.uint32(packed)
-        temp = _DEFAULT_TEMPS.get(material_id, T_AMBIENT)
-        self.temperature[sl] = temp
-        self.health[sl] = 1.0
-        self.lifetime[sl] = 0.0
-        self.shear_rate[sl] = 0.0
-        self.exposure_heat[sl] = 0.0
-        self.exposure_corrode[sl] = 0.0
-        self.color[sl, 0] = mat.color_r
-        self.color[sl, 1] = mat.color_g
-        self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = mat.behavior_class * 0.25
-        self.particle_dye[sl, 0] = mat.color_r
-        self.particle_dye[sl, 1] = mat.color_g
-        self.particle_dye[sl, 2] = mat.color_b
-        self.particle_dye[sl, 3] = 0.0
-        self.density[sl] = mat.rest_density
-        self.sleep_counter[sl] = 0
+        self._init_slot_state(sl, d_positions, material_id, (0.0, 0.0, 0.0), lifetime)
         self._high_water += actual
         self._spawned_material_ids.add(material_id)
         return actual

@@ -23,8 +23,16 @@ from rigid_bodies import SDF_BOX, SDF_SPHERE, SDF_CYLINDER, SDF_PLANE
 
 
 def _clear_world(world: World) -> None:
-    """Kill all particles and reset high water mark."""
+    """Kill all particles and reset high water mark.
+
+    Also zeroes the DFSPH and PBF warm-start fields, so no pressure from the
+    previous scene reaches the first substep of the next one. Every spawn_*
+    zeroes them in its own slots too (bd-r5-review-n28.96).
+    """
     world.packed_info[:] = 0
+    world.kappa[:] = 0.0
+    world.kappa_v[:] = 0.0
+    world.sorted_lambda_pbf[:] = 0.0
     world._high_water = 0
 
 
@@ -961,6 +969,8 @@ def load_fire_and_ice(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         "max_corner": (0.4, 0.85, 0.4),
         "spacing": 0.06,
         "interval_frames": 20,
+        # main.py skips a spawn once _high_water passes this slot count
+        "budget": int(0.9 * world.max_particles),
     }
 
     return total, spawner
@@ -1286,6 +1296,8 @@ def load_water_mill(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         "max_corner": (0.2, 0.7, 0.2),
         "spacing": 0.02,
         "interval_frames": 15,
+        # main.py skips a spawn once _high_water passes this slot count
+        "budget": int(0.9 * world.max_particles),
     }
     return total, spawner
 
