@@ -11,12 +11,13 @@ from __future__ import annotations
 import functools
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from world import World
+from world import DEFAULT_SPACING, World
 import math
 
 from materials import (
     STONE, SAND, DIRT, GRAVEL, WATER, OIL, LAVA, ACID,
     WOOD, METAL, ICE, FIRE, GUNPOWDER, SMOKE, WET_SAND, MUD,
+    MATERIALS, FLUID,
 )
 from rigid_bodies import SDF_BOX, SDF_SPHERE, SDF_CYLINDER, SDF_PLANE
 
@@ -70,6 +71,33 @@ def _check_no_overlap(boxes: List[SpawnBox]) -> List[Tuple[int, int]]:
                 continue
             pairs.append((i, j))
     return pairs
+
+
+# FLUID spawns that are sparse on purpose: Acid Rain drops a layer of separate
+# acid drops (spacing 0.04 = h, so they do not touch), not a liquid block.
+SPARSE_FLUID_ALLOWED = {("Acid Rain", ACID)}
+
+
+def _check_fluid_spacing(
+    name: str, spawns: List[Tuple[int, float]],
+) -> List[Tuple[int, float]]:
+    """Find FLUID spawns of preset `name` that start below rest density.
+
+    CPU-only. `spawns` is a list of (material_id, spacing), one per
+    `spawn_cube` call. FLUID particles get a mass that puts them at rest
+    density on the DEFAULT_SPACING (0.02) lattice, and SPH density scales as
+    1/spacing^3: a box at 0.022 starts at about 0.75 rest density, one at
+    0.025 at about 0.51. compute_pressure clamps pressure at zero, so such a
+    block has no pressure until it has compressed that far
+    (bd-r5-review-n28.76). Returns the (material_id, spacing) pairs above
+    DEFAULT_SPACING, skipping SPARSE_FLUID_ALLOWED.
+    """
+    return [
+        (mat_id, spacing) for mat_id, spacing in spawns
+        if MATERIALS[mat_id].behavior_class == FLUID
+        and (name, mat_id) not in SPARSE_FLUID_ALLOWED
+        and spacing > DEFAULT_SPACING + 1e-9
+    ]
 
 
 def _warn_on_truncation(
@@ -264,9 +292,9 @@ def load_dam_break(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Lava heat source on the right side (close to the ice wall)
     n = world.spawn_cube(
         min_corner=(0.05, -0.9, -0.4),
-        max_corner=(0.45, -0.2, 0.4),
+        max_corner=(0.45, -0.54, 0.4),
         material_id=LAVA,
-        spacing=0.025,
+        spacing=0.02,
     )
     total += n
 
@@ -371,8 +399,10 @@ def load_water_drop(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     simple water demo.
 
     NOTE: Water spacing must be <= 0.02 (the default particle spacing).
-    Larger spacing produces SPH density below rest_density, giving negative
-    Tait EOS pressure that causes particles to attract instead of repel.
+    Larger spacing produces SPH density below rest_density. compute_pressure
+    clamps the Tait pressure at zero, so the block has no pressure at all
+    until it has compressed back to rest_density (spacing 0.022 spawns at
+    about 0.75 rest_density).
     """
     _clear_world(world)
     total = 0
@@ -421,9 +451,9 @@ def load_lava_meets_ice(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Lava block (left side)
     n = world.spawn_cube(
         min_corner=(-0.9, -0.9, -0.6),
-        max_corner=(-0.1, 0.3, 0.6),
+        max_corner=(-0.1, -0.11, 0.6),
         material_id=LAVA,
-        spacing=0.023,
+        spacing=0.02,
     )
     total += n
 
@@ -452,9 +482,9 @@ def load_oil_fire(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Oil pool (wide, shallow)
     n = world.spawn_cube(
         min_corner=(-0.8, -0.9, -0.8),
-        max_corner=(0.8, -0.4, 0.8),
+        max_corner=(0.8, -0.525, 0.8),
         material_id=OIL,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
@@ -638,14 +668,14 @@ def load_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     _clear_world(world)
     total = 0
 
-    lava_box = ((-0.25, -0.85, -0.25), (0.25, -0.5, 0.25))
+    lava_box = ((-0.23, -0.85, -0.23), (0.23, -0.53, 0.23))
 
     # Water filling most of the domain, with a hole where the lava goes
     n = world.spawn_cube(
         min_corner=(-0.7, -0.9, -0.7),
-        max_corner=(0.7, 0.6, 0.7),
+        max_corner=(0.7, 0.23, 0.7),
         material_id=WATER,
-        spacing=0.022,
+        spacing=0.02,
         exclude_box=lava_box,
     )
     total += n
@@ -655,7 +685,7 @@ def load_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         min_corner=lava_box[0],
         max_corner=lava_box[1],
         material_id=LAVA,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
@@ -735,9 +765,9 @@ def load_forge(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Lava pool (left side, touching metal)
     n = world.spawn_cube(
         min_corner=(-0.8, -0.9, -0.5),
-        max_corner=(-0.15, 0.0, 0.5),
+        max_corner=(-0.15, -0.44, 0.5),
         material_id=LAVA,
-        spacing=0.025,
+        spacing=0.02,
     )
     total += n
 
@@ -802,9 +832,9 @@ def load_avalanche(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Water on the ice
     n = world.spawn_cube(
         min_corner=(0.0, -0.7, -0.6),
-        max_corner=(0.85, -0.4, 0.6),
+        max_corner=(0.85, -0.455, 0.6),
         material_id=WATER,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
@@ -823,9 +853,9 @@ def load_acid_bath(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Acid pool
     n = world.spawn_cube(
         min_corner=(-0.8, -0.9, -0.8),
-        max_corner=(0.8, -0.2, 0.8),
+        max_corner=(0.8, -0.375, 0.8),
         material_id=ACID,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
@@ -863,27 +893,27 @@ def load_multi_fluid(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # Water (bottom layer)
     n = world.spawn_cube(
         min_corner=(-0.7, -0.9, -0.7),
-        max_corner=(0.7, -0.3, 0.7),
+        max_corner=(0.7, -0.45, 0.7),
         material_id=WATER,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
     # Oil (middle — should float up)
     n = world.spawn_cube(
-        min_corner=(-0.7, -0.3, -0.7),
-        max_corner=(0.7, 0.1, 0.7),
+        min_corner=(-0.7, -0.45, -0.7),
+        max_corner=(0.7, -0.15, 0.7),
         material_id=OIL,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
     # Acid (top — denser, should sink)
     n = world.spawn_cube(
-        min_corner=(-0.7, 0.1, -0.7),
-        max_corner=(0.7, 0.5, 0.7),
+        min_corner=(-0.7, -0.15, -0.7),
+        max_corner=(0.7, 0.15, 0.7),
         material_id=ACID,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
@@ -950,9 +980,14 @@ def load_sandbox(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
         (WOOD, -0.6, 0.4),     (METAL, -0.2, 0.4),    (FIRE, 0.2, 0.4),    (GUNPOWDER, 0.6, 0.4),
     ]
 
-    size = 0.14  # half-size of each cube
     for mat_id, cx, cz in materials_grid:
-        sp = 0.03 if mat_id in (FIRE, SMOKE) else 0.025
+        if MATERIALS[mat_id].behavior_class == FLUID:
+            # Liquids spawn at the default spacing so they start at rest
+            # density. The smaller cube keeps the particle count the same.
+            sp, size = 0.02, 0.112
+        else:
+            sp = 0.03 if mat_id in (FIRE, SMOKE) else 0.025
+            size = 0.14  # half-size of each cube
         n = world.spawn_cube(
             min_corner=(cx - size, -0.9, cz - size),
             max_corner=(cx + size, -0.9 + size * 3, cz + size),
@@ -1021,10 +1056,10 @@ def load_debris_flow(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
     # MUD mass (larger volume for better visual coverage), with a hole for
     # the gravel
     n = world.spawn_cube(
-        min_corner=(-0.9, 0.2, -0.5),
+        min_corner=(-0.9, 0.35, -0.5),
         max_corner=(-0.2, 0.9, 0.5),
         material_id=MUD,
-        spacing=0.022,
+        spacing=0.02,
         exclude_box=gravel_box,
     )
     total += n
@@ -1320,28 +1355,28 @@ def load_sdf_lava_lamp(world: World) -> Tuple[int, Optional[Dict[str, Any]]]:
 
     # Water in the middle (r/sqrt2 = 0.141, use 0.13 for margin)
     n = world.spawn_cube(
-        min_corner=(-0.13, -0.3, -0.13),
-        max_corner=(0.13, 0.4, 0.13),
+        min_corner=(-0.13, -0.52, -0.13),
+        max_corner=(0.13, 0.02, 0.13),
         material_id=WATER,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
     # Oil layer on top (lighter, floats)
     n = world.spawn_cube(
-        min_corner=(-0.13, 0.4, -0.13),
-        max_corner=(0.13, 0.7, 0.13),
+        min_corner=(-0.13, 0.02, -0.13),
+        max_corner=(0.13, 0.26, 0.13),
         material_id=OIL,
-        spacing=0.022,
+        spacing=0.02,
     )
     total += n
 
     # Lava blobs at the bottom (hot, rises through convection)
     n = world.spawn_cube(
         min_corner=(-0.12, -0.8, -0.12),
-        max_corner=(0.12, -0.3, 0.12),
+        max_corner=(0.12, -0.52, 0.12),
         material_id=LAVA,
-        spacing=0.025,
+        spacing=0.02,
     )
     total += n
 

@@ -17,8 +17,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from presets import PRESETS, _check_no_overlap
-from materials import MATERIALS, MUD, SAND, STONE, WATER
+from presets import PRESETS, _check_fluid_spacing, _check_no_overlap
+from materials import ACID, FLUID, MATERIALS, MUD, SAND, STONE, WATER
 
 
 class RecordingWorld:
@@ -28,6 +28,8 @@ class RecordingWorld:
         self.packed_info = np.zeros(1, dtype=np.uint32)
         self._high_water = 0
         self.boxes: list = []
+        self.spacings: list = []
+        self.spawn_truncated_count = 0
         self.sdf_manager = MagicMock()
         self.rigid_body_manager = MagicMock()
 
@@ -36,6 +38,7 @@ class RecordingWorld:
                    inside_fn=None) -> int:
         self.boxes.append((tuple(min_corner), tuple(max_corner), material_id,
                            exclude_box))
+        self.spacings.append((material_id, spacing))
         return 0
 
     # Non-box spawners (bowl, ramp, wall with gap) are not axis-aligned boxes.
@@ -222,3 +225,51 @@ def test_nested_preset_spawn_density(name, material):
         f"{name}: {MATERIALS[material].name} peak {peak:.0f} is "
         f"{peak / np.median(rho):.2f}x its median")
     assert peak / MATERIALS[material].rest_density < 1.3
+
+
+# ---------------------------------------------------------------------------
+# FLUID spawn spacing (bd-r5-review-n28.76)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", sorted(PRESETS))
+def test_preset_fluid_spawns_use_default_spacing(name):
+    """A FLUID box spawned above DEFAULT_SPACING starts below rest density
+    (0.75 at 0.022) and has zero pressure until it compresses."""
+    world = RecordingWorld()
+    PRESETS[name](world)
+    assert _check_fluid_spacing(name, world.spacings) == []
+
+
+def test_check_fluid_spacing_flags_wide_fluid_only():
+    spawns = [(WATER, 0.022), (WATER, 0.02), (SAND, 0.025), (STONE, 0.04)]
+    assert _check_fluid_spacing("Any", spawns) == [(WATER, 0.022)]
+
+
+def test_check_fluid_spacing_allows_acid_rain_drops():
+    assert _check_fluid_spacing("Acid Rain", [(ACID, 0.04)]) == []
+    assert _check_fluid_spacing("Other", [(ACID, 0.04)]) == [(ACID, 0.04)]
+
+
+@pytest.mark.parametrize("name", ["Lava Lamp", "Multi-Fluid"])
+def test_fluid_preset_density_after_one_substep(gpu_sim, name):
+    """One substep after loading, each FLUID material's median density is
+    within 10% of its rest density."""
+    cp, world, sim = gpu_sim
+    PRESETS[name](world)
+    sim.notify_scene_changed()
+    n = world._high_water
+    sim._sim_step(n)
+    cp.cuda.Device().synchronize()
+
+    mat = world.sorted_packed_info[:n].get() & 0xFF
+    rho = world.sorted_density[:n].get()
+    fluids = [m for m in np.unique(mat)
+              if MATERIALS[int(m)].behavior_class == FLUID]
+    assert fluids
+    for m in fluids:
+        sel = mat == m
+        assert sel.sum() > 1_000
+        ratio = float(np.median(rho[sel])) / MATERIALS[int(m)].rest_density
+        assert 0.9 < ratio < 1.1, (
+            f"{name}: {MATERIALS[int(m)].name} median density "
+            f"{ratio:.3f}x rest density")
