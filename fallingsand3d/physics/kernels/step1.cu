@@ -296,13 +296,13 @@ void K_Step1(
                             } else if (r_sq > 1e-12f && m_j > 0.0f) {
                                 // MAT_RIGID neighbour: count it and add it to the colour-field
                                 // normal like a STONE wall, so fluid at a rigid face is not
-                                // classed as surface (bd-r5-review-n28.68). psi_b lives in mass,
-                                // so V_b = psi_b / rho0_i.
+                                // classed as surface (bd-r5-review-n28.68). The mass slot holds
+                                // RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
                                 float inv_rlen = 1.0f / rlen;
                                 float h_rlen = h - rlen;
                                 float grad_scalar = c_precalc.spiky_grad_coeff * h_rlen * h_rlen * inv_rlen;
                                 if (is_fluid) {
-                                    float vol_b = m_j / c_materials[mat_id_i].rest_density;
+                                    float vol_b = m_j / RIGID_PSI_RHO0;
                                     normal.x += vol_b * grad_scalar * r.x;
                                     normal.y += vol_b * grad_scalar * r.y;
                                     normal.z += vol_b * grad_scalar * r.z;
@@ -633,13 +633,13 @@ void K_Step1_BuildNL(
                             } else if (r_sq > 1e-12f && m_j > 0.0f) {
                                 // MAT_RIGID neighbour: count it and add it to the colour-field
                                 // normal like a STONE wall, so fluid at a rigid face is not
-                                // classed as surface (bd-r5-review-n28.68). psi_b lives in mass,
-                                // so V_b = psi_b / rho0_i.
+                                // classed as surface (bd-r5-review-n28.68). The mass slot holds
+                                // RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
                                 float inv_rlen = 1.0f / rlen;
                                 float h_rlen = h - rlen;
                                 float grad_scalar = c_precalc.spiky_grad_coeff * h_rlen * h_rlen * inv_rlen;
                                 if (is_fluid) {
-                                    float vol_b = m_j / c_materials[mat_id_i].rest_density;
+                                    float vol_b = m_j / RIGID_PSI_RHO0;
                                     normal.x += vol_b * grad_scalar * r.x;
                                     normal.y += vol_b * grad_scalar * r.y;
                                     normal.z += vol_b * grad_scalar * r.z;

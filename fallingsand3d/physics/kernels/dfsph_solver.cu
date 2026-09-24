@@ -260,8 +260,8 @@ void K_DFSPH_ComputeDensityAlpha(
                         if (is_rigid_j) {
                             if (m_j > 0.0f) {
                                 if (is_fluid && normal_out != 0) {
-                                    // psi_b lives in mass, so V_b = psi_b / rho0_i
-                                    float vol_b = m_j / c_materials[mat_id_i].rest_density;
+                                    // The mass slot holds RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77)
+                                    float vol_b = m_j / RIGID_PSI_RHO0;
                                     normal.x += vol_b * gW.x;
                                     normal.y += vol_b * gW.y;
                                     normal.z += vol_b * gW.z;

@@ -425,8 +425,9 @@ void K_PBF_ComputeLambda(
                         } else if (do_normal && m_j > 0.0f) {
                             // MAT_RIGID neighbour: count it and add it to the colour-field
                             // normal like a STONE wall, so fluid at a rigid face is not
-                            // classed as surface (bd-r5-review-n28.68). V_b = psi_b / rho0_i.
-                            float vol_b = m_j / rho0;
+                            // classed as surface (bd-r5-review-n28.68). The mass slot holds
+                            // RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
+                            float vol_b = m_j / RIGID_PSI_RHO0;
                             normal.x += vol_b * gW.x;
                             normal.y += vol_b * gW.y;
                             normal.z += vol_b * gW.z;
