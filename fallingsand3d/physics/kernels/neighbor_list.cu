@@ -310,6 +310,32 @@ void K_Step1_NL(
  * K_Step2_NL -- Neighbor-list variant of K_Step2.
  * ====================================================================== */
 
+/* ======================================================================
+ * FLUID-GRANULAR pair scaling (bd-r5-review-n28.41)
+ *
+ * The final output multiplies particle i's sums by fs_i (1.0 GRANULAR,
+ * c_granular.force_scale FLUID/GAS). A pair between two behaviours must
+ * use one scale on both sides, or F_ij != -F_ji and every water-sand
+ * interface creates momentum. Cross pairs therefore use
+ *   pressure:  fs_cross = min(fs_FLUID, fs_GRANULAR) = force_scale
+ *   viscosity: dynamic form mu_pair * m_j * lap / (rho_i * rho_j),
+ *              mu_pair = harmonic mean of the FLUID effective value
+ *              (force_scale * base_viscosity * rho0 * lap_coeff) and the
+ *              GRANULAR value (viscosity_precalc = mu * lap_coeff).
+ * Both are symmetric in i and j. The terms are divided by fs_i here so
+ * the final fs_i multiply leaves exactly the pair value.
+ * ====================================================================== */
+__device__ __forceinline__ float cross_pair_visc(
+    uint mat_fluid, float m_j, float lap_v, float rho_i, float rho_j)
+{
+    float mu_f = c_granular.force_scale * c_materials[mat_fluid].base_viscosity
+               * c_materials[mat_fluid].rest_density * c_precalc.viscosity_lap_coeff;
+    float mu_g = c_precalc.viscosity_precalc;
+    float mu_pair = 2.0f * mu_f * mu_g / (mu_f + mu_g + 1e-8f);
+    return mu_pair * m_j * lap_v
+         / (fmaxf(rho_i, RHO_EPSILON) * fmaxf(rho_j, RHO_EPSILON));
+}
+
 extern "C" __global__ __launch_bounds__(256, 3)
 void K_Step2_NL(
     uint            numParticles,
@@ -367,6 +393,11 @@ void K_Step2_NL(
     bool is_granular_i = (behavior_i == GRANULAR);
     bool is_fluid_i    = (behavior_i == FLUID);
     bool is_gas_i      = (behavior_i == GAS);
+
+    // Per-particle output scale and FLUID-GRANULAR pair scale (bd-r5-review-n28.41)
+    float fs_i = is_granular_i ? 1.0f : c_granular.force_scale;
+    float inv_fs_i = 1.0f / fmaxf(fs_i, 1e-6f);
+    float cross_p_rescale = fminf(c_granular.force_scale, 1.0f) * inv_fs_i;
 
     float gamma_dot_i = 0.0f;
     float eta_i = 0.0f;
@@ -507,7 +538,9 @@ void K_Step2_NL(
         // Pressure force
         uint mat_id_j = GET_MATERIAL_ID(pi_j);
         float p_j = __ldg(&pressure_in[index_j]);
+        bool cross_ij = (is_granular_i != (behavior_j == GRANULAR));
         float press_sym = (p_i / (rho_i * rho_i)) + (p_j / (rho_j * rho_j));
+        if (cross_ij) press_sym *= cross_p_rescale;
         float3 grad_s = grad_spiky_variable(r, rlen, h);
         f_pressure.x += m_j * press_sym * grad_s.x;
         f_pressure.y += m_j * press_sym * grad_s.y;
@@ -527,8 +560,9 @@ void K_Step2_NL(
             f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
             f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
             f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
-        } else if (is_granular_i) {
-            float visc_factor = c_precalc.viscosity_precalc * m_j * lap_v / (rho_j * rho_i);
+        } else if (cross_ij) {
+            uint mat_fluid = is_granular_i ? mat_id_j : mat_id_i;
+            float visc_factor = cross_pair_visc(mat_fluid, m_j, lap_v, rho_i, rho_j) * inv_fs_i;
             f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
             f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
             f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
@@ -587,8 +621,7 @@ void K_Step2_NL(
     total_force.y = c_precalc.pressure_precalc * f_pressure.y + f_viscosity.y + f_vorticity_conf.y + f_surface_tension.y;
     total_force.z = c_precalc.pressure_precalc * f_pressure.z + f_viscosity.z + f_vorticity_conf.z + f_surface_tension.z;
 
-    float fs = is_granular_i ? 1.0f : c_granular.force_scale;
-    sph_force_out[index_i] = make_float4(total_force.x * fs, total_force.y * fs, total_force.z * fs, 0.0f);
+    sph_force_out[index_i] = make_float4(total_force.x * fs_i, total_force.y * fs_i, total_force.z * fs_i, 0.0f);
 
     if (is_fluid_i || is_granular_i) {
         float eps = c_granular.xsph_epsilon;

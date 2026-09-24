@@ -80,6 +80,32 @@ __device__ __forceinline__ float boundary_visc_factor(
 }
 
 /* ======================================================================
+ * FLUID-GRANULAR pair scaling (bd-r5-review-n28.41)
+ *
+ * The final output multiplies particle i's sums by fs_i (1.0 GRANULAR,
+ * c_granular.force_scale FLUID/GAS). A pair between two behaviours must
+ * use one scale on both sides, or F_ij != -F_ji and every water-sand
+ * interface creates momentum. Cross pairs therefore use
+ *   pressure:  fs_cross = min(fs_FLUID, fs_GRANULAR) = force_scale
+ *   viscosity: dynamic form mu_pair * m_j * lap / (rho_i * rho_j),
+ *              mu_pair = harmonic mean of the FLUID effective value
+ *              (force_scale * base_viscosity * rho0 * lap_coeff) and the
+ *              GRANULAR value (viscosity_precalc = mu * lap_coeff).
+ * Both are symmetric in i and j. The terms are divided by fs_i here so
+ * the final fs_i multiply leaves exactly the pair value.
+ * ====================================================================== */
+__device__ __forceinline__ float cross_pair_visc(
+    uint mat_fluid, float m_j, float lap_v, float rho_i, float rho_j)
+{
+    float mu_f = c_granular.force_scale * c_materials[mat_fluid].base_viscosity
+               * c_materials[mat_fluid].rest_density * c_precalc.viscosity_lap_coeff;
+    float mu_g = c_precalc.viscosity_precalc;
+    float mu_pair = 2.0f * mu_f * mu_g / (mu_f + mu_g + 1e-8f);
+    return mu_pair * m_j * lap_v
+         / (fmaxf(rho_i, RHO_EPSILON) * fmaxf(rho_j, RHO_EPSILON));
+}
+
+/* ======================================================================
  * K_Step2 kernel
  * ====================================================================== */
 
@@ -146,6 +172,12 @@ void K_Step2(
     bool is_granular_i = (behavior_i == GRANULAR);
     bool is_fluid_i    = (behavior_i == FLUID);
     bool is_gas_i      = (behavior_i == GAS);
+
+    // Per-particle output scale and the FLUID-GRANULAR pair scale
+    // (bd-r5-review-n28.41, see cross_pair_visc above).
+    float fs_i = is_granular_i ? 1.0f : c_granular.force_scale;
+    float inv_fs_i = 1.0f / fmaxf(fs_i, 1e-6f);
+    float cross_p_rescale = fminf(c_granular.force_scale, 1.0f) * inv_fs_i;
 
     // --- Grid cell of particle i ---
     int3 cell_i = calcGridCell(make_float3(pos_i.x, pos_i.y, pos_i.z));
@@ -332,9 +364,14 @@ void K_Step2(
                     uint mat_id_j = GET_MATERIAL_ID(pi_j);
                     float p_j = __ldg(&pressure_in[index_j]);
 
+                    // FLUID-GRANULAR pair (GAS and STATIC were handled above)
+                    bool cross_ij = (is_granular_i != (behavior_j == GRANULAR));
+
                     // ---- Pressure force ----
                     // f_press += pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable
+                    // Cross pairs are rescaled so fs_i * rescale = fs_cross on both sides.
                     float press_sym = (p_i / (rho_i * rho_i)) + (p_j / (rho_j * rho_j));
+                    if (cross_ij) press_sym *= cross_p_rescale;
                     float3 grad_s = grad_spiky_variable(r, rlen, h);
                     f_pressure.x += m_j * press_sym * grad_s.x;
                     f_pressure.y += m_j * press_sym * grad_s.y;
@@ -363,10 +400,11 @@ void K_Step2(
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
-                    } else if (is_granular_i) {
-                        // GRANULAR-nonGRANULAR pair: use constant mu0 with
-                        // full coefficient baked in (includes 1/rho_i for G2 fix)
-                        float visc_factor = c_precalc.viscosity_precalc * m_j * lap_v / (rho_j * rho_i);
+                    } else if (cross_ij) {
+                        // FLUID-GRANULAR pair: one symmetric dynamic-form term on
+                        // both sides (bd-r5-review-n28.41), undone by the fs_i multiply.
+                        uint mat_fluid = is_granular_i ? mat_id_j : mat_id_i;
+                        float visc_factor = cross_pair_visc(mat_fluid, m_j, lap_v, rho_i, rho_j) * inv_fs_i;
                         f_viscosity.x += (vel_j.x - vel_i.x) * visc_factor;
                         f_viscosity.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_viscosity.z += (vel_j.z - vel_i.z) * visc_factor;
@@ -378,7 +416,7 @@ void K_Step2(
                         // GRANULAR uses the dynamic form because mu(I) eta has Pa*s units.
                         // FLUID uses kinematic form — base_viscosity acts as a tuned coefficient,
                         // not a physical dynamic viscosity. This is coupled with force_scale=0.02
-                        // which globally scales all FLUID SPH forces (pressure + viscosity).
+                        // which scales FLUID/GAS same-behaviour SPH forces (pressure + viscosity).
                         // Changing to / (rho_i * rho_j) requires retuning both force_scale and
                         // all per-material base_viscosity values.
                         float mu_i = c_materials[mat_id_i].base_viscosity;
@@ -465,8 +503,8 @@ void K_Step2(
     // GRANULAR uses force_scale=1.0 (full-strength SPH forces).
     // With force_scale=0.02 and rho0=2500, SPH pressure is ~50x too weak vs gravity,
     // causing 200%+ compression instead of 2-5%.  FLUID keeps 0.02 (game-tuned).
-    float fs = is_granular_i ? 1.0f : c_granular.force_scale;
-    sph_force_out[index_i] = make_float4(total_force.x * fs, total_force.y * fs, total_force.z * fs, 0.0f);
+    // FLUID-GRANULAR pair terms were pre-divided by fs_i in the loop.
+    sph_force_out[index_i] = make_float4(total_force.x * fs_i, total_force.y * fs_i, total_force.z * fs_i, 0.0f);
 
     // XSPH-corrected veleval (FLUID only; GRANULAR/GAS/STATIC keep original velocity).
     // GRANULAR position is advected with vel_new in integrate.cu, not veleval_xsph,
