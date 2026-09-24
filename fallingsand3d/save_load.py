@@ -214,6 +214,62 @@ def _restore_rigid_body_manager(rbm, rb_data: dict, modules: list) -> None:
     rbm.upload(modules)
 
 
+# Expected per-particle arrays in a .fs3d file: name -> (dtype, trailing shape).
+_SCENE_ARRAYS = {
+    "position":     (np.float32, (4,)),
+    "velocity":     (np.float32, (4,)),
+    "packed_info":  (np.uint32,  ()),
+    "temperature":  (np.float32, ()),
+    "health":       (np.float32, ()),
+    "lifetime":     (np.float32, ()),
+    "mass":         (np.float32, ()),
+    "particle_dye": (np.float32, (4,)),
+    "density":      (np.float32, ()),
+}
+
+
+def _validate_scene_arrays(data, n: int) -> dict:
+    """Check every particle array in a loaded .fs3d before the world is touched.
+
+    Each array must exist, have shape (n,) or (n, 4) and the dtype save_scene
+    writes. Material ids (packed_info bits [7:0]) must be below MAX_MATERIALS,
+    because kernels index the 32-entry c_materials table with them. The
+    behavior class (bits [9:8]) is 2 bits wide, so it is always in range.
+
+    Returns the arrays as NumPy arrays. Raises ValueError naming the bad key.
+    """
+    from materials import MAX_MATERIALS
+
+    missing = [k for k in _SCENE_ARRAYS if k not in data]
+    if missing:
+        raise ValueError(f"Save file missing arrays: {missing}")
+
+    arrays = {}
+    for key, (dtype, tail) in _SCENE_ARRAYS.items():
+        arr = data[key]
+        expected = (n,) + tail
+        if arr.shape != expected:
+            raise ValueError(
+                f"Save file array '{key}' has shape {arr.shape}, expected {expected}"
+            )
+        if arr.dtype != dtype:
+            raise ValueError(
+                f"Save file array '{key}' has dtype {arr.dtype}, "
+                f"expected {np.dtype(dtype)}"
+            )
+        arrays[key] = arr
+
+    mat_ids = arrays["packed_info"] & 0xFF
+    bad = mat_ids >= MAX_MATERIALS
+    if np.any(bad):
+        first = int(np.flatnonzero(bad)[0])
+        raise ValueError(
+            f"Save file array 'packed_info' has material id {int(mat_ids[first])} "
+            f"at particle {first}; ids must be below {MAX_MATERIALS}"
+        )
+    return arrays
+
+
 def load_scene(world, sim, camera, filename: str) -> int:
     """Load scene from saves/<filename>. Returns particle count.
 
@@ -227,7 +283,9 @@ def load_scene(world, sim, camera, filename: str) -> int:
     data = np.load(path, allow_pickle=False)
 
     header = json.loads(data["header"].tobytes())
-    n = header["particle_count"]
+    n = header.get("particle_count")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise ValueError(f"Save file header has invalid particle_count: {n!r}")
 
     max_p = world.position.shape[0]
     if n > max_p:
@@ -236,12 +294,10 @@ def load_scene(world, sim, camera, filename: str) -> int:
             f"Increase max_particles to at least {n:,} before loading."
         )
 
-    # Validate all required keys exist before modifying world state
-    required = ["position", "velocity", "packed_info", "temperature",
-                "health", "lifetime", "mass", "particle_dye", "density"]
-    missing = [k for k in required if k not in data]
-    if missing:
-        raise ValueError(f"Save file missing arrays: {missing}")
+    # bd-r5-review-n28.12: validate every array (key, shape, dtype, material
+    # ids) before touching the world, so a corrupt or hand-edited file raises
+    # a clean ValueError and leaves the current scene intact.
+    arrays = _validate_scene_arrays(data, n)
 
     # Reset world
     world.packed_info[:] = 0
@@ -254,15 +310,15 @@ def load_scene(world, sim, camera, filename: str) -> int:
         _restore_sdf_manager(sim.sdf_manager, sdf_data)
 
     # Restore arrays
-    world.position[:n] = cp.asarray(data["position"])
-    world.velocity[:n] = cp.asarray(data["velocity"])
-    world.packed_info[:n] = cp.asarray(data["packed_info"])
-    world.temperature[:n] = cp.asarray(data["temperature"])
-    world.health[:n] = cp.asarray(data["health"])
-    world.lifetime[:n] = cp.asarray(data["lifetime"])
-    world.mass[:n] = cp.asarray(data["mass"])
-    world.particle_dye[:n] = cp.asarray(data["particle_dye"])
-    world.density[:n] = cp.asarray(data["density"])
+    world.position[:n] = cp.asarray(arrays["position"])
+    world.velocity[:n] = cp.asarray(arrays["velocity"])
+    world.packed_info[:n] = cp.asarray(arrays["packed_info"])
+    world.temperature[:n] = cp.asarray(arrays["temperature"])
+    world.health[:n] = cp.asarray(arrays["health"])
+    world.lifetime[:n] = cp.asarray(arrays["lifetime"])
+    world.mass[:n] = cp.asarray(arrays["mass"])
+    world.particle_dye[:n] = cp.asarray(arrays["particle_dye"])
+    world.density[:n] = cp.asarray(arrays["density"])
     world.veleval[:n] = world.velocity[:n]
 
     # bd-unl.13: zero warm-start and sleep fields so loaded particles start
