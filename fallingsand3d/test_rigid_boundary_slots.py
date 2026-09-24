@@ -109,6 +109,8 @@ def test_over_capacity_flags_and_freezes_body_then_retries():
 
     # Kill enough fluid, compact on a due frame: the block is retried.
     world.packed_info[:nb + 500] = cp.uint32(0)
+    world.dead_reserve = 0  # plain compaction, no parked DEAD top-up
+    sim.compact_threshold = 1
     sim._frame_counter = 0
     sim._maybe_compact()
     assert not rbm.boundary_dropped
