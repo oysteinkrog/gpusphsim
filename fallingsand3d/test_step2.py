@@ -910,6 +910,76 @@ def test_granular_rigid_drag_matches_pair() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.69: FP16 pairing rule for pair velocity differences
+# ---------------------------------------------------------------------------
+
+# Off the FP16 grid in every component: fp16(v) - v is about 1e-4 to 1e-3.
+TRANSLATE_VEL = (1.3, -0.7, 2.1)
+
+
+def _translating_block_step2(mat_id: int) -> tuple:
+    """Run step2 on a 10^3 FLUID lattice moving at TRANSLATE_VEL, and at rest.
+
+    Both runs use the same sorted scene and pressure, so any difference in
+    the force comes from the velocity terms alone. Returns
+    (force_moving, force_rest, veleval_moving), all in sorted order.
+    """
+    _upload_all_params()
+    k = 10
+    idx = np.arange(k, dtype=np.float32) * SPACING
+    xx, yy, zz = np.meshgrid(idx, idx, idx, indexing="ij")
+    n = xx.size
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0], pos[:, 1], pos[:, 2] = xx.ravel(), yy.ravel(), zz.ravel()
+    pos[:, 3] = RHO0
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, :3] = TRANSLATE_VEL
+    scene = counting_sort_scene(
+        pos, velocity=vel, mass=np.full(n, MASS, dtype=np.float32),
+        packed_info=np.full(n, MAKE_PACKED(mat_id, FLUID), dtype=np.uint32),
+        grid_params=default_grid_params(),
+    )
+    density = cupy.ascontiguousarray(scene["position"][:, 3])
+    pressure = cupy.zeros(n, dtype=cupy.float32)
+    compute_pressure(density, scene["packed_info"], pressure)
+
+    def run():
+        f, ve = compute_step2(
+            scene["position"], scene["velocity"], scene["mass"],
+            scene["packed_info"], cupy.zeros(n, dtype=cupy.float32),
+            scene["cell_start"], scene["cell_end"],
+            pressure_in=pressure, velocity_h=scene["velocity_h"],
+        )
+        return cupy.asnumpy(f), cupy.asnumpy(ve)
+
+    f_moving, ve_moving = run()
+    scene["velocity"][:] = 0.0
+    scene["velocity_h"][:] = 0
+    f_rest, _ = run()
+    return f_moving, f_rest, ve_moving
+
+
+@pytest.mark.parametrize("mat_name", ["WATER", "LAVA"])
+def test_translating_block_no_fp16_viscous_bias(mat_name: str) -> None:
+    """A uniformly translating block gets exactly zero viscous force and XSPH.
+
+    Neighbour velocities come from the FP16 mirror. Before the fix particle
+    i's own velocity was FP32, so every pair difference was fp16(v) - v and
+    summed to a body force (about 4.5 m/s^2 for LAVA at 0.5 m/s).
+    """
+    import materials
+    mat_id = getattr(materials, mat_name)
+    f_moving, f_rest, ve_moving = _translating_block_step2(mat_id)
+    v = np.array(TRANSLATE_VEL, dtype=np.float32)
+    dv_force = np.abs(f_moving[:, :3] - f_rest[:, :3]).max()
+    dv_xsph = np.abs(ve_moving[:, :3] - v).max()
+    print(f"  {mat_name}: max |force(v) - force(0)| = {dv_force:.3e}, "
+          f"max |veleval - v| = {dv_xsph:.3e}")
+    assert dv_force == 0.0, f"translation changed the force by {dv_force}"
+    assert dv_xsph == 0.0, f"XSPH moved veleval off v by {dv_xsph}"
+
+
 def main() -> None:
     test_compilation()
     test_struct_sizes()

@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import cupy
 import numpy as np
+import pytest
 
 from hash_sort import (
     NUM_CELLS,
@@ -1346,6 +1347,82 @@ def test_rigid_wall_contact_layer_matches_stone() -> None:
             assert abs(rigid[1]) < n_free, (build_nl, layers, rigid, n_free)
             # Lateral components cancel like STONE's.
             assert abs(rigid[0]) <= 0.10 * n_free and abs(rigid[2]) <= 0.10 * n_free, rigid
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.69: FP16 pairing rule for pair velocity and dye differences
+# ---------------------------------------------------------------------------
+
+def _translating_block_step1(packed: int, build_nl: bool) -> tuple:
+    """Step1 on a 10^3 lattice moving at (1.3, -0.7, 2.1) with uniform dye 0.3.
+
+    Returns (vorticity, shear_rate, dye_rate) as numpy arrays.
+    """
+    from step1 import compute_step1_build_nl
+
+    k = 10
+    idx = np.arange(k, dtype=np.float32) * SPACING
+    xx, yy, zz = np.meshgrid(idx, idx, idx, indexing="ij")
+    n = xx.size
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0], pos[:, 1], pos[:, 2] = xx.ravel(), yy.ravel(), zz.ravel()
+    pos[:, 3] = 1.0
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, :3] = (1.3, -0.7, 2.1)
+
+    _upload_all_params()
+    upload_sim_params(build_sim_params(
+        smoothing_length=H, particle_mass=MASS, particle_spacing=SPACING,
+        dye_enabled=1,
+    ))
+    scene = counting_sort_scene(
+        pos, velocity=vel, mass=np.full(n, MASS, dtype=np.float32),
+        packed_info=np.full(n, packed, dtype=np.uint32),
+        grid_params=default_grid_params(),
+    )
+    # Uniform dye 0.3 (off the FP16 grid) with its FP16 mirror.
+    dye = cupy.zeros((n, 4), dtype=cupy.float32)
+    dye[:, :3] = 0.3
+    dye_h = cupy.ascontiguousarray(dye.astype(cupy.float16)).view(cupy.uint32)
+
+    density_in = cupy.full(n, RHO0, dtype=cupy.float32)
+    vort = cupy.zeros((n, 4), dtype=cupy.float32)
+    dye_rate = cupy.zeros((n, 4), dtype=cupy.float32)
+    shear = cupy.zeros(n, dtype=cupy.float32)
+    args = (scene["position"], scene["velocity"], scene["mass"], density_in,
+            scene["packed_info"], scene["temperature"],
+            scene["cell_start"], scene["cell_end"])
+    kw = dict(shear_rate_out=shear, vorticity_out=vort, particle_dye_in=dye,
+              dye_rate_out=dye_rate, velocity_h=scene["velocity_h"], dye_h=dye_h)
+    if build_nl:
+        max_nb = 96
+        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
+                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb, **kw)
+    else:
+        compute_step1(*args, **kw)
+    cupy.cuda.Device().synchronize()
+    out = (cupy.asnumpy(vort), cupy.asnumpy(shear), cupy.asnumpy(dye_rate))
+    # Leave dye off for the other tests.
+    _upload_all_params()
+    return out
+
+
+@pytest.mark.parametrize("build_nl", [False, True])
+def test_translating_block_zero_vorticity_strain_dye(build_nl: bool) -> None:
+    """A uniformly translating block has exactly zero vorticity, strain rate
+    and dye rate. Neighbour velocity and dye come from the FP16 mirrors; the
+    particle's own value must come from the same mirror, or every pair
+    difference is fp16(x) - x instead of zero."""
+    vort, _, dye_rate = _translating_block_step1(PACKED_WATER, build_nl)
+    _, shear, _ = _translating_block_step1(PACKED_SAND, build_nl)
+    max_vort = np.abs(vort[:, :3]).max()
+    max_shear = np.abs(shear).max()
+    max_dye = np.abs(dye_rate[:, :3]).max()
+    print(f"  build_nl={build_nl}: max |curl v| = {max_vort:.3e}, "
+          f"max gamma_dot = {max_shear:.3e}, max |dye rate| = {max_dye:.3e}")
+    assert max_vort == 0.0, f"spurious vorticity {max_vort}"
+    assert max_shear == 0.0, f"spurious strain rate {max_shear}"
+    assert max_dye == 0.0, f"spurious dye rate {max_dye}"
 
 
 def main() -> None:
