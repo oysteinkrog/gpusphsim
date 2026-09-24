@@ -357,6 +357,9 @@ class RigidBodyManager:
         self._bodies_cpu = np.zeros(max_bodies, dtype=RIGID_BODY_DTYPE)
         self._num_bodies = 0
         self._boundary_data_list = []  # per-body boundary data before combining
+        # Per-body constructor arguments, so a save file can rebuild the same
+        # bodies and boundary samples (bd-r5-review-n28.57).
+        self._build_params: list[dict] = []
         self.num_boundary_particles = 0
 
         # GPU arrays
@@ -421,6 +424,12 @@ class RigidBodyManager:
         idx = self.add_rigid_body(
             position, half_extents, mass, sdf_type,
             restitution, friction, is_kinematic, velocity
+        )
+        self._build_params[idx].update(
+            with_particles=True,
+            spacing=float(spacing),
+            smoothing_length=float(smoothing_length),
+            rho0=float(rho0),
         )
 
         # Sample surface
@@ -511,8 +520,27 @@ class RigidBodyManager:
         body["inertia_inv"][:] = [ix_inv, iy_inv, iz_inv,
                                   _type_as_float(int(is_kinematic))]
 
+        self._build_params.append({
+            "half_extents": [float(v) for v in half_extents],
+            "mass": float(mass),
+            "sdf_type": int(sdf_type),
+            "restitution": float(restitution),
+            "friction": float(friction),
+            "is_kinematic": bool(is_kinematic),
+            "with_particles": False,
+        })
         self._num_bodies += 1
         return idx
+
+    def build_params(self, idx: int) -> dict:
+        """Return a copy of the constructor arguments body idx was added with.
+
+        Keys: half_extents, mass, sdf_type, restitution, friction,
+        is_kinematic, with_particles, and for bodies added by
+        add_rigid_body_with_particles also spacing, smoothing_length, rho0.
+        Save files use this to rebuild the same bodies on load.
+        """
+        return dict(self._build_params[idx])
 
     def upload(self, modules: list) -> None:
         """Upload rigid body array to GPU global memory and count to constant memory.
@@ -687,6 +715,7 @@ class RigidBodyManager:
         self._num_bodies = 0
         self._bodies_cpu[:] = 0
         self._boundary_data_list = []
+        self._build_params = []
         self.num_boundary_particles = 0
         self.boundary_data = None
         self.d_rigid_bodies.fill(0)

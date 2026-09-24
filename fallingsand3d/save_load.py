@@ -9,7 +9,11 @@ import cupy as cp
 import numpy as np
 
 SAVE_DIR = os.path.join(os.path.dirname(__file__), "saves")
-VERSION = 3  # v3: added sim_time to header (bd-unl.14)
+# v3: added sim_time to header (bd-unl.14)
+# v4: each rigid body carries its constructor arguments under "build", so
+#     load rebuilds the bodies instead of patching the session's
+#     (bd-r5-review-n28.57)
+VERSION = 4
 
 
 def _ensure_save_dir():
@@ -50,7 +54,9 @@ def _serialize_rigid_body_manager(rbm) -> dict:
 
     Downloads the current GPU state so dynamic bodies' positions/velocities
     are captured, then serialises the RIGID_BODY_DTYPE structured array.
-    Each body is stored as a dict with all 6 float4 fields.
+    Each body is stored as a dict with all 6 float4 fields, plus "build": the
+    arguments it was created with (rbm.build_params), so load can rebuild it
+    and its boundary samples in a session that does not have it.
     """
     if rbm is None or rbm.num_bodies == 0:
         return {"count": 0, "bodies": []}
@@ -68,6 +74,7 @@ def _serialize_rigid_body_manager(rbm) -> dict:
             "ang_vel":      b["ang_vel"].tolist(),
             "half_extents": b["half_extents"].tolist(),
             "inertia_inv":  b["inertia_inv"].tolist(),
+            "build":        rbm.build_params(i),
         })
     return {"count": rbm.num_bodies, "bodies": bodies}
 
@@ -183,14 +190,30 @@ def _restore_sdf_manager(sdf_manager, sdf_data: dict) -> None:
     sdf_manager.upload_if_dirty()
 
 
-def _restore_rigid_body_manager(rbm, rb_data: dict, modules: list) -> None:
-    """Restore a RigidBodyManager's GPU state from the serialised dict.
+_RB_STATE_FIELDS = ("position", "rotation", "lin_vel", "ang_vel",
+                    "half_extents", "inertia_inv")
 
-    Only restores the raw body struct data (position, rotation, velocities,
-    half_extents, inertia_inv) directly into the GPU array and calls
-    rbm.upload() to sync count to constant memory.  The boundary particle
-    psi_b data is topology (not state) and is preserved from the existing
-    rbm setup -- loading only updates dynamic state.
+
+def _write_body_state(rbm, i: int, b_data: dict) -> None:
+    """Copy the six saved float4 fields of one body into rbm._bodies_cpu[i]."""
+    for key in _RB_STATE_FIELDS:
+        rbm._bodies_cpu[i][key] = np.array(b_data[key], dtype=np.float32)
+
+
+def _restore_rigid_body_manager(rbm, rb_data: dict, modules: list) -> None:
+    """Rebuild a RigidBodyManager from the serialised dict.
+
+    Saves from VERSION 4 on carry each body's constructor arguments under
+    "build". For those the manager is reset and every body is re-added with
+    add_rigid_body_with_particles (or add_rigid_body when it had no boundary
+    samples), then the saved dynamic state (pose, velocities, and the packed
+    mass, restitution, friction and type words) overwrites the fresh bodies.
+    A save with no bodies leaves the manager empty. The boundary block is
+    rebuilt from the new bodies on the next substep.
+
+    Older saves lack "build". They keep the old behaviour: only bodies that
+    already exist in the session get the saved state, and a warning is
+    printed when the counts differ.
 
     Parameters
     ----------
@@ -204,26 +227,52 @@ def _restore_rigid_body_manager(rbm, rb_data: dict, modules: list) -> None:
     if not rb_data:
         return
 
-    from rigid_bodies import RIGID_BODY_DTYPE
+    count = int(rb_data.get("count", 0))
+    bodies = rb_data.get("bodies", [])[:count]
 
-    count = rb_data.get("count", 0)
-    bodies = rb_data.get("bodies", [])
+    if count == 0 or all("build" in b for b in bodies):
+        if len(bodies) > rbm.max_bodies:
+            print(f"WARNING: save has {len(bodies)} rigid bodies but the "
+                  f"manager holds at most {rbm.max_bodies}; extra bodies dropped")
+            bodies = bodies[:rbm.max_bodies]
+        rbm.reset()
+        for i, b_data in enumerate(bodies):
+            build = b_data["build"]
+            pos = b_data["position"]
+            kwargs = dict(
+                position=(pos[0], pos[1], pos[2]),
+                half_extents=tuple(build["half_extents"]),
+                mass=float(build["mass"]),
+                sdf_type=int(build["sdf_type"]),
+                restitution=float(build["restitution"]),
+                friction=float(build["friction"]),
+                is_kinematic=bool(build["is_kinematic"]),
+            )
+            if build.get("with_particles", False):
+                idx = rbm.add_rigid_body_with_particles(
+                    spacing=float(build["spacing"]),
+                    smoothing_length=float(build["smoothing_length"]),
+                    rho0=float(build["rho0"]),
+                    **kwargs,
+                )
+            else:
+                idx = rbm.add_rigid_body(**kwargs)
+            _write_body_state(rbm, idx, b_data)
+        rbm.finalize_boundary_data()
+        rbm.upload(modules)
+        return
 
-    # Only restore state for bodies that already exist in the manager.
-    # If the save has more bodies than the current manager (e.g. different
-    # preset), we skip the extra bodies to stay within capacity.
+    # Pre-v4 save: no topology, so patch the bodies the session already has.
     restore_count = min(count, rbm.num_bodies, len(bodies))
+    if count != rbm.num_bodies:
+        print(f"WARNING: old save format has {count} rigid bodies without "
+              f"build data; the session has {rbm.num_bodies}. Restored state "
+              f"for {restore_count} bodies only. Re-save to fix.")
     if restore_count == 0:
         return
 
     for i in range(restore_count):
-        b_data = bodies[i]
-        rbm._bodies_cpu[i]["position"]     = np.array(b_data["position"],     dtype=np.float32)
-        rbm._bodies_cpu[i]["rotation"]     = np.array(b_data["rotation"],     dtype=np.float32)
-        rbm._bodies_cpu[i]["lin_vel"]      = np.array(b_data["lin_vel"],      dtype=np.float32)
-        rbm._bodies_cpu[i]["ang_vel"]      = np.array(b_data["ang_vel"],      dtype=np.float32)
-        rbm._bodies_cpu[i]["half_extents"] = np.array(b_data["half_extents"], dtype=np.float32)
-        rbm._bodies_cpu[i]["inertia_inv"]  = np.array(b_data["inertia_inv"],  dtype=np.float32)
+        _write_body_state(rbm, i, bodies[i])
 
     rbm.upload(modules)
 
@@ -288,7 +337,7 @@ def load_scene(world, sim, camera, filename: str) -> int:
     """Load scene from saves/<filename>. Returns particle count.
 
     Resets world, restores all particle arrays, SDF collision geometry
-    (including kinematic motions), rigid body dynamic state, and camera.
+    (including kinematic motions), rigid bodies, and camera.
     """
     if not filename.endswith(".fs3d"):
         filename += ".fs3d"
@@ -359,7 +408,7 @@ def load_scene(world, sim, camera, filename: str) -> int:
     unique_mats = cp.unique(world.packed_info[:n] & 0xFF).get()
     world._spawned_material_ids = set(int(m) for m in unique_mats if m != 0)
 
-    # Restore rigid body dynamic state
+    # Rebuild rigid bodies from the save (bd-r5-review-n28.57).
     # bd-unl.15: use sim.get_all_modules() so every compiled module receives the
     # updated c_num_rigid_bodies constant -- the old 3-module list was a partial
     # subset that would silently leave any other module with a stale count.
@@ -390,9 +439,10 @@ def load_scene(world, sim, camera, filename: str) -> int:
     sim._last_frame_time = None
     sim.reset_spawn_damping()
 
-    # The world arrays were replaced, so the boundary block is gone. Keep the
-    # bodies (reset() would drop them) and rebuild the block on the next
-    # substep from the restored body state. (bd-r5-review-n28.22)
+    # The world arrays were replaced, so the boundary block is gone. Rebuild
+    # the block on the next substep from the restored body state. A v4 load
+    # already cleared the flag through reset(); old saves still need this.
+    # (bd-r5-review-n28.22)
     if hasattr(sim, "rigid_body_manager"):
         sim.rigid_body_manager.mark_for_reinjection()
 
