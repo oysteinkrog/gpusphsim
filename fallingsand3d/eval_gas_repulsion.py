@@ -1,6 +1,6 @@
 """Measure GAS self-repulsion under WCSPH, DFSPH and PBF (bd-r5-review-n28.91).
 
-Spawns a permanent STEAM block, runs 2 s of simulated time under each
+Spawns a permanent gas block, runs 2 s of simulated time under each
 solver and reads the gas state once at the end:
 
   - density mean and 95th percentile (sorted_density, gas only)
@@ -9,7 +9,8 @@ solver and reads the gas state once at the end:
     neighbour closer than 0.25 * spacing (collapse into strands or points)
 
 Run with Windows Python from this directory:
-    python eval_gas_repulsion.py
+    python eval_gas_repulsion.py          # hot STEAM, buoyancy presses it to the ceiling
+    python eval_gas_repulsion.py --free   # ambient SMOKE, zero gravity, free expansion
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import cupy as cp
 import numpy as np
 
-from materials import STEAM
+from materials import SMOKE, STEAM
 from simulation import Simulation
 from solver_profiles import PROFILES
 from world import World
@@ -39,14 +40,22 @@ def _profile(name: str):
     return PROFILES[name]
 
 
-def measure(name: str, sim_time: float = SIM_TIME) -> dict:
+def measure(name: str, sim_time: float = SIM_TIME, free: bool = False) -> dict:
+    """free=False: hot STEAM, default gravity; buoyancy presses it to the ceiling.
+    free=True: SMOKE at ambient temperature with zero gravity, so only the gas
+    pressure, viscosity and drag act (no buoyancy, no wall contact)."""
+    mat = SMOKE if free else STEAM
     world = World(max_particles=4096)
-    n = world.spawn_cube((-0.1, 0.3, -0.1), (0.1, 0.5, 0.1), STEAM,
+    n = world.spawn_cube((-0.1, 0.3, -0.1), (0.1, 0.5, 0.1), mat,
                          spacing=SPACING, lifetime=0.0)
+    if free:
+        world.temperature[:n] = 293.0
     profile = _profile(name)
     sim = Simulation(world, dt=profile.dt, speed=1.0, accuracy=0.4,
                      fixed_dt=True, max_substeps=40)
     sim.set_solver_profile(profile)
+    if free:
+        sim.set_gravity(0.0)
     sim.reset_spawn_damping()
     sim.sim_time = 0.0
     sim._last_frame_time = None
@@ -59,7 +68,7 @@ def measure(name: str, sim_time: float = SIM_TIME) -> dict:
     info = cp.asnumpy(world.sorted_packed_info[:n])
     rho = cp.asnumpy(world.sorted_density[:n])
     pos = cp.asnumpy(world.sorted_position[:n])[:, :3]
-    gas = (info & 0xFF) == STEAM
+    gas = (info & 0xFF) == mat
     rho_g = rho[gas]
     p = pos[gas]
     c = p.mean(axis=0)
@@ -82,11 +91,16 @@ def measure(name: str, sim_time: float = SIM_TIME) -> dict:
 
 
 def main() -> None:
-    names = sys.argv[1:] or ["WCSPH", "DFSPH", "PBF"]
+    args = sys.argv[1:]
+    free = "--free" in args
+    if free:
+        args.remove("--free")
+    names = args or ["WCSPH", "DFSPH", "PBF"]
+    print("scene:", "SMOKE, ambient T, zero gravity" if free else "hot STEAM, default gravity")
     print(f"{'solver':8s} {'steps':>5s} {'count':>5s} {'rho_mean':>9s} {'rho_p95':>9s} "
           f"{'r_xz':>7s} {'height':>7s} {'nn_med':>7s} {'close':>6s}")
     for name in names:
-        m = measure(name)
+        m = measure(name, free=free)
         print(f"{m['solver']:8s} {m['steps']:5d} {m['count']:5d} {m['rho_mean']:9.1f} "
               f"{m['rho_p95']:9.1f} {m['r_xz']:7.4f} {m['height']:7.4f} "
               f"{m['nn_median']:7.4f} {m['close_frac']:6.3f}"

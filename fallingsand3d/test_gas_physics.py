@@ -1045,6 +1045,66 @@ def test_pbf_gas_density_survives_iterations():
         f"GAS density after 6 PBF iterations is {rho:.3f}, self term {rho_self:.1f}")
 
 
+def _free_gas_cloud(solver: str, sim_time: float) -> tuple[float, float, float]:
+    """Run a 5^3 SMOKE cube at ambient temperature and zero gravity, so only
+    the gas pressure, viscosity and drag act. Returns (initial RMS radius,
+    final RMS radius, final mean density) of the cloud."""
+    import dataclasses
+    import cupy as cp
+    from world import World
+    from simulation import Simulation
+    from solver_profiles import PROFILES
+
+    world = World(max_particles=1024)
+    n = world.spawn_cube((-0.04, 0.46, -0.04), (0.04, 0.54, 0.04), SMOKE,
+                         spacing=SPACING, lifetime=0.0)
+    assert n == 125
+    world.temperature[:n] = 293.0
+    if solver == "WCSPH":
+        profile = dataclasses.replace(PROFILES["WCSPH"], dt=0.0005, fixed_dt=True)
+    else:
+        profile = PROFILES[solver]
+    sim = Simulation(world, dt=profile.dt, speed=1.0, accuracy=0.4,
+                     fixed_dt=True, max_substeps=40)
+    sim.set_solver_profile(profile)
+    sim.set_gravity(0.0)
+    sim.reset_spawn_damping()
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+
+    def rms_radius(pos):
+        return float(np.sqrt(((pos - pos.mean(axis=0)) ** 2).sum(axis=1).mean()))
+
+    r0 = rms_radius(cp.asnumpy(world.position[:n])[:, :3])
+    for _ in range(int(round(sim_time / sim.fixed_dt_value))):
+        sim._sim_step(n)
+    cp.cuda.Device().synchronize()
+    info = cp.asnumpy(world.sorted_packed_info[:n])
+    assert ((info & 0xFF) == SMOKE).all(), "cloud is no longer all SMOKE"
+    pos = cp.asnumpy(world.sorted_position[:n])[:, :3]
+    assert not np.isnan(pos).any()
+    rho = cp.asnumpy(world.sorted_density[:n])
+    return r0, rms_radius(pos), float(rho.mean())
+
+
+@pytest.mark.parametrize("solver", ["DFSPH", "PBF"])
+def test_gas_pressure_spreads_cloud_like_wcsph(solver):
+    """bd-r5-review-n28.91: DFSPH and PBF skip GAS in their pressure solvers
+    and used to give it no repulsion at all, so a compressed gas cloud never
+    expanded. They now apply the WCSPH gas EOS pressure between GAS pairs.
+    A 125-particle SMOKE cube at spacing 0.02 starts at rho about 2 * rho0,
+    so the pressure must spread it, by the same amount as WCSPH."""
+    r0, r_ref, rho_ref = _free_gas_cloud("WCSPH", 0.5)
+    r0_s, r_s, rho_s = _free_gas_cloud(solver, 0.5)
+    assert r0_s == pytest.approx(r0, rel=1e-6)
+    assert r_ref > 1.15 * r0, f"WCSPH cloud did not spread: {r0:.4f} -> {r_ref:.4f}"
+    assert r_s > 1.15 * r0, f"{solver} cloud did not spread: {r0:.4f} -> {r_s:.4f}"
+    assert r_s == pytest.approx(r_ref, rel=0.15), (
+        f"{solver} RMS radius {r_s:.4f} vs WCSPH {r_ref:.4f}")
+    assert rho_s == pytest.approx(rho_ref, rel=0.25), (
+        f"{solver} mean density {rho_s:.1f} vs WCSPH {rho_ref:.1f}")
+
+
 if __name__ == "__main__":
     tests = [
         test_gas_linear_eos,
