@@ -55,6 +55,31 @@ void K_ComputePressure(
 }
 
 /* ======================================================================
+ * boundary_visc_factor -- viscous drag coefficient against a STATIC
+ * boundary particle (regular STATIC or MAT_RIGID).
+ *
+ * GRANULAR i uses the same dynamic-viscosity form as its pair code,
+ * mu0 * m_b * lap / (rho_i * rho_b), with rho_b = rest density of i's own
+ * material (the Akinci mirror: the boundary stands in for fluid of i's
+ * kind). Dropping the 1/rho_b made sand-on-wall drag rho0 (~4000x) too
+ * strong (bd-r5-review-n28.24).
+ *
+ * FLUID/GAS i keep the tuned kinematic form base_viscosity * lap_coeff *
+ * m_b * lap / rho_i (matches the / rho_j FLUID pair form, rho_j ~ rho_i).
+ * ====================================================================== */
+__device__ __forceinline__ float boundary_visc_factor(
+    bool is_granular_i, uint mat_id_i, float m_b, float lap_v_b, float rho_i)
+{
+    float rho_i_safe = fmaxf(rho_i, RHO_EPSILON);
+    if (is_granular_i) {
+        float rho_b = fmaxf(c_materials[mat_id_i].rest_density, RHO_EPSILON);
+        return c_precalc.viscosity_precalc * m_b * lap_v_b / (rho_i_safe * rho_b);
+    }
+    float mu_b = c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
+    return mu_b * m_b * lap_v_b / rho_i_safe;
+}
+
+/* ======================================================================
  * K_Step2 kernel
  * ====================================================================== */
 
@@ -253,9 +278,8 @@ void K_Step2(
                                 rb_linvel.z + (rb_angvel.x * r_b.y - rb_angvel.y * r_b.x)
                             );
                             float lap_v_b = lap_visc_variable(rlen, h);
-                            float mu_b = is_granular_i ? c_precalc.viscosity_precalc
-                                       : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-                            float visc_factor_b = mu_b * psi_b * lap_v_b / fmaxf(rho_i, RHO_EPSILON);
+                            float visc_factor_b = boundary_visc_factor(
+                                is_granular_i, mat_id_i, psi_b, lap_v_b, rho_i);
                             float3 F_visc = make_float3(
                                 (vel_boundary.x - vel_i.x) * visc_factor_b,
                                 (vel_boundary.y - vel_i.y) * visc_factor_b,
@@ -295,9 +319,8 @@ void K_Step2(
                             f_pressure.z += m_j * press_sym_b * grad_s.z;
                             // Boundary friction: vel_j=0, drag toward zero
                             float lap_v_b = lap_visc_variable(rlen, h);
-                            float mu_b = is_granular_i ? c_precalc.viscosity_precalc
-                                       : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
-                            float visc_factor_b = mu_b * m_j * lap_v_b / fmaxf(rho_i, RHO_EPSILON);
+                            float visc_factor_b = boundary_visc_factor(
+                                is_granular_i, mat_id_i, m_j, lap_v_b, rho_i);
                             f_viscosity.x += (-vel_i.x) * visc_factor_b;
                             f_viscosity.y += (-vel_i.y) * visc_factor_b;
                             f_viscosity.z += (-vel_i.z) * visc_factor_b;

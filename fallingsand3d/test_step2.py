@@ -807,6 +807,101 @@ def test_500k_no_errors() -> None:
     print(f"     Veleval range: [{vels_np[:, :3].min():.4e}, {vels_np[:, :3].max():.4e}]")
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.24: GRANULAR boundary viscous drag must carry 1/rho_b
+# ---------------------------------------------------------------------------
+
+ACCEL_MAX_GRANULAR = 200.0  # integrate.cu clamp for GRANULAR acceleration
+
+
+def _granular_drag_x(mat_id_b: int, bclass_b: int, density_b: float,
+                     rigid: bool = False) -> tuple:
+    """One SAND particle moving at +1 m/s in x next to one still neighbour.
+
+    The neighbour sits along +y, so pressure acts only in y and the x force
+    on the sand particle is pure viscous drag. Returns (fx_sand, body_fx).
+    """
+    from materials import SAND
+    _upload_all_params()
+    rho0_sand = float(MATERIALS[SAND].rest_density)
+    mass = float(MASS)
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[0.0, H * 0.5, 0.0],
+        vel_a=[1.0, 0.0, 0.0],
+        vel_b=[0.0, 0.0, 0.0],
+        density_a=rho0_sand,
+        density_b=density_b,
+        mass_a=mass,
+        mass_b=mass,
+        mat_id_a=SAND,
+        mat_id_b=mat_id_b,
+        bclass_a=GRANULAR,
+        bclass_b=bclass_b,
+    )
+    body_fx = 0.0
+    if rigid:
+        from rigid_bodies import RIGID_BODY_DTYPE
+        data["d_rigid_bodies"] = cupy.zeros(1, dtype=RIGID_BODY_DTYPE)
+        data["d_rigid_forces"] = cupy.zeros(4, dtype=cupy.float32)
+        data["d_rigid_torques"] = cupy.zeros(4, dtype=cupy.float32)
+    forces, _ = _step2_original_order(data)
+    cupy.cuda.Device().synchronize()
+    fx = float(cupy.asnumpy(forces)[0, 0])
+    if rigid:
+        body_fx = float(cupy.asnumpy(data["d_rigid_forces"])[0])
+    return fx, body_fx
+
+
+def _granular_pair_reference_x() -> float:
+    """Same geometry, but the neighbour is a still FLUID particle at the
+    sand rest density: the GRANULAR-nonGRANULAR pair form with mu0."""
+    from materials import SAND, WATER
+    rho0_sand = float(MATERIALS[SAND].rest_density)
+    fx, _ = _granular_drag_x(WATER, FLUID, rho0_sand)
+    return fx
+
+
+def test_granular_static_drag_matches_pair() -> None:
+    """GRANULAR-STATIC drag equals the GRANULAR pair drag within 10%.
+
+    Before the fix the boundary term divided by rho_i only, so the drag was
+    about rho0_sand (~4000x) larger than the pair form with the same mu0.
+    """
+    from materials import STONE, SAND
+    ref = _granular_pair_reference_x()
+    rho0_stone = float(MATERIALS[STONE].rest_density)
+    fx, _ = _granular_drag_x(STONE, STATIC, rho0_stone)
+    print(f"  pair ref fx={ref:.4e}  static fx={fx:.4e}  ratio={fx / ref:.3f}")
+    assert ref < 0.0, f"Pair drag should oppose +x motion, got {ref}"
+    assert fx < 0.0, f"STATIC drag should oppose +x motion, got {fx}"
+    assert abs(fx / ref - 1.0) < 0.10, (
+        f"GRANULAR-STATIC drag {fx:.4e} differs from pair drag {ref:.4e} "
+        f"by more than 10% (ratio {fx / ref:.3f}); rho0_sand={MATERIALS[SAND].rest_density}"
+    )
+
+
+def test_granular_rigid_drag_matches_pair() -> None:
+    """GRANULAR-MAT_RIGID drag equals the GRANULAR pair drag within 10%,
+    stays under ACCEL_MAX_GRANULAR, and the body reaction is -m_i * a_i."""
+    from materials import MAT_RIGID
+    ref = _granular_pair_reference_x()
+    fx, body_fx = _granular_drag_x(MAT_RIGID, STATIC, 0.0, rigid=True)
+    print(f"  pair ref fx={ref:.4e}  rigid fx={fx:.4e}  body fx={body_fx:.4e}")
+    assert fx < 0.0, f"Rigid drag should oppose +x motion, got {fx}"
+    assert abs(fx) < ACCEL_MAX_GRANULAR, (
+        f"Rigid drag accel {fx:.4e} exceeds ACCEL_MAX_GRANULAR={ACCEL_MAX_GRANULAR}"
+    )
+    assert abs(fx / ref - 1.0) < 0.10, (
+        f"GRANULAR-rigid drag {fx:.4e} differs from pair drag {ref:.4e} "
+        f"by more than 10% (ratio {fx / ref:.3f})"
+    )
+    expected_body = -float(MASS) * fx
+    assert abs(body_fx - expected_body) <= 1e-3 * abs(expected_body) + 1e-12, (
+        f"Body reaction {body_fx:.4e} != -m_i * a_i = {expected_body:.4e}"
+    )
+
+
 def main() -> None:
     test_compilation()
     test_struct_sizes()
@@ -824,6 +919,8 @@ def main() -> None:
     test_fluid_unchanged_by_muI()
     test_granular_no_nan()
     test_500k_no_errors()
+    test_granular_static_drag_matches_pair()
+    test_granular_rigid_drag_matches_pair()
     print("\n=== ALL CHECKS PASSED ===")
 
 
