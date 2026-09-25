@@ -1436,7 +1436,7 @@ Three visual effects combined:
 Hot tint and health fade applied on top (same as base color function).
 
 **Where the color is computed.** No solver stores a color. `K_ComputeColor`
-(`integrate.cu`) runs once per frame from `Simulation.copy_to_vbos`, one
+(`integrate.cu`) runs from `Simulation.copy_to_vbos`, at most once per frame, one
 thread per unsorted slot in `[0, _high_water)`, and writes straight into
 the mapped color VBO. It reads `packed_info`, `temperature`, `health`,
 `velocity` and `position`, with this substep's density in `position.w`.
@@ -1449,6 +1449,14 @@ the rendered color is the same. At 1M particles the kernel takes about
 0.1 ms per frame and replaces a 16 B per particle scatter on every
 substep (WCSPH integrate 0.96 to 0.72 ms per substep) and the 32 MB of
 `color` and `sorted_color` buffers. (bd-r5-review-n28.145)
+
+main.py skips the whole VBO fill (position, color, velocity and foam) on
+frames where no substep ran, unless `Simulation.scene_dirty` is set.
+`notify_scene_changed()` and `set_world_size()` set it and `copy_to_vbos`
+clears it, so a paused scene costs no device copies and no interop map
+calls, and a brush spawn while paused still shows on that frame. Position,
+color and velocity are mapped with one `cudaGraphicsMapResources` call
+(`gl_cuda_interop.map_all`). (bd-r5-review-n28.150)
 
 **Source**: `sph_shared.cuh:compute_fluid_color`, `integrate.cu:K_ComputeColor`
 
