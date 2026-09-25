@@ -159,6 +159,8 @@ class Simulation:
         # world.foam_enabled the graphs were captured with. The body launches
         # K_FoamPhysics only with foam on, so a toggle drops the graphs.
         self._graph_foam_enabled = False
+        # Rigid body state the graphs were captured with (see _rigid_graph_key).
+        self._graph_rigid_key = (0, False)
         # Two-graph system: separate graphs for full-sort and gather-only paths
         # so sort-skip decisions don't invalidate the graph.
         self._graph_full_sort = None      # cupy.cuda.Graph for full-sort path
@@ -938,8 +940,8 @@ class Simulation:
 
         # Full sort: reset max_displacement tracker (fresh baseline for grid reuse).
         # With rigid bodies _update_rigid_boundary has already cleared it and
-        # recorded the boundary drift for this substep. Bodies disable CUDA
-        # graphs, so a captured graph always takes the memset branch.
+        # recorded the boundary drift for this substep. A captured graph bakes
+        # in the branch; _sim_step recaptures when _rigid_graph_key changes.
         if self._disp_cleared_for_sort:
             self._disp_cleared_for_sort = False
         else:
@@ -1733,8 +1735,15 @@ class Simulation:
         if self._graph_foam_enabled != foam_on:
             self._invalidate_graphs()
             self._graph_foam_enabled = foam_on
-        # Rigid bodies active: always run directly, no graph
-        graphs_disabled = self.rigid_body_manager.num_bodies > 0
+        # Rigid bodies stay in the graph (bd-r5-review-n28.182): the prologue
+        # zeroes the accumulators and moves the boundary block, and the
+        # epilogue integrates the bodies, both outside the graph. The body
+        # buffers are allocated once, so only the state the body bakes in
+        # needs a new capture when it changes.
+        rigid_key = self._rigid_graph_key()
+        if self._graph_rigid_key != rigid_key:
+            self._invalidate_graphs()
+            self._graph_rigid_key = rigid_key
 
         # Select graph based on sort-skip state
         is_gather = self._sort_skip_next
@@ -1745,10 +1754,7 @@ class Simulation:
             graph = self._graph_full_sort
             graph_n = self._graph_full_sort_n
 
-        if graphs_disabled:
-            # Rigid bodies active — always run directly, no graph
-            self._run_graph_body(n)
-        elif graph_n != n:
+        if graph_n != n:
             # n changed — invalidate this path's graph, run directly
             if is_gather:
                 self._graph_gather_only = None
@@ -1765,6 +1771,9 @@ class Simulation:
         else:
             # n stable, graph exists — fast replay
             graph.launch()
+            # The replay skips the host code in _run_grid_setup that consumes
+            # this flag; the captured branch already matches it.
+            self._disp_cleared_for_sort = False
             if not is_gather:
                 # The full-sort graph sorts for n, but the host-side
                 # bookkeeping in _run_grid_setup does not run on replay.
@@ -1773,6 +1782,20 @@ class Simulation:
                 self._last_full_sort_n = n
 
         self._substep_epilogue(n, last_substep=last_substep)
+
+    def _rigid_graph_key(self) -> tuple[int, bool]:
+        """Rigid body state that a captured graph body bakes in.
+
+        The body count selects NULL or the body buffers in every solver and is
+        a PBF/DFSPH kernel argument. The flag says whether _update_rigid_boundary
+        clears max_displacement on a full sort, in which case the captured
+        _run_grid_setup skips its own memset. Call after _substep_prologue.
+        """
+        rbm = self.rigid_body_manager
+        nb = rbm.num_bodies
+        clears = (nb > 0 and rbm.num_boundary_particles > 0
+                  and rbm.boundary_offset >= 0)
+        return (nb, clears)
 
     def _count_substep_sort(self, n: int) -> None:
         """Count this substep for the grid-reuse drift prediction.
