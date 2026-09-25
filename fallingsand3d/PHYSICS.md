@@ -886,10 +886,18 @@ costs nothing when there are no SDF objects. PBF and DFSPH finalize kernels do
 not have this test yet.
 
 Wake propagation (`wake.run_wake_propagation`, 2 kernels on the unsorted
-arrays) runs at the end of every substep for all three solvers.
-`K_MarkWakeCells` writes a stamp into the own grid cell of each particle
-that has JUST_WOKE set, and of each awake particle faster than 0.02 m/s (one
-plain store per marker). `K_WakeSleepersAndClearJustWoke` wakes a sleeping
+arrays) runs at the end of every substep for all three solvers. A marker
+is a particle that has JUST_WOKE set, or an awake particle faster than
+0.02 m/s; it writes a stamp into its own grid cell (one plain store). For
+WCSPH `K_MarkWakeCells` does this after `K_Integrate`. For PBF and DFSPH
+`K_PBF_Finalize` and `K_DFSPH_Finalize` write the stamp themselves from the
+final position, velocity and packed_info they already hold, through
+`wake_mark_own_cell` in `sph_shared.cuh`, and `run_wake_propagation` runs with
+`mark=False`, so `K_MarkWakeCells` is not launched and the 36 B per particle
+reread is gone (bd-r5-review-n28.167). Both paths use the same test, so the
+marks are the same: on Sand Castle with all sand starting asleep, DFSPH
+sleeping counts matched the `K_MarkWakeCells` path exactly at every checked
+substep. `K_WakeSleepersAndClearJustWoke` wakes a sleeping
 particle when any of its 27 cells (own cell and 26 neighbours) holds the
 stamp. This is the same rule as marking the 3x3x3 block around each marker
 and probing one cell, because the neighbourhood is symmetric; it replaces 27
@@ -937,7 +945,9 @@ a few substeps. For WCSPH, `K_Integrate` keeps the MAT_RIGID boundary velocity
 other STATIC particles get zero.
 
 **Source**: `integrate.cu:54-59, 115-127, 280-302, 407-418`, `wake.cu`
-(`K_MarkWakeCells`, `K_MarkWakeCellsRigid`), `wake.py`, `simulation.py`
+(`K_MarkWakeCells`, `K_MarkWakeCellsRigid`), `sph_shared.cuh`
+(`wake_stamp`, `wake_mark_own_cell`), `pbf_solver.cu` and `dfsph_solver.cu`
+(finalize kernels), `wake.py`, `simulation.py`
 (`_run_wcsph_body`, `_run_pbf_body`, `_run_dfsph_body`, `_wake_rigid_kwargs`)
 
 ---
