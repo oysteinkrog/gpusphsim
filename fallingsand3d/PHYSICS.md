@@ -2842,11 +2842,14 @@ read), `pbf_solver.cu` (K_PBF_Finalize XSPH loop)
 
 The epsilon values were kept when the vorticity sign was fixed. Before the fix
 the force pointed against the flow and drained vortex cores. With the right sign
-it amplifies them. After the fix, the `test_odd_viscosity.py` Taylor-Green run
-(WCSPH, 300 substeps) shows net L_z drift of 1.3e-7 (eps 0), 2.2e-7 (eps 0.05)
-and 1.5e-7 (eps 0.10), against a noise floor of 5e-4. Transverse RMS v_x is
-2.822e-3 with and without confinement. So these values do not inject
-measurable angular momentum. A visual A/B at eps 0.01 and 0.05 has not been
+it amplifies them. `eval_vorticity.py` measures this on a gravity-free 0.4 m
+water cube with a Taylor-Green field (A = 0.3 m/s, WCSPH, 300 substeps). On
+2026-09-25 net L_z drift was +1.5e-6 (eps 0), -5.1e-6 (eps 0.05) and -2.7e-6
+(eps 0.10), with no trend in eps. Transverse RMS v_x under a pure shear is
+7.3009e-3 (eps 0) and 7.3011e-3 (eps 0.10). So these values do not inject
+measurable angular momentum. KE/KE0 is 0.836, 0.841 and 0.846 for the three
+eps values: confinement feeds the vortex. `test_vorticity_confinement.py`
+checks this over 100 substeps (measured gap 2.87e-3 of KE0, required 1e-3). A visual A/B at eps 0.01 and 0.05 has not been
 done yet.
 
 ---
