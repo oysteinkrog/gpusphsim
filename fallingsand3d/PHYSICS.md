@@ -1494,8 +1494,8 @@ Changes:
 
 ### 10.8 OPTIMIZATION: Counting sort pipeline
 The per-substep grid build is `counting_sort.counting_sort_full` (no physics changes):
-1. **One sort path**: K_CalcHashCS, K_Histogram, an exclusive prefix sum
-   (`cupy.cumsum`), K_ScatterReorder and K_BuildCellEnd. `sort_perm` maps a
+1. **One sort path**: K_CalcHashCS, K_Histogram, a prefix sum
+   (`cupy.cumsum`) and K_ScatterReorder. `sort_perm` maps a
    sorted slot to its original index. The argsort pipeline (hash_sort,
    build_grid, fused_reorder, fused_sort_reorder_build) was removed
    (bd-r5-review-n28.153).
@@ -1503,13 +1503,22 @@ The per-substep grid build is `counting_sort.counting_sort_full` (no physics cha
    outputs are not reordered, since K_Step1, K_Step2 and K_Integrate overwrite them.
 3. **One scatter kernel**: K_ScatterReorder claims each particle's sorted slot
    with an atomic per cell and gathers every particle array in the same pass.
-   K_BuildCellEnd then writes `cell_end = cell_start + count`.
 4. **Reactions/spawn always run**: Previously conditionally skipped for non-reactive
    materials; now always included for CUDA graph fixed topology (§10.9).
    Non-reactive threads early-exit with negligible GPU cost.
 5. **Fused wake kernels**: K_WakeSleepers + K_ClearJustWoke merged into
    K_WakeSleepersAndClearJustWoke (3→2 kernel launches).
 6. **Block size 128→256** for Step1/Step2 kernels.
+7. **One cell offsets table** (bd-r5-review-n28.160): the grid is one uint32
+   array of `table_size + 1` entries with `offsets[0] = 0`; the prefix sum
+   writes the inclusive sum into `offsets[1:]`. Kernels get
+   `cell_start = offsets[:-1]` and `cell_end = offsets[1:]` (views of the same
+   memory), so cell `h` holds sorted slots `cell_start[h] .. cell_end[h] - 1`
+   and an empty cell has `cell_start[h] == cell_end[h]`. There is no empty-cell
+   sentinel and no neighbour loop tests for one, and a full sort needs no
+   separate cell_end pass or memset. Measured against the two-array layout at
+   1M WCSPH particles (shared GPU, 3 A/B runs): step1 2.64 vs 2.72 ms, step2
+   4.03 vs 4.38 ms per substep.
 
 **Source**: simulation.py, counting_sort.py/.cu, wake.py/.cu
 
@@ -1616,7 +1625,7 @@ hash = ((uint)cx * 73856093u + (uint)cy * 19349669u + (uint)cz * 83492791u) & TA
 - `grid_params.compute_table_size(N)` rounds `max(N/2, 2^18)` up to a power
   of 2 and caps it at 2^20: 2^18 up to about 524K particles, 2^19 up to about 1M,
   2^20 above. `TABLE_SIZE = 2^18` is the default for tests.
-- cell_start/cell_end always 262K entries (~2MB total) at 2^18
+- The cell offsets table (§10.8) has table_size + 1 entries (~1MB at 2^18)
 - The products and the sum wrap in 32-bit unsigned arithmetic, so negative
   cell coordinates are well defined
 - **Stencil cells never share a bucket.** The combiner is addition, so
