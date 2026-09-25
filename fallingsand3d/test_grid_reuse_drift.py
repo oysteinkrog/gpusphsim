@@ -163,8 +163,8 @@ def _run_translating_block(world, substeps, frames, reuse):
             sim._MAX_SORT_SKIP_FRAMES = 0
         real_step = sim._sim_step
 
-        def _step(n_):
-            real_step(n_)
+        def _step(n_, **kw):
+            real_step(n_, **kw)
             # Debug readback: density per original particle index.
             perm = sim._sort_perm[:n_]
             rho = cp.empty(n_, dtype=cp.float32)

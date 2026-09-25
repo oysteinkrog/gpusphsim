@@ -36,7 +36,7 @@ FOAM_PARAMS_DTYPE = np.dtype(
         ("spawn_jitter", np.float32),
         ("max_foam", np.int32),
         ("dt", np.float32),
-        ("_pad0", np.float32),
+        ("k_rate", np.float32),
     ],
     align=False,
 )
@@ -60,8 +60,14 @@ def build_foam_params(
     spawn_jitter: float = 0.01,
     max_foam: int = 200_000,
     dt: float = 0.001,
+    k_rate: float = 5.0,
 ) -> np.ndarray:
-    """Build FoamParams numpy struct for constant memory upload."""
+    """Build FoamParams numpy struct for constant memory upload.
+
+    k_rate is the emission rate per unit of (phi - threshold), in 1/s. The
+    default 5.0 makes a surface particle with phi = 4 emit about 10 foam
+    particles per second.
+    """
     params = np.zeros(1, dtype=FOAM_PARAMS_DTYPE)
     params[0]["k_ta"] = np.float32(k_ta)
     params[0]["k_wc"] = np.float32(k_wc)
@@ -76,6 +82,7 @@ def build_foam_params(
     params[0]["spawn_jitter"] = np.float32(spawn_jitter)
     params[0]["max_foam"] = np.int32(max_foam)
     params[0]["dt"] = np.float32(dt)
+    params[0]["k_rate"] = np.float32(k_rate)
     return params
 
 
@@ -156,8 +163,15 @@ def foam_generate(
     foam_count: cupy.ndarray,
     num_particles: int,
     frame_seed: int,
+    dt_emit: float,
 ) -> None:
-    """Launch K_FoamGenerate: emit secondary particles from FLUID particles."""
+    """Launch K_FoamGenerate: emit secondary particles from FLUID particles.
+
+    dt_emit is the sim time this launch covers. Each qualifying particle
+    emits with probability min(1, k_rate * (phi - threshold) * dt_emit).
+    It is a kernel argument, not a c_foam field, so a per-frame value needs
+    no constant-memory upload.
+    """
     module = _get_module()
     kernel = module.get_function("K_FoamGenerate")
     grid = ((num_particles + _BLOCK - 1) // _BLOCK,)
@@ -174,6 +188,7 @@ def foam_generate(
             foam_count,
             np.int32(num_particles),
             np.uint32(frame_seed),
+            np.float32(dt_emit),
         ),
     )
 

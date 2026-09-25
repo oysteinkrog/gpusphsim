@@ -30,7 +30,7 @@ struct FoamParams {
     float spawn_jitter;   // random offset for spawned position
     int   max_foam;       // max foam particles (pool size)
     float dt;             // simulation timestep
-    float _pad0;          // padding to 56 bytes
+    float k_rate;         // emission rate per unit (phi - threshold), 1/s
 };
 
 __constant__ FoamParams c_foam;
@@ -66,7 +66,8 @@ void K_FoamGenerate(
     float4*       foam_velocity,
     uint*         foam_count,     // atomic counter
     int           num_particles,
-    uint          frame_seed
+    uint          frame_seed,
+    float         dt_emit         // sim time covered by this launch (s)
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_particles) return;
@@ -111,6 +112,12 @@ void K_FoamGenerate(
               + c_foam.k_ke * kinetic;
 
     if (phi <= c_foam.threshold) return;
+
+    // Emit with probability p = k_rate * (phi - threshold) * dt_emit, so the
+    // expected rate is k_rate * (phi - threshold) per second whatever the
+    // substep count (Ihmsen et al. 2012 use n = dt * phi).
+    float p_emit = fminf(1.0f, c_foam.k_rate * (phi - c_foam.threshold) * dt_emit);
+    if (hash_rand((uint)i, frame_seed + 4u) >= p_emit) return;
 
     // Claim a slot in the foam pool
     uint slot = atomicAdd(foam_count, 1u);

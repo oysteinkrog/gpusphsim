@@ -257,9 +257,9 @@ def test_wait_event_issued_before_first_substep(world, monkeypatch):
                             lambda *a, **k: _Spy(real_stream(*a, **k)))
         real_step = sim._sim_step
 
-        def _step(n):
+        def _step(n, **kw):
             calls.append(("step", None))
-            return real_step(n)
+            return real_step(n, **kw)
 
         sim._sim_step = _step
         _frame(sim)  # launches a copy, so the next frame has one to wait on

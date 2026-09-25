@@ -166,6 +166,8 @@ class Simulation:
         # The displacement starts at the "unknown" sentinel, which never skips.
         self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
         self._last_foam_count = 0
+        # Sim time since the last foam generation launch (host float).
+        self._foam_emit_dt = 0.0
 
         # --- Counting sort scratch buffers (allocated in _upload_constants) ---
         self._cs_histogram = None
@@ -1531,8 +1533,12 @@ class Simulation:
             self._graph_full_sort_n = n
         return graph
 
-    def _sim_step(self, n: int) -> None:
+    def _sim_step(self, n: int, last_substep: bool = True) -> None:
         """Run one simulation substep on n particles.
+
+        last_substep: step_frame passes True only for the frame's last
+        substep, so foam generation runs once per frame. Direct callers keep
+        the default and generate every substep.
 
         Pipeline (fully graph-capturable):
           1. Counting sort (or gather-only if sort skipped)
@@ -1583,7 +1589,7 @@ class Simulation:
                 # -1) cannot leave the value stale (bd-r5-review-n28.84).
                 self._last_full_sort_n = n
 
-        self._substep_epilogue(n)
+        self._substep_epilogue(n, last_substep=last_substep)
 
     def _count_substep_sort(self, n: int) -> None:
         """Count this substep for the grid-reuse drift prediction.
@@ -1632,7 +1638,8 @@ class Simulation:
             self.sdf_manager.upload_if_dirty()
         return n
 
-    def _substep_epilogue(self, n: int, mark: StageMark = _no_mark) -> None:
+    def _substep_epilogue(self, n: int, mark: StageMark = _no_mark,
+                          last_substep: bool = True) -> None:
         """Per-substep work after the solver body (outside any CUDA graph).
 
         Rigid-body integration and collisions, foam, then advance sim time.
@@ -1656,20 +1663,26 @@ class Simulation:
             mark("rigid")
 
         # Foam generation + physics (outside graph -- uses atomicAdd with variable count)
-        self._run_foam_step(n)
+        self._foam_emit_dt += self.dt
+        self._run_foam_step(n, generate=last_substep)
         mark("foam")
 
         self.sim_time += self.dt
         self._substep_counter += 1
 
-    def _run_foam_step(self, n: int) -> None:
-        """Run foam generate + physics + compaction (outside CUDA graph).
+    def _run_foam_step(self, n: int, generate: bool = True) -> None:
+        """Run foam physics, and generation when asked (outside CUDA graph).
 
-        No GPU->CPU sync: kernels read foam_count from device memory,
-        grid sizes use max_foam upper bound.
+        Physics runs every substep. Generation runs when generate is True
+        (once per frame from step_frame) and covers the sim time since the
+        last generation, so the emission rate does not depend on the substep
+        count. Compaction is in _maybe_compact_foam, once per frame.
+
+        No GPU->CPU sync: kernels read foam_count from device memory.
         """
         w = self.world
         if not w.foam_enabled:
+            self._foam_emit_dt = 0.0
             return
 
         max_foam = w._max_foam
@@ -1678,6 +1691,9 @@ class Simulation:
         #    get physics next step). Kernel reads count from device pointer.
         foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count, max_foam,
                           last_foam_count=self._last_foam_count)
+
+        if not generate:
+            return
 
         # 2. Generate new foam from FLUID particles
         foam.foam_generate(
@@ -1690,24 +1706,38 @@ class Simulation:
             w.foam_count,
             n,
             self._substep_counter,  # per-substep RNG seed; _frame_counter repeats across a frame's substeps -> correlated/duplicated foam (bd-r4fix-uup.15)
+            self._foam_emit_dt,
         )
+        self._foam_emit_dt = 0.0
 
-        # 3. Compact dead particles every 8th frame (amortize cost)
-        if self._frame_counter % 8 == 0:
-            foam.foam_compact(
-                w.foam_position, w.foam_velocity,
-                w.foam_position_b, w.foam_velocity_b,
-                w.foam_alive_count,
-                w.foam_count,
-                max_foam,
-            )
-            # Swap buffers
-            w.foam_position, w.foam_position_b = w.foam_position_b, w.foam_position
-            w.foam_velocity, w.foam_velocity_b = w.foam_velocity_b, w.foam_velocity
-            # Update count from compaction result (device-to-device copy, no sync)
-            w.foam_count[:] = w.foam_alive_count
+    def _maybe_compact_foam(self) -> None:
+        """Compact dead foam once per frame when due (outside CUDA graph).
 
-    def _sim_step_timed(self, n: int) -> None:
+        Runs every 8th frame, and every frame while the deferred foam count is
+        above 80% of the pool. step_frame calls it once after the substep loop.
+        No GPU->CPU sync: the new count is a device-to-device copy.
+        """
+        w = self.world
+        if not w.foam_enabled:
+            return
+        max_foam = w._max_foam
+        if not (self._frame_counter % 8 == 0
+                or self._last_foam_count > 0.8 * max_foam):
+            return
+        foam.foam_compact(
+            w.foam_position, w.foam_velocity,
+            w.foam_position_b, w.foam_velocity_b,
+            w.foam_alive_count,
+            w.foam_count,
+            max_foam,
+        )
+        # Swap buffers
+        w.foam_position, w.foam_position_b = w.foam_position_b, w.foam_position
+        w.foam_velocity, w.foam_velocity_b = w.foam_velocity_b, w.foam_velocity
+        # Update count from compaction result (device-to-device copy, no sync)
+        w.foam_count[:] = w.foam_alive_count
+
+    def _sim_step_timed(self, n: int, last_substep: bool = True) -> None:
         """Run one substep with CUDA event timing (bypasses graph capture).
 
         Runs the same prologue, solver body and epilogue as _sim_step, with a
@@ -1727,7 +1757,7 @@ class Simulation:
         n = self._substep_prologue(n)
         self._count_substep_sort(n)
         self._run_graph_body(n, mark)
-        self._substep_epilogue(n, mark)
+        self._substep_epilogue(n, mark, last_substep=last_substep)
         self._read_deferred_timings()
         # Store this substep's events for reading next substep
         self._pending_timing_events = events
@@ -1911,8 +1941,12 @@ class Simulation:
             # that write foam_count, start only after the previous frame's
             # readback copies have finished (bd-r5-review-n28.46).
             cupy.cuda.get_current_stream().wait_event(self._readback_done)
-        for _ in range(sim_steps):
-            step_fn(n)
+        for i in range(sim_steps):
+            step_fn(n, last_substep=(i == sim_steps - 1))
+
+        # Foam compaction once per frame, before the readback copies foam_count
+        if sim_steps > 0:
+            self._maybe_compact_foam()
 
         # Increment frame counter once per render frame (I4 fix)
         if sim_steps > 0:
