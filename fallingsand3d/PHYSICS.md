@@ -1708,8 +1708,14 @@ boils. (bd-r5-review-n28.27)
   more than 8 of them at table sizes 2^18 to 2^20.
 - **When it is filled.** `Simulation._maybe_compact` runs every
   `compact_interval` frames (60) and on the first frame after
-  `notify_scene_changed()`. It counts dead slots once (`num_active`, one sync)
-  and tops the reserve up to `dead_reserve` DEAD slots.
+  `notify_scene_changed()`. On an interval frame it first reads the freelist
+  size (`_dead_count`) that the async readback copied at the end of the
+  previous frame. That is the DEAD count one frame ago, with no host sync. If
+  it shows no compaction due and at least `dead_reserve` dead slots, the frame
+  does nothing more. Otherwise, and on the first frame after a scene change
+  (when that value is unknown), it counts dead slots once (`num_active`, one
+  sync) and tops the reserve up to `dead_reserve` DEAD slots. Deaths after the
+  copy (brush kills, the last frame's substeps) show up in the next copy.
 - **Compaction.** With the reserve on, compaction runs only when there are more
   than `dead_reserve + compact_threshold` dead slots. `World.compact()` drops
   every dead slot, parked or not, and `_maybe_compact` then re-creates the
