@@ -100,11 +100,9 @@ def test_static_uniforms_set_on_init_and_resize(gl_context):
                           (r._prog_composite, r._u_comp_texel)):
             assert _get_vec2(prog, loc) == pytest.approx((1 / 320, 1 / 240))
 
+        # SSFR FBOs (and the texel size) are rebuilt lazily by the first
+        # SSFR draw after a resize (bd-r5-review-n28.137).
         r.resize(640, 480)
-        for prog, loc in ((r._prog_blur, r._u_blur_texel),
-                          (r._prog_normal, r._u_norm_texel),
-                          (r._prog_composite, r._u_comp_texel)):
-            assert _get_vec2(prog, loc) == pytest.approx((1 / 640, 1 / 480))
 
         # One SSFR frame and one point-sprite frame render without GL errors.
         cam = OrbitCamera(distance=2.0, elevation=20.0)
@@ -114,6 +112,10 @@ def test_static_uniforms_set_on_init_and_resize(gl_context):
             pass
         r.ssfr_enabled = True
         r.draw(view, proj)
+        for prog, loc in ((r._prog_blur, r._u_blur_texel),
+                          (r._prog_normal, r._u_norm_texel),
+                          (r._prog_composite, r._u_comp_texel)):
+            assert _get_vec2(prog, loc) == pytest.approx((1 / 640, 1 / 480))
         r.ssfr_enabled = False
         r.draw(view, proj)
         assert glGetError() == GL_NO_ERROR
