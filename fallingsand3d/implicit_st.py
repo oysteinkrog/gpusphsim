@@ -101,7 +101,7 @@ def upload_materials(materials_data: np.ndarray) -> None:
 def upload_ist_params(
     sigma: float = 0.5,
     surface_threshold: float = 25.0,
-    num_iterations: int = 5,
+    num_iterations: int = 4,
 ) -> None:
     """Upload ISTParams to constant memory."""
     params = np.zeros(1, dtype=IST_PARAMS_DTYPE)
@@ -131,12 +131,16 @@ def run_implicit_st(
     normal: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
-    num_iterations: int = 5,
+    num_iterations: int = 4,
 ) -> cupy.ndarray:
     """Run implicit surface tension iterations.
 
-    Uses ping-pong between velocity and velocity_scratch.
-    Returns the array containing the final result (may be either buffer).
+    Uses ping-pong between velocity and velocity_scratch. The scratch is
+    first set to a copy of velocity (one device copy, no host sync); the
+    kernel then writes only surface FLUID particles, so interior and
+    non-FLUID entries stay equal in both buffers without per-iteration
+    pass-through writes. Returns the array containing the final result:
+    velocity for an even iteration count, velocity_scratch for an odd one.
 
     Parameters
     ----------
@@ -162,6 +166,11 @@ def run_implicit_st(
 
     src = velocity
     dst = velocity_scratch
+    if num_iterations <= 0:
+        return src
+    # Both buffers must start equal: K_IST_Iterate skips the write for
+    # particles it does not smooth.
+    cupy.copyto(dst, src)
 
     for _ in range(num_iterations):
         kernel(grid, block, (

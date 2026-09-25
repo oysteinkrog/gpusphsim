@@ -15,7 +15,7 @@
  *     S_i  = SUM_j (m_j/rho_j) * W(r_ij)
  *     a_i  = min(sigma * w_surface, 1 / S_i)
  *     v_new_i = v_old_i + a_i * dv_i
- *   Non-surface and non-FLUID particles: v_new_i = v_old_i (pass through)
+ *   Non-surface and non-FLUID particles: no write (see below)
  *
  * The clamp a_i * S_i <= 1 makes v_new_i a convex combination of v_i and
  * its neighbours' velocities, so the largest speed can never grow from one
@@ -26,7 +26,12 @@
  * So the most exposed particles (fewest neighbors) get the strongest smoothing.
  *
  * Uses ping-pong buffers: reads from vel_src, writes to vel_dst.
- * Caller swaps pointers between iterations.
+ * Caller swaps pointers between iterations. The caller copies the input
+ * velocity into the scratch buffer once before the first iteration, so
+ * both buffers start equal. The kernel then writes only surface FLUID
+ * particles: interior and non-FLUID entries hold the input value in both
+ * buffers for the whole pass, and the surface set does not change between
+ * iterations (neighbour count and packed_info are fixed during the pass).
  *
  * Constant memory: c_grid, c_sim, c_precalc, c_materials (from common.cuh)
  */
@@ -53,7 +58,8 @@ __device__ inline float W_poly6_ist(float r_sq, float h_sq) {
  *
  * For FLUID surface particles: smooth velocity toward neighbor average,
  * with the weight clamped so sigma * w_surface * S_i <= 1.
- * Non-surface particles and non-FLUID: pass through unchanged.
+ * Non-surface particles and non-FLUID: return without writing (vel_dst
+ * already holds the same value, see the header).
  *
  * Uses the surface normal buffer's .w component (neighbor_count) from step1.
  * ====================================================================== */
@@ -78,20 +84,13 @@ void K_IST_Iterate(
     int behavior = GET_BEHAVIOR(pi);
 
     // Only FLUID particles are smoothed
-    if (behavior != FLUID || IS_SLEEPING(pi)) {
-        vel_dst[i] = vel_src[i];
-        return;
-    }
+    if (behavior != FLUID || IS_SLEEPING(pi)) return;
 
     // Check if surface particle (fewer neighbors than threshold)
     float nc = __ldg(&normal[i]).w;  // neighbor count from step1
     float threshold = c_ist.surface_threshold;
 
-    if (nc >= threshold) {
-        // Interior particle: no smoothing
-        vel_dst[i] = vel_src[i];
-        return;
-    }
+    if (nc >= threshold) return;  // interior particle: no smoothing
 
     // Surface weight: stronger for more exposed particles
     float w_surface = 1.0f - nc / threshold;

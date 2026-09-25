@@ -298,7 +298,9 @@ class Simulation:
         # --- Implicit surface tension ---
         self.ist_enabled = False
         self.ist_sigma = 0.5
-        self.ist_iterations = 5
+        # Even by default: the result then lands back in sorted_velocity and
+        # the odd-count copy-back after run_implicit_st is skipped.
+        self.ist_iterations = 4
         self.ist_surface_threshold = 25.0
         self._IST_MAX_PARTICLES = 100_000  # disable above this count
 
