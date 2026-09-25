@@ -437,7 +437,9 @@ def run_benchmark(
         sim.sim_time += sim.dt
         sim._substep_counter += 1
 
-        # Force full sort every step for consistent benchmarking
+        # Force full sort every step for consistent benchmarking. To time the
+        # grid-reuse (gather-only) path as step_frame drives it, run
+        # bench_substep.py --grid-reuse.
         sim._sort_skip_next = False
         sim._sort_skip_consecutive = 0
 
