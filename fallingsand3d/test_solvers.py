@@ -1252,7 +1252,7 @@ def test_dfsph_module_has_only_live_kernels():
         "K_DFSPH_ComputeDensityAlpha", "K_DFSPH_NonPressureForces",
         "K_DFSPH_ComputeKappaV", "K_DFSPH_CorrectVelocityDiv",
         "K_DFSPH_ComputePressureAccel", "K_DFSPH_DensitySolverUpdate",
-        "K_DFSPH_ApplyPressureVelocity", "K_DFSPH_Finalize",
+        "K_DFSPH_PackVolume", "K_DFSPH_Finalize",
     }
     cu_path = os.path.join(os.path.dirname(dfsph_solver.__file__),
                            "physics", "kernels", "dfsph_solver.cu")
