@@ -9,6 +9,13 @@ Checks:
 - sorted_veleval is unchanged by run_implicit_st (odd and even counts).
 - With IST on and sigma = 0, two colliding water blocks match IST off
   over 20 substeps, within the run-to-run noise of float atomics.
+
+bd-r5-review-n28.133 (weight clamp, sigma * w_surface * S <= 1):
+- A still droplet with one surface particle kicked to 1 m/s: over 20
+  iterations at sigma 1.0 the largest surface speed never grows and the
+  surface kinetic energy ends at or below its start.
+- Same with sigma 50 (far past the UI cap), where the unclamped update
+  overshoots and grows.
 """
 
 from __future__ import annotations
@@ -140,3 +147,83 @@ def test_substep_leaves_veleval_as_step2_output():
     # Before the fix veleval equalled the IST velocity (odd count of 5).
     assert not bool(cp.array_equal(world.sorted_veleval[:n, :3],
                                    world.sorted_velocity[:n, :3]))
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.133: Jacobi weight clamp
+# ---------------------------------------------------------------------------
+
+SURFACE_THRESHOLD = 25.0  # implicit_st.upload_ist_params default
+
+
+def _still_droplet():
+    """10x10x10 water block, zero gravity, sorted buffers after one substep."""
+    world = World(max_particles=2_000)
+    sim = Simulation(world, dt=DT, speed=1.0, accuracy=0.4,
+                     fixed_dt=True, max_substeps=1)
+    sim.fixed_dt_value = DT
+    sim._upload_dt(DT)
+    sim._spawn_substep = sim._damping_duration
+    sim.set_gravity(0.0)
+    world.spawn_cube(min_corner=(-0.1, -0.1, -0.1), max_corner=(0.1, 0.1, 0.1),
+                     material_id=WATER, spacing=0.02)
+    sim.notify_scene_changed()
+    sim._invalidate_graphs()
+    n = world._high_water
+    sim._sim_step(n)
+    cp.cuda.Device().synchronize()
+    world.ensure_ist_scratch(sim._IST_MAX_PARTICLES)
+    return sim, world, n
+
+
+def _surface_history(sigma, iterations=20):
+    """Kick the most exposed surface particle to 1 m/s, then run single
+    iterations. Returns (max surface speed, surface KE) per step, start
+    included."""
+    sim, world, n = _still_droplet()
+    implicit_st.upload_ist_params(sigma=sigma, num_iterations=1)
+    try:
+        # Test-only readbacks.
+        nc = cp.asnumpy(world.sorted_normal[:n, 3])
+        mass = cp.asnumpy(world.sorted_mass[:n])
+        surface = nc < SURFACE_THRESHOLD
+        assert surface.sum() > 100
+        v = cp.zeros((n, 4), dtype=cp.float32)
+        v[int(np.argmin(nc)), 0] = 1.0
+        world.sorted_velocity[:n] = v
+        history = []
+        for it in range(iterations + 1):
+            vel = cp.asnumpy(world.sorted_velocity[:n, :3])
+            speed = np.linalg.norm(vel, axis=1)
+            history.append((speed[surface].max(),
+                            0.5 * float((mass[surface] * speed[surface] ** 2).sum())))
+            if it == iterations:
+                break
+            result = implicit_st.run_implicit_st(
+                world.sorted_velocity[:n],
+                world.sorted_ist_scratch[:n],
+                world.sorted_position[:n],
+                world.sorted_density[:n],
+                world.sorted_mass[:n],
+                world.sorted_packed_info[:n],
+                world.sorted_normal[:n],
+                sim._cell_start,
+                sim._cell_end,
+                num_iterations=1,
+            )
+            world.sorted_velocity[:n] = result
+    finally:
+        implicit_st.upload_ist_params()
+    return history
+
+
+@pytest.mark.parametrize("sigma", [1.0, 50.0])
+def test_surface_speed_never_grows(sigma):
+    history = _surface_history(sigma)
+    speeds = [h[0] for h in history]
+    kes = [h[1] for h in history]
+    # The pass must act (a stale or broken kernel leaves the kick alone).
+    assert speeds[-1] < 0.5 * speeds[0]
+    for a, b in zip(speeds, speeds[1:]):
+        assert b <= a * (1.0 + 1e-5) + 1e-7, speeds
+    assert kes[-1] <= kes[0]
