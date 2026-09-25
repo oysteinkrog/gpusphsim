@@ -103,6 +103,11 @@ def water_heating(profile_name, monkeypatch):
     n = _substep(s, n)
     mat = w.packed_info[:n] & 0xFF
     w.temperature[:n] = cp.where(mat == STONE, T_WALL, T_AMBIENT).astype(cp.float32)
+    # STONE and WATER both spawn at T_AMBIENT and do not react, so the
+    # thermal gate (bd-r5-review-n28.172) would turn the heat sums off.
+    # Temperatures written by hand are unknown to the gate, so replace the
+    # material set the way a load does; the gate then stays on.
+    w._spawned_material_ids = set(w._spawned_material_ids)
 
     rises = {}
     for k in range(1, LONG + 1):
