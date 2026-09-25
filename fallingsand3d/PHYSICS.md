@@ -336,8 +336,7 @@ Side effects:
 
 Neighbour velocities are read from the FP16 mirror `velocity_h` (OPT-4.3). Every pair
 difference `v_j - v_i` (viscosity and XSPH in step2; vorticity and strain rate in step1)
-also takes `v_i` from `velocity_h`, and the step1 dye difference takes `dye_i` from
-`dye_h`. So two particles with the same true velocity give exactly zero difference.
+also takes `v_i` from `velocity_h`. So two particles with the same true velocity give exactly zero difference.
 Step2 keeps the FP32 `v_i` for `veleval = v_i + eps * xsph` and for the STATIC and
 MAT_RIGID boundary terms, whose other side (`v_b`) is FP32. When `velocity_h` is NULL
 both sides are FP32.
@@ -349,7 +348,7 @@ WATER and 0.18 for LAVA, and vorticity up to 0.012 1/s. It now gets exactly zero
 Dam Break KE (WCSPH, 0.25 to 1.5 s) is unchanged within 1%.
 
 Tests: `test_step2.py::test_translating_block_no_fp16_viscous_bias`,
-`test_step1.py::test_translating_block_zero_vorticity_strain_dye`.
+`test_step1.py::test_translating_block_zero_vorticity_strain`.
 
 Tests: `test_visc_dynamic_form.py` (pair and free-surface block momentum at round-off,
 pair value equals the formula above), `test_implicit_viscosity.py`.
@@ -970,7 +969,7 @@ sort writes every substep. It holds `uint16 = round(T * 8)`, so it has uniform
 multiple of 0.125 K, T_AMBIENT = 293 included. `store_t16` / `load_t16` in
 `common.cuh` encode and decode it. The particle's own `T_i` in every pair
 difference (`T_j - T_i` in `sum_dTdt` and `max(T_j - T_i, 0)` in
-`exposure_heat`) is read from the same mirror, as for velocity and dye (3.3).
+`exposure_heat`) is read from the same mirror, as for velocity (3.3).
 The pair flux is therefore exactly antisymmetric and a uniform field gives
 exactly zero. The cost is a 0.125 K resolution in the conduction gradient:
 pairs whose temperatures round to the same step exchange no heat. With FP16
@@ -1192,7 +1191,7 @@ occupant:
 | health | 1 |
 | lifetime | GAS default below, else 0 |
 | shear_rate, exposure_heat, exposure_corrode | 0 |
-| color, particle_dye | material color |
+| color | material color |
 
 `presets._clear_world` also zeroes `kappa`, `kappa_v` and `sorted_lambda_pbf`
 for the whole pool, so no DFSPH or PBF warm-start pressure from the previous
@@ -1293,8 +1292,7 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
    XSPH includes STATIC (vel_j=0 → boundary friction).
 4. **DFSPH**: STATIC kappa=0, p_rho2=0, vel=0 set by early returns. Correction
    kernels include STATIC neighbors for one-sided corrections.
-5. **Dye diffusion**: STATIC neighbors skipped to prevent color bleeding from stone.
-6. **GAS phase separation**: GAS particles skip regular STATIC neighbours in
+5. **GAS phase separation**: GAS particles skip regular STATIC neighbours in
    the SPH loops. In WCSPH step2 a GAS particle does take the MAT_RIGID Akinci
    branch (pressure mirror with the gas EOS pressure and gas rest density,
    viscous drag toward the body surface velocity, reaction force and torque on
@@ -1890,7 +1888,7 @@ dead occupant's values. (bd-r5-review-n28.42)
 - **DFSPH.** `kappa` and `kappa_v` are zeroed. DFSPH skips GAS in its pressure
   solvers, so the slot's `alpha` from the pre-spawn density pass is not used.
   `predicted_position` is not written: DFSPH reuses it as `a_press` scratch.
-- **All solvers.** Dye is zeroed. The spawn writes the
+- **All solvers.** The spawn writes the
   `+inf` bits into `max_displacement`, so the next grid-reuse decision forces a
   full sort (see 20.5 on the readback lag).
 - **Blast wave.** `K_BlastWave` adds impulses to `velocity` between step1 and
@@ -1913,6 +1911,30 @@ substeps is at most 0.3% (it was 99.9% before), and the largest deviation at ste
 is 0.028 m/s against 0.108 m/s for WATER in the same box (0.23 m/s before). A full
 implicit solve (Jacobi or CG on the viscous system) would remove the residual.
 **Source**: `step2.cu` (implicit scale), `test_implicit_viscosity.py`
+
+### 10.23 Particle dye diffusion (removed)
+
+Particles carry no dye colour, and no kernel diffuses, integrates or sorts one
+(bd-r5-review-n28.144). The old pipeline diffused a per-particle `float4` dye
+with an SPH Laplacian in step1 (and in PBF ComputeLambda and DFSPH
+DensityAlpha) and integrated it in the integrate and finalize kernels. It was
+gated on a `dye_enabled` flag that no caller ever set, and no renderer read the
+dye, so it never ran and never showed. It still moved 88 B per particle per
+substep through the counting sort and the integrate/finalize kernels and held
+56 MB of buffers at 1M particles. `SimParams` lost the flag and is 72 bytes.
+
+Removing it cut the WCSPH substep at 1M particles from 11.27 ms to 10.48 ms
+median (sort 1.80 to 1.54 ms, step1 3.02 to 2.68 ms, integrate 1.42 to
+0.96 ms; `bench_substep.py`, RTX 5070 Ti shared with other jobs) with the same
+position checksum. Dam Break after 10 substeps matches the old code within
+the run-to-run spread of the atomics for all three solvers. Save files written
+before the removal still load: `load_scene` ignores the extra array.
+
+A real dye feature would need the painting brush to write it and
+`compute_fluid_color` to blend it into the particle colour.
+
+**Source**: `test_state_roundtrip.py::test_load_ignores_removed_dye_array`,
+`test_common_cuh.py::test_struct_sizes`
 
 ## 11. Multi-Solver Architecture
 
@@ -1948,7 +1970,6 @@ All three solvers now support the complete material behavior set:
 | Cross-material heat | Step1 (heat_boost) | ComputeLambda (heat_boost) | DensityAlpha (heat_boost) |
 | Cross-phase heat (GAS with non-GAS, capped at 0.5 dT per pair) | Step1 | ComputeLambda | DensityAlpha |
 | Exposure (fire/acid) | Step1 | ComputeLambda | DensityAlpha |
-| Dye diffusion | Step1 | ComputeLambda | DensityAlpha |
 | Vorticity computation | Step1 | ComputeLambda | DensityAlpha |
 | Vorticity confinement | Step2 (eps=0.05) | Finalize (eps=0.001) | NonPressure (eps=0.05) |
 | Surface normals | Step1 | ComputeLambda | DensityAlpha |
@@ -1963,7 +1984,7 @@ material, and every solver stores `max(rest_density, 1)` as its density:
 K_Step1 (WCSPH), K_PBF_ComputeLambda and
 K_DFSPH_ComputeDensityAlpha. So:
 
-- Heat, normal, vorticity and dye sums weight a wall neighbour by
+- Heat, normal and vorticity sums weight a wall neighbour by
   `m_j / rest_density_j` in all three solvers. The wall's own dTdt divides by the
   same `rest_density * cp`, which keeps the pair term conservative (9).
 - WCSPH forces do not read the wall density: step2 mirrors the fluid's own
@@ -2071,9 +2092,9 @@ wall contact is stable. Lambda and delta gradients also use `m_j` without scalin
 
 **STATIC and GAS density per substep (bd-r5-review-n28.62)**: STATIC and GAS take
 no part in the constraint (lambda = 0). GAS density is computed once per substep,
-in the first ComputeLambda call (the one that also does heat, exposure and dye),
+in the first ComputeLambda call (the one that also does heat and exposure),
 as `rho = SUM_j m_j W_poly6`. Later iterations take an early return and leave that
-value in `sorted_density`, so next substep's heat and dye terms use the real
+value in `sorted_density`, so next substep's heat terms use the real
 `vol_j = m_j / rho_j` for GAS neighbours (an isolated STEAM particle has
 `rho = m W(0)`, about 163, where rest_density is 0.6). Those later iterations
 write `max(rest_density, 1)` for STATIC.
@@ -2207,7 +2228,7 @@ gives wall friction. A MAT_RIGID neighbour uses the body surface velocity
   Steam spawned by `K_SpawnGas` after Predict gets its predicted position
   written by the spawn (`x + dt * v`, see 10.21).
 - **STATIC**: Lambda always forced to 0 (Akinci one-way boundary). STATIC
-  contributes to neighbor density sums. On do_heat path, exposure/heat/dye
+  contributes to neighbor density sums. On do_heat path, exposure and heat
   are accumulated but lambda is still 0.
 
 ### 12.6 PBF Sleep System
@@ -2953,7 +2974,7 @@ from the body at free-surface strength. The rigid contact normal is not zero:
 psi_b of a one-plane shell is about 1.6 V, so n points into the body at about
 0.6 of a free-surface normal (0.2 for a three-plane slab). No force follows
 from it while nc >= 25, because every consumer gates on nc < 25.
-Vorticity, strain rate, heat, exposure and dye still skip MAT_RIGID.
+Vorticity, strain rate, heat and exposure still skip MAT_RIGID.
 PBF (K_PBF_ComputeLambda) and DFSPH (K_DFSPH_ComputeDensityAlpha) use the same rule.
 
 Output: `normal_out[i] = float4(n_x, n_y, n_z, as_float(neighbor_count))`
@@ -3002,63 +3023,6 @@ surface-minimizing behavior for our particle spacing (h=0.04, dx=0.02).
   negative C) for cohesion instead.
 - **DFSPH**: Normals computed in K_DFSPH_ComputeDensityAlpha, force applied in
   K_DFSPH_NonPressureForces as acceleration. Uses gamma=1.0 (same as WCSPH).
-
----
-
-## 18. Particle Dye Diffusion
-
-### 18.1 Per-Particle Dye
-
-Each particle carries a `float4` dye color `(r, g, b, unused)`. Initialized from
-material base color on spawn. Stored in `particle_dye` / `sorted_particle_dye` arrays.
-
-### 18.2 SPH Laplacian Diffusion (Step1)
-
-Dye diffusion rate computed in Step1 neighbor loop for FLUID particles:
-```
-dC/dt_i = D * SUM_j (m_j / rho_j) * (C_j - C_i) * lap_W_visc(r_ij)
-```
-
-Where:
-- D = 0.01 (diffusion coefficient, hardcoded)
-- `lap_W_visc = (h - |r|)` (variable part of viscosity Laplacian kernel)
-- `C_i`, `C_j` are dye colors (RGB) of particles i, j
-
-Output: `dye_rate_out[i] = float4(dR/dt, dG/dt, dB/dt, 0)`
-
-**Source**: `step1.cu` (neighbor loop, FLUID branch)
-
-### 18.3 Integration (Integrate)
-
-Dye updated in the integrate kernel:
-```
-dye_new = dye + dye_rate * dt
-dye_final = clamp(dye_new, 0, 1)     [per-component clamp]
-```
-
-**Source**: `integrate.cu` (dye update block)
-
-### 18.4 Sort Pipeline
-
-Dye arrays flow through the counting sort / fused reorder pipeline:
-```
-particle_dye → [sort scatter] → sorted_particle_dye → [Step1 reads] → sorted_dye_rate
-sorted_particle_dye + sorted_dye_rate → [Integrate] → particle_dye (unsorted writeback)
-```
-
-PBF and DFSPH Finalize kernels pass `sorted_particle_dye` through to `particle_dye_out`
-via their writeback paths (STATIC, sleeping, and main return paths all copy dye).
-
-### 18.5 Solver Support
-
-- **WCSPH**: Full diffusion (Step1 computes rate, Integrate applies update)
-- **PBF**: Dye rate computed in K_PBF_ComputeLambda (first call only), applied in
-  K_PBF_Finalize. Same SPH Laplacian formula as WCSPH.
-- **DFSPH**: Dye rate computed in K_DFSPH_ComputeDensityAlpha, applied in
-  K_DFSPH_Finalize. Same SPH Laplacian formula as WCSPH.
-
-**Source**: `step1.cu`, `integrate.cu`, `pbf_solver.cu:K_PBF_Finalize`,
-`dfsph_solver.cu:K_DFSPH_Finalize`, `counting_sort.cu` / `fused_sort_reorder_build.cu`
 
 ---
 
@@ -3264,8 +3228,8 @@ the sum of the scaled warm start and every divergence iteration's increment
 initial velocity correction before the divergence solver iterations.
 
 PBF has no warm-start state (see 12.4). PBF also never reads kappa, kappa_v or
-the FP16 mirrors (sorted_velocity_h, sorted_temperature_h, sorted_dye_h), so
-`_run_grid_setup` passes None for all five when the active solver is PBF, and
+the reduced-precision mirrors (sorted_velocity_h, sorted_temperature_h), so
+`_run_grid_setup` passes None for all four when the active solver is PBF, and
 both reorder kernels skip the gather and the store for a NULL output. The
 pointer set depends only on the solver, and a solver switch recaptures the
 CUDA graph. Measured at 992K particles (PBF Dam Break, full sort each
@@ -3943,11 +3907,11 @@ Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
   body list and re-uploads the count, so the block is rebuilt at the restored
   poses. If the body count changed since capture, the rigid state is not
   restored and a warning is printed.
-- The undo ring (`SnapshotRing`) is sized to a 256 MB VRAM budget, 62 B per
-  particle per slot, clamped to 2..12 slots (4 slots at 1M particles, 8 at
+- The undo ring (`SnapshotRing`) is sized to a 256 MB VRAM budget, 46 B per
+  particle per slot, clamped to 2..12 slots (5 slots at 1M particles, 11 at
   500K). All slots are allocated at construction. Health, lifetime and mass
   are stored as float16 in a slot (relative error under 0.05% after
-  restore); position, velocity, packed_info, temperature and dye stay
+  restore); position, velocity, packed_info and temperature stay
   float32, so temperature comes back exact.
 - The R key, the solver switch and preset load call
   `Simulation.reset_scene_objects()`. It clears SDF objects, calls
