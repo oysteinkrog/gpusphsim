@@ -1789,8 +1789,6 @@ def test_exposure_matches_across_solvers(world, sim):
 
     # WCSPH
     s1_dTdt, s1_eh, s1_ec = outs()
-    # rho_j = rest density, the same fallback PBF and DFSPH use for density_in=None.
-    w.sorted_position[:n, 3] = 0.0
     step1.compute_step1(
         w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n],
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
@@ -1899,8 +1897,14 @@ def test_cross_phase_heat_matches_across_solvers(world, sim):
                 cp.zeros(n, cp.float32))
 
     s1_dTdt, s1_eh, s1_ec = outs()
-    # rho_j = rest density, the same fallback PBF and DFSPH use for density_in=None.
-    w.sorted_position[:n, 3] = 0.0
+    # K_Step1 reads rho_j from position.w and overwrites it with its density
+    # (bd-r5-review-n28.163). A warm-up call packs that density, so .w is the
+    # same before and after the measured call; PBF and DFSPH get it as density_in.
+    s1_args = (w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n],
+               w.sorted_packed_info[:n], w.sorted_temperature[:n],
+               sim._cell_start, sim._cell_end)
+    step1.compute_step1(*s1_args)
+    rho_prev = w.sorted_position[:n, 3].copy()
     step1.compute_step1(
         w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n],
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
@@ -1913,12 +1917,12 @@ def test_cross_phase_heat_matches_across_solvers(world, sim):
         w.sorted_position[:n], w.sorted_mass[:n], w.sorted_packed_info[:n],
         sim._cell_start, sim._cell_end,
         cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
-        temperature_in=w.sorted_temperature[:n],
+        temperature_in=w.sorted_temperature[:n], density_in=rho_prev,
         dTdt_out=pbf_dTdt, exposure_heat_out=pbf_eh, exposure_corrode_out=pbf_ec,
     )
     df_dTdt, df_eh, df_ec = outs()
     dfsph_solver.compute_density_alpha(
-        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], None,
+        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], rho_prev,
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
         sim._cell_start, sim._cell_end,
         cp.zeros(n, cp.float32), cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
