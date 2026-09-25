@@ -1254,8 +1254,11 @@ class Simulation:
             mass_out=w.mass,
             max_displacement=w.max_displacement,
             displacement_anchor=w.sorted_anchor,
-            cell_start=self._cell_start,
-            cell_end=self._cell_end,
+            # No cell_start/cell_end: the STATIC push-out stays off in WCSPH.
+            # It never ran before c_grid reached this module (it scanned hash
+            # bucket 0 only), and turning it on costs about 0.16 ms per
+            # substep at 1M. Step2's Akinci STATIC term handles walls.
+            # Enabling it is a separate physics decision (bd-r5-review-n28.166).
             cell_wake_flags=self._cell_wake_flags,
             frame_counter=self._frame_counter_d,
         )
