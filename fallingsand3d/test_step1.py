@@ -1795,4 +1795,7 @@ def test_heat_weight_reads_neighbour_density_from_position_w() -> None:
     d_zero = dTdt_hot_to_cold(0.0)
     assert d_rest > 0.0
     np.testing.assert_allclose(d_half, 2.0 * d_rest, rtol=1e-5)
-    np.testing.assert_allclose(d_zero, d_rest, rtol=1e-6)
+    # .w = 0 uses the WATER table rest density, which differs from RHO0.
+    from materials import MATERIALS
+    rho_table = float(MATERIALS[PACKED_WATER & 0xFF].rest_density)
+    np.testing.assert_allclose(d_zero, d_rest * RHO0 / rho_table, rtol=1e-5)
