@@ -272,8 +272,21 @@ def test_legacy_sort_modules_removed() -> None:
             f"{name}.cu still exists"
         )
 
+    # Only tracked modules count: agents leave untracked scratch scripts here.
+    import subprocess
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--", "*.py"], cwd=base,
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        sources = [base / f for f in tracked if "/" not in f]
+    except (OSError, subprocess.CalledProcessError):
+        sources = list(base.glob("*.py"))
+
     found = []
-    for src_path in base.glob("*.py"):
+    for src_path in sources:
+        if not src_path.exists():
+            continue
         tree = ast.parse(src_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
