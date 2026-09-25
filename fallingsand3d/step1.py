@@ -54,7 +54,8 @@ from kernel_loader import load_module
 #     float3 world_max;            // 12 bytes
 #     float  velocity_damping;     //  4 bytes
 #     float  velocity_limit;       //  4 bytes
-# };                               // Total: 72 bytes
+#     int    thermal_enabled;      //  4 bytes
+# };                               // Total: 76 bytes
 SIM_PARAMS_DTYPE = np.dtype(
     [
         ("smoothing_length", np.float32),
@@ -69,6 +70,7 @@ SIM_PARAMS_DTYPE = np.dtype(
         ("world_max", np.float32, (3,)),
         ("velocity_damping", np.float32),
         ("velocity_limit", np.float32),
+        ("thermal_enabled", np.int32),
     ],
     align=False,
 )
@@ -105,8 +107,15 @@ def build_sim_params(
     world_max: tuple = (1.0, 1.0, 1.0),
     velocity_damping: float = 0.0,
     velocity_limit: float = 10.0,
+    thermal_enabled: bool = True,
 ) -> np.ndarray:
-    """Build a single SimParams struct as a numpy structured array."""
+    """Build a single SimParams struct as a numpy structured array.
+
+    thermal_enabled False tells K_Step1 to skip heat diffusion and exposure
+    and write 0 for dTdt and both exposures. Only use it for a scene where
+    every temperature is T_AMBIENT and no present pair of materials has a
+    non-zero c_interactions entry (Simulation sets it from that rule).
+    """
     params = np.zeros(1, dtype=SIM_PARAMS_DTYPE)
     params[0]["smoothing_length"] = smoothing_length
     params[0]["smoothing_length_sq"] = smoothing_length * smoothing_length
@@ -120,6 +129,7 @@ def build_sim_params(
     params[0]["world_max"] = world_max
     params[0]["velocity_damping"] = velocity_damping
     params[0]["velocity_limit"] = velocity_limit
+    params[0]["thermal_enabled"] = 1 if thermal_enabled else 0
     return params
 
 

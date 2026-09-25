@@ -167,6 +167,7 @@ struct SimParams {
     float3 world_max;            // simulation domain max
     float  velocity_damping;     // spawn stabilization: 0.0=none, 0.8=heavy
     float  velocity_limit;       // CFL-derived max velocity (replaces VELOCITY_LIMIT define)
+    int    thermal_enabled;      // 0 = cold scene with no reacting pair: K_Step1 skips heat and exposure (bd-r5-review-n28.172)
 };
 
 __constant__ SimParams c_sim;

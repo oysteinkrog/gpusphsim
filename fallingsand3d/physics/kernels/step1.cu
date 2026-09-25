@@ -56,6 +56,13 @@
  * temperatures. MAT_DEAD slots write fixed outputs every substep.
  * frame_ptr == NULL turns the skip off (every particle computes every substep).
  *
+ * Thermal gate (bd-r5-review-n28.172): c_sim.thermal_enabled == 0 skips the
+ * neighbour temperature load and the heat and exposure sums, so dTdt and both
+ * exposures come out 0. The host clears it only for a scene where every
+ * temperature is T_AMBIENT and no present material pair has a non-zero
+ * c_interactions entry, where those sums are exactly 0 anyway. The support
+ * weight sum_W is still accumulated (it only divides the exposure sums).
+ *
  * Constant memory (c_grid, c_sim, c_precalc, c_materials, c_interactions) declared in common.cuh.
  */
 
@@ -64,8 +71,11 @@
 // Substeps between full computes of an inactive particle (power of two).
 #define INACTIVE_REFRESH_PERIOD 8u
 
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_Step1(
+// Kernel body, specialised on the thermal gate (bd-r5-review-n28.172).
+// THERMAL = false drops the neighbour temperature load and the heat and
+// exposure sums at compile time, so neither path carries the other's branches.
+template <bool THERMAL>
+__device__ __forceinline__ void step1_body(
     uint            numParticles,
     float4*         __restrict__ position,      // sorted positions (writes density to .w -- PERF-004)
     const float4*   __restrict__ velocity,      // sorted velocities (for strain-rate)
@@ -185,6 +195,8 @@ void K_Step1(
     // in pair differences against T_j from the 0.125 K fixed-point mirror, so it
     // is read from that mirror too. The pair flux is then exactly antisymmetric
     // and a uniform field gives exactly zero.
+    // Compile-time thermal gate (see the header and step1_body below).
+    const bool thermal_on = THERMAL;
     float T_i = temperature_h ? load_t16((const unsigned short*)temperature_h + index_i)
                               : __ldg(&temperature_in[index_i]);
     float kappa_i = c_materials[mat_id_i].thermal_conductivity;
@@ -247,8 +259,11 @@ void K_Step1(
                                                : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                     float m_j = velocity_h ? vel4_j.w * MASS_H_UNIT : __ldg(&mass[index_j]);
                     uint pi_j = __ldg(&packed_info[index_j]);
-                    float T_j = temperature_h ? load_t16((const unsigned short*)temperature_h + index_j)
-                                              : __ldg(&temperature_in[index_j]);
+                    float T_j = 0.0f;
+                    if (thermal_on) {
+                        T_j = temperature_h ? load_t16((const unsigned short*)temperature_h + index_j)
+                                            : __ldg(&temperature_in[index_j]);
+                    }
 
                     float3 r = make_float3(
                         pos_i.x - pos4_j.x,
@@ -271,7 +286,7 @@ void K_Step1(
                             if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
                             // A rigid wall dilutes gas exposure but never reacts with it
                             // (same rule as the same-phase branch, bd-r5-review-n28.66).
-                            if (mat_id_j != MAT_RIGID) {
+                            if (thermal_on && mat_id_j != MAT_RIGID) {
                                 sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                                 sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
                                 // Cross-phase heat conduction (bd-r5-review-n28.94): the same symmetric
@@ -312,7 +327,6 @@ void K_Step1(
                             // (density contribution already included via mass=psi_b; the else
                             // branch below still adds them to the normal and neighbour count)
                             if (mat_id_j != MAT_RIGID) {
-                                // --- Heat diffusion ---
                                 // Neighbour density from pos4_j.w, already loaded above
                                 // (bd-r5-review-n28.163). The reorder gathers .w, which
                                 // K_Integrate set to last substep's density. This kernel
@@ -323,19 +337,23 @@ void K_Step1(
                                 float rho_j = pos4_j.w;
                                 // Unset or zero .w (unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
                                 if (rho_j <= 0.0f) rho_j = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
-                                float lap_var = h - rlen;
-                                float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
-                                // Pairwise harmonic-mean conductivity: the pair term is symmetric,
-                                // so heat lost by i equals heat gained by j (bd-r5-review-n28.67).
-                                float kappa_j = c_materials[mat_id_j].thermal_conductivity;
-                                float k_ij = 2.0f * kappa_i * kappa_j / fmaxf(kappa_i + kappa_j, 1e-6f);
-                                sum_dTdt += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
-                                sum_heat_a += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * lap_var * heat_boost;
 
-                                // --- Exposure accumulation ---
-                                float w_poly6_var = diff * diff * diff;
-                                sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
-                                sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                                if (thermal_on) {
+                                    // --- Heat diffusion ---
+                                    float lap_var = h - rlen;
+                                    float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
+                                    // Pairwise harmonic-mean conductivity: the pair term is symmetric,
+                                    // so heat lost by i equals heat gained by j (bd-r5-review-n28.67).
+                                    float kappa_j = c_materials[mat_id_j].thermal_conductivity;
+                                    float k_ij = 2.0f * kappa_i * kappa_j / fmaxf(kappa_i + kappa_j, 1e-6f);
+                                    sum_dTdt += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
+                                    sum_heat_a += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * lap_var * heat_boost;
+
+                                    // --- Exposure accumulation ---
+                                    float w_poly6_var = diff * diff * diff;
+                                    sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
+                                    sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                                } // thermal_on
 
                                 // --- Gradient-based computations ---
                                 if (r_sq > 1e-12f) {
@@ -490,4 +508,48 @@ void K_Step1(
 
     // Pack density into position.w for Step2 neighbor reads (PERF-004)
     position[index_i].w = density_out[index_i];
+}
+
+// One kernel for both cases: c_sim.thermal_enabled is uniform across the
+// grid, so every warp takes the same side of this branch.
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_Step1(
+    uint            numParticles,
+    float4*         __restrict__ position,      // sorted positions (writes density to .w -- PERF-004)
+    const float4*   __restrict__ velocity,      // sorted velocities (for strain-rate)
+    const float*    __restrict__ mass,           // sorted per-particle mass
+    const uint*     __restrict__ packed_info,    // sorted packed_info (for behavior class check)
+    const float*    __restrict__ temperature_in, // sorted temperature (for heat diffusion)
+    const uint*     __restrict__ cell_start,     // grid cell start indices
+    const uint*     __restrict__ cell_end,       // grid cell end indices
+    float*          __restrict__ density_out,    // output: density per particle
+    float*          __restrict__ shear_rate_out, // output: gamma_dot per particle (0 for non-GRANULAR)
+    float*          __restrict__ dTdt_out,       // output: temperature rate of change (heat diffusion)
+    float*          __restrict__ exposure_heat_out,    // output: heat exposure from interactions
+    float*          __restrict__ exposure_corrode_out, // output: corrosion exposure from interactions
+    float4*         __restrict__ vorticity_out,        // output: (omega_x, omega_y, omega_z, |omega|) -- FLUID only
+    float4*         __restrict__ normal_out,           // output: (n_x, n_y, n_z, neighbor_count) -- FLUID only
+    const void*     __restrict__ velocity_h,           // FP16 velocity for neighbor reads (OPT-4.3), .w = mass / MASS_H_UNIT, may be NULL
+    float*          __restrict__ pressure_out,         // output: pre-computed pressure per particle (PERF-007)
+    const void*     __restrict__ temperature_h,        // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
+    float2*         __restrict__ pr2_omega_out,        // output: (p / rho^2, |omega|) for K_Step2 neighbour reads, may be NULL
+    float*          __restrict__ eta_out,              // output: mu(I) viscosity eta (0 for non-GRANULAR) for K_Step2, may be NULL
+    const uint*     __restrict__ frame_ptr,            // per-substep counter for the inactive refresh cadence; NULL = never skip
+    uint                         force_refresh         // 1 = every inactive particle computes (full-sort substep)
+) {
+    if (c_sim.thermal_enabled != 0) {
+        step1_body<true>(
+            numParticles, position, velocity, mass, packed_info, temperature_in,
+            cell_start, cell_end, density_out, shear_rate_out, dTdt_out,
+            exposure_heat_out, exposure_corrode_out, vorticity_out, normal_out,
+            velocity_h, pressure_out, temperature_h, pr2_omega_out, eta_out,
+            frame_ptr, force_refresh);
+    } else {
+        step1_body<false>(
+            numParticles, position, velocity, mass, packed_info, temperature_in,
+            cell_start, cell_end, density_out, shear_rate_out, dTdt_out,
+            exposure_heat_out, exposure_corrode_out, vorticity_out, normal_out,
+            velocity_h, pressure_out, temperature_h, pr2_omega_out, eta_out,
+            frame_ptr, force_refresh);
+    }
 }
