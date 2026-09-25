@@ -140,6 +140,10 @@ def upload_pbf_params(profile, h: float = 0.04) -> None:
     poly6_coeff = 315.0 / (64.0 * math.pi * h ** 9)
     diff = h_sq - dq_sq
     W_dq = poly6_coeff * diff ** 3 if diff > 0 else 0.0
+    # With k = 0 the s_corr term is zero anyway. Uploading W_dq = 0 makes
+    # K_PBF_ComputeDelta skip its `W_dq > 1e-12f` branch for every neighbour.
+    if profile.pbf_s_corr_k == 0.0:
+        W_dq = 0.0
 
     params = np.zeros(1, dtype=PBF_PARAMS_DTYPE)
     params[0]["num_iterations"] = profile.pbf_iterations
