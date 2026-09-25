@@ -242,10 +242,11 @@ def test_struct_sizes() -> None:
     sp = build_sim_params()
     pp = build_precalc_params()
 
-    # SimParams: 72 bytes (smoothing_length, smoothing_length_sq, particle_mass,
+    # SimParams: 76 bytes (smoothing_length, smoothing_length_sq, particle_mass,
     # particle_spacing, gravity(3), dt, restitution, wall_friction, world_min(3),
-    # world_max(3), velocity_damping, velocity_limit = 18 floats)
-    assert sp.nbytes == 72, f"SimParams: {sp.nbytes} != 72 bytes"
+    # world_max(3), velocity_damping, velocity_limit = 18 floats, then
+    # int thermal_enabled)
+    assert sp.nbytes == 76, f"SimParams: {sp.nbytes} != 76 bytes"
     print(f"[OK] SimParams: {sp.nbytes} bytes")
 
     # PrecalcParams: 20 bytes
