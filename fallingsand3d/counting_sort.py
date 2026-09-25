@@ -131,6 +131,17 @@ def allocate_scratch(num_cells: int, max_particles: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v) -> None:
+    """The reorder kernels read kappa / kappa_v only when the sorted output is
+    given (NULL output = skip the gather and the store). A sorted output
+    without its input would read a NULL pointer, so reject it on the host.
+    Host-only check on Python objects: no device sync."""
+    if sorted_kappa is not None and kappa is None:
+        raise ValueError("sorted_kappa given without kappa")
+    if sorted_kappa_v is not None and kappa_v is None:
+        raise ValueError("sorted_kappa_v given without kappa_v")
+
+
 def counting_sort_full(
     num_particles: int,
     num_cells: int,
@@ -152,8 +163,8 @@ def counting_sort_full(
     health: cupy.ndarray,
     lifetime: cupy.ndarray,
     sleep_counter: cupy.ndarray,
-    kappa: cupy.ndarray,
-    kappa_v: cupy.ndarray,
+    kappa: "Optional[cupy.ndarray]",
+    kappa_v: "Optional[cupy.ndarray]",
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
@@ -184,6 +195,10 @@ def counting_sort_full(
     sorted_anchor, when given, receives a copy of sorted_position. gather_reorder
     never writes it, so it keeps the positions of the last full sort and the
     finalize kernels measure drift since that sort against it.
+
+    sorted_kappa, sorted_kappa_v, sorted_velocity_h and sorted_temperature_h
+    may be None: the kernel then skips that gather and store. kappa and
+    kappa_v may be None when their sorted output is None.
 
     All operations are CUDA-graph-capturable.
     """
@@ -234,6 +249,7 @@ def counting_sort_full(
     # Zero write_offset (graph-capturable memset)
     write_offset.data.memset_async(0x00, write_offset.nbytes)
 
+    _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v)
     _null = cupy.ndarray(0, dtype=cupy.uint32)
 
     k_scatter = module.get_function("K_ScatterReorder")
@@ -252,8 +268,8 @@ def counting_sort_full(
         health,
         lifetime,
         sleep_counter,
-        kappa,
-        kappa_v,
+        kappa if sorted_kappa is not None else _null,
+        kappa_v if sorted_kappa_v is not None else _null,
         # Sorted outputs
         sorted_position,
         sorted_velocity,
@@ -286,8 +302,8 @@ def gather_reorder(
     health: cupy.ndarray,
     lifetime: cupy.ndarray,
     sleep_counter: cupy.ndarray,
-    kappa: cupy.ndarray,
-    kappa_v: cupy.ndarray,
+    kappa: "Optional[cupy.ndarray]",
+    kappa_v: "Optional[cupy.ndarray]",
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
     sorted_velocity: cupy.ndarray,
@@ -313,6 +329,7 @@ def gather_reorder(
     cell_start/cell_end are still valid. Only the particle data needs re-gathering.
     Cheaper than full counting sort (no hash, no histogram, no prefix sum, no atomics).
     It leaves the drift anchor from the last full sort untouched.
+    None outputs and inputs work as in counting_sort_full.
     """
     if num_particles == 0:
         return
@@ -322,6 +339,7 @@ def gather_reorder(
     grid = ((num_particles + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
 
+    _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v)
     _null = cupy.ndarray(0, dtype=cupy.uint32)
 
     k_gather = module.get_function("K_GatherReorder")
@@ -337,8 +355,8 @@ def gather_reorder(
         health,
         lifetime,
         sleep_counter,
-        kappa,
-        kappa_v,
+        kappa if sorted_kappa is not None else _null,
+        kappa_v if sorted_kappa_v is not None else _null,
         # Sorted outputs
         sorted_position,
         sorted_velocity,
