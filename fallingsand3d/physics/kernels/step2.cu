@@ -130,7 +130,8 @@ void K_Step2(
     const void*     __restrict__ velocity_h,     // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
     const RigidBody* __restrict__ d_rigid_bodies, // rigid body state array (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,  // force accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques  // torque accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques, // torque accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
+    const float2*   __restrict__ pr2_omega_in   // (p / rho^2, |omega|) from K_Step1 for FLUID neighbours, may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -173,6 +174,7 @@ void K_Step2(
 
     float rho_i = pos4_i.w;  // density packed into position.w by K_Step1 (OPT-4.1)
     float p_i = __ldg(&pressure_in[index_i]);  // pre-computed (PERF-007)
+    float pr2_i = p_i / (rho_i * rho_i);
 
     // Accumulators
     float3 f_pressure  = make_float3(0.0f, 0.0f, 0.0f);
@@ -279,6 +281,15 @@ void K_Step2(
 
                     int behavior_j = GET_BEHAVIOR(pi_j);
 
+                    // Packed neighbour carrier (bd-r5-review-n28.158): one 8 B
+                    // load gives a FLUID neighbour's p_j / rho_j^2 and |omega_j|.
+                    // Other neighbours (GRANULAR needs p_j for its floor, GAS,
+                    // and slots K_SpawnGas rewrote after K_Step1) keep the
+                    // pressure_in read. With a NULL carrier every neighbour
+                    // takes the old loads.
+                    bool use_pk = (pr2_omega_in != 0) && (behavior_j == FLUID) && !is_gas_i;
+                    float2 pk_j = use_pk ? __ldg(&pr2_omega_in[index_j]) : make_float2(0.0f, 0.0f);
+
                     // Vorticity eta accumulation (FLUID i, FLUID neighbours only -- PERF-002).
                     // STATIC (incl. MAT_RIGID), GAS and GRANULAR neighbours carry
                     // omega = 0 and a rho_j that is not a fluid density, so they
@@ -288,7 +299,7 @@ void K_Step2(
                         float h_rl = h - rlen;
                         float inv_rl = 1.0f / rlen;
                         float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
-                        float omega_j = __ldg(&vorticity_in[index_j]).w;
+                        float omega_j = use_pk ? pk_j.y : __ldg(&vorticity_in[index_j]).w;
                         float rho_j_e = pos4_j.w;
                         float wt = m_j / fmaxf(rho_j_e, RHO_EPSILON);
                         float omega_diff = omega_j - omega_mag_i;
@@ -406,7 +417,7 @@ void K_Step2(
                             warp_reduce_accumulate(d_rigid_torques, tau, body_id);
                         } else {
                             // --- Regular STATIC boundary: Akinci pressure mirroring + friction ---
-                            float press_sym_b = 2.0f * (p_i / (rho_i * rho_i));
+                            float press_sym_b = 2.0f * pr2_i;
                             f_pressure.x += m_j * press_sym_b * grad_s.x;
                             f_pressure.y += m_j * press_sym_b * grad_s.y;
                             f_pressure.z += m_j * press_sym_b * grad_s.z;
@@ -424,7 +435,12 @@ void K_Step2(
 
                     // Neighbor pressure from pre-computed array (PERF-007)
                     uint mat_id_j = GET_MATERIAL_ID(pi_j);
-                    float p_j = __ldg(&pressure_in[index_j]);
+                    float p_j = 0.0f;
+                    float pr2_j = pk_j.x;
+                    if (!use_pk) {
+                        p_j = __ldg(&pressure_in[index_j]);
+                        pr2_j = p_j / (rho_j * rho_j);
+                    }
 
                     // FLUID-GRANULAR pair (GAS and STATIC were handled above)
                     bool cross_ij = (is_granular_i != (behavior_j == GRANULAR));
@@ -432,7 +448,7 @@ void K_Step2(
                     // ---- Pressure force ----
                     // f_press += pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable
                     // Cross pairs are rescaled so fs_i * rescale = fs_cross on both sides.
-                    float press_sym = (p_i / (rho_i * rho_i)) + (p_j / (rho_j * rho_j));
+                    float press_sym = pr2_i + pr2_j;
                     if (cross_ij) press_sym *= cross_p_rescale;
                     float3 grad_s = grad_spiky_variable(r, rlen, h);
                     f_pressure.x += m_j * press_sym * grad_s.x;

@@ -240,6 +240,7 @@ def compute_step1(
     velocity_h: Optional[cupy.ndarray] = None,
     pressure_out: Optional[cupy.ndarray] = None,
     temperature_h: Optional[cupy.ndarray] = None,
+    pr2_omega_out: Optional[cupy.ndarray] = None,
 ) -> tuple:
     """Launch K_Step1 and return (density, shear_rate, dTdt, exposure_heat, exposure_corrode).
 
@@ -272,6 +273,10 @@ def compute_step1(
         Pre-allocated (N,) float32 output buffer. If None, allocates new.
     exposure_corrode_out : cupy.ndarray, optional
         Pre-allocated (N,) float32 output buffer. If None, allocates new.
+    pr2_omega_out : cupy.ndarray, optional
+        (N, 2) float32 output of (p / rho^2, |omega|), the packed neighbour
+        carrier K_Step2 reads (pass the same array as its pr2_omega_in).
+        If None, K_Step1 skips the write.
 
     Returns
     -------
@@ -306,6 +311,7 @@ def compute_step1(
     _null = cupy.ndarray(0, dtype=cupy.uint32)
     velocity_h_ptr = velocity_h if velocity_h is not None else _null
     temperature_h_ptr = temperature_h if temperature_h is not None else _null
+    pr2_omega_ptr = pr2_omega_out if pr2_omega_out is not None else _null
 
     module = _get_module()
     kernel = module.get_function("K_Step1")  # type: ignore[union-attr]
@@ -336,6 +342,7 @@ def compute_step1(
             velocity_h_ptr,
             pressure_out,
             temperature_h_ptr,
+            pr2_omega_ptr,
         ),
     )
 

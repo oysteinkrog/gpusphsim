@@ -241,6 +241,7 @@ def compute_step2(
     d_rigid_bodies: "Optional[cupy.ndarray]" = None,
     d_rigid_forces: "Optional[cupy.ndarray]" = None,
     d_rigid_torques: "Optional[cupy.ndarray]" = None,
+    pr2_omega_in: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Step2 and return (sph_force, veleval_out).
 
@@ -266,6 +267,11 @@ def compute_step2(
         Pre-allocated (N, 4) float32 output. If None, allocates new.
     veleval_out : cupy.ndarray, optional
         Pre-allocated (N, 4) float32 output. If None, allocates new.
+    pr2_omega_in : cupy.ndarray, optional
+        (N, 2) float32 (p / rho^2, |omega|) written by K_Step1 this substep.
+        FLUID neighbours then read p_j / rho_j^2 and |omega_j| from it (8 B)
+        instead of pressure_in and vorticity_in (20 B). If None, the kernel
+        uses pressure_in and vorticity_in for every neighbour.
 
     Returns
     -------
@@ -302,6 +308,7 @@ def compute_step2(
     rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null
     rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null
     rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null
+    pk_ptr = pr2_omega_in if pr2_omega_in is not None else _null
 
     kernel(
         grid,
@@ -324,6 +331,7 @@ def compute_step2(
             rb_ptr,
             rf_ptr,
             rt_ptr,
+            pk_ptr,
         ),
     )
 

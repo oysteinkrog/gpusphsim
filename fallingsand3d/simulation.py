@@ -1119,6 +1119,7 @@ class Simulation:
             velocity_h=w.sorted_velocity_h,
             pressure_out=w.sorted_pressure,
             temperature_h=w.sorted_temperature_h,
+            pr2_omega_out=w.sorted_pr2_omega,
         )
         mark("step1")
 
@@ -1148,6 +1149,7 @@ class Simulation:
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+            pr2_omega_in=w.sorted_pr2_omega,
         )
         mark("step2")
 

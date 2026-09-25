@@ -62,7 +62,8 @@ void K_Step1(
     float4*         __restrict__ normal_out,           // output: (n_x, n_y, n_z, neighbor_count) -- FLUID only
     const void*     __restrict__ velocity_h,           // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
     float*          __restrict__ pressure_out,         // output: pre-computed pressure per particle (PERF-007)
-    const void*     __restrict__ temperature_h         // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
+    const void*     __restrict__ temperature_h,        // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
+    float2*         __restrict__ pr2_omega_out         // output: (p / rho^2, |omega|) for K_Step2 neighbour reads, may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -100,6 +101,7 @@ void K_Step1(
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         position[index_i].w = RIGID_PSI_RHO0;  // pack the placeholder density like other particles
+        if (pr2_omega_out) pr2_omega_out[index_i] = make_float2(0.0f, 0.0f);
         return;
     }
 
@@ -356,6 +358,16 @@ void K_Step1(
     // --- PostCalc: vorticity ---
     float omega_mag = sqrtf(omega.x * omega.x + omega.y * omega.y + omega.z * omega.z);
     vorticity_out[index_i] = make_float4(omega.x, omega.y, omega.z, omega_mag);
+
+    // --- PostCalc: packed neighbour carrier for K_Step2 (bd-r5-review-n28.158) ---
+    // K_Step2 reads p_j / rho_j^2 and |omega_j| for each FLUID neighbour from
+    // this 8 B pair instead of pressure (4 B) plus the vorticity float4 (16 B).
+    // Same expression as K_Step2's own p / (rho * rho), so the result is bitwise
+    // the same as dividing there.
+    if (pr2_omega_out) {
+        float rho_pk = density_out[index_i];
+        pr2_omega_out[index_i] = make_float2(pressure_out[index_i] / (rho_pk * rho_pk), omega_mag);
+    }
 
     // --- PostCalc: surface normal + neighbor count ---
     normal_out[index_i] = make_float4(normal.x, normal.y, normal.z, neighbor_count);
