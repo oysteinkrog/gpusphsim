@@ -3578,6 +3578,34 @@ No kernel code changes needed — existing per-material property lookups handle 
 
 **Source**: `materials.py`, `reactions.cu`
 
+### 21.5 Reaction State Carry-Back (state-dirty bit)
+
+K_Reactions and K_SpawnGas change health, lifetime and mass in sorted space.
+Every substep re-gathers those arrays from the unsorted copies, so each change
+must be scattered back to unsorted or it is lost. packed_info bit 21
+(`STATE_DIRTY_BIT` in `state_dirty.cuh`) marks the particles those two kernels
+wrote: every material transition, death, spawned steam child, the source water
+it replaces, non-lethal corrosion and acid health loss, GAS lifetime decay, and
+a DEAD slot whose leftover mass is cleared to 0.
+
+WCSPH `K_Integrate` scatters health, lifetime and mass only when the bit is
+set, and clears it in the packed_info it writes back, so the unsorted
+packed_info never keeps it. Every other particle's unsorted copy already holds
+the value it was gathered from. The PBF and DFSPH finalize kernels still
+scatter the three arrays for every particle and pass the bit through; all
+readers mask packed_info fields, so a set bit has no effect there.
+
+In the same kernel, a particle that stays asleep stores its zero velocity only
+when the gathered velocity is not all-zero bits: on its first sleeping substep,
+or after a kick below the wake threshold. Later sleeping substeps skip the
+store because the unsorted velocity is already zero. The position store stays,
+because `.w` carries the density.
+
+At 1M particles (dam break, no reactions) the K_Integrate median went from
+0.73 ms to 0.48 ms (bd-r5-review-n28.162).
+
+**Source**: `reactions.cu`, `spawn.cu`, `integrate.cu`, `state_dirty.cuh`
+
 ---
 
 ## 22. Rigid Body System
