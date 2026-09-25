@@ -1724,6 +1724,17 @@ boils. (bd-r5-review-n28.27)
 - A steam particle claims the slot where it is written, so a parked slot jumps
   from the park lattice to the boiling water. The displacement tracker then
   forces a full sort, as for any reused DEAD slot.
+- **Waiting for slots.** `K_Reactions` sets the spawn flag on WATER above
+  `temp_boil` and writes `packed_info` only when the flag changes. When the
+  freelist has fewer than 3 entries, `K_SpawnGas` leaves the flag set and
+  writes nothing. A volatile read of `dead_count` skips the claim atomics
+  while the freelist is visibly short; the `atomicSub` claim stays the
+  authoritative check. WATER that cools to `temp_boil` or below while flagged
+  has the flag cleared by `K_Reactions`, so it never spawns steam late.
+  (bd-r5-review-n28.142)
+- **Rebuild push.** `K_Reactions` pushes DEAD slots with one `atomicAdd` per
+  warp (`__ballot_sync`, `__popc`, `__shfl_sync`). Each DEAD index is listed
+  exactly once; the order inside the freelist is not defined.
 
 **Source**: `world.py:add_dead_reserve`, `world.py:park_positions`,
 `simulation.py:_maybe_compact`, `reactions.cu:K_Reactions`, `spawn.cu:K_SpawnGas`
