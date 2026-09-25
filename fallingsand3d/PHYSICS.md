@@ -900,6 +900,42 @@ This is bidirectional: `T_j - T_i` can be positive or negative, so lava
 near water both cools the lava AND heats the water. This enables visible
 phase transitions: lava→gravel (T<1000K), water→steam (T>373K). See §9.5.
 
+**Cross-phase pairs (GAS with non-GAS).** The GAS/non-GAS branch skips density
+and forces, but it does conduct heat, so FIRE, STEAM and SMOKE heat or cool
+WATER, ICE, METAL, STONE, WOOD and the rest (bd-r5-review-n28.94). It uses the
+same pair term as above, with the pair coefficient capped:
+```
+a_ij    = k_ij * (m_j/rho_j) * (h - |r|) * heat_boost
+rho_lb  = max(C_poly6 * m_i * h^6, is_gas_i ? RHO_EPSILON : 1)   (own self term)
+a_x_max = 0.5 * rho_lb * cp_i / ([45/(pi*h^6)] * dt)
+sum    += min(a_ij, a_x_max) * (T_j - T_i)
+```
+`rho_lb` is a lower bound on the `rho_i` that PostCalc divides by, because the
+self term is always in the density sum. So the cap holds one neighbour's
+contribution to `|dTdt_i| * dt` at or below `0.5 * |T_j - T_i|`, and the explicit
+step cannot overshoot that pair. When the cap is not hit the pair stays
+symmetric and conserves energy like a same-phase pair. In normal scenes it is
+not hit: WATER at 293 K with one FIRE neighbour at 1200 K at r = h/2 (both mass
+0.02, isolated) gives WATER +1688 K/s and FIRE -2827 K/s, about 1.7 K and
+2.8 K per 1 ms substep against a 454 K cap. MAT_RIGID neighbours never exchange
+heat, in either branch. The cap reads `c_sim.dt` of the solver's own module.
+
+This is in `K_Step1`, `K_Step1_BuildNL`, `K_PBF_ComputeLambda` (do_heat call) and
+`K_DFSPH_ComputeDensityAlpha`. The neighbour-list step1 in `neighbor_list.cu`
+(used only by `benchmark.py` and tests, not by `simulation.py`) still skips
+cross-phase heat. Tests: `test_step1.py::test_fire_heats_water_across_phase`,
+`test_step1.py::test_cross_phase_heat_capped_at_half_gap` and
+`test_solvers.py::test_cross_phase_heat_matches_across_solvers` (all three
+solvers give identical dTdt in a WATER/SAND/STONE/FIRE/STEAM block).
+
+Fire under water: WATER turns FIRE into SMOKE once water holds more than 37.5%
+of the fire particle's support (§9.4, `FIRE_EXTINGUISH_EXPOSURE`). GAS passes
+through non-GAS, so a FIRE layer under a 5 cm WATER column rises into the water
+and is extinguished within about 0.1 s. In that time it heats the bottom water
+from 293 K to about 345 K (WCSPH, 200 FIRE and 300 WATER particles). With the
+extinguish rule turned off, the same scene takes the bottom water past 373 K in
+under 0.1 s under all three solvers.
+
 ### 9.2 Key Heat Exchange Values
 
 | Pair | heat_exchange | Effect |
@@ -1775,6 +1811,7 @@ All three solvers now support the complete material behavior set:
 | GAS phase separation | Step1 (skip GAS) | ComputeLambda (skip GAS) | DensityAlpha (skip GAS) |
 | Heat diffusion | Step1 | ComputeLambda | DensityAlpha |
 | Cross-material heat | Step1 (heat_boost) | ComputeLambda (heat_boost) | DensityAlpha (heat_boost) |
+| Cross-phase heat (GAS with non-GAS, capped at 0.5 dT per pair) | Step1 | ComputeLambda | DensityAlpha |
 | Exposure (fire/acid) | Step1 | ComputeLambda | DensityAlpha |
 | Dye diffusion | Step1 | ComputeLambda | DensityAlpha |
 | Vorticity computation | Step1 | ComputeLambda | DensityAlpha |
