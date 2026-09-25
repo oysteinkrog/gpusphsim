@@ -1601,7 +1601,8 @@ Each item names its bead (`bd-r4fix-uup.N`).
     values are still in the previous sort order after a full re-sort. The
     effect is bounded noise in the weighting, not a blow-up.
   - Every read site (K_Step1, K_Step1_BuildNL, K_DFSPH_ComputeDensityAlpha,
-    same-phase and cross-phase heat) replaces a value `<= 0` with the
+    K_PBF_ComputeLambda; same-phase and cross-phase heat, and the PBF
+    vorticity/normal sum) replaces a value `<= 0` with the
     neighbour's own `rest_density`, floored at `RHO_EPSILON` so GAS keeps its
     low rest density (bd-r5-review-n28.110). A never-computed or freshly
     spawned slot therefore gets `m_j / rho_j` equal to its rest volume and
