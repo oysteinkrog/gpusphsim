@@ -1933,7 +1933,6 @@ up `+curl(v)`, see §16.1.
 - **Bounding sphere body-body collisions**: Body-body collision uses the bounding sphere `|half_extents|`, not the true shape, so elongated bodies leave gaps at corners. Body-SDF contact and the world wall clamp use the box support distance (22.7, 22.8).
 - **No rigid-rigid stacking**: Single push-apart pass per substep; deep piles of bodies may interpenetrate.
 - **Max 8 dynamic bodies, 16 SDF objects**: Hardcoded limits in constant memory (`MAX_RIGID_BODIES`, `MAX_SDF_OBJECTS`).
-- **CUDA graph disabled**: Rigid body forces vary per substep, so the CUDA graph pipeline is disabled when any rigid body is present.
 - **No body-frame friction/rolling**: Only linear velocity is reflected in collision; angular velocity is not affected by rigid-rigid contacts.
 - **Gas against bodies** (bd-r5-review-n28.101): GAS is kept out of a body by the `static_particle_boundary` push (all solvers) plus, in WCSPH, the step2 Akinci term. `test_gas_rigid.py` drops a 12 cm, 50 kg box at 1 m/s through an ambient-temperature SMOKE block for 0.2 s. DFSPH: no smoke inside the box at any check. WCSPH: 216 inside, because the push is dead there until the integrate module gets `c_grid` (10.6, bd-r5-review-n28.214); with `c_grid` uploaded by hand it is 0 inside and the box slows from 1.0 to 0.86 m/s (0.998 m/s with no smoke in its path), and peak gas pressure under the box is about 30000 against 3600 at rest. PBF: up to about 90 inside, because at dt 1/120 the box moves 8 mm per substep, the PBF gas density solve does not see the body, and one push per substep lags behind.
 
@@ -3580,8 +3579,9 @@ disp_sq = |x_end - anchor[i]|^2  -> atomicMax into max_displacement
 On a substep that runs a full sort, `_update_rigid_boundary` clears
 `max_displacement` before the kernel and sets `anchor[i] = x`, and
 `_run_grid_setup` skips its own clear, so the boundary drift of that substep
-is kept. Rigid bodies disable CUDA graphs, so a captured graph always keeps
-the clear in `_run_grid_setup`. A block with no anchor yet (after injection,
+is kept. A captured graph bakes in which branch `_run_grid_setup` took, so
+`Simulation._rigid_graph_key` (body count, and whether this clear runs) drops
+the graphs when it changes (bd-r5-review-n28.182). A block with no anchor yet (after injection,
 reinjection or reset) makes the substep a full sort. A body at 2 m/s with
 dt = 1e-3 and 10 substeps per frame moves 20 mm (0.5h) per frame and sorts
 every frame; a body at rest adds zero drift and calm water keeps skipping.
@@ -4015,7 +4015,17 @@ tau_on_body = (r_b - COM) × F_on_body
 
 This ensures `K_IntegrateRigidBodies` correctly computes `a_body = F_total / M_body`.
 
-Forces accumulated via `warp_reduce_accumulate()` then `atomicAdd` to per-body accumulators.
+Accumulation (bd-r5-review-n28.182): K_Step2 sums the reaction on the first
+body a particle touches in registers and writes it once after the neighbour
+loop, 6 atomics per particle. The viscous part is scaled by the implicit
+factor there. The pressure part `F_p = -m_i * fs_i * pressure_precalc * sum F_on_fluid`
+is summed as a force only: every Akinci term is parallel to `r = x_i - x_j`, so
+```
+sum_j (x_j - COM) x F_j = sum_j ((x_i - COM) - r_j) x F_j = (x_i - COM) x F_p
+```
+A pair on any other body is written at once with `atomic_accumulate3`. A second
+register sum of torque as well spilled K_Step2 (local memory 40 to 88 B) and
+cost 0.8 ms per substep at 1M particles, so there is none.
 
 **Source**: `step2.cu:K_Step2` (WCSPH), `dfsph_solver.cu:K_DFSPH_NonPressureForces` (DFSPH viscous part)
 
@@ -4084,20 +4094,28 @@ displaced volume reaches half a spacing past each face. So the 4.32 kg
 gets about 27 N of support and should float in PBF and DFSPH (inferred from the
 force, not run as a preset).
 
-### 22.6 Force Accumulation with Warp-Level Reduction
+### 22.6 Force Accumulation
 
-To reduce atomic contention (~32x), forces are summed within each warp before a single atomic write:
+`atomic_accumulate3(target, val, body_id)` adds a float3 to one body's slot of
+the `[MAX_RIGID_BODIES * 4]` force or torque accumulator with three global
+`atomicAdd`. There is no warp reduction: callers sit in divergent
+neighbour-loop branches where lanes may hold different bodies, and a
+full-warp shuffle would blend them (bd-r4-epic-x2j.1).
 
-```c
-// Warp-level reduction (butterfly)
-for (int offset = 16; offset > 0; offset >>= 1) {
-    fx += __shfl_down_sync(0xFFFFFFFF, fx, offset);
-    // ... fy, fz, tx, ty, tz
-}
-if (lane_id == 0) atomicAdd(&d_rigid_forces[body_id*4 + k], f_k);
-```
+- WCSPH K_Step2 sums a particle's reaction on its first body in registers and
+  writes it once (22.5, reaction forces): 6 atomics per particle
+  instead of 6 per pair plus 6.
+- PBF (K_PBF_ComputeDelta, K_PBF_Finalize) and DFSPH (K_DFSPH_NonPressureForces,
+  K_DFSPH_CorrectVelocityDiv, K_DFSPH_ComputePressureAccel) write each pair at
+  once. A per-thread register or `__shared__` sum there made those kernels 3 to
+  5 percent slower at 1M particles with a submerged 0.4 m box, more than the
+  atomics cost (bd-r5-review-n28.182).
 
-**Source**: `sph_shared.cuh:warp_reduce_accumulate()`
+Both forms give the same per-body sums up to float summation order: on
+Archimedes Pool the per-substep force and torque match the per-pair form
+within 1e-6 relative (WCSPH), the same size as the run-to-run atomic noise.
+
+**Source**: `sph_shared.cuh:atomic_accumulate3()`, `step2.cu:K_Step2`
 
 ### 22.6.1 Blast Wave Force on Rigid Bodies
 
@@ -4282,7 +4300,7 @@ the flag.
 |----------|--------|-----------|
 | Body state storage | Global memory (RigidBody struct) | Max 8 bodies; constant memory reserved for SDF objects |
 | psi_b storage | mass field holds RIGID_PSI_RHO0 * V_b | Avoids extra buffer; volume terms read V_b, density sums and Akinci coupling scale by rho0_i / RIGID_PSI_RHO0 |
-| Force accumulation | Warp reduction + atomicAdd | 32x less contention than per-thread atomics |
+| Force accumulation | Per-particle register sum in K_Step2, per-pair atomicAdd in PBF/DFSPH | See 22.6: a register sum spills or slows the PBF/DFSPH kernels |
 | SDF vs boundary | Both coexist | SDF for collision, boundary particles for pressure/viscosity |
 | Quaternion convention | (x,y,z,w) where w=scalar | Matches CUDA float4 layout |
-| CUDA graph | Disabled when bodies present | Rigid body forces vary per substep (not capturable) |
+| CUDA graph | On with bodies present | Accumulator zeroing and body integration run outside the graph; `_rigid_graph_key` drops the graphs when the body count or the boundary drift clear changes (bd-r5-review-n28.182) |
