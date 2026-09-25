@@ -404,10 +404,10 @@ def test_stability_dfsph(world, sim):
 #
 # Measured on fix/r5-review (2026-09-25), 39,600 WATER particles after 100
 # substeps, interior = FLUID with sorted_normal.w (neighbour count) >= 25:
-#   PBF   (dt 1/120, 4 iters): mean |rho/rho0 - 1| = 0.010
-#   DFSPH (dt 1/300):          mean |rho/rho0 - 1| = 0.004
-# With the PBF m_j factor dropped from the delta, the PBF value is far above
-# 0.12 (see test_pbf_density_bound_catches_missing_mass_factor).
+#   PBF   (dt 1/120): mean |rho/rho0 - 1| = 0.017 (about 29.7K interior)
+#   DFSPH (dt 1/300): mean |rho/rho0 - 1| = 0.007 (about 33.0K interior)
+# With the PBF m_j factor dropped from the delta, the column blows apart and
+# no interior particle is left (test_pbf_density_bound_catches_missing_mass_factor).
 #
 # Which buffer holds the density: PBF's sorted_density is the density of the
 # last constraint iteration's lambda pass, so it lags the final delta by one
@@ -423,7 +423,8 @@ _INTERIOR_MIN_NEIGHBOURS = 25   # nc < 25 is the surface threshold in the kernel
 def _interior_density_error(world, profile_name, substeps=100):
     """Settle a ~40K WATER column and return the interior mean |rho/rho0 - 1|.
 
-    One readback after the loop. Returns NaN if any read density is not finite.
+    One readback after the loop. Returns (err, n_interior); err is NaN when
+    there are no interior particles or a read density is not finite.
     """
     from materials import FLUID, MATERIALS
 
@@ -446,20 +447,21 @@ def _interior_density_error(world, profile_name, substeps=100):
     nc = world.sorted_normal[:n, 3].get()
     pi = world.sorted_packed_info[:n].get()
     interior = (((pi >> 8) & 0x3) == FLUID) & (nc >= _INTERIOR_MIN_NEIGHBOURS)
-    assert interior.sum() > 50, 'scene produced no test candidates'
-    if not np.isfinite(rho[interior]).all():
-        return float('nan')
+    n_interior = int(interior.sum())
+    if n_interior == 0 or not np.isfinite(rho[interior]).all():
+        return float('nan'), n_interior
     rho0 = MATERIALS[WATER].rest_density
     err = float(np.abs(rho[interior] / rho0 - 1.0).mean())
-    print(f"  {profile_name}: interior={int(interior.sum())}/{n} "
+    print(f"  {profile_name}: interior={n_interior}/{n} "
           f"mean|rho/rho0-1|={err:.4f}")
-    return err
+    return err, n_interior
 
 
 @pytest.mark.gpu
 def test_pbf_density_error_bound(world):
     """PBF at dt = 1/120 must hold interior density within 12% of rho0."""
-    err = _interior_density_error(world, "PBF")
+    err, n_interior = _interior_density_error(world, "PBF")
+    assert n_interior > 50, 'scene produced no test candidates'
     assert err < PBF_DENSITY_ERR_BOUND, (
         f"PBF interior density error {err:.4f} >= {PBF_DENSITY_ERR_BOUND}")
 
@@ -467,7 +469,8 @@ def test_pbf_density_error_bound(world):
 @pytest.mark.gpu
 def test_dfsph_density_error_bound(world):
     """DFSPH must hold interior density within 3% of rho0."""
-    err = _interior_density_error(world, "DFSPH")
+    err, n_interior = _interior_density_error(world, "DFSPH")
+    assert n_interior > 50, 'scene produced no test candidates'
     assert err < DFSPH_DENSITY_ERR_BOUND, (
         f"DFSPH interior density error {err:.4f} >= {DFSPH_DENSITY_ERR_BOUND}")
 
@@ -495,9 +498,12 @@ def test_pbf_density_bound_catches_missing_mass_factor(world, monkeypatch):
         options=("--std=c++11", "--use_fast_math", f"-I{kernel_dir}"),
     )
     monkeypatch.setattr(pbf_solver, "_module", mutated)
-    err = _interior_density_error(world, "PBF")
-    assert not (err < PBF_DENSITY_ERR_BOUND), (
-        f"PBF density bound missed the missing-m_j delta bug: err={err:.4f}")
+    # The bug blows the column apart, so it can also fail the candidate count.
+    err, n_interior = _interior_density_error(world, "PBF")
+    caught = n_interior <= 50 or not (err < PBF_DENSITY_ERR_BOUND)
+    assert caught, (
+        f"PBF density test missed the missing-m_j delta bug: err={err:.4f}, "
+        f"interior={n_interior}")
 
 
 # ---------------------------------------------------------------------------
