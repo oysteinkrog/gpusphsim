@@ -71,13 +71,17 @@ def _block(w, sim, profile, half_n=5):
             w.sorted_exposure_heat, w.sorted_exposure_corrode,
             normal_out=w.sorted_normal,
         )
+    dfsph_solver.pack_volume(
+        w.sorted_position[:n], w.sorted_density[:n],
+        w.sorted_mass[:n], w.sorted_packed_info[:n],
+    )
     cp.cuda.Device().synchronize()
     return n
 
 
 def _kappa(w, sim, n, vel, out, total=None):
     dfsph_solver.compute_kappa_v(
-        vel, w.sorted_density[:n], w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+        vel, w.sorted_alpha_dfsph[:n],
         w.sorted_packed_info[:n], w.sorted_position[:n],
         sim._cell_start, sim._cell_end, out,
         normal_in=w.sorted_normal[:n], kappa_v_total=total,

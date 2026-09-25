@@ -249,6 +249,11 @@ def test_dfsph_detailed(world, sim):
         print(f"  density: min={dens.min():.2f} mean={dens.mean():.2f} max={dens.max():.2f}")
         print(f"  alpha:   min={alpha.min():.6f} mean={alpha.mean():.6f} max={alpha.max():.6f}")
 
+        dfsph_solver.pack_volume(
+            w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_mass[:n], w.sorted_packed_info[:n],
+        )
+
         # Non-pressure forces
         dfsph_solver.compute_non_pressure_forces(
             w.sorted_position[:n], w.sorted_velocity[:n],
@@ -267,8 +272,7 @@ def test_dfsph_detailed(world, sim):
         # Divergence solver
         for it in range(profile.dfsph_div_iters):
             dfsph_solver.compute_kappa_v(
-                w.sorted_velocity[:n], w.sorted_density[:n],
-                w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+                w.sorted_velocity[:n], w.sorted_alpha_dfsph[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 sim._cell_start, sim._cell_end,
                 w.sorted_kappa_v,
@@ -286,43 +290,38 @@ def test_dfsph_detailed(world, sim):
 
         # Density solver: the live Jacobi loop on p/rho^2 (same calls as
         # Simulation._sim_step DFSPH path).  sorted_kappa holds p_rho2 and
-        # sorted_predicted_position holds a_press.
+        # sorted_predicted_position holds the predicted velocity vt.
         p_rho2 = w.sorted_kappa  # K_DFSPH_Finalize already applied the warm start
-        a_press = w.sorted_predicted_position
+        vt = w.sorted_predicted_position
         dfsph_solver.compute_pressure_accel(
-            p_rho2[:n], w.sorted_position[:n],
+            p_rho2[:n], w.sorted_velocity[:n], w.sorted_position[:n],
             w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n],
             sim._cell_start, sim._cell_end,
-            a_press,
+            vt,
         )
         for it in range(profile.dfsph_dens_iters):
+            last = it == profile.dfsph_dens_iters - 1
             dfsph_solver.density_solver_update(
-                w.sorted_velocity[:n], a_press[:n],
-                w.sorted_position[:n], w.sorted_density[:n],
-                w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
-                w.sorted_packed_info[:n],
+                vt[:n], w.sorted_position[:n], w.sorted_density[:n],
+                w.sorted_alpha_dfsph[:n], w.sorted_packed_info[:n],
                 sim._cell_start, sim._cell_end,
                 p_rho2,
             )
+            # The last call writes vt into the velocity (applies the pressure).
             dfsph_solver.compute_pressure_accel(
-                p_rho2[:n], w.sorted_position[:n],
+                p_rho2[:n], w.sorted_velocity[:n], w.sorted_position[:n],
                 w.sorted_density[:n], w.sorted_mass[:n],
                 w.sorted_packed_info[:n],
                 sim._cell_start, sim._cell_end,
-                a_press,
+                w.sorted_velocity if last else vt,
             )
             cp.cuda.Device().synchronize()
             pr = p_rho2[:n].get()
-            ap = a_press[:n].get()
+            vth = (w.sorted_velocity if last else vt)[:n].get()
             assert np.isfinite(pr).all(), f"p_rho2 not finite at dens iter {it}"
-            assert np.isfinite(ap).all(), f"a_press not finite at dens iter {it}"
+            assert np.isfinite(vth).all(), f"vt not finite at dens iter {it}"
             print(f"  dens iter {it}: p_rho2 min={pr.min():.6f} mean={pr.mean():.6f} max={pr.max():.6f}")
-
-        dfsph_solver.apply_pressure_velocity(
-            w.sorted_velocity[:n], a_press[:n],
-            w.sorted_packed_info[:n],
-        )
         cp.cuda.Device().synchronize()
 
         # Finalize — API drift: sorted_kappa required after sorted_sleep_counter;
@@ -700,26 +699,29 @@ def test_dfsph_density_convergence(world, sim):
                 w.sorted_shear_rate, w.sorted_dTdt,
                 w.sorted_exposure_heat, w.sorted_exposure_corrode,
             )
+        dfsph_solver.pack_volume(
+            w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_mass[:n], w.sorted_packed_info[:n],
+        )
         cp.cuda.Device().synchronize()
         return n, profile
 
-    def _update(n, vel, accel, p):
+    def _update(n, vt, p):
         dfsph_solver.density_solver_update(
-            vel, accel,
-            w.sorted_position[:n], w.sorted_density[:n],
-            w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
-            w.sorted_packed_info[:n],
+            vt, w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_alpha_dfsph[:n], w.sorted_packed_info[:n],
             sim._cell_start, sim._cell_end,
             p,
         )
 
-    def _accel(n, p, accel):
+    def _accel(n, p, vel, vt):
+        """vt = v + dt * a_press(p), clamped."""
         dfsph_solver.compute_pressure_accel(
-            p, w.sorted_position[:n],
+            p, vel, w.sorted_position[:n],
             w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n],
             sim._cell_start, sim._cell_end,
-            accel,
+            vt,
         )
 
     def _compression_run(omega, n_updates=9):
@@ -734,11 +736,11 @@ def test_dfsph_density_convergence(world, sim):
         vel = cp.zeros((n, 4), dtype=cp.float32)
         vel[:, :3] = cp.asarray((-k * (pos - centre)).astype(np.float32))
         p = cp.zeros(n, dtype=cp.float32)
-        accel = cp.zeros((n, 4), dtype=cp.float32)
+        vt = vel.copy()  # p = 0: vt = v
         history = [p.copy()]
         for _ in range(n_updates):
-            _update(n, vel, accel, p)
-            _accel(n, p, accel)
+            _update(n, vt, p)
+            _accel(n, p, vel, vt)
             history.append(p.copy())
         cp.cuda.Device().synchronize()
         hist = np.stack([hp.get() for hp in history])
@@ -762,7 +764,7 @@ def test_dfsph_density_convergence(world, sim):
     zero4 = cp.zeros((n, 4), dtype=cp.float32)
     p_zero = cp.zeros(n, dtype=cp.float32)
     for _ in range(20):
-        _update(n, zero4, zero4, p_zero)
+        _update(n, zero4, p_zero)
     cp.cuda.Device().synchronize()
     p_zero_h = p_zero.get()
     max_p_zero = float(np.abs(p_zero_h).max())
@@ -780,12 +782,12 @@ def test_dfsph_density_convergence(world, sim):
     assert alpha[i] > 0.0, "centre particle has alpha = 0"
     p_single = cp.zeros(n, dtype=cp.float32)
     p_single[i] = 1.0
-    accel = cp.zeros((n, 4), dtype=cp.float32)
-    _accel(n, p_single, accel)
+    vt = cp.zeros((n, 4), dtype=cp.float32)
+    _accel(n, p_single, zero4, vt)
     # Probe with a large offset so the >= 0 clamp never fires; omega = 1 here.
     offset = 1.0e6
     probe = cp.full(n, offset, dtype=cp.float32)
-    _update(n, zero4, accel, probe)
+    _update(n, vt, probe)
     cp.cuda.Device().synchronize()
     r_with_p = (float(probe[i].get()) - offset) * dt * dt / float(alpha[i])
     r_rest = float(rho[i]) / rho0 - 1.0
@@ -941,9 +943,9 @@ def test_pbf_wall_density(world, sim):
 def test_dfsph_density_solver_velocity_clamp(world, sim):
     """bd-mzc.33: DFSPH density solver must not produce runaway velocities.
 
-    Inject a large pressure acceleration (50x the velocity limit) into the
-    density solver update kernel and run 12 iterations. Velocity magnitude must
-    stay bounded (below 10x the velocity limit) — the v_total clamp prevents
+    Inject a large velocity (100x the velocity limit) into the density solver
+    and run 12 iterations. p_rho2 must stay bounded: the vt clamp in
+    K_DFSPH_ComputePressureAccel (which writes the vt the update reads) keeps
     the Jacobi iterations from amplifying an initial overshoot into a runaway.
     """
     import dfsph_solver
@@ -967,6 +969,10 @@ def test_dfsph_density_solver_velocity_clamp(world, sim):
         w.sorted_shear_rate, w.sorted_dTdt,
         w.sorted_exposure_heat, w.sorted_exposure_corrode,
     )
+    dfsph_solver.pack_volume(
+        w.sorted_position[:n], w.sorted_density[:n],
+        w.sorted_mass[:n], w.sorted_packed_info[:n],
+    )
     cp.cuda.Device().synchronize()
 
     # Velocity limit from sim params
@@ -980,18 +986,23 @@ def test_dfsph_density_solver_velocity_clamp(world, sim):
     vel_injected = w.sorted_velocity[:n].copy()
     vel_injected[:, 0] = 100.0 * vel_limit   # huge +x velocity on all particles
 
-    accel_press = cp.zeros((n, 4), dtype=cp.float32)
+    vt = cp.zeros((n, 4), dtype=cp.float32)
     p_rho2 = cp.zeros(n, dtype=cp.float32)
 
     # Run 12 Jacobi density solver iterations (normal inner loop count).
-    # With the v_total clamp: vt_i is clamped to VELOCITY_LIMIT before drho,
-    # so p_rho2 stays bounded. Without the clamp, p_rho2 would diverge.
+    # compute_pressure_accel clamps vt to VELOCITY_LIMIT before the update
+    # predicts drho, so p_rho2 stays bounded. Without the clamp, p_rho2 would diverge.
     for _ in range(12):
-        dfsph_solver.density_solver_update(
-            vel_injected, accel_press,
-            w.sorted_position[:n], w.sorted_density[:n],
-            w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+        dfsph_solver.compute_pressure_accel(
+            p_rho2, vel_injected, w.sorted_position[:n],
+            w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n],
+            sim._cell_start, sim._cell_end,
+            vt,
+        )
+        dfsph_solver.density_solver_update(
+            vt, w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_alpha_dfsph[:n], w.sorted_packed_info[:n],
             sim._cell_start, sim._cell_end,
             p_rho2,
         )
@@ -1007,7 +1018,7 @@ def test_dfsph_density_solver_velocity_clamp(world, sim):
     print(f"  DFSPH density solver p_rho2: max={max_p:.4e}, threshold={threshold_p:.4e}")
     assert max_p < threshold_p, (
         f"DFSPH density solver p_rho2 diverged: max={max_p:.4e} > {threshold_p:.4e}. "
-        f"The v_total clamp in K_DFSPH_DensitySolverUpdate is required."
+        f"The vt clamp in K_DFSPH_ComputePressureAccel is required."
     )
 
 
@@ -1415,13 +1426,13 @@ def test_old_dead_encoding_stays_finite(world, sim, profile_name):
 
 def test_dfsph_density_solver_dead_fluid_slot_is_finite(world, sim):
     """A DEAD slot with FLUID behavior (packed_info 0, what the brush wrote
-    before bd-r5-review-n28.34) must not drive p_rho2 or a_press to inf/NaN.
+    before bd-r5-review-n28.34) must not drive p_rho2 or vt to inf/NaN.
 
     DEAD has rest_density 0, so K_DFSPH_DensitySolverUpdate divided by zero.
     The kernel now floors rho0 at 1. Under --use_fast_math the unfloored
     division happens to come out as NaN, which fmaxf(new_p, 0) clamps to 0,
     so this check also passes without the floor today. It guards p_rho2 and
-    a_press against inf or NaN if the build or the clamp changes.
+    vt against inf or NaN if the build or the clamp changes.
     """
     import dataclasses
     import dfsph_solver
@@ -1461,22 +1472,26 @@ def test_dfsph_density_solver_dead_fluid_slot_is_finite(world, sim):
     k = 0.1 / (3.0 * dt)
     vel = cp.zeros((n, 4), dtype=cp.float32)
     vel[:, :3] = cp.asarray((-k * (pos - centre)).astype(np.float32))
+    dfsph_solver.pack_volume(
+        w.sorted_position[:n], w.sorted_density[:n],
+        w.sorted_mass[:n], w.sorted_packed_info[:n],
+    )
     p = cp.zeros(n, dtype=cp.float32)
-    accel = cp.zeros((n, 4), dtype=cp.float32)
+    vt = vel.copy()  # p = 0: vt = v
     for _ in range(8):
         dfsph_solver.density_solver_update(
-            vel, accel, w.sorted_position[:n], w.sorted_density[:n],
-            w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
-            w.sorted_packed_info[:n], sim._cell_start, sim._cell_end, p,
+            vt, w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_alpha_dfsph[:n], w.sorted_packed_info[:n],
+            sim._cell_start, sim._cell_end, p,
         )
         dfsph_solver.compute_pressure_accel(
-            p, w.sorted_position[:n], w.sorted_density[:n], w.sorted_mass[:n],
-            w.sorted_packed_info[:n], sim._cell_start, sim._cell_end, accel,
+            p, vel, w.sorted_position[:n], w.sorted_density[:n], w.sorted_mass[:n],
+            w.sorted_packed_info[:n], sim._cell_start, sim._cell_end, vt,
         )
     p_h = p.get()
-    a_h = accel.get()
+    a_h = vt.get()
     assert np.isfinite(p_h).all(), f"p_rho2 not finite at {np.count_nonzero(~np.isfinite(p_h))} slots"
-    assert np.isfinite(a_h).all(), f"a_press not finite at {np.count_nonzero(~np.isfinite(a_h).any(axis=1))} slots"
+    assert np.isfinite(a_h).all(), f"vt not finite at {np.count_nonzero(~np.isfinite(a_h).any(axis=1))} slots"
 
 
 # ---------------------------------------------------------------------------

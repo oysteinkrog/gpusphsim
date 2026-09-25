@@ -90,6 +90,10 @@ def _block(w, sim, profile, half_n=5):
             w.sorted_exposure_heat, w.sorted_exposure_corrode,
             normal_out=w.sorted_normal,
         )
+    dfsph_solver.pack_volume(
+        w.sorted_position[:n], w.sorted_density[:n],
+        w.sorted_mass[:n], w.sorted_packed_info[:n],
+    )
     cp.cuda.Device().synchronize()
     return n
 
@@ -136,7 +140,7 @@ def test_dfsph_divergence_solver_is_unilateral(world, sim):
 
     def kappa(vel):
         dfsph_solver.compute_kappa_v(
-            vel, w.sorted_density[:n], w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+            vel, w.sorted_alpha_dfsph[:n],
             w.sorted_packed_info[:n], w.sorted_position[:n],
             sim._cell_start, sim._cell_end, kv,
         )
@@ -210,7 +214,7 @@ def test_dfsph_divergence_solver_skips_sparse_neighbourhoods(world, sim):
     def kappa(normal_in):
         kv = cp.zeros(n, dtype=cp.float32)
         dfsph_solver.compute_kappa_v(
-            vel, w.sorted_density[:n], w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+            vel, w.sorted_alpha_dfsph[:n],
             w.sorted_packed_info[:n], w.sorted_position[:n],
             sim._cell_start, sim._cell_end, kv, normal_in=normal_in,
         )
