@@ -539,8 +539,8 @@ def test_fused_reorder_not_on_production_path() -> None:
 
 
 def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
-    """bd-r5-review-n28.155: sorted_velocity_h, sorted_temperature_h and
-    sorted_dye_h may be None. The wrappers pass a NULL pointer and
+    """bd-r5-review-n28.155: sorted_velocity_h and sorted_temperature_h
+    may be None. The wrappers pass a NULL pointer and
     K_ScatterReorder / K_GatherReorder skip those stores, so neither the
     full sort nor the gather reorder faults, and the float32 outputs are
     still the unsorted arrays gathered through sort_perm."""
@@ -569,7 +569,6 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
             lifetime=cupy.zeros(n, dtype=cupy.float32),
             sleep_counter=cupy.zeros(n, dtype=cupy.uint8),
             kappa=cupy.zeros(n, dtype=cupy.float32),
-            particle_dye=cupy.zeros((n, 4), dtype=cupy.float32),
             kappa_v=cupy.zeros(n, dtype=cupy.float32),
         )
 
@@ -584,11 +583,9 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
             sorted_lifetime=cupy.empty(n, dtype=cupy.float32),
             sorted_sleep_counter=cupy.empty(n, dtype=cupy.uint8),
             sorted_kappa=None,
-            sorted_particle_dye=cupy.empty((n, 4), dtype=cupy.float32),
             sorted_kappa_v=None,
             sorted_velocity_h=None,
             sorted_temperature_h=None,
-            sorted_dye_h=None,
         )
 
     src = unsorted()

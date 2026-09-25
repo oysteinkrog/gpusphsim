@@ -62,7 +62,6 @@ GATHERED_FIELDS = [
     ("sleep_counter", "sorted_sleep_counter"),
     ("kappa", "sorted_kappa"),
     ("kappa_v", "sorted_kappa_v"),
-    ("particle_dye", "sorted_particle_dye"),
 ]
 
 
@@ -145,10 +144,6 @@ def _check_gather(world, sim, n, snap, skip=()):
     temp = snap["temperature"].get()[perm]
     temp_h = world.sorted_temperature_h[:n].get().view(np.uint16)
     assert np.array_equal(temp_h, _temperature_mirror(temp)), "sorted_temperature_h"
-    dye = snap["particle_dye"].get()[perm]
-    dye_h = world.sorted_dye_h[:n].get().view(np.float16).reshape(n, 4)
-    assert np.array_equal(dye_h.view(np.uint16),
-                          dye.astype(np.float16).view(np.uint16)), "sorted_dye_h"
 
 
 def _gather_step(world, sim, n, run_substep):

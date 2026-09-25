@@ -814,7 +814,7 @@ class Simulation:
             force_sort = True
 
         # PBF never reads the DFSPH warm-start state (kappa, kappa_v) or any FP16
-        # mirror (velocity, temperature, dye), so the reorder skips them. The pointer set depends only
+        # mirror (velocity, temperature), so the reorder skips them. The pointer set depends only
         # on the solver, and a solver switch resets and recaptures the CUDA graph,
         # so a captured graph always sees one fixed set (bd-r5-review-n28.45).
         is_pbf = self._profile.solver_type == SolverType.PBF
@@ -822,7 +822,6 @@ class Simulation:
         sorted_kappa_v = None if is_pbf else w.sorted_kappa_v
         sorted_velocity_h = None if is_pbf else w.sorted_velocity_h
         sorted_temperature_h = None if is_pbf else w.sorted_temperature_h
-        sorted_dye_h = None if is_pbf else w.sorted_dye_h
 
         # Host-side record of the branch taken, read by _capture_graph to check
         # that a gather-only graph never bakes in a full sort.
@@ -843,7 +842,6 @@ class Simulation:
                 lifetime=w.lifetime,
                 sleep_counter=w.sleep_counter,
                 kappa=w.kappa,
-                particle_dye=w.particle_dye,
                 angular_velocity=w.angular_velocity,
                 kappa_v=w.kappa_v,
                 sorted_position=w.sorted_position,
@@ -855,12 +853,10 @@ class Simulation:
                 sorted_lifetime=w.sorted_lifetime,
                 sorted_sleep_counter=w.sorted_sleep_counter,
                 sorted_kappa=sorted_kappa,
-                sorted_particle_dye=w.sorted_particle_dye,
                 sorted_angular_velocity=w.sorted_angular_velocity,
                 sorted_kappa_v=sorted_kappa_v,
                 sorted_velocity_h=sorted_velocity_h,
                 sorted_temperature_h=sorted_temperature_h,
-                sorted_dye_h=sorted_dye_h,
             )
             return
 
@@ -914,7 +910,6 @@ class Simulation:
             lifetime=w.lifetime,
             sleep_counter=w.sleep_counter,
             kappa=w.kappa,
-            particle_dye=w.particle_dye,
             angular_velocity=w.angular_velocity,
             kappa_v=w.kappa_v,
             # Sorted particle arrays
@@ -927,12 +922,10 @@ class Simulation:
             sorted_lifetime=w.sorted_lifetime,
             sorted_sleep_counter=w.sorted_sleep_counter,
             sorted_kappa=sorted_kappa,
-            sorted_particle_dye=w.sorted_particle_dye,
             sorted_angular_velocity=w.sorted_angular_velocity,
             sorted_kappa_v=sorted_kappa_v,
             sorted_velocity_h=sorted_velocity_h,
             sorted_temperature_h=sorted_temperature_h,
-            sorted_dye_h=sorted_dye_h,
             sorted_anchor=w.sorted_anchor,
         )
 

@@ -142,7 +142,7 @@ def counting_sort_scene(
     Returns a dict with the sorted arrays under their unsorted names
     (``position``, ``velocity``, ``mass``, ``packed_info``, ``temperature``,
     ``health``, ``lifetime``, ``sleep_counter``), the FP16 mirrors
-    (``velocity_h``, ``temperature_h``, ``dye_h``), the cell tables
+    (``velocity_h``, ``temperature_h``), the cell tables
     (``cell_start``, ``cell_end``), ``sort_perm`` (sorted index -> original
     index, uint32), ``hashes`` (unsorted), ``sorted_hashes``, ``histogram``
     and ``num_cells``.
@@ -168,7 +168,6 @@ def counting_sort_scene(
     sc = _arr(sleep_counter, (n,), cupy.uint8, 0)
     kappa = cupy.zeros(n, dtype=cupy.float32)
     kappa_v = cupy.zeros(n, dtype=cupy.float32)
-    dye = cupy.zeros((n, 4), dtype=cupy.float32)
 
     if grid_params is None:
         grid_params = hash_sort.build_grid_params()
@@ -193,11 +192,9 @@ def counting_sort_scene(
         "lifetime": cupy.empty_like(lt),
         "sleep_counter": cupy.empty_like(sc),
         "kappa": cupy.empty_like(kappa),
-        "particle_dye": cupy.empty_like(dye),
         "kappa_v": cupy.empty_like(kappa_v),
         "velocity_h": cupy.zeros((n, 2), dtype=cupy.uint32),
         "temperature_h": cupy.zeros(n, dtype=cupy.uint16),
-        "dye_h": cupy.zeros((n, 2), dtype=cupy.uint32),
         "hashes": cupy.zeros(n, dtype=cupy.uint32),
         "sorted_hashes": cupy.zeros(n, dtype=cupy.uint32),
         "sort_perm": cupy.zeros(n, dtype=cupy.uint32),
@@ -227,7 +224,6 @@ def counting_sort_scene(
         lifetime=lt,
         sleep_counter=sc,
         kappa=kappa,
-        particle_dye=dye,
         kappa_v=kappa_v,
         sorted_position=out["position"],
         sorted_velocity=out["velocity"],
@@ -238,11 +234,9 @@ def counting_sort_scene(
         sorted_lifetime=out["lifetime"],
         sorted_sleep_counter=out["sleep_counter"],
         sorted_kappa=out["kappa"],
-        sorted_particle_dye=out["particle_dye"],
         sorted_kappa_v=out["kappa_v"],
         sorted_velocity_h=out["velocity_h"],
         sorted_temperature_h=out["temperature_h"],
-        sorted_dye_h=out["dye_h"],
     )
     out["scratch"] = scratch
     return out

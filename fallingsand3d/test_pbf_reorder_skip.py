@@ -2,8 +2,8 @@
 
 PBF recomputes lambda from scratch every iteration, so there is no lambda
 warm start to carry through the sort. PBF also never reads the DFSPH
-warm-start state (kappa, kappa_v) or the FP16 mirrors (velocity, temperature,
-dye), so _run_grid_setup passes None for those and the reorder kernels skip
+warm-start state (kappa, kappa_v) or the FP16 mirrors (velocity and
+temperature), so _run_grid_setup passes None for those and the reorder kernels skip
 both the gather and the store.
 """
 
@@ -39,7 +39,6 @@ def _run(world, profile_name, full_sort_substeps=1):
     world.sorted_kappa[:] = SENTINEL
     world.sorted_kappa_v[:] = SENTINEL
     world.sorted_velocity_h[:] = cp.uint32(0xDEADBEEF)
-    world.sorted_dye_h[:] = cp.uint32(0xDEADBEEF)
     world.sorted_temperature_h[:] = cp.uint16(0xBEEF)
     for _ in range(full_sort_substeps):
         sim._run_grid_setup(n, force_sort=True)
@@ -60,7 +59,6 @@ def test_pbf_reorder_skips_unread_buffers(world):
     assert (cp.asnumpy(world.sorted_kappa[:n]) == SENTINEL).all()
     assert (cp.asnumpy(world.sorted_kappa_v[:n]) == SENTINEL).all()
     assert (cp.asnumpy(world.sorted_velocity_h[:n]) == 0xDEADBEEF).all()
-    assert (cp.asnumpy(world.sorted_dye_h[:n]) == 0xDEADBEEF).all()
     assert (cp.asnumpy(world.sorted_temperature_h[:n]) == 0xBEEF).all()
 
 

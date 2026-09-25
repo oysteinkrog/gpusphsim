@@ -11,19 +11,18 @@ DEAD CODE WARNING (bd-mzc.46)
 ------------------------------
 This module is NOT on the live production code path as of 2026-06.  The
 live pipeline uses ``counting_sort.counting_sort_full`` (which handles all
-11 particle arrays including kappa, kappa_v and particle_dye).
+particle arrays including kappa and kappa_v).
 
 ``fused_reorder`` is still called from test files (test_sort_reorder.py,
 test_gas_physics.py, test_integration_15mat.py) that cannot be touched by
 this bead's owner, so the module is kept rather than deleted.
 
-If this path is ever reactivated for production use, the following 3 arrays
+If this path is ever reactivated for production use, the following 2 arrays
 MUST be added to ``K_FusedReorder`` in fused_reorder.cu and to the
 ``fused_reorder()`` signature below to match ``counting_sort_full``'s
 ``K_ScatterReorder``:
   - kappa          (float, DFSPH warm-start pressure)
   - kappa_v        (float, DFSPH warm-start divergence)
-  - particle_dye   (float4, per-particle dye colour)
 
 Until then this is intentionally a reduced-coverage reorder path.
 """
