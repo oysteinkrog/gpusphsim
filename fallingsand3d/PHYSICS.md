@@ -898,6 +898,28 @@ give `k_ij = 91`, LAVA and METAL (2000) give 800. All five loop copies use this 
 (`|SUM m cp dTdt| / SUM |m cp dTdt| < 1e-4`, measured 3e-8) and the drift of
 `SUM m cp T` over 100 fixed-geometry Euler steps (`< 1e-5`, measured 2e-8). With
 `kappa_i` applied per particle the imbalance was 0.82.
+
+**Temperature mirror precision (bd-r5-review-n28.132).** WCSPH step1 reads
+neighbour temperatures from `sorted_temperature_h`, a 2-byte mirror the counting
+sort writes every substep. It holds `uint16 = round(T * 8)`, so it has uniform
+0.125 K steps, covers 0 to 8191.875 K (T_MAX = 5000) and is exact for every
+multiple of 0.125 K, T_AMBIENT = 293 included. `store_t16` / `load_t16` in
+`common.cuh` encode and decode it. The particle's own `T_i` in every pair
+difference (`T_j - T_i` in `sum_dTdt` and `max(T_j - T_i, 0)` in
+`exposure_heat`) is read from the same mirror, as for velocity and dye (3.3).
+The pair flux is therefore exactly antisymmetric and a uniform field gives
+exactly zero. The cost is a 0.125 K resolution in the conduction gradient:
+pairs whose temperatures round to the same step exchange no heat. With FP16
+(0.25 K steps near ambient, 1 K from 1024 K, 2 K from 2048 K) against an FP32
+`T_i`, each pair gave `fp16(T_j) - T_i`, which pulled particles toward the FP16
+grid and did not conserve `SUM m cp T`. The integrator still updates the FP32
+`temperature`; only the step1 neighbour reads see the mirror. With a NULL mirror
+step1 reads FP32 for both. The PBF and DFSPH heat loops read FP32 only. Tests:
+`test_step1.py::test_uniform_off_grid_temperature_zero_dTdt` (WATER at 293.2 K
+and LAVA at 1499.7 K in STATIC STONE walls: every `dTdt` and `exposure_heat`
+is 0, both step1 kernels), `test_temp_mirror_is_fixed_point_eighth_kelvin` and
+`test_heat_energy_conserved_with_temp_mirror` (LAVA/WATER slab, 1000 substeps
+through the mirror, drift `< 1e-6`, measured 4.7e-7).
 This means `thermal_conductivity` values must be tuned for the `rho*cp` divisor to produce
 visible heat exchange rates (see updated values in materials.py).
 
