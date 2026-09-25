@@ -1968,3 +1968,92 @@ def test_pbf_s_corr_w_dq_zero_when_k_zero():
 
     # Leave the default profile in constant memory for later tests.
     pbf_solver.upload_pbf_params(base, h=h)
+
+
+# ---------------------------------------------------------------------------
+# Wake mark written by K_PBF_Finalize / K_DFSPH_Finalize (bd-r5-review-n28.167)
+# ---------------------------------------------------------------------------
+
+# Sleeper and mover sit 0.05 m apart (more than h), one cell apart in y, so
+# only the wake pass can wake the sleeper. The 0.015 offsets keep them off a
+# cell boundary. The far sleeper is well outside the mover's 27 cells.
+_WAKE_NEAR = (0.015, 0.02, 0.015)
+_WAKE_FAR = (0.515, 0.02, 0.515)
+_WAKE_MOVER = (0.015, 0.07, 0.015)
+
+
+def _spawn_one(world, center, material_id, velocity=(0.0, 0.0, 0.0)):
+    lo = tuple(c - 0.001 for c in center)
+    hi = tuple(c + 0.001 for c in center)
+    n = world.spawn_cube(lo, hi, material_id, spacing=0.002, velocity=velocity)
+    assert n == 1
+
+
+def _grid_cell(p, grid_params):
+    """calcGridCell in float32, as the kernels compute it."""
+    gmin = np.asarray(grid_params[0]["grid_min"], dtype=np.float32)
+    delta = np.asarray(grid_params[0]["grid_delta"], dtype=np.float32)
+    return np.floor((np.asarray(p, dtype=np.float32) - gmin) * delta).astype(np.int64)
+
+
+@pytest.mark.parametrize("solver", ["PBF", "DFSPH"])
+@pytest.mark.parametrize("mover_material,wakes", [(WATER, True), ("SMOKE", False)])
+def test_finalize_wake_mark_wakes_sleeping_sand(world, sim, monkeypatch,
+                                                solver, mover_material, wakes):
+    """A fast FLUID particle one cell above a sleeping SAND particle wakes it
+    after one substep, with K_MarkWakeCells never launched: the stamp comes
+    from the finalize kernel. A fast GAS particle does not wake it (step1 and
+    step2 give GAS no forces on non-GAS). A far sleeper stays asleep."""
+    import wake
+    from materials import SMOKE
+    if mover_material == "SMOKE":
+        mover_material = SMOKE
+
+    def _no_mark(*args, **kwargs):
+        raise AssertionError(f"{solver} launched K_MarkWakeCells")
+
+    monkeypatch.setattr(wake, "mark_wake_cells", _no_mark)
+
+    world.packed_info[:] = 0
+    world._high_water = 0
+    world.sorted_density[:] = 0.0
+    world.sleep_counter[:] = 0
+    world.velocity[:] = 0.0
+    _spawn_one(world, _WAKE_NEAR, SAND)
+    _spawn_one(world, _WAKE_FAR, SAND)
+    world.packed_info[:2] |= cp.uint32(_SLEEP_BIT)
+    world.sleep_counter[:2] = 200
+    _spawn_one(world, _WAKE_MOVER, mover_material, velocity=(0.0, -0.1, 0.0))
+    n = 3
+
+    sim.set_solver_profile(PROFILES[solver])
+    sim.set_gravity(0.0)
+    sim._spawn_substep = sim._damping_duration
+    sim.sim_time = 0.0
+    sim._last_frame_time = None
+    try:
+        sim._sim_step(n)
+        pi = cp.asnumpy(world.packed_info[:n])
+        sc = cp.asnumpy(world.sleep_counter[:n])
+        vel = cp.asnumpy(world.velocity[:n])
+        pos = cp.asnumpy(world.position[:n])[:, :3]
+    finally:
+        sim.set_gravity(-4.0)
+
+    gp = sim._grid_params
+    near_d = _grid_cell(pos[0], gp) - _grid_cell(pos[2], gp)
+    far_d = _grid_cell(pos[1], gp) - _grid_cell(pos[2], gp)
+    assert np.abs(near_d).max() == 1, f"near sleeper not in the next cell: {near_d}"
+    assert np.abs(far_d).max() > 1, f"far sleeper inside the stencil: {far_d}"
+    assert np.dot(vel[2, :3], vel[2, :3]) > 0.02 ** 2, f"mover slowed: {vel[2]}"
+
+    near_asleep = bool(pi[0] & _SLEEP_BIT)
+    far_asleep = bool(pi[1] & _SLEEP_BIT)
+    print(f"\n  {solver} mover {mover_material}: near asleep {near_asleep} "
+          f"(sc {sc[0]}), far asleep {far_asleep} (sc {sc[1]})")
+    assert far_asleep and sc[1] == 200, f"{solver}: far sand woke"
+    if wakes:
+        assert not near_asleep, f"{solver}: finalize stamp did not wake the sand"
+        assert sc[0] == 0, f"{solver}: sleep_counter not reset: {sc[0]}"
+    else:
+        assert near_asleep and sc[0] == 200, f"{solver}: GAS mover woke the sand"
