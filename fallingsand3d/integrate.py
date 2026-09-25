@@ -419,7 +419,8 @@ def update_boundary_particles(
     Parameters
     ----------
     boundary_data : cupy.ndarray, (N, 8) float32
-        Combined boundary data: (x_local, y_local, z_local, psi, body_id, nx, ny, nz).
+        Combined boundary data: (x_local, y_local, z_local, psi, body_id, 0, 0, 0).
+        The kernel reads each row as two float4s, so it must be C-contiguous.
     d_rigid_bodies : cupy.ndarray
         GPU array of RigidBody structs.
     position_out : cupy.ndarray, (M, 4) float32

@@ -884,6 +884,12 @@ void K_RigidBodyCollisions(
  *
  * Runs AFTER K_IntegrateRigidBodies, BEFORE hash/sort for next substep.
  *
+ * boundary_data layout: 8 floats (32 B) per boundary particle, read as two
+ * float4s. float4 0 = (x_local, y_local, z_local, psi); float4 1 =
+ * (body_id as float, 0, 0, 0). Only float4 0 and the body id are loaded.
+ * Columns 5-7 are zero padding (they held unused surface normals before
+ * bd-r5-review-n28.183).
+ *
  * Grid-reuse drift (bd-r5-review-n28.65): boundary particles are STATIC, so
  * K_Integrate and the PBF/DFSPH finalize kernels never record their motion.
  * This kernel records it instead. anchor[i] holds boundary particle i's
@@ -899,7 +905,7 @@ void K_RigidBodyCollisions(
 
 extern "C" __global__
 void K_UpdateBoundaryParticles(
-    const float*    __restrict__ boundary_data,  // (N, 8): x_local, y_local, z_local, psi, body_id, nx, ny, nz
+    const float4*   __restrict__ boundary_data,  // (N, 8) floats = 2 float4 per record, see header
     const RigidBody* __restrict__ d_rigid_bodies,
     float4*         __restrict__ position_out,    // main unsorted position array
     float4*         __restrict__ velocity_out,    // main unsorted velocity array
@@ -913,24 +919,28 @@ void K_UpdateBoundaryParticles(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    // Read boundary particle data (8 floats per particle)
-    int base = i * 8;
-    float3 r_local = make_float3(boundary_data[base + 0], boundary_data[base + 1], boundary_data[base + 2]);
-    float psi = boundary_data[base + 3];
-    int bid = (int)(boundary_data[base + 4] + 0.5f);
+    // One 16 B load for (x_local, y_local, z_local, psi), one 4 B load for
+    // the body id (first float of the record's second float4).
+    const float4 rec = __ldg(&boundary_data[2 * i]);
+    float3 r_local = make_float3(rec.x, rec.y, rec.z);
+    float psi = rec.w;
+    int bid = (int)(__ldg(reinterpret_cast<const float*>(&boundary_data[2 * i + 1])) + 0.5f);
 
-    // Read body state
-    RigidBody body = d_rigid_bodies[bid];
-    float3 com = make_float3(body.position.x, body.position.y, body.position.z);
-    float4 q = body.rotation;
+    // Read only the four body fields used here (64 of the 96 B struct).
+    const RigidBody* bp = &d_rigid_bodies[bid];
+    const float4 body_pos = __ldg(&bp->position);
+    const float4 q = __ldg(&bp->rotation);
+    const float4 body_lin_vel = __ldg(&bp->lin_vel);
+    const float4 body_ang_vel = __ldg(&bp->ang_vel);
+    float3 com = make_float3(body_pos.x, body_pos.y, body_pos.z);
 
     // Rotate local position to world frame
     float3 r_world = quat_rotate(q, r_local);
     float3 pos = make_float3(com.x + r_world.x, com.y + r_world.y, com.z + r_world.z);
 
     // Compute boundary velocity: v_body + cross(omega, r_world)
-    float3 v_body = make_float3(body.lin_vel.x, body.lin_vel.y, body.lin_vel.z);
-    float3 omega = make_float3(body.ang_vel.x, body.ang_vel.y, body.ang_vel.z);
+    float3 v_body = make_float3(body_lin_vel.x, body_lin_vel.y, body_lin_vel.z);
+    float3 omega = make_float3(body_ang_vel.x, body_ang_vel.y, body_ang_vel.z);
     float3 vel = make_float3(
         v_body.x + (omega.y * r_world.z - omega.z * r_world.y),
         v_body.y + (omega.z * r_world.x - omega.x * r_world.z),

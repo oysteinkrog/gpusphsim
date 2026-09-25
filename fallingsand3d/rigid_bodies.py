@@ -377,7 +377,7 @@ class RigidBodyManager:
         self.rigid_torques = cupy.zeros((max_bodies, 4), dtype=cupy.float32)
 
         # Combined boundary particle data (set after all bodies added)
-        # Columns: x_local, y_local, z_local, psi, body_id, nx, ny, nz
+        # Columns: x_local, y_local, z_local, psi, body_id, 0, 0, 0 (padding)
         self.boundary_data = None  # cupy (N, 8) float32
         # Grid-reuse drift anchor (bd-r5-review-n28.65): each boundary
         # particle's position at the last full sort, written by
@@ -486,21 +486,22 @@ class RigidBodyManager:
 
         # Sample surface
         if sdf_type == SDF_SPHERE:
-            positions, normals = sample_sphere_surface(half_extents[0], spacing)
+            positions, _normals = sample_sphere_surface(half_extents[0], spacing)
         else:
-            positions, normals = sample_box_surface(half_extents, spacing)
+            positions, _normals = sample_box_surface(half_extents, spacing)
 
         # Compute boundary volumes
         psi = compute_boundary_volumes(positions, smoothing_length, rho0)
         psi_cpu = psi.get()
 
-        # Build boundary data: (x, y, z, psi, body_id, nx, ny, nz)
+        # Build boundary data: (x, y, z, psi, body_id, 0, 0, 0). The kernel
+        # reads the row as two float4s: (x, y, z, psi) and the body id.
+        # Columns 5-7 are zero padding; no kernel uses surface normals.
         N = len(positions)
         data = np.zeros((N, 8), dtype=np.float32)
         data[:, 0:3] = positions
         data[:, 3] = psi_cpu
         data[:, 4] = float(idx)
-        data[:, 5:8] = normals
 
         self._boundary_data_list.append(data)
         return idx
@@ -712,7 +713,7 @@ class RigidBodyManager:
             self.boundary_dropped = True
             return n_fluid
 
-        # boundary_data columns: x_local, y_local, z_local, psi, body_id, nx, ny, nz
+        # boundary_data columns: x_local, y_local, z_local, psi, body_id, 0, 0, 0
         bd = self.boundary_data  # cupy (N, 8)
 
         # For each body, transform local positions to world space
