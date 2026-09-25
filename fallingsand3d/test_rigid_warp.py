@@ -306,6 +306,12 @@ def test_step2_rigid_reaction_matches_per_pair_reference(monkeypatch):
     import step2
 
     world, sim, rbm = _two_body_sim()
+    # The wrapper below reads results back to the host, which a CUDA graph
+    # capture does not allow; run every substep directly.
+    def direct(n, gather_only):
+        sim._run_graph_body(n)
+        return None
+    monkeypatch.setattr(sim, "_capture_graph", direct)
     sim._sim_step(world._high_water)  # inject the boundary block
     assert rbm.boundary_injected
 
