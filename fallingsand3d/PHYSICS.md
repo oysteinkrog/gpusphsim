@@ -1521,7 +1521,7 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
 - F1: force_scale=0.02 (co-adapted WCSPH convention). It applies per pair: FLUID-GRANULAR pairs use force_scale on both sides (3.2)
 - F2: WCSPH viscosity convention (force_scale absorbs 1/rho for FLUID-FLUID). FLUID-GRANULAR pairs use the symmetric dynamic form of 3.3
 - F3: Tait EOS for mu(I) (lithostatic needs expensive column height)
-- G4: Surface tension is the Akinci 2013 pair force in WCSPH (cohesion + curvature) and its curvature half in DFSPH (section 17)
+- G4: Surface tension is "surface normal cohesion" (not full Akinci model)
 - J10: Sorted array transitions handled by per-particle branching (safe invariant)
 
 **Reaction fixes (2026-06-10 batch, bd-mzc.27):**
@@ -1881,7 +1881,7 @@ All three solvers now support the complete material behavior set:
 | Vorticity computation | Step1 | ComputeLambda | DensityAlpha |
 | Vorticity confinement | Step2 (eps=0.05) | Finalize (eps=0.001) | NonPressure (eps=0.05) |
 | Surface normals | Step1 | ComputeLambda | DensityAlpha |
-| Surface tension | Step2, Akinci pair (gamma=1.0) | Finalize, one-body (gamma=0.0) | NonPressure, Akinci curvature pair (gamma=1.0) |
+| Surface tension | Step2 (gamma=1.0) | Finalize (gamma=0.0) | NonPressure (gamma=1.0) |
 | Micropolar angular vel | Integrate | Finalize | Finalize |
 | Drucker-Prager friction | Step2 (force-space) | Finalize (vel-space) | NonPressure (force-space) |
 | Sleep/wake system | Integrate | Finalize | Finalize |
@@ -2881,10 +2881,8 @@ one-plane rigid shell and 31 on a three-plane rigid slab; with the rigid wall
 left out it had 21, so it was classed as surface and its normal pointed away
 from the body at free-surface strength. The rigid contact normal is not zero:
 psi_b of a one-plane shell is about 1.6 V, so n points into the body at about
-0.6 of a free-surface normal (0.2 for a three-plane slab). It enters the
-surface tension pair term (17.3) as n_i, but that term only acts between FLUID
-pairs and cancels in the pair sum, so it cannot push the fluid off the body as
-a whole.
+0.6 of a free-surface normal (0.2 for a three-plane slab). No force follows
+from it while nc >= 25, because every consumer gates on nc < 25.
 Vorticity, strain rate, heat, exposure and dye still skip MAT_RIGID.
 PBF (K_PBF_ComputeLambda) and DFSPH (K_DFSPH_ComputeDensityAlpha) use the same rule.
 
@@ -2897,80 +2895,43 @@ test: `test_step1.py::test_rigid_wall_contact_layer_matches_stone`
 
 ### 17.2 Surface Detection
 
-There is no surface classification for surface tension. The pair force in 17.3
-acts on every FLUID particle; in the interior n_i is near zero and the pair
-terms cancel, so only the surface layer feels a net force. The DFSPH divergence
-gate and implicit surface tension still read `neighbor_count` from `.w`.
-
-### 17.3 Akinci Pair Force (Step2, bd-r5-review-n28.125)
-
-WCSPH sums the Akinci 2013 cohesion and curvature terms over FLUID neighbours j
-of a FLUID particle i, inside the main Step2 neighbour loop:
+A particle is classified as a surface particle when:
 ```
-a_st,i = gamma * SUM_j K_ij * [ -m_j * C(|r|) * r/|r|  +  h * m_ij/m_i * (n_i - n_j) ]
-K_ij   = (rho0_i + rho0_j) / (rho_i + rho_j)
-m_ij   = 2 m_i m_j / (m_i + m_j)
-r      = x_i - x_j
-
-C(r) = 32/(pi h^9) * (h - r)^3 r^3                 for h/2 < r <= h
-C(r) = 32/(pi h^9) * (2 (h - r)^3 r^3 - h^6/64)    for 0 < r <= h/2
+neighbor_count < 25
 ```
-`gamma = c_granular.surface_tension_gamma` (default 1.0). The result goes into
-the Step2 force sum, so it is multiplied by force_scale (0.02) like the rest of
-the FLUID force.
 
-**Momentum**: every factor is symmetric in i and j, while r and (n_i - n_j)
-change sign, so m_i a_i = -m_j a_j for each pair and the sum over particles is
-zero. `test_akinci_st.py` measures |SUM m_i a_i| below 1e-5 of SUM m_i |a_i|.
-A sleeping FLUID neighbour does not run Step2, so it does not take its half.
+Interior FLUID particles typically have 30+ neighbors. Particles with fewer neighbors
+are near the free surface and receive surface tension forces.
 
-**Sign convention**: n_i = SUM V_j grad_W_spiky(r_ij) points into the bulk,
-because spiky_grad_coeff is negative. Akinci's normal h * n points out of the
-fluid, so the curvature term here is +(n_i - n_j): it pulls convex regions
-(ends and corners) inward. h * n is Akinci's dimensionless normal: about 1.5 on
-a flat free surface.
+### 17.3 Curvature-Based Surface Tension (Step2)
 
-**Cohesion spline**: C(r) is negative below about 0.18 h (repulsion) and peaks
-at r = h/2, which is the particle spacing (0.02 at h = 0.04).
+For surface particles (neighbor_count < 25), the Akinci curvature model:
+```
+f_st = +gamma * n_i     [cohesion force toward bulk]
+```
 
-**Measured** (zero gravity, 0.4 x 0.16 x 0.16 m water block, 1280 particles,
-start aspect ratio 2.5, largest over smallest principal radius):
+Where `gamma = c_granular.surface_tension_gamma` (default 1.0).
 
-| Solver | gamma | AR at 0.5 s | AR at 1 s | AR at 2 s | KE at 2 s (J) |
-|---|---|---|---|---|---|
-| WCSPH | 0 | 2.51 | 2.49 | 2.47 | 7e-6 |
-| WCSPH | 0.5 | 2.48 | 1.67 | 1.00 | 0.061 |
-| WCSPH | 1.0 | 1.95 | 1.11 | 1.80 | 0.19 |
-| DFSPH | 0 | 1.88 | 1.52 | 1.15 | 0.052 |
-| DFSPH | 1.0 | 1.76 | 1.40 | 1.15 | 0.17 |
+**Sign convention**: The surface normal `n_i = SUM (m_j/rho_j) * grad_W_spiky`
+points **into the bulk** (toward higher density) because `spiky_grad_coeff` is
+negative (-45/π/h⁶). Multiplying by `+gamma` gives an inward (cohesive) force
+that drives surface particles toward the fluid interior, minimizing surface area.
 
-At gamma 1.0 the WCSPH droplet overshoots and oscillates (AR 1.1 at 1 s, 1.8 at
-2 s): the capillary oscillation is only lightly damped. At gamma 5 a thin
-0.32 x 0.08 x 0.08 block breaks apart. DFSPH already rounds with gamma 0; the
-curvature term speeds it up.
+**Note**: The full Akinci model also includes a cohesion kernel C(r) for particle-pair
+attraction. Currently only the curvature term is implemented — it provides the dominant
+surface-minimizing behavior for our particle spacing (h=0.04, dx=0.02).
 
-**Cost**: the n_j read is a 16 B float4 per FLUID neighbour. At 1M particles
-(benchmark.py, WCSPH, shared GPU) Step2 went from 4.95 ms to 6.9-7.0 ms per
-substep. The n_j read is about 1.1 ms of that. The planned fix is a half4
-(n_x, n_y, n_z, |omega|) buffer written by Step1, which replaces both this read
-and the 16 B vorticity read in the vorticity eta sum.
-
-**Source**: `step2.cu` (`akinci_cohesion_st2`, pair term at the end of the
-neighbour loop), test: `test_akinci_st.py`
+**Source**: `step2.cu` (surface tension block after vorticity confinement)
 
 ### 17.4 Solver Support
 
-- **WCSPH**: normals in Step1, Akinci cohesion + curvature pair force in Step2, gamma=1.0.
-- **DFSPH**: normals in K_DFSPH_ComputeDensityAlpha. K_DFSPH_NonPressureForces sums
-  only the curvature half of the pair term, `gamma * force_scale * SUM_j K_ij h m_ij/m_i (n_i - n_j)`,
-  so the same gamma gives the same accel as WCSPH. gamma=1.0. Cohesion is left out:
-  the density solver keeps rho at rho0, and with cohesion on the 2.5:1 block above
-  stayed at AR 2.1-2.6 for 2 s (gamma 0.5 and 1.0), while curvature alone rounds it.
-- **PBF**: normals in K_PBF_ComputeLambda; K_PBF_Finalize still applies the old
-  one-body form `v += dt * gamma * n_i` for nc < 25. PBF gamma=0.0 (disabled) because
-  PBF's fixed dt causes energy injection. PBF relies on a weak attractive constraint (5%
+- **WCSPH**: Full surface tension in Step1 (normals) + Step2 (curvature force), gamma=1.0
+- **PBF**: Normals computed in K_PBF_ComputeLambda, force applied in K_PBF_Finalize
+  as velocity correction `v += dt * (-gamma * n_i)`. PBF gamma=0.0 (disabled) because
+  PBF's fixed dt causes energy injection. PBF relies on weak attractive constraint (5%
   negative C) for cohesion instead.
-- **Neighbour-list Step2** (`neighbor_list.cu`, benchmark only) still has the one-body form.
+- **DFSPH**: Normals computed in K_DFSPH_ComputeDensityAlpha, force applied in
+  K_DFSPH_NonPressureForces as acceleration. Uses gamma=1.0 (same as WCSPH).
 
 ---
 
