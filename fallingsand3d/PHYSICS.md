@@ -2248,7 +2248,7 @@ The alpha factor encodes how much a particle's density responds to pressure corr
 
 ```
 grad_sum = SUM_j (m_j/rho_j) * grad_W_spiky(x_ij)     [vector sum]
-grad_norm_sum = SUM_j (m_j/rho_j)^2 * |grad_W_spiky(x_ij)|^2    [scalar sum]
+grad_norm_sum = SUM_{j not STATIC} (m_j/rho_j)^2 * |grad_W_spiky(x_ij)|^2    [scalar sum]
 
 denom   = |grad_sum|^2 + grad_norm_sum
 alpha_i = denom > 1e-6 ? min(1 / denom, alpha_limit * h^2) : 0
@@ -2266,6 +2266,17 @@ equals 1/denom at both profiles.
 
 The first term (`|grad_sum|^2`) is the squared norm of the vector sum of gradients.
 The second term is the sum of squared norms. Both are accumulated in a single neighbor loop.
+
+**Boundary neighbours (bd-r5-review-n28.108).** Every non-GAS neighbour enters `grad_sum`,
+STATIC ones (STONE, METAL, MAT_RIGID) included. STATIC neighbours are left out of
+`grad_norm_sum`: that term is neighbour j's own density response to kappa_i, and a STATIC
+particle never moves under pressure. This matches Bender and Koschier 2015 and
+SPlisHSPlasH `computeDFSPHFactor`. Interior alpha is unchanged. A WATER particle in contact
+with a STONE floor gets about 2% larger alpha. In a settled 4000-particle pool in a
+two-layer STONE box (default profile, 4 s), mean |rho/rho0 - 1| within 2h of the floor
+moved from 0.281% to 0.267% and at the side walls from 0.32% to 0.28%, which is within
+run-to-run noise. `test_dfsph_alpha_static.py` checks the GPU alpha against a host
+recompute of this formula.
 
 For GRANULAR particles, alpha is multiplied by a compliance factor (0.7) to allow
 some compression for granular packing without destabilizing the solver.
