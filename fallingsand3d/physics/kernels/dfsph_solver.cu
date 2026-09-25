@@ -1448,18 +1448,27 @@ void K_DFSPH_Finalize(
         sc = 0;
     }
 
-    // STATIC push, accumulated in the XSPH loop below so Finalize scans the
-    // neighbourhood once (bd-r5-review-n28.164). The push must be measured
-    // at pos_new, which needs the XSPH sum, so the loop measures it at
-    // pos_adv = pos + dt * vel (before XSPH) and applies it to pos_new.
-    // GRANULAR gets no XSPH, so for it pos_adv == pos_new. FLUID differs by
-    // dt * xsph_epsilon * xsph. The 27 cells around pos hold every wall
-    // particle within 0.5h of pos_adv only while dt*|vel| < 0.5h (cell size
-    // is h); faster particles and GAS (no XSPH loop) take the separate scan.
+    // STATIC push, handled in the XSPH loop below so Finalize usually scans
+    // the neighbourhood once (bd-r5-review-n28.164). The push is measured at
+    // pos_new = pos + dt * vel_advect, which needs the XSPH sum, so the loop
+    // tests wall particles against pos_adv = pos + dt * vel instead.
+    //   GRANULAR: no XSPH, so pos_adv == pos_new and the loop accumulates
+    //     the exact push.
+    //   FLUID: the loop only flags a wall particle within band + margin of
+    //     pos_adv. With no flag and |pos_new - pos_adv| < margin, no wall
+    //     particle is within the band of pos_new, so there is no push.
+    //     Otherwise the particle runs the separate scan at pos_new.
+    // The 27 cells around pos hold every wall particle within band + margin
+    // of pos_adv only while dt*|vel| < h - band - margin (cell size is h).
+    // Faster particles and GAS (no XSPH loop) take the separate scan, so
+    // the result always equals static_particle_boundary(pos_new).
     StaticPush spush = static_push_init();
     bool spush_in_loop = false;
+    bool fluid_near_wall = false;
     float sp_band = static_push_band();
     float sp_band_sq = sp_band * sp_band;
+    float sp_margin = 0.1f * c_sim.smoothing_length;
+    float sp_reach_sq = (sp_band + sp_margin) * (sp_band + sp_margin);
     float3 pos_adv = make_float3(pos.x + dt * vel.x, pos.y + dt * vel.y, pos.z + dt * vel.z);
 
     // XSPH velocity smoothing
@@ -1468,7 +1477,8 @@ void K_DFSPH_Finalize(
         float h = c_sim.smoothing_length;
         float h_sq = c_sim.smoothing_length_sq;
         float step_sq = dt * dt * (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
-        spush_in_loop = (step_sq < sp_band_sq);
+        float step_max = h - sp_band - sp_margin;
+        spush_in_loop = (step_sq < step_max * step_max);
         float rho_i = sorted_density[i];
         // Akinci wall volume divisor (dfsph_vol_rho); floor at 1 for DEAD
         float rho0_vol_i = fmaxf(c_materials[mat_id].rest_density, 1.0f);
@@ -1495,7 +1505,11 @@ void K_DFSPH_Finalize(
                         if (spush_in_loop && bj == STATIC && static_push_source(pi_j, false)) {
                             float3 ra = make_float3(pos_adv.x - p4j.x, pos_adv.y - p4j.y, pos_adv.z - p4j.z);
                             float ra_sq = ra.x * ra.x + ra.y * ra.y + ra.z * ra.z;
-                            static_push_add(spush, ra, ra_sq, sp_band, sp_band_sq);
+                            if (behavior == GRANULAR) {
+                                static_push_add(spush, ra, ra_sq, sp_band, sp_band_sq);
+                            } else if (ra_sq < sp_reach_sq) {
+                                fluid_near_wall = true;
+                            }
                         }
 
                         float3 r = make_float3(pos.x - p4j.x, pos.y - p4j.y, pos.z - p4j.z);
@@ -1544,7 +1558,13 @@ void K_DFSPH_Finalize(
     );
 
     // STATIC particle boundary repulsion: the push gathered in the XSPH
-    // loop, or the shared 27-cell scan at pos_new for GAS and fast particles.
+    // loop, or the shared 27-cell scan at pos_new for GAS, fast particles
+    // and FLUID near a wall (see the note above the XSPH loop).
+    if (spush_in_loop && behavior == FLUID) {
+        float3 d = make_float3(pos_new.x - pos_adv.x, pos_new.y - pos_adv.y, pos_new.z - pos_adv.z);
+        float d_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+        if (fluid_near_wall || d_sq >= sp_margin * sp_margin) spush_in_loop = false;
+    }
     if (spush_in_loop) {
         static_push_apply(spush, pos_new, vel, c_sim.restitution);
     } else {

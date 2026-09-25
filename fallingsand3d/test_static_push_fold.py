@@ -1,9 +1,10 @@
 """bd-r5-review-n28.164: the STATIC push is folded into the Finalize XSPH loops.
 
 K_PBF_Finalize and K_DFSPH_Finalize used to run static_particle_boundary, a
-second 27-cell scan, after the XSPH loop. FLUID and GRANULAR now accumulate
-the push inside the XSPH loop; GAS (and, in DFSPH, particles moving more
-than 0.5h in one step) still take the separate scan.
+second 27-cell scan, after the XSPH loop. PBF FLUID and GRANULAR and DFSPH
+GRANULAR now accumulate the push inside the XSPH loop. DFSPH FLUID uses the
+loop only to prove there is no push, and runs the separate scan near a wall.
+GAS and fast DFSPH particles still take the separate scan.
 
 Each test runs water, sand and smoke falling onto a STONE slab. Every
 Finalize call is replayed on the same inputs with two variants of the
@@ -13,13 +14,14 @@ kernel, built from the current source with small text changes:
             static_particle_boundary (the behaviour before this bead)
   no-push   the STATIC push removed entirely
 
-The folded kernel must match two-scan (exactly for PBF; for DFSPH, GRANULAR
-exactly and FLUID within the XSPH lag bound) and must differ from no-push,
-which shows the push is active in the scene.
+The folded kernel must match two-scan to float rounding (1e-6 m, 1e-4 m/s)
+and must differ from no-push, which shows the push acts in the scene.
 """
 
+import ctypes
 import inspect
 import os
+import sys
 
 import cupy as cp
 import numpy as np
@@ -38,8 +40,10 @@ CONST_SYMBOLS = ("c_grid", "c_sim", "c_precalc", "c_materials", "c_interactions"
                  "c_granular", "c_num_rigid_bodies", "c_sdf_objects",
                  "c_num_sdf_objects", "c_pbf", "c_dfsph")
 
+_cuda = None
+
 PBF_FOLD_ON = "spush_in_loop = true;"
-DFSPH_FOLD_ON = "spush_in_loop = (step_sq < sp_band_sq);"
+DFSPH_FOLD_ON = "spush_in_loop = (step_sq < step_max * step_max);"
 NO_PUSH = ("#define static_particle_boundary(...) ((void)0)\n"
            "#define static_push_apply(...) ((void)0)\n")
 
@@ -58,14 +62,31 @@ def _variant(filename, fold_on, no_push):
                                             f"-I{KERNEL_DIR}"))
 
 
+def _symbol_size(mod, name):
+    """Byte size of a __constant__ symbol (CuPy's get_global reports 0)."""
+    global _cuda
+    if _cuda is None:
+        lib = (ctypes.WinDLL("nvcuda.dll") if sys.platform == "win32"
+               else ctypes.CDLL("libcuda.so.1"))
+        _cuda = lib.cuModuleGetGlobal_v2
+        _cuda.argtypes = [ctypes.POINTER(ctypes.c_uint64),
+                          ctypes.POINTER(ctypes.c_size_t),
+                          ctypes.c_void_p, ctypes.c_char_p]
+    ptr, size = ctypes.c_uint64(), ctypes.c_size_t()
+    rc = _cuda(ctypes.byref(ptr), ctypes.byref(size),
+               ctypes.c_void_p(mod.module.ptr), name.encode())
+    return size.value if rc == 0 else 0
+
+
 def _copy_constants(src_mod, dst_mod):
     for name in CONST_SYMBOLS:
-        try:
-            s = src_mod.get_global(name)
-        except Exception:
+        size = _symbol_size(src_mod, name)
+        if size == 0:
             continue
+        s = src_mod.get_global(name)
         d = dst_mod.get_global(name)
-        cp.cuda.runtime.memcpy(d.ptr, s.ptr, s.mem.size,
+        assert _symbol_size(dst_mod, name) == size
+        cp.cuda.runtime.memcpy(d.ptr, s.ptr, size,
                                cp.cuda.runtime.memcpyDeviceToDevice)
 
 
@@ -147,7 +168,14 @@ def _run(solver, monkeypatch):
 
 
 def _diffs(records, behaviour):
+    """Max |new - two_scan| (pos, vel), max |new - no_push| (pos), and counts.
+
+    pushed: particle-substeps the two-scan push moved.
+    vel_mismatch: particle-substeps whose velocity differs from two-scan by
+    more than 1 mm/s.
+    """
     d_ref_p, d_ref_v, d_nop_p = 0.0, 0.0, 0.0
+    pushed, vel_mismatch = 0, 0
     for p, v, rp, rv, np_, nv, beh in records:
         m = beh == behaviour
         if not m.any():
@@ -155,7 +183,9 @@ def _diffs(records, behaviour):
         d_ref_p = max(d_ref_p, float(np.abs(p[m, :3] - rp[m, :3]).max()))
         d_ref_v = max(d_ref_v, float(np.abs(v[m, :3] - rv[m, :3]).max()))
         d_nop_p = max(d_nop_p, float(np.abs(p[m, :3] - np_[m, :3]).max()))
-    return d_ref_p, d_ref_v, d_nop_p
+        pushed += int((np.abs(rp[m, :3] - np_[m, :3]).max(axis=1) > 1e-7).sum())
+        vel_mismatch += int((np.abs(v[m, :3] - rv[m, :3]).max(axis=1) > 1e-3).sum())
+    return d_ref_p, d_ref_v, d_nop_p, pushed, vel_mismatch
 
 
 @pytest.fixture(scope="module")
@@ -180,27 +210,25 @@ def dfsph_records():
                                             (GAS, "GAS")])
 def test_pbf_fold_matches_two_scan(pbf_records, behaviour, name):
     assert len(pbf_records) == STEPS
-    dp, dv, dnop = _diffs(pbf_records, behaviour)
+    dp, dv, dnop, pushed, vmis = _diffs(pbf_records, behaviour)
     print(f"  PBF {name}: |new-two_scan| pos={dp:.3e} vel={dv:.3e}, "
-          f"|new-no_push| pos={dnop:.3e}")
+          f"|new-no_push| pos={dnop:.3e}, pushed={pushed}, vel_mismatch={vmis}")
     assert dp <= 1e-6, f"PBF {name} position differs from two-scan by {dp:.3e} m"
     assert dv <= 1e-4, f"PBF {name} velocity differs from two-scan by {dv:.3e} m/s"
     assert dnop > 1e-5, f"PBF {name}: STATIC push never acted in the scene"
 
 
-@pytest.mark.parametrize("behaviour,name,tol_p", [(GRANULAR, "GRANULAR", 1e-6),
-                                                  (FLUID, "FLUID", 1e-3),
-                                                  (GAS, "GAS", 1e-6)])
-def test_dfsph_fold_matches_two_scan(dfsph_records, behaviour, name, tol_p):
-    """GRANULAR has no XSPH, so pos + dt*vel is pos_new and the push is exact.
+@pytest.mark.parametrize("behaviour,name", [(GRANULAR, "GRANULAR"), (FLUID, "FLUID"),
+                                            (GAS, "GAS")])
+def test_dfsph_fold_matches_two_scan(dfsph_records, behaviour, name):
+    """GRANULAR has no XSPH, so pos + dt*vel is pos_new and the loop push is exact.
 
-    FLUID measures the push at pos + dt*vel instead of pos_new; they differ
-    by dt * xsph_epsilon * xsph, well under 1 mm (0.05 rest spacings).
-    GAS keeps the separate scan and must be exact.
+    FLUID near a wall and GAS take the separate scan, so they match too.
     """
     assert len(dfsph_records) == STEPS
-    dp, dv, dnop = _diffs(dfsph_records, behaviour)
+    dp, dv, dnop, pushed, vmis = _diffs(dfsph_records, behaviour)
     print(f"  DFSPH {name}: |new-two_scan| pos={dp:.3e} vel={dv:.3e}, "
-          f"|new-no_push| pos={dnop:.3e}")
-    assert dp <= tol_p, f"DFSPH {name} position differs from two-scan by {dp:.3e} m"
+          f"|new-no_push| pos={dnop:.3e}, pushed={pushed}, vel_mismatch={vmis}")
+    assert dp <= 1e-6, f"DFSPH {name} position differs from two-scan by {dp:.3e} m"
+    assert dv <= 1e-4, f"DFSPH {name} velocity differs from two-scan by {dv:.3e} m/s"
     assert dnop > 1e-5, f"DFSPH {name}: STATIC push never acted in the scene"
