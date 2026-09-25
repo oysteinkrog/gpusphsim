@@ -8,7 +8,7 @@ World.sorted_ist_scratch.
 Checks:
 - sorted_veleval is unchanged by run_implicit_st (odd and even counts).
 - With IST on and sigma = 0, two colliding water blocks match IST off
-  over 20 substeps, within the run-to-run noise of float atomics.
+  over 20 substeps, within the run-to-run noise of the WCSPH pipeline.
 
 bd-r5-review-n28.133 (weight clamp, sigma * w_surface * S <= 1):
 - A still droplet with one surface particle kicked to 1 m/s: over 20
@@ -95,11 +95,14 @@ def test_ist_sigma_zero_matches_ist_off():
     pos_on, vel_on = _run(sim_on, w_on)
     implicit_st.upload_ist_params()  # restore defaults for other tests
     assert pos_off.shape == pos_on.shape
-    # Two IST-off runs already differ by about 1e-8 m and 1e-7 m/s (float
-    # atomics in the pipeline), so bit-for-bit is not reachable. Borrowing
+    # Two IST-off runs already differ by up to about 2e-5 m and 2e-3 m/s
+    # after 20 substeps, so bit-for-bit is not reachable. Float atomics give
+    # about 1e-8 m; the rest comes from K_Step1 reading rho_j from
+    # position.w while the same launch rewrites .w (bd-r5-review-n28.163),
+    # so a neighbour gives either its old or its new density. Borrowing
     # veleval as scratch gave 1.8e-3 m and 4e-2 m/s here.
-    assert np.abs(pos_off[:, :3] - pos_on[:, :3]).max() < 1e-6
-    assert np.abs(vel_off[:, :3] - vel_on[:, :3]).max() < 1e-5
+    assert np.abs(pos_off[:, :3] - pos_on[:, :3]).max() < 1e-4
+    assert np.abs(vel_off[:, :3] - vel_on[:, :3]).max() < 1e-2
 
 
 @pytest.mark.parametrize("iterations", [4, 5])
