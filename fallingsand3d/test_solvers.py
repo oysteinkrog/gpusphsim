@@ -397,6 +397,110 @@ def test_stability_dfsph(world, sim):
 
 
 # ---------------------------------------------------------------------------
+# Density error bounds (bd-r5-review-n28.128)
+# ---------------------------------------------------------------------------
+# The stability tests above only catch NaN/Inf. These catch finite but wrong
+# PBF/DFSPH physics, such as the 50x PBF delta bug (missing m_j factor).
+#
+# Measured on fix/r5-review (2026-09-25), 39,600 WATER particles after 100
+# substeps, interior = FLUID with sorted_normal.w (neighbour count) >= 25:
+#   PBF   (dt 1/120, 4 iters): mean |rho/rho0 - 1| = 0.010
+#   DFSPH (dt 1/300):          mean |rho/rho0 - 1| = 0.004
+# With the PBF m_j factor dropped from the delta, the PBF value is far above
+# 0.12 (see test_pbf_density_bound_catches_missing_mass_factor).
+#
+# Which buffer holds the density: PBF's sorted_density is the density of the
+# last constraint iteration's lambda pass, so it lags the final delta by one
+# iteration but is a real post-correction density. DFSPH's sorted_density is
+# computed at the start of the substep from the positions the previous
+# substep's solver produced, so it measures how well that solve held rho0.
+
+PBF_DENSITY_ERR_BOUND = 0.12
+DFSPH_DENSITY_ERR_BOUND = 0.03
+_INTERIOR_MIN_NEIGHBOURS = 25   # nc < 25 is the surface threshold in the kernels
+
+
+def _interior_density_error(world, profile_name, substeps=100):
+    """Settle a ~40K WATER column and return the interior mean |rho/rho0 - 1|.
+
+    One readback after the loop. Returns NaN if any read density is not finite.
+    """
+    from materials import FLUID, MATERIALS
+
+    profile = PROFILES[profile_name]
+    world.packed_info[:] = 0
+    world._high_water = 0
+    n = world.spawn_cube(
+        min_corner=(-0.3, -0.98, -0.3),
+        max_corner=(0.3, -0.1, 0.3),
+        material_id=WATER,
+        spacing=0.02,
+    )
+    sim = Simulation(world, dt=profile.dt, speed=1.0,
+                     fixed_dt=True, max_substeps=1)
+    sim.set_solver_profile(profile)
+    for _ in range(substeps):
+        sim._sim_step(n)
+
+    rho = world.sorted_density[:n].get()
+    nc = world.sorted_normal[:n, 3].get()
+    pi = world.sorted_packed_info[:n].get()
+    interior = (((pi >> 8) & 0x3) == FLUID) & (nc >= _INTERIOR_MIN_NEIGHBOURS)
+    assert interior.sum() > 50, 'scene produced no test candidates'
+    if not np.isfinite(rho[interior]).all():
+        return float('nan')
+    rho0 = MATERIALS[WATER].rest_density
+    err = float(np.abs(rho[interior] / rho0 - 1.0).mean())
+    print(f"  {profile_name}: interior={int(interior.sum())}/{n} "
+          f"mean|rho/rho0-1|={err:.4f}")
+    return err
+
+
+@pytest.mark.gpu
+def test_pbf_density_error_bound(world):
+    """PBF at dt = 1/120 must hold interior density within 12% of rho0."""
+    err = _interior_density_error(world, "PBF")
+    assert err < PBF_DENSITY_ERR_BOUND, (
+        f"PBF interior density error {err:.4f} >= {PBF_DENSITY_ERR_BOUND}")
+
+
+@pytest.mark.gpu
+def test_dfsph_density_error_bound(world):
+    """DFSPH must hold interior density within 3% of rho0."""
+    err = _interior_density_error(world, "DFSPH")
+    assert err < DFSPH_DENSITY_ERR_BOUND, (
+        f"DFSPH interior density error {err:.4f} >= {DFSPH_DENSITY_ERR_BOUND}")
+
+
+@pytest.mark.gpu
+def test_pbf_density_bound_catches_missing_mass_factor(world, monkeypatch):
+    """Mutation check: the PBF bound must fail when the delta drops m_j.
+
+    Compiles pbf_solver.cu with the old delta coeff (no m_j, so corrections
+    are 1/m_j = 50x too large) and checks the density test would catch it.
+    """
+    import os
+    import pbf_solver
+
+    good = "float coeff = m_j * (lambda_i + lambda_eff_j + s_corr) / rho0;"
+    bad = "float coeff = (lambda_i + lambda_eff_j + s_corr) / rho0;"
+    kernel_dir = os.path.join(os.path.dirname(os.path.abspath(pbf_solver.__file__)),
+                              "physics", "kernels")
+    with open(os.path.join(kernel_dir, "pbf_solver.cu"), encoding="utf-8") as f:
+        source = f.read()
+    assert source.count(good) == 1, "PBF delta coeff line changed; update this test"
+    pbf_solver._ensure_ptx_if_needed()
+    mutated = cp.RawModule(
+        code=source.replace(good, bad),
+        options=("--std=c++11", "--use_fast_math", f"-I{kernel_dir}"),
+    )
+    monkeypatch.setattr(pbf_solver, "_module", mutated)
+    err = _interior_density_error(world, "PBF")
+    assert not (err < PBF_DENSITY_ERR_BOUND), (
+        f"PBF density bound missed the missing-m_j delta bug: err={err:.4f}")
+
+
+# ---------------------------------------------------------------------------
 # Regression tests for review-2026-06-10 beads
 # ---------------------------------------------------------------------------
 
@@ -432,8 +536,7 @@ def test_surface_tension_cohesion_dfsph(world, sim):
     pi = w.sorted_packed_info[:n].get()
     behaviors = (pi >> 8) & 0x3
     fluid_idx = np.where(behaviors == FLUID)[0]
-    if len(fluid_idx) == 0:
-        pytest.skip("no fluid particles found")
+    assert len(fluid_idx) > 50, 'scene produced no test candidates'
     idx = int(fluid_idx[0])
 
     # Inject a surface normal for particle idx (pointing +x, nc < 25 = surface)
@@ -497,8 +600,7 @@ def test_surface_tension_cohesion_pbf(world, sim):
     pi = w.sorted_packed_info[:n].get()
     behaviors = (pi >> 8) & 0x3
     fluid_idx = np.where(behaviors == FLUID)[0]
-    if len(fluid_idx) == 0:
-        pytest.skip("no fluid particles found")
+    assert len(fluid_idx) > 50, 'scene produced no test candidates'
     idx = int(fluid_idx[0])
 
     # Inject surface normal for particle idx
@@ -801,8 +903,8 @@ def test_pbf_wall_density(world, sim):
     fluid_mask = behaviors == FLUID
     static_mask = behaviors == STATIC
 
-    if fluid_mask.sum() == 0 or static_mask.sum() == 0:
-        pytest.skip("need both fluid and static particles in scene")
+    assert fluid_mask.sum() > 0 and static_mask.sum() > 0, \
+        'scene produced no test candidates'
 
     # Now run compute_lambda again but with all particles marked as FLUID
     # (i.e., remove the STATIC flag). Without boundary_scale, this should give
@@ -839,8 +941,7 @@ def test_pbf_wall_density(world, sim):
     # For particles with NO static neighbors, both runs give identical density.
     # For particles with static neighbors: fix => ratio ≈ 1.0; bug => ratio ≈ 2.0.
     nonzero = rho_fluid_fluid > 100.0
-    if nonzero.sum() == 0:
-        pytest.skip("no fluid particles with non-zero density near static wall")
+    assert nonzero.sum() > 0, 'scene produced no test candidates'
 
     ratio = rho_static_fluid[nonzero] / rho_fluid_fluid[nonzero]
     max_ratio = ratio.max()
