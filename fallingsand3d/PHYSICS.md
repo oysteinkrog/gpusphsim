@@ -3372,6 +3372,18 @@ Simple per-particle physics, no neighbor interaction:
 
 Integration: symplectic Euler. World boundary clamp kills particles at floor.
 
+SDF object collision: after the world clamp, each live particle is checked
+against every analytic SDF object in `c_sdf_objects` (at most 16). When
+`eval_sdf(p) < BOUNDARY_MARGIN` the particle moves to `BOUNDARY_MARGIN` outside
+along `sdf_normal(p)`, and the inward part of its velocity relative to the
+object surface (`v_obj + omega x r`) is removed: `v -= min(0, (v - v_obj).n) * n`.
+There is no bounce and no friction term. A SPRAY particle that touches an object
+becomes FOAM (type 1.0) and keeps its remaining lifetime, so splash that lands on
+an obstacle rests on its surface. The objects are uploaded by
+`rigid_bodies.upload_sdf_objects`, which includes the foam module; a foam module
+compiled after the last upload gets it replayed on compile. Rigid body SDFs
+(`d_rigid_bodies`) are not checked, so foam still passes through rigid bodies.
+
 Death: when the lifetime runs out, or the floor clamp kills a particle, the
 kernel writes -1 to both `foam_velocity.w` (lifetime, read by compaction) and
 `foam_position.w` (type, read by `foam.vert`). The particle stops drawing on
