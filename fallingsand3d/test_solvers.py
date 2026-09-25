@@ -1207,7 +1207,8 @@ if __name__ == "__main__":
 
 def test_wcsph_density_in_carries_previous_density(world, sim):
     """Regression (round-5 bead 0-density-w-carry): WCSPH step1 reads neighbour
-    density from sorted_density_prev, which is copied from sorted_position.w.
+    density rho_j from sorted_position.w, which the reorder gathers from the
+    unsorted position.w that K_Integrate writes (bd-r5-review-n28.163).
     K_Integrate used to write .w = 1.0 for every awake particle, so from the
     second substep every awake neighbour had rho_j = 1 instead of ~1000-2500,
     inflating heat, vorticity, normals and strain rate by that factor."""
@@ -1215,16 +1216,20 @@ def test_wcsph_density_in_carries_previous_density(world, sim):
     sim.set_solver_profile(PROFILES["WCSPH"])
     sim.sim_time = 0.0
     sim._last_frame_time = None
-    for _ in range(3):
+    for _ in range(4):
         sim._sim_step(n)
-    # One more substep: density_in for it is the density computed last substep.
-    sim._sim_step(n)
-    prev = cp.asnumpy(world.sorted_density_prev[:n])
-    info = cp.asnumpy(world.sorted_packed_info[:n])
+    # The next substep's step1 reads this .w, reordered, as rho_j.
+    prev = cp.asnumpy(world.position[:n, 3])
+    info = cp.asnumpy(world.packed_info[:n])
     live = (info & 0xFF) != 0  # not MAT_DEAD
     frac_unit = float(np.mean(np.abs(prev[live] - 1.0) < 1e-3))
-    assert frac_unit < 0.01, f"{frac_unit:.1%} of density_in entries are 1.0"
-    assert np.median(prev[live]) > 100.0, f"median density_in {np.median(prev[live]):.2f}"
+    assert frac_unit < 0.01, f"{frac_unit:.1%} of position.w entries are 1.0"
+    assert np.median(prev[live]) > 100.0, f"median position.w {np.median(prev[live]):.2f}"
+    # The unsorted .w is this substep's step1 density for each particle.
+    dens = cp.asnumpy(world.sorted_density[:n])
+    perm = cp.asnumpy(sim._sort_perm[:n]).astype(np.int64)
+    live_s = live[perm]
+    np.testing.assert_allclose(prev[perm][live_s], dens[live_s], rtol=1e-6)
 
 
 def test_dfsph_module_has_only_live_kernels():
@@ -1785,7 +1790,7 @@ def test_exposure_matches_across_solvers(world, sim):
     # WCSPH
     s1_dTdt, s1_eh, s1_ec = outs()
     step1.compute_step1(
-        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], None,
+        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n],
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
         sim._cell_start, sim._cell_end,
         density_out=cp.zeros(n, cp.float32), shear_rate_out=cp.zeros(n, cp.float32),
@@ -1893,7 +1898,7 @@ def test_cross_phase_heat_matches_across_solvers(world, sim):
 
     s1_dTdt, s1_eh, s1_ec = outs()
     step1.compute_step1(
-        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], None,
+        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n],
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
         sim._cell_start, sim._cell_end,
         density_out=cp.zeros(n, cp.float32), shear_rate_out=cp.zeros(n, cp.float32),

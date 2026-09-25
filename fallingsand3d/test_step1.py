@@ -110,6 +110,15 @@ def _upload_all_params() -> None:
     upload_step1_interactions(interactions_data)
 
 
+def _set_rho_prev(sorted_pos: cupy.ndarray, rho_sorted) -> None:
+    """Put the neighbour density K_Step1 reads (position.w) into sorted_pos.
+
+    rho_sorted is a sorted-order array or scalar; None writes 0, which the
+    kernel replaces with the neighbour's rest density (bd-r5-review-n28.163).
+    """
+    sorted_pos[:, 3] = 0.0 if rho_sorted is None else rho_sorted
+
+
 def _run_full_pipeline(
     positions_np: np.ndarray,
     mass_np: np.ndarray,
@@ -126,7 +135,9 @@ def _run_full_pipeline(
     mass_np : (N,) float32
     velocity_np : (N, 4) float32, optional (default: zeros)
     packed_info_np : (N,) uint32, optional (default: PACKED_WATER)
-    density_in_np : (N,) float32, optional (default: None -> kernel uses fallback)
+    density_in_np : (N,) float32, optional
+        Previous-substep density, written into position.w for K_Step1 to read
+        as rho_j. Default None writes 0, so the kernel uses the rest density.
     temperature_np : (N,) float32, optional (default: 293.0 ambient)
 
     Returns
@@ -169,11 +180,12 @@ def _run_full_pipeline(
     if density_in_np is not None:
         perm = scene["sort_perm"].astype(cupy.int64)
         sorted_density_in = cupy.asarray(density_in_np, dtype=cupy.float32)[perm]
+    _set_rho_prev(sorted_pos, sorted_density_in)
 
     # compute_step1 returns 6 values; the 6th (pressure_out) is not used by pipeline
     density, shear_rate, dTdt, exposure_heat, exposure_corrode, _pressure = compute_step1(
         sorted_pos, sorted_vel, sorted_mass,
-        sorted_density_in, sorted_pi,
+        sorted_pi,
         sorted_temp,
         cell_start, cell_end,
         velocity_h=scene["velocity_h"],
@@ -1162,7 +1174,8 @@ def _exposure_step1(positions, packed_info, temperature):
         grid_params=default_grid_params(),
     )
     k0 = int(np.where(cupy.asnumpy(scene["sort_perm"]) == 0)[0][0])
-    args = (scene["position"], scene["velocity"], scene["mass"], None,
+    _set_rho_prev(scene["position"], None)
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     out = []
@@ -1298,9 +1311,9 @@ def _wall_contact_normals(wall: str, layers: int):
         pos, velocity=np.zeros((n, 4), np.float32), mass=mass, packed_info=packed,
         temperature=np.full(n, 293.0, np.float32), grid_params=default_grid_params(),
     )
-    density_in = cupy.full(n, rho, dtype=cupy.float32)
+    _set_rho_prev(scene["position"], rho)
     normal = cupy.zeros((n, 4), dtype=cupy.float32)
-    args = (scene["position"], scene["velocity"], scene["mass"], density_in,
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     compute_step1(*args, normal_out=normal, velocity_h=scene["velocity_h"])
@@ -1375,10 +1388,10 @@ def _translating_block_step1(packed: int) -> tuple:
         grid_params=default_grid_params(),
     )
 
-    density_in = cupy.full(n, RHO0, dtype=cupy.float32)
+    _set_rho_prev(scene["position"], RHO0)
     vort = cupy.zeros((n, 4), dtype=cupy.float32)
     shear = cupy.zeros(n, dtype=cupy.float32)
-    args = (scene["position"], scene["velocity"], scene["mass"], density_in,
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     kw = dict(shear_rate_out=shear, vorticity_out=vort, velocity_h=scene["velocity_h"])
@@ -1432,9 +1445,9 @@ def test_rigid_rotation_curl_is_two_omega() -> None:
         packed_info=np.full(n, PACKED_WATER, dtype=np.uint32),
         grid_params=default_grid_params(),
     )
-    density_in = cupy.full(n, RHO0, dtype=cupy.float32)
+    _set_rho_prev(scene["position"], RHO0)
     vort = cupy.zeros((n, 4), dtype=cupy.float32)
-    args = (scene["position"], scene["velocity"], scene["mass"], density_in,
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     kw = dict(vorticity_out=vort, velocity_h=scene["velocity_h"])
@@ -1516,7 +1529,8 @@ def _fluid_rigid_pair_density(fluid_mat: int) -> tuple[float, float, float]:
         pos, velocity=np.zeros((2, 4), np.float32), mass=mass, packed_info=packed,
         temperature=np.full(2, 293.0, np.float32), grid_params=default_grid_params(),
     )
-    args = (scene["position"], scene["velocity"], scene["mass"], None,
+    _set_rho_prev(scene["position"], None)
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     density = compute_step1(*args, velocity_h=scene["velocity_h"])[0]
@@ -1576,8 +1590,8 @@ def _water_fire_pair_dTdt(dt: float) -> tuple[float, float]:
         packed_info=packed, temperature=temp, grid_params=default_grid_params(),
     )
     perm = cupy.asnumpy(scene["sort_perm"]).astype(np.int64)
-    rho_in = cupy.asarray(np.array([2500.0, 1000.0], np.float32)[perm])
-    args = (scene["position"], scene["velocity"], scene["mass"], rho_in,
+    _set_rho_prev(scene["position"], cupy.asarray(np.array([2500.0, 1000.0], np.float32)[perm]))
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     dTdt = compute_step1(*args, velocity_h=scene["velocity_h"])[2]
@@ -1648,11 +1662,12 @@ def _step1_with_temp_mirror(pos, packed_info, temperature, density_in=None):
     )
     assert scene["temperature_h"].dtype == cupy.uint16
     perm = scene["sort_perm"].astype(cupy.int64)
-    dens = None if density_in is None else cupy.asarray(density_in, dtype=cupy.float32)[perm]
+    _set_rho_prev(scene["position"],
+                  None if density_in is None else cupy.asarray(density_in, dtype=cupy.float32)[perm])
     dTdt = cupy.zeros(n, dtype=cupy.float32)
     heat = cupy.zeros(n, dtype=cupy.float32)
     rho = cupy.zeros(n, dtype=cupy.float32)
-    args = (scene["position"], scene["velocity"], scene["mass"], dens,
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     kw = dict(density_out=rho, dTdt_out=dTdt, exposure_heat_out=heat,
@@ -1754,3 +1769,30 @@ def test_heat_energy_conserved_with_temp_mirror() -> None:
     # Interior particles stay put (flat mirror field); the interface must move.
     assert t_max < 1499.7 - 0.05, "no conduction happened"
     assert drift < 1e-6, f"energy drift {drift:.2e} through the temperature mirror"
+
+
+def test_heat_weight_reads_neighbour_density_from_position_w() -> None:
+    """bd-r5-review-n28.163: K_Step1 takes rho_j for the m_j / rho_j heat
+    weight from the neighbour's position.w. Halving every .w doubles dTdt,
+    and .w <= 0 falls back to the rest density."""
+    n = 2
+    positions = np.zeros((n, 4), dtype=np.float32)
+    positions[1, 0] = 0.5 * H
+    mass_arr = np.full(n, MASS, dtype=np.float32)
+    packed_info = np.full(n, PACKED_WATER, dtype=np.uint32)
+    temperature = np.array([293.0, 353.0], dtype=np.float32)
+
+    def dTdt_hot_to_cold(rho: float) -> float:
+        _, _, dTdt, _, _, sorted_pos, _ = _run_full_pipeline(
+            positions, mass_arr, None, packed_info,
+            np.full(n, rho, dtype=np.float32), temperature,
+        )
+        cold = int(np.argmin(np.abs(sorted_pos[:, 0])))
+        return float(dTdt[cold])
+
+    d_rest = dTdt_hot_to_cold(RHO0)
+    d_half = dTdt_hot_to_cold(0.5 * RHO0)
+    d_zero = dTdt_hot_to_cold(0.0)
+    assert d_rest > 0.0
+    np.testing.assert_allclose(d_half, 2.0 * d_rest, rtol=1e-5)
+    np.testing.assert_allclose(d_zero, d_rest, rtol=1e-6)

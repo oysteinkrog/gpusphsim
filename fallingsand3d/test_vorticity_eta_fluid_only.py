@@ -276,11 +276,11 @@ def _run_step1_fire_next_to(mat_j: int, beh_j: int, m_j: float) -> tuple:
         temperature=temp,
         grid_params=default_grid_params(),
     )
+    scene["position"][:, 3] = 0.0  # rho_j = rest density (K_Step1 reads position.w)
     _, _, _, exp_heat, exp_corr, _ = s1.compute_step1(
         scene["position"],
         scene["velocity"],
         scene["mass"],
-        None,
         scene["packed_info"],
         scene["temperature"],
         scene["cell_start"],

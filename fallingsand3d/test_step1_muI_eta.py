@@ -48,7 +48,6 @@ def _run_step1(sim, n):
         w.sorted_position[:n],
         w.sorted_velocity[:n],
         w.sorted_mass[:n],
-        w.sorted_density_prev[:n],
         w.sorted_packed_info[:n],
         w.sorted_temperature[:n],
         sim._cell_start,

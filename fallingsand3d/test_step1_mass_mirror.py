@@ -57,7 +57,7 @@ def _densities(pos, vel, mass, zero_mass_lane=False):
     if zero_mass_lane:
         # half4 = 2 x uint32; .w is the high 16 bits of the second word.
         vh[:, 1] &= cupy.uint32(0x0000FFFF)
-    args = (scene["position"], scene["velocity"], scene["mass"], None,
+    args = (scene["position"], scene["velocity"], scene["mass"],
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     rho_h = compute_step1(*args, velocity_h=vh)[0].copy()

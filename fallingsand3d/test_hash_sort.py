@@ -347,8 +347,9 @@ def test_step1_density_on_world_edges_matches_brute_force() -> None:
         packed_info=np.full(n, WATER, dtype=np.uint32),
         grid_params=default_grid_params(),
     )
+    scene["position"][:, 3] = 0.0  # rho_j = rest density (K_Step1 reads position.w)
     density, *_rest = step1.compute_step1(
-        scene["position"], scene["velocity"], scene["mass"], None,
+        scene["position"], scene["velocity"], scene["mass"],
         scene["packed_info"], scene["temperature"],
         scene["cell_start"], scene["cell_end"],
         velocity_h=scene["velocity_h"],

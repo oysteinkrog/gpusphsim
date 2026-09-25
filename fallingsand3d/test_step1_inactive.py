@@ -155,13 +155,11 @@ def _run(
     temp_sorted=None,
     frame=None,
     force=True,
-    density_in=None,
 ):
     compute_step1(
         pos_sorted,
         sc["velocity"],
         sc["mass"],
-        density_in,
         sc["packed_info"],
         sc["temperature"] if temp_sorted is None else temp_sorted,
         sc["cell_start"],

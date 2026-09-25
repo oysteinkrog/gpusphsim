@@ -198,8 +198,9 @@ def run_full_pipeline_step(w, grid_params, scratch, frame=0):
     sorted_sr = w["shear_rate"][perm]
 
     # Step1: density, shear_rate, dTdt, exposure (now returns 6-tuple; 6th is pressure)
+    sorted_pos[:, 3] = 0.0  # rho_j = rest density (K_Step1 reads position.w)
     density, shear_rate, dTdt, exp_heat, exp_corrode, _pressure = compute_step1(
-        sorted_pos, sorted_vel, sorted_mass, None, sorted_pi,
+        sorted_pos, sorted_vel, sorted_mass, sorted_pi,
         sorted_temp, cell_start, cell_end,
         velocity_h=velocity_h,
     )

@@ -233,8 +233,9 @@ def run_full_pipeline_step(w, grid_params, scratch, frame=0):
 
     # Step1: density, shear_rate, dTdt, exposure
     # API drift: compute_step1 now returns 6 values (added pressure_out)
+    sorted_pos[:, 3] = 0.0  # rho_j = rest density (K_Step1 reads position.w)
     density, shear_rate, dTdt, exp_heat, exp_corrode, _pressure = compute_step1(
-        sorted_pos, sorted_vel, sorted_mass, None, sorted_pi,
+        sorted_pos, sorted_vel, sorted_mass, sorted_pi,
         sorted_temp, cell_start, cell_end,
         velocity_h=velocity_h,
     )
@@ -347,8 +348,9 @@ def test_gas_linear_eos():
 
     # Step1: compute density
     s_temp = cupy.full(n, 373.0, dtype=cupy.float32)
+    s_pos[:, 3] = 0.0  # rho_j = rest density (K_Step1 reads position.w)
     density, shear_rate, _, _, _, _pressure = compute_step1(
-        s_pos, s_vel, s_mass, None, s_pi, s_temp, cell_start, cell_end,
+        s_pos, s_vel, s_mass, s_pi, s_temp, cell_start, cell_end,
     )
 
     density_h = density.get()
@@ -947,8 +949,9 @@ def _gas_lattice_step1(mat_id, spacing, mass_val, n_side):
         grid_params=default_grid_params(),
     )
     s_temp = cupy.full(n, 373.0, dtype=cupy.float32)
+    scene["position"][:, 3] = 0.0  # rho_j = rest density (K_Step1 reads position.w)
     density, _, _, _, _, pressure = compute_step1(
-        scene["position"], scene["velocity"], scene["mass"], None,
+        scene["position"], scene["velocity"], scene["mass"],
         scene["packed_info"], s_temp, scene["cell_start"], scene["cell_end"],
     )
     s_pos = scene["position"].get()[:, :3]
