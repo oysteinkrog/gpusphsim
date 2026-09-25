@@ -272,6 +272,15 @@ void K_Step2(
                     // sorted_mass (kills, conversions, steam children) without
                     // updating the mirror (bd-r5-review-n28.161).
                     float m_j = __ldg(&mass[index_j]);
+                    // p_j for neighbours that will not take the packed carrier
+                    // below (GRANULAR, GAS, STATIC, a GAS particle i, or a NULL
+                    // carrier). Issued here with the other loads so an in-range
+                    // pair does not wait on it after the branches. FLUID
+                    // neighbours skip it, so a water scene loads nothing extra
+                    // (bd-r5-review-n28.171).
+                    float p_j_spec = 0.0f;
+                    if (pr2_omega_in == 0 || is_gas_i || GET_BEHAVIOR(pi_j) != FLUID)
+                        p_j_spec = __ldg(&pressure_in[index_j]);
 
                     float3 r = make_float3(
                         pos_i.x - pos4_j.x,
@@ -442,7 +451,7 @@ void K_Step2(
                     float p_j = 0.0f;
                     float pr2_j = pk_j.x;
                     if (!use_pk) {
-                        p_j = __ldg(&pressure_in[index_j]);
+                        p_j = p_j_spec;  // loaded before the distance check
                         pr2_j = p_j / (rho_j * rho_j);
                     }
 
