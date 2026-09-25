@@ -25,7 +25,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from world import World
+from world import World, T_AMBIENT, _DEFAULT_TEMPS
 from materials import (
     WATER, SAND, MATERIALS, GRANULAR, GAS, STATIC,
     build_material_array, build_interaction_matrix, upload_to_gpu,
@@ -64,6 +64,16 @@ DT_UPLOAD_REL = 0.05
 # lagged v_max passes this fraction of the velocity clamp at fixed_dt.
 FIXED_SUBDIV_MARGIN = 0.5
 FIXED_SUBDIV_MAX = 8
+
+# Thermal gate host rule (bd-r5-review-n28.172). Materials that spawn at a
+# temperature other than T_AMBIENT, and [a][b] pairs with any non-zero
+# interaction entry. A scene with neither has exactly zero heat diffusion and
+# exposure, so K_Step1 can skip them.
+_NON_AMBIENT_MATERIALS = frozenset(
+    m for m, t in _DEFAULT_TEMPS.items() if t != T_AMBIENT)
+_INTERACTION_TABLE = build_interaction_matrix()
+_PAIR_INTERACTS = ((_INTERACTION_TABLE["reaction_rate"] != 0.0)
+                   | (_INTERACTION_TABLE["heat_exchange"] != 0.0))
 
 
 def _no_mark(label: str) -> None:
@@ -330,6 +340,13 @@ class Simulation:
         self.rigid_body_manager.world = world
         world.reserved_tail = 0
 
+        # Thermal gate (bd-r5-review-n28.172). World adds to this set on every
+        # spawn. A load or undo replaces it with a set rebuilt from the
+        # restored particles, whose temperatures are unknown, so the gate may
+        # only turn off while the set is still this object.
+        self._thermal_trusted_mats = getattr(world, "_spawned_material_ids", None)
+        self._thermal_key: Optional[tuple] = None
+
         # Compile all kernel modules and upload constant memory
         self._upload_constants()
 
@@ -563,6 +580,7 @@ class Simulation:
             world_min=wmin,
             world_max=wmax,
             velocity_limit=vel_limit,
+            thermal_enabled=self._thermal_rule(),
         )
         self._sim_params = sim_params
         precalc_params = step1.build_precalc_params(
@@ -1670,6 +1688,43 @@ class Simulation:
                 self._sim_params[0]["velocity_damping"] = np.float32(damping)
                 self._upload_sim_params_all()  # only uploads when value changed
 
+    def _thermal_rule(self) -> bool:
+        """Return the value of c_sim.thermal_enabled for the current scene.
+
+        False only when at least one material was spawned, every one of them
+        starts at T_AMBIENT, and no pair of them (a material with itself
+        included) has a non-zero reaction_rate or heat_exchange. Then every temperature stays
+        at T_AMBIENT, the heat and exposure sums in K_Step1 are exactly 0, and
+        no reaction can create a new material. Host-only, no GPU sync.
+        """
+        mats = getattr(self.world, "_spawned_material_ids", None)
+        if mats is None or mats is not self._thermal_trusted_mats:
+            return True
+        present = [m for m in mats if 0 < m < _PAIR_INTERACTS.shape[0]]
+        # An empty world stays on: a caller may spawn and launch K_Step1
+        # directly before the next substep re-evaluates the rule.
+        if not present or any(m in _NON_AMBIENT_MATERIALS for m in present):
+            return True
+        return bool(_PAIR_INTERACTS[np.ix_(present, present)].any())
+
+    def _update_thermal_gate(self) -> None:
+        """Re-evaluate the thermal gate when the spawned material set changed.
+
+        Called once per substep before any kernel launch. The set only grows
+        or is replaced, so its identity and size are enough to detect a
+        change. On a change of the flag, c_sim is re-uploaded with the same
+        async copy as the damping ramp, so captured graphs stay valid.
+        """
+        mats = getattr(self.world, "_spawned_material_ids", None)
+        key = (id(mats), len(mats) if mats is not None else 0)
+        if key == self._thermal_key or self._sim_params is None:
+            return
+        self._thermal_key = key
+        on = 1 if self._thermal_rule() else 0
+        if int(self._sim_params[0]["thermal_enabled"]) != on:
+            self._sim_params[0]["thermal_enabled"] = on
+            self._upload_sim_params_all()
+
     def _invalidate_graphs(self) -> None:
         """Invalidate both CUDA graphs (call when constants/solver/grid changes)."""
         self._graph_full_sort = None
@@ -1819,6 +1874,7 @@ class Simulation:
         """
         # --- Spawn velocity damping ramp ---
         self._apply_damping_ramp()
+        self._update_thermal_gate()
 
         # IST scratch is allocated here, outside the graph body, so a graph
         # capture never allocates (bd-r5-review-n28.56).
