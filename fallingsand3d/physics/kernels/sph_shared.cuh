@@ -33,6 +33,28 @@
 #define V_WAKE_SQ        (V_WAKE * V_WAKE)
 #define SLEEP_THRESHOLD  10
 
+/* Wake stamp for this substep: *frame_ptr + 1 (never 0, the value of a fresh
+ * table), or 1 when frame_ptr is NULL (the caller then clears the table).
+ * See wake.cu for the generation-stamp scheme. */
+__device__ __forceinline__ uint wake_stamp(const uint* frame_ptr) {
+    return frame_ptr ? (*frame_ptr + 1u) : 1u;
+}
+
+/* Own-cell wake mark written by a solver's final kernel from registers
+ * (bd-r5-review-n28.167). Same predicate as K_MarkWakeCells: the particle
+ * just woke, or it is awake, not STATIC or GAS, and moves faster than
+ * V_WAKE. pi is the packed_info being written back. NULL flags: no mark. */
+__device__ __forceinline__ void wake_mark_own_cell(
+    uint* cell_wake_flags, const uint* frame_ptr,
+    uint pi, int behavior, float vel_sq, float3 pos)
+{
+    if (cell_wake_flags == 0) return;
+    bool mark = HAS_JUST_WOKE(pi)
+             || (!IS_SLEEPING(pi) && behavior != STATIC && behavior != GAS
+                 && vel_sq > V_WAKE_SQ);
+    if (mark) cell_wake_flags[spatialHash(calcGridCell(pos))] = wake_stamp(frame_ptr);
+}
+
 /* Temperature integration */
 #define T_AMBIENT        293.0f
 #define COOL_RATE        0.02f

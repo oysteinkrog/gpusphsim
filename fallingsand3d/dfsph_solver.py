@@ -416,6 +416,8 @@ def finalize(
     mass_out: "cupy.ndarray | None" = None,
     max_displacement: "cupy.ndarray | None" = None,
     displacement_anchor: "cupy.ndarray | None" = None,
+    cell_wake_flags: "cupy.ndarray | None" = None,
+    frame_counter: "cupy.ndarray | None" = None,
 ) -> None:
     """Run K_DFSPH_Finalize.
 
@@ -439,6 +441,10 @@ def finalize(
     max_disp_ptr = max_displacement if max_displacement is not None else np.intp(0)
     # Sorted position at the last full sort; NULL measures per-substep motion.
     anchor_ptr = displacement_anchor if displacement_anchor is not None else np.intp(0)
+    # Own-cell wake stamp written from registers (bd-r5-review-n28.167).
+    # NULL table: no mark, so the caller must run K_MarkWakeCells instead.
+    wake_ptr = cell_wake_flags if cell_wake_flags is not None else np.intp(0)
+    frame_ptr = frame_counter if frame_counter is not None else np.intp(0)
     module = _get_module()
     kernel = module.get_function("K_DFSPH_Finalize")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -455,4 +461,5 @@ def finalize(
         s_lifetime_ptr, health_out_ptr, lifetime_out_ptr, mass_out_ptr,
         max_disp_ptr,
         anchor_ptr,
+        wake_ptr, frame_ptr,
     ))

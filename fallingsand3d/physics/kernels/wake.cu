@@ -37,9 +37,7 @@
 
 // Uses calcGridCell() and spatialHash() from common.cuh.
 
-__device__ __forceinline__ uint wake_stamp(const uint* frame_ptr) {
-    return frame_ptr ? (*frame_ptr + 1u) : 1u;
-}
+// wake_stamp() lives in sph_shared.cuh, shared with the solver finalize kernels.
 
 /* ======================================================================
  * K_MarkWakeCells -- Phase 1: stamp the own cell of each just-woke or

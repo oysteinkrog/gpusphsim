@@ -1369,6 +1369,8 @@ class Simulation:
             health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
             displacement_anchor=w.sorted_anchor,
+            cell_wake_flags=self._cell_wake_flags,
+            frame_counter=self._frame_counter_d,
         )
         mark("finalize")
 
@@ -1383,6 +1385,7 @@ class Simulation:
             self._cell_wake_flags,
             num_particles=n,
             frame_counter=self._frame_counter_d,
+            mark=False,  # finalize wrote the own-cell stamps
             **self._wake_rigid_kwargs(),
         )
         mark("wake")
@@ -1586,6 +1589,8 @@ class Simulation:
             health_out=w.health, lifetime_out=w.lifetime, mass_out=w.mass,
             max_displacement=w.max_displacement,
             displacement_anchor=w.sorted_anchor,
+            cell_wake_flags=self._cell_wake_flags,
+            frame_counter=self._frame_counter_d,
         )
         mark("finalize")
 
@@ -1599,6 +1604,7 @@ class Simulation:
             self._cell_wake_flags,
             num_particles=n,
             frame_counter=self._frame_counter_d,
+            mark=False,  # finalize wrote the own-cell stamps
             **self._wake_rigid_kwargs(),
         )
         mark("wake")

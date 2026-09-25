@@ -1377,7 +1377,9 @@ void K_DFSPH_Finalize(
     float*          __restrict__ lifetime_out,          // unsorted lifetime writeback, or NULL
     float*          __restrict__ mass_out,              // unsorted mass writeback, or NULL
     uint*           __restrict__ max_displacement_out,   // [1] atomicMax of displacement^2 (float-as-uint), or NULL
-    const float4*   __restrict__ displacement_anchor  // [N] sorted position at the last full sort, or NULL
+    const float4*   __restrict__ displacement_anchor, // [N] sorted position at the last full sort, or NULL
+    uint*           __restrict__ cell_wake_flags,     // wake stamp table, or NULL (bd-r5-review-n28.167)
+    const uint*     __restrict__ frame_ptr            // per-substep counter for the stamp, or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -1705,6 +1707,10 @@ void K_DFSPH_Finalize(
         float disp_sq = dx_d * dx_d + dy_d * dy_d + dz_d * dz_d;
         atomicMax(max_displacement_out, __float_as_uint(disp_sq));
     }
+
+    // Own-cell wake mark from registers, so wake.py skips K_MarkWakeCells
+    // (bd-r5-review-n28.167). vel_sq is the final |v|^2 here.
+    wake_mark_own_cell(cell_wake_flags, frame_ptr, pi, behavior, vel_sq, pos_new);
 
     // Writeback. .w carries this substep's density for K_ComputeColor,
     // which runs once per frame on the unsorted arrays

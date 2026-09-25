@@ -258,10 +258,11 @@ def run_wake_propagation(
     rigid_bodies: Optional[cupy.ndarray] = None,
     num_bodies: int = 0,
     frame_counter: Optional[cupy.ndarray] = None,
+    mark: bool = True,
 ) -> None:
     """Run the 2-phase wake propagation pipeline.
 
-    1. K_MarkWakeCells (Phase 1)
+    1. K_MarkWakeCells (Phase 1), skipped when mark is False
     2. K_MarkWakeCellsRigid (Phase 1b), when rigid_bodies is given and
        num_bodies > 0
     3. K_WakeSleepersAndClearJustWoke (Phase 2+3 fused)
@@ -290,7 +291,15 @@ def run_wake_propagation(
         Number of live rigid bodies (host-side count).
     frame_counter : cupy.ndarray, (1,) uint32, optional
         Per-substep device counter; must change every substep.
+    mark : bool
+        False when the solver's final kernel already wrote the own-cell
+        stamps this substep (K_PBF_Finalize and K_DFSPH_Finalize given
+        cell_wake_flags, bd-r5-review-n28.167). Needs frame_counter, since
+        clearing the table would erase those stamps.
     """
+    if not mark and frame_counter is None:
+        raise ValueError("mark=False needs frame_counter: the table clear "
+                         "would erase the stamps the solver wrote")
     n = num_particles if num_particles is not None else position.shape[0]
     if n == 0:
         return
@@ -300,8 +309,9 @@ def run_wake_propagation(
         cell_wake_flags.data.memset_async(0x00, cell_wake_flags.nbytes)
 
     # Phase 1: stamp the own cell of just-woke and fast-moving particles
-    mark_wake_cells(position, velocity, packed_info, cell_wake_flags, n,
-                    frame_counter=frame_counter)
+    if mark:
+        mark_wake_cells(position, velocity, packed_info, cell_wake_flags, n,
+                        frame_counter=frame_counter)
 
     # Phase 1b: moving rigid bodies stamp the cells they cover
     if rigid_bodies is not None and num_bodies > 0:
