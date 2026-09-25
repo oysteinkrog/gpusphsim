@@ -2248,20 +2248,45 @@ available from the PBF constraint computation.
 
 ---
 
-## 12.8 Implicit Surface Tension (Quality Mode)
+## 12.8 Surface Velocity Smoothing (Quality Mode)
 
-Iterative Jacobi smoothing of surface particle velocities for smoother, more
-cohesive fluid surfaces. WCSPH only, limited to < 100K particles.
+Iterative Jacobi smoothing of FLUID surface particle velocities. This is
+XSPH-style smoothing restricted to surface particles. It is not surface
+tension: it has no cohesion or curvature term, so it cannot pull a surface
+inward or form droplets. It only damps relative velocity at the free surface.
+The code keeps the old "IST" (implicit surface tension) names
+(`implicit_st.cu`, `sim.ist_*`). The UI calls it "Surface velocity smoothing".
+WCSPH only, limited to < 100K particles.
+
+Real implicit surface tension (Jeske et al. 2023, which makes the explicit
+Akinci curvature force of §17.3 in `step2.cu` implicit) is a separate
+feature that does not exist yet.
 
 ### Algorithm
 
-For each Jacobi iteration (5-20 per substep):
+For each Jacobi iteration (1-20 per substep):
 ```
 For each FLUID particle i with neighbor_count < surface_threshold:
   w_surface = 1 - neighbor_count / surface_threshold
-  dv_i = sigma * w_surface * SUM_j (m_j/rho_j) * (v_j - v_i) * W_poly6(r_ij)
-  v_new_i = v_old_i + dv_i
+  dv_i = SUM_j (m_j/rho_j) * W_poly6(r_ij) * (v_j - v_i)
+  S_i  = SUM_j (m_j/rho_j) * W_poly6(r_ij)
+  a_i  = min(sigma * w_surface, 1 / S_i)
+  v_new_i = v_old_i + a_i * dv_i
 ```
+
+The sums run over FLUID neighbours j != i. The clamp keeps `a_i * S_i <= 1`,
+so `v_new_i` is a convex combination of `v_i` and its neighbours' velocities
+and the largest speed cannot grow between iterations (Jacobi stability). S is
+about 1 at rest and can exceed 1 when a surface particle's own density is below
+its neighbours'. Without the clamp, sigma 50 on a still 1000-particle droplet
+grows a 1 m/s kick to 2e9 m/s in 7 iterations. With it, speed falls every
+iteration (`test_implicit_st.py::test_surface_speed_never_grows`).
+
+The clamp bounds each particle on its own, so it does not stop two particles
+from overshooting each other: for an isolated pair the relative velocity is
+multiplied by `1 - a_1 S_1 - a_2 S_2` per iteration. At sigma 2.0 that was
+about -0.73 (a damped sign flip each iteration). At sigma 1.0 it was about
++0.13. The UI caps sigma at 1.0.
 
 Surface particles (fewer neighbors) receive stronger smoothing. Interior
 particles pass through unchanged. Uses ping-pong velocity buffers for proper
@@ -2271,9 +2296,9 @@ Jacobi iteration (read from old, write to new).
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `sigma` | 0.5 | Surface tension strength (higher = stronger smoothing) |
+| `sigma` | 0.5 | Smoothing strength, UI range 0.01-1.0 (higher = stronger smoothing; clamped per particle) |
 | `surface_threshold` | 25.0 | Neighbor count below which particle is "surface" |
-| `num_iterations` | 5 | Jacobi iterations per substep |
+| `num_iterations` | 5 | Jacobi iterations per substep, UI range 1-20 |
 
 ### Pipeline Position
 
