@@ -1410,6 +1410,11 @@ a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
   scenes, every thread early-exits in the kernel — negligible GPU time.
 - Graph invalidation: re-captured when `n` (particle count) changes (compaction,
   preset switch). Grid dimensions and `np.uint32(n)` args are baked.
+  `World.compact()` runs one `K_Compact` pass (`compact.cu`) into the
+  `sorted_*` scratch arrays and then swaps them with the primary arrays, so
+  the device pointers change. It bumps `World.buffer_generation`, and
+  `_sim_step` drops both graphs when that value changed, even if `n` came
+  back to the same count (bd-r5-review-n28.149).
 - Capture uses a non-default stream (`cupy.cuda.Stream(non_blocking=True)`);
   replay launches on the default stream.
 
