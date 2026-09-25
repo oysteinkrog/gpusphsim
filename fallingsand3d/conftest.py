@@ -169,7 +169,6 @@ def counting_sort_scene(
     kappa = cupy.zeros(n, dtype=cupy.float32)
     kappa_v = cupy.zeros(n, dtype=cupy.float32)
     dye = cupy.zeros((n, 4), dtype=cupy.float32)
-    omega = cupy.zeros((n, 4), dtype=cupy.float32)
 
     if grid_params is None:
         grid_params = hash_sort.build_grid_params()
@@ -195,7 +194,6 @@ def counting_sort_scene(
         "sleep_counter": cupy.empty_like(sc),
         "kappa": cupy.empty_like(kappa),
         "particle_dye": cupy.empty_like(dye),
-        "angular_velocity": cupy.empty_like(omega),
         "kappa_v": cupy.empty_like(kappa_v),
         "velocity_h": cupy.zeros((n, 2), dtype=cupy.uint32),
         "temperature_h": cupy.zeros(n, dtype=cupy.uint16),
@@ -230,7 +228,6 @@ def counting_sort_scene(
         sleep_counter=sc,
         kappa=kappa,
         particle_dye=dye,
-        angular_velocity=omega,
         kappa_v=kappa_v,
         sorted_position=out["position"],
         sorted_velocity=out["velocity"],
@@ -242,7 +239,6 @@ def counting_sort_scene(
         sorted_sleep_counter=out["sleep_counter"],
         sorted_kappa=out["kappa"],
         sorted_particle_dye=out["particle_dye"],
-        sorted_angular_velocity=out["angular_velocity"],
         sorted_kappa_v=out["kappa_v"],
         sorted_velocity_h=out["velocity_h"],
         sorted_temperature_h=out["temperature_h"],

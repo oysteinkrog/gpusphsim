@@ -156,7 +156,6 @@ def _scramble(world, sim, camera) -> None:
     world.kappa[:n] = 5.0
     world.kappa_v[:n] = 5.0
     world.sleep_counter[:n] = 255
-    world.angular_velocity[:n] = 3.0
     world.color[:] = 9.0
     world._spawned_material_ids = {99}
     sim.sim_time = 99.0
@@ -167,9 +166,9 @@ def _scramble(world, sim, camera) -> None:
 
 
 def _assert_fresh_warm_start(world) -> None:
-    """Loaded or restored slots start with no warm-start, sleep or spin state."""
+    """Loaded or restored slots start with no warm-start or sleep state."""
     n = world._high_water
-    for k in ("kappa", "kappa_v", "sleep_counter", "angular_velocity"):
+    for k in ("kappa", "kappa_v", "sleep_counter"):
         assert not np.any(getattr(world, k)[:n].get()), k
     assert np.array_equal(_bits(world.veleval[:n].get()), _bits(world.velocity[:n].get()))
     # Tail beyond the restored range holds no live particle.

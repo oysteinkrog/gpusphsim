@@ -69,7 +69,6 @@ def test_inject_boundary_zeroes_warm_start():
     # Stale values everywhere, as left by earlier occupants of the slots.
     w.kappa[:] = 17.0
     w.kappa_v[:] = 3.0
-    w.angular_velocity[:] = 1.0
     rbm = sim.rigid_body_manager
     rbm.add_rigid_body_with_particles(
         position=(0.3, 0.3, 0.3), half_extents=(0.05, 0.05, 0.05), mass=2.0
@@ -82,7 +81,6 @@ def test_inject_boundary_zeroes_warm_start():
     assert np.all((w.packed_info[off : off + nb].get() & 0xFF) == MAT_RIGID)
     assert np.all(w.kappa[off : off + nb].get() == 0.0)
     assert np.all(w.kappa_v[off : off + nb].get() == 0.0)
-    assert np.all(w.angular_velocity[off : off + nb].get() == 0.0)
 
 
 def _pool_on_floor(stale: bool):

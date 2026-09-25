@@ -63,7 +63,6 @@ GATHERED_FIELDS = [
     ("kappa", "sorted_kappa"),
     ("kappa_v", "sorted_kappa_v"),
     ("particle_dye", "sorted_particle_dye"),
-    ("angular_velocity", "sorted_angular_velocity"),
 ]
 
 

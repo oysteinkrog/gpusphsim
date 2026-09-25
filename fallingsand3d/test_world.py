@@ -365,7 +365,7 @@ def test_spawn_sphere_no_loop_sync():
 def _dirty_world(n=20_000):
     """World whose per-particle arrays hold 1.0, as if a previous scene used them."""
     w = World(n)
-    for arr in (w.position, w.velocity, w.veleval, w.sph_force, w.angular_velocity,
+    for arr in (w.position, w.velocity, w.veleval, w.sph_force,
                 w.kappa, w.kappa_v, w.lifetime, w.shear_rate, w.exposure_heat,
                 w.exposure_corrode, w.sorted_lambda_pbf):
         arr[:] = 1.0
@@ -384,13 +384,13 @@ _SPAWNERS = {
 @pytest.mark.parametrize("shape", sorted(_SPAWNERS))
 @pytest.mark.parametrize("material_id", [WATER, STONE, FIRE])
 def test_spawn_clears_stale_slot_state(shape, material_id):
-    """Every spawn_* zeroes warm-start and spin state and packs rest density in position.w."""
+    """Every spawn_* zeroes warm-start state and packs rest density in position.w."""
     w = _dirty_world()
     n = _SPAWNERS[shape](w, material_id)
     assert n > 0 and w._high_water == n
     sl = slice(0, n)
     mat = MATERIALS[material_id]
-    for name in ("kappa", "kappa_v", "angular_velocity", "sph_force", "shear_rate",
+    for name in ("kappa", "kappa_v", "sph_force", "shear_rate",
                  "exposure_heat", "exposure_corrode"):
         vals = getattr(w, name)[sl].get()
         assert np.all(vals == 0.0), f"{shape}: {name} kept stale values"
