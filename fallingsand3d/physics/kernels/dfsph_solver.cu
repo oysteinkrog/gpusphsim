@@ -791,8 +791,10 @@ void K_DFSPH_NonPressureForces(
 
 /* ======================================================================
  * K_DFSPH_ComputeKappaV -- Divergence correction factor
- * div_v = SUM_j m_j/rho_j * (v*_i - v*_j) . gradW_ij
- * kappa_v_i = (1/dt) * div_v / max(alpha_i, eps)
+ * div_v = SUM_j m_j/rho_j * (v*_i - v*_j) . gradW_ij = +(1/rho) Drho/Dt,
+ *   positive under compression (grad_spiky points toward j)
+ * dkappa_v_i = max(div_v, 0) * alpha_i * omega / dt
+ *   (multiply by alpha = 1/denom, never divide)
  *
  * kappa_v_out gets this iteration's increment, which CorrectVelocityDiv
  * applies. kappa_v_total (optional) is the running sum over the warm-start
