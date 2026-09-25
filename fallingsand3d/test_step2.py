@@ -110,8 +110,11 @@ def _upload_all_params() -> None:
     mat_array = build_material_array()
     upload_materials(mat_array)
 
-    # Upload granular params with base viscosity matching VISCOSITY
-    upload_granular_params(build_granular_params(mu0=VISCOSITY))
+    # Upload granular params with base viscosity matching VISCOSITY.
+    # Surface tension off: the Akinci cohesion pair term (bd-r5-review-n28.125)
+    # acts on any two FLUID particles, and these tests check pressure and
+    # viscosity alone. test_akinci_st.py covers surface tension.
+    upload_granular_params(build_granular_params(mu0=VISCOSITY, surface_tension_gamma=0.0))
 
 
 def _make_two_particle_setup(
@@ -715,7 +718,7 @@ def test_fluid_unchanged_by_muI() -> None:
     forces1 = cupy.asnumpy(sph_force1)
 
     # Run again with very different granular params
-    upload_granular_params(build_granular_params(mu_s=0.9, mu_2=0.99, mu_max=99999.0))
+    upload_granular_params(build_granular_params(mu_s=0.9, mu_2=0.99, mu_max=99999.0, surface_tension_gamma=0.0))
 
     data2 = _make_two_particle_setup(
         pos_a=[0.0, 0.0, 0.0],
