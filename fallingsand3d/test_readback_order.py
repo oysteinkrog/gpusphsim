@@ -318,7 +318,7 @@ def test_spawn_gas_forces_sort():
         spawn.compute_spawn(
             packed, f4(), f4(), f4(), mass,
             cp.full(n, 400.0, dtype=cp.float32), cp.ones(n, dtype=cp.float32),
-            cp.zeros(n, dtype=cp.float32), f4(), cp.zeros(n, dtype=cp.uint8),
+            cp.zeros(n, dtype=cp.float32), cp.zeros(n, dtype=cp.uint8),
             cp.full(n, 1000.0, dtype=cp.float32), cp.zeros(n, dtype=cp.float32),
             dead_indices, dead_count, md,
         )

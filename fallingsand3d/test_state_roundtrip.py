@@ -153,7 +153,6 @@ def _scramble(world, sim, camera) -> None:
     world.kappa[:n] = 5.0
     world.kappa_v[:n] = 5.0
     world.sleep_counter[:n] = 255
-    world.color[:] = 9.0
     world._spawned_material_ids = {99}
     sim.sim_time = 99.0
     camera.target = np.array([9.0, 9.0, 9.0], np.float32)
@@ -172,11 +171,15 @@ def _assert_fresh_warm_start(world) -> None:
     assert not np.any(world.packed_info[n:].get())
 
 
-def _assert_color_matches_material(world) -> None:
-    """color.w carries behavior * 0.25, DEAD gets -1 (refresh_color)."""
+def _assert_color_matches_material(world, sim) -> None:
+    """Render color.w carries behavior * 0.25, DEAD gets -1. K_ComputeColor
+    computes it from the state, so a paused load or undo shows the restored
+    state (bd-r5-review-n28.145)."""
     n = world._high_water
     packed = world.packed_info[:n].get()
-    w = world.color[:n, 3].get()
+    out = cp.zeros((n, 4), dtype=cp.float32)
+    sim.compute_render_color(out, n)
+    w = out[:, 3].get()
     mat = packed & 0xFF
     beh = (packed >> 8) & 0x3
     expected = np.where(mat == 0, np.float32(-1.0), beh.astype(np.float32) * np.float32(0.25))
@@ -216,7 +219,7 @@ def test_save_load_roundtrip_live_world(tmp_path, monkeypatch):
     assert camera.azimuth == 33.0
     assert camera.elevation == 12.5
     _assert_fresh_warm_start(world)
-    _assert_color_matches_material(world)
+    _assert_color_matches_material(world, sim)
 
 
 def test_load_ignores_removed_dye_array(tmp_path, monkeypatch):
@@ -275,7 +278,7 @@ def test_snapshot_capture_restore_live_world():
         _assert_state_equal(world, expected, SNAPPED, SNAPPED_FP16)
         assert world._spawned_material_ids == mats
         _assert_fresh_warm_start(world)
-        _assert_color_matches_material(world)
+        _assert_color_matches_material(world, sim)
         _scramble(world, sim, camera)
     assert not ring.restore(world, steps_back=1, sim=sim)
 

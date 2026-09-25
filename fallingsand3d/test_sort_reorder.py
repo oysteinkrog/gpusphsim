@@ -281,7 +281,6 @@ def test_world_sorted_buffers_preallocated() -> None:
     assert world.sorted_velocity.shape == (1000, 4)
     assert world.sorted_veleval.shape == (1000, 4)
     assert world.sorted_sph_force.shape == (1000, 4)
-    assert world.sorted_color.shape == (1000, 4)
     assert world.sorted_density.shape == (1000,)
     assert world.sorted_mass.shape == (1000,)
     assert world.sorted_temperature.shape == (1000,)

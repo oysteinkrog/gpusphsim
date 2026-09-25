@@ -8,7 +8,7 @@ Verifies that:
    slot rather than repeating the same slot.
 
 Most tests stub out the CuPy dependency with numpy arrays and need no GPU.
-test_restore_rebuilds_color_on_gpu needs a CUDA GPU. The end-to-end
+test_restore_renders_material_colors_on_gpu needs a CUDA GPU. The end-to-end
 capture/restore test on a real World and Simulation is in
 test_state_roundtrip.py.
 """
@@ -94,11 +94,6 @@ class _World:
         self.lifetime = np.zeros(n, dtype=np.float32)
         self.mass = np.ones(n, dtype=np.float32)
         self._spawned_material_ids: set = set()
-        self.refresh_color_calls: list[int] = []
-
-    def refresh_color(self, n: int) -> None:
-        """Record the call; the GPU version is tested in test_restore_color."""
-        self.refresh_color_calls.append(n)
 
     def set_marker(self, value: float) -> None:
         """Write a unique value into position[0] so states are distinguishable."""
@@ -225,24 +220,14 @@ class TestSnapshotRingUndo(unittest.TestCase):
         self.assertAlmostEqual(float(world.position[0, 0]), 5.0,
                                msg="undo in wrapped ring should give most recent capture")
 
-    # ------------------------------------------------------------------
-    # Test 6: restore rebuilds color for the restored slots, since the
-    # slot holds no color (bd-r5-review-n28.63).
-    # ------------------------------------------------------------------
-    def test_restore_refreshes_color(self):
-        ring = self._make_ring()
-        world = _World()
-        ring.capture(world)
-        world._high_water = 3
-        self.assertTrue(ring.restore(world, steps_back=1))
-        self.assertEqual(world.refresh_color_calls, [MAX_P])
 
+def test_restore_renders_material_colors_on_gpu():
+    """bd-r5-review-n28.63, bd-r5-review-n28.145: a paused undo renders the
+    restored state's colors.
 
-def test_restore_rebuilds_color_on_gpu():
-    """bd-r5-review-n28.63: GPU restore gives each slot its material color.
-
-    The slot holds no color, so without the rebuild a paused undo keeps the
-    colors of the state being undone.
+    Nothing stores a color: K_ComputeColor computes it from the state every
+    frame, so the restored packed_info, temperature and health must give
+    the colors the scene had at capture.
     """
     try:
         import cupy as cp
@@ -251,6 +236,7 @@ def test_restore_rebuilds_color_on_gpu():
         import pytest
         pytest.skip("needs CuPy and a CUDA GPU")
     from materials import MATERIALS, SAND, STONE, WATER
+    from simulation import Simulation
     from world import World
 
     world = World(20_000)
@@ -258,23 +244,36 @@ def test_restore_rebuilds_color_on_gpu():
         x = -0.3 + 0.25 * i
         world.spawn_cube((x, -0.05, -0.05), (x + 0.1, 0.05, 0.05), mat, 0.02)
     n = world._high_water
+    sim = Simulation(world)
+
+    def render():
+        out = cp.zeros((n, 4), dtype=cp.float32)
+        sim.compute_render_color(out, n)
+        return out.get()
+
+    before = render()
     ring = SnapshotRing(max_snapshots=2, max_particles=world.max_particles)
     ring.capture(world)
 
-    world.color[:] = 0.5
+    world.temperature[:n] = cp.float32(1400.0)
+    world.health[:n] = cp.float32(0.3)
+    world.packed_info[:n] = cp.uint32(STONE | (3 << 8))
     assert ring.restore(world, steps_back=1)
     cp.cuda.Device().synchronize()
 
     packed = world.packed_info[:n].get()
-    got = world.color[:n].get()
+    got = render()
+    np.testing.assert_allclose(got, before, rtol=0, atol=1e-7)
     for mat_id, beh_w in ((WATER, 0.0), (SAND, 0.25), (STONE, 0.75)):
         rows = got[(packed & 0xFF) == mat_id]
         assert rows.shape[0] > 0
+        np.testing.assert_array_equal(rows[:, 3], np.float32(beh_w))
+        if mat_id == WATER:
+            continue  # FLUID gets the depth and density tint
         m = MATERIALS[mat_id]
         np.testing.assert_allclose(
             rows[:, :3], np.broadcast_to(
                 np.array([m.color_r, m.color_g, m.color_b], np.float32), rows[:, :3].shape))
-        np.testing.assert_array_equal(rows[:, 3], np.float32(beh_w))
 
 
 class TestSnapshotSDFUndo(unittest.TestCase):

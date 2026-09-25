@@ -33,11 +33,21 @@ def test_constructor():
     print("PASS: constructor custom")
 
 
+def _render_color(world, n):
+    """Render color of the first n slots, as the renderer gets it: one
+    K_ComputeColor launch over the unsorted state (bd-r5-review-n28.145)."""
+    from simulation import Simulation
+
+    out = cp.zeros((n, 4), dtype=cp.float32)
+    Simulation(world).compute_render_color(out, n)
+    return out.get()
+
+
 def test_array_shapes_dtypes():
     w = World(1000)
     n = 1000
     # float4 arrays
-    for name in ["position", "velocity", "veleval", "sph_force", "color"]:
+    for name in ["position", "velocity", "veleval", "sph_force"]:
         arr = getattr(w, name)
         assert arr.shape == (n, 4), f"{name} shape: {arr.shape}"
         assert arr.dtype == cp.float32, f"{name} dtype: {arr.dtype}"
@@ -56,7 +66,7 @@ def test_array_shapes_dtypes():
     # All are CuPy arrays
     for name in ["position", "velocity", "veleval", "sph_force", "density",
                  "mass", "packed_info", "temperature", "health", "lifetime",
-                 "shear_rate", "exposure_heat", "exposure_corrode", "color",
+                 "shear_rate", "exposure_heat", "exposure_corrode",
                  "sleep_counter"]:
         assert isinstance(getattr(w, name), cp.ndarray), f"{name} not CuPy"
     print("PASS: array shapes, dtypes, and GPU residency")
@@ -93,13 +103,11 @@ def test_spawn_cube_water():
     assert abs(float(w.temperature[0]) - T_AMBIENT) < 0.1
     # health = 1.0
     assert abs(float(w.health[0]) - 1.0) < 1e-6
-    # color = water color
-    mat = MATERIALS[WATER]
-    assert abs(float(w.color[0, 0]) - mat.color_r) < 1e-6
-    assert abs(float(w.color[0, 1]) - mat.color_g) < 1e-6
-    assert abs(float(w.color[0, 2]) - mat.color_b) < 1e-6
-    # color.w = behavior_class * 0.25 (FLUID = 0) for the SSFR shaders (bd-r5-review-n28.63)
-    assert abs(float(w.color[0, 3]) - FLUID * 0.25) < 1e-6
+    # Render color (K_ComputeColor, bd-r5-review-n28.145): color.w =
+    # behavior_class * 0.25 (FLUID = 0) for the SSFR shaders, rgb in [0, 1].
+    col = _render_color(w, n)
+    assert np.all(col[:, 3] == FLUID * 0.25)
+    assert np.all((col[:, :3] >= 0.0) & (col[:, :3] <= 1.0))
     print(f"PASS: spawn_cube water ({n} particles)")
 
 
@@ -156,9 +164,9 @@ def test_kill_in_sphere():
     # count=True returns the number killed; the UI brush uses it so main.py
     # sees a nonzero delta (bd-r5-review-n28.155).
     killed = w.kill_in_sphere((0.0, 0.0, 0.0), 0.25, count=True)
-    # Killed slots are MAKE_PACKED(DEAD, STATIC) with zero mass, health,
-    # velocity and rgb, and color.w = -1 so the vertex shaders cull them
-    # (bd-r5-review-n28.34, bd-r5-review-n28.60).
+    # Killed slots are MAKE_PACKED(DEAD, STATIC) with zero mass, health and
+    # velocity, and render with color (0, 0, 0, -1) so the vertex shaders
+    # cull them (bd-r5-review-n28.34, bd-r5-review-n28.60).
     n = w._high_water
     dead_mask = (w.packed_info[:n] & 0xFF) == 0
     dead_count = int(cp.sum(dead_mask))
@@ -170,8 +178,11 @@ def test_kill_in_sphere():
     assert bool(cp.all(w.mass[:n][dead_mask] == 0.0))
     assert bool(cp.all(w.health[:n][dead_mask] == 0.0))
     assert bool(cp.all(w.velocity[:n][dead_mask] == 0.0))
-    assert bool(cp.all(w.color[:n, :3][dead_mask] == 0.0))
-    assert bool(cp.all(w.color[:n, 3][dead_mask] == -1.0))
+    col = _render_color(w, n)
+    dead_h = dead_mask.get()
+    assert np.all(col[dead_h, :3] == 0.0)
+    assert np.all(col[dead_h, 3] == -1.0)
+    assert np.all(col[~dead_h, 3] == 0.0)
     # Particles outside the sphere are untouched.
     r2 = cp.sum(w.position[:n, :3] ** 2, axis=1)
     assert bool(cp.all(dead_mask == (r2 <= 0.25 * 0.25)))
@@ -241,7 +252,7 @@ def test_contiguous_arrays():
     w = World(1000)
     for name in ["position", "velocity", "veleval", "sph_force", "density",
                  "mass", "packed_info", "temperature", "health", "lifetime",
-                 "shear_rate", "exposure_heat", "exposure_corrode", "color",
+                 "shear_rate", "exposure_heat", "exposure_corrode",
                  "sleep_counter"]:
         arr = getattr(w, name)
         assert isinstance(arr, cp.ndarray)

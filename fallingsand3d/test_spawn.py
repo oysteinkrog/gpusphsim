@@ -111,7 +111,6 @@ def make_sorted_arrays(n, max_particles=None):
         "temperature": cupy.full(max_particles, 293.0, dtype=cupy.float32),
         "health": cupy.ones(max_particles, dtype=cupy.float32),
         "lifetime": cupy.zeros(max_particles, dtype=cupy.float32),
-        "color": cupy.zeros((max_particles, 4), dtype=cupy.float32),
         "sleep_counter": cupy.zeros(max_particles, dtype=cupy.uint8),
         "density": cupy.full(max_particles, 1000.0, dtype=cupy.float32),
         "shear_rate": cupy.zeros(max_particles, dtype=cupy.float32),
@@ -181,7 +180,6 @@ def test_water_spawns_steam():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -196,7 +194,6 @@ def test_water_spawns_steam():
     vel = arrays["velocity"].get()
     lt = arrays["lifetime"].get()
     health = arrays["health"].get()
-    color = arrays["color"].get()
 
     # Source water particle should be DEAD
     assert GET_MATERIAL_ID(int(pi[0])) == DEAD, f"Source should be DEAD, got {GET_MATERIAL_ID(int(pi[0]))}"
@@ -230,10 +227,6 @@ def test_water_spawns_steam():
 
         # Health should be 1.0
         assert abs(health[idx] - 1.0) < 0.01, f"Particle {idx}: health={health[idx]}, expected 1.0"
-
-        # color.w carries the GAS behavior code (2 * 0.25) for the SSFR
-        # shaders, not 1.0, which they read as STATIC (bd-r5-review-n28.63).
-        assert color[idx, 3] == 0.5, f"Particle {idx}: color.w={color[idx, 3]}, expected 0.5"
 
     # Total mass conservation: spawned mass == original mass
     assert abs(total_spawned_mass - water_mass) < 1e-5, \
@@ -269,7 +262,6 @@ def test_spawn_flag_cleared():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -310,7 +302,6 @@ def test_freelist_exhausted():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -363,7 +354,6 @@ def test_freelist_partial_exhaustion():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -415,7 +405,6 @@ def test_scattered_freelist_indices():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -466,7 +455,6 @@ def test_source_marked_dead():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -516,7 +504,6 @@ def test_no_spawn_flag_unchanged():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -567,7 +554,6 @@ def test_multiple_spawns():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -788,7 +774,6 @@ def test_end_to_end_boil_spawn():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -871,7 +856,6 @@ def test_500k_stress():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -943,7 +927,6 @@ def test_dead_particle_phase_is_static():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -993,7 +976,6 @@ def test_freelist_underflow_safety():
         arrays["temperature"][:n],
         arrays["health"][:n],
         arrays["lifetime"][:n],
-        arrays["color"][:n],
         arrays["sleep_counter"][:n],
         arrays["density"][:n],
         arrays["shear_rate"][:n],
@@ -1086,7 +1068,7 @@ def test_spawn_retries_after_slots_appear():
     arrays["mass"][0] = 0.009
     dead_indices, dead_count = allocate_freelist(n)
     names = ["packed_info", "position", "velocity", "veleval", "mass", "temperature",
-             "health", "lifetime", "color", "sleep_counter", "density", "shear_rate"]
+             "health", "lifetime", "sleep_counter", "density", "shear_rate"]
     args = [arrays[k][:n] for k in names]
 
     dead_count[0] = 0
@@ -1359,7 +1341,7 @@ def test_spawn_children_ring_and_slot_state():
     compute_spawn(
         arrays["packed_info"], arrays["position"], arrays["velocity"],
         arrays["veleval"], arrays["mass"], arrays["temperature"],
-        arrays["health"], arrays["lifetime"], arrays["color"],
+        arrays["health"], arrays["lifetime"],
         arrays["sleep_counter"], arrays["density"], arrays["shear_rate"],
         dead_indices, dead_count,
         predicted_position=predicted, velocity_h=velocity_h, pressure=pressure,
@@ -1415,7 +1397,7 @@ def test_spawn_optional_state_null_safe():
     compute_spawn(
         arrays["packed_info"], arrays["position"], arrays["velocity"],
         arrays["veleval"], arrays["mass"], arrays["temperature"],
-        arrays["health"], arrays["lifetime"], arrays["color"],
+        arrays["health"], arrays["lifetime"],
         arrays["sleep_counter"], arrays["density"], arrays["shear_rate"],
         dead_indices, dead_count,
     )
@@ -1518,22 +1500,31 @@ if __name__ == "__main__":
 
 
 def test_world_spawn_writes_behavior_code_in_color_w():
-    """bd-r5-review-n28.63: spawned particles carry behavior * 0.25 in color.w.
+    """bd-r5-review-n28.63, bd-r5-review-n28.145: a spawned particle renders
+    with behavior * 0.25 in color.w before it has been through a substep.
 
-    The SSFR shaders decode color.w as the behavior class, so a particle
-    that has not been through a substep must already hold the right code.
+    The SSFR shaders decode color.w as the behavior class. K_ComputeColor
+    computes the color from the state every frame, so a paused spawn must
+    already come out right. Non-FLUID slots get the plain material color at
+    ambient temperature.
     """
     from materials import MATERIALS
+    from simulation import Simulation
     from world import World
 
     w = World(20_000)
+    sim = Simulation(w)
     for mat_id, expected_w in ((WATER, 0.0), (SAND, 0.25), (STONE, 0.75)):
         start = w._high_water
         w.spawn_cube((-0.05, -0.05, -0.05), (0.05, 0.05, 0.05), mat_id, 0.02)
-        col = w.color[start:w._high_water].get()
+        out = cupy.zeros((w._high_water, 4), dtype=cupy.float32)
+        sim.compute_render_color(out)
+        col = out[start:].get()
         assert col.shape[0] > 0
-        mat = MATERIALS[mat_id]
         np.testing.assert_array_equal(col[:, 3], np.float32(expected_w))
+        if mat_id == WATER:
+            continue  # FLUID gets the depth and density tint
+        mat = MATERIALS[mat_id]
         np.testing.assert_allclose(
             col[:, :3], np.broadcast_to(
                 np.array([mat.color_r, mat.color_g, mat.color_b], np.float32), col[:, :3].shape))

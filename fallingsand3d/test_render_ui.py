@@ -187,10 +187,18 @@ def _fake_sim(high_water, rigid_tail, capacity=512):
     world = SimpleNamespace(
         _high_water=high_water,
         position=rng.random((capacity, 4), dtype=np.float32),
-        color=rng.random((capacity, 4), dtype=np.float32),
         velocity=rng.random((capacity, 4), dtype=np.float32),
     )
-    return SimpleNamespace(world=world, _rigid_tail_count=rigid_tail)
+    # Stands in for K_ComputeColor (bd-r5-review-n28.145): copy_to_vbos asks
+    # the sim to write the render color of the first n slots into the VBO.
+    render_color = rng.random((capacity, 4), dtype=np.float32)
+
+    def compute_render_color(out, n=None):
+        out[:n] = render_color[:n]
+
+    return SimpleNamespace(world=world, _rigid_tail_count=rigid_tail,
+                           render_color=render_color,
+                           compute_render_color=compute_render_color)
 
 
 @pytest.mark.xfail(
@@ -209,7 +217,7 @@ def test_copy_to_vbos_returns_drawn_count_with_rigid_tail():
         n = copy(sim, pos, col, vel)
         assert n == 200 + tail
         assert np.array_equal(pos.host[:n], sim.world.position[:n])
-        assert np.array_equal(col.host[:n], sim.world.color[:n])
+        assert np.array_equal(col.host[:n], sim.render_color[:n])
         assert np.array_equal(vel.host[:n], sim.world.velocity[:n])
 
 

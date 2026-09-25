@@ -31,9 +31,6 @@ class _World:
         self._high_water = N
         self._spawned_material_ids = set()
 
-    def refresh_color(self, n):
-        pass
-
     def mark(self, v):
         self.position[:, 0] = v
 

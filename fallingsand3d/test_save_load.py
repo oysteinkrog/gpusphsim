@@ -824,8 +824,31 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# bd-r5-review-n28.63: load_scene rebuilds color from the material table
+# bd-r5-review-n28.63, bd-r5-review-n28.145: a paused load renders the loaded
+# state's colors. Nothing stores a color; K_ComputeColor computes it from the
+# state every frame.
 # ---------------------------------------------------------------------------
+
+def _render_color(world, n: int) -> np.ndarray:
+    """Render color of the first n slots: one K_ComputeColor launch."""
+    import cupy as cp
+    from simulation import Simulation
+
+    out = cp.zeros((n, 4), dtype=cp.float32)
+    Simulation(world).compute_render_color(out, n)
+    return out.get()
+
+
+def _scramble_color_inputs(world, n: int) -> None:
+    """Change every input of the render color, so a load has to put it back."""
+    import cupy as cp
+    from materials import STONE
+
+    world.temperature[:n] = cp.float32(1400.0)
+    world.health[:n] = cp.float32(0.3)
+    world.velocity[:n] = cp.float32(2.0)
+    world.packed_info[:n] = cp.uint32(STONE | (3 << 8))
+
 
 def _expected_colors(packed: np.ndarray) -> np.ndarray:
     """Base material color, with behavior * 0.25 in w (DEAD gets -1)."""
@@ -843,7 +866,7 @@ def _expected_colors(packed: np.ndarray) -> np.ndarray:
 
 @pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
 def test_load_scene_rebuilds_color(tmp_path, monkeypatch) -> None:
-    """Load into a world whose color holds junk: loaded slots get material colors."""
+    """Load over a changed state: loaded slots render in material colors."""
     import cupy as cp
     import save_load as sl
     from materials import SAND, STONE, WATER
@@ -858,13 +881,16 @@ def test_load_scene_rebuilds_color(tmp_path, monkeypatch) -> None:
     n = world._high_water
     sl.save_scene(world, sim, cam, "mixed")
 
-    world.color[:] = 9.0
+    _scramble_color_inputs(world, n)
     assert sl.load_scene(world, sim, cam, "mixed") == n
     cp.cuda.Device().synchronize()
 
     packed = world.packed_info[:n].get()
-    got = world.color[:n].get()
-    np.testing.assert_allclose(got, _expected_colors(packed), rtol=0, atol=1e-7)
+    got = _render_color(world, n)
+    # FLUID adds a depth and density tint; every other slot is the plain
+    # material color at ambient temperature and full health.
+    solid = ((packed >> 8) & 0x3) != 0
+    np.testing.assert_allclose(got[solid], _expected_colors(packed)[solid], rtol=0, atol=1e-7)
     mats = set((packed & 0xFF).tolist())
     assert {WATER, SAND, STONE} <= mats
     w_by_mat = {m: set(got[(packed & 0xFF) == m, 3].tolist()) for m in (WATER, SAND, STONE)}
@@ -964,10 +990,10 @@ def test_color_round_trip_through_save(tmp_path, monkeypatch) -> None:
         x = -0.3 + 0.25 * i
         world.spawn_cube((x, -0.05, -0.05), (x + 0.1, 0.05, 0.05), mat, 0.02)
     n = world._high_water
-    before = world.color[:n].get()
+    before = _render_color(world, n)
     sl.save_scene(world, sim, cam, "rt")
 
-    world.color[:] = 9.0
+    _scramble_color_inputs(world, n)
     assert sl.load_scene(world, sim, cam, "rt") == n
     cp.cuda.Device().synchronize()
-    np.testing.assert_allclose(world.color[:n].get(), before, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(_render_color(world, n), before, rtol=0, atol=1e-7)

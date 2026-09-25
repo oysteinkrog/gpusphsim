@@ -239,22 +239,6 @@ def test_compact_preserves_sleep_counter():
     print(f"PASS: compact preserves sleep_counter ({w._high_water} particles)")
 
 
-def test_compact_preserves_color():
-    """Compaction preserves color for alive particles."""
-    w = World(10_000)
-    n = w.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), WATER, 0.02)
-
-    # Kill some
-    killed = w.kill_in_sphere((0.0, 0.0, 0.0), 0.05)
-    alive_mask = (w.packed_info[:n] & cp.uint32(0xFF)) != 0
-    color_before = w.color[:n][alive_mask].copy()
-
-    w.compact()
-    color_after = w.color[:w._high_water]
-    np.testing.assert_allclose(color_after.get(), color_before.get(), rtol=0, atol=0)
-    print(f"PASS: compact preserves color ({w._high_water} particles)")
-
-
 def test_compact_dead_with_nonzero_packed_info():
     """Compaction correctly handles dead particles with packed_info=0x300 (MAKE_PACKED(0, STATIC))."""
     w = World(10_000)
@@ -340,7 +324,7 @@ def test_compact_contiguous_after():
 
     for name in ["position", "velocity", "veleval", "sph_force", "density",
                  "mass", "packed_info", "temperature", "health", "lifetime",
-                 "shear_rate", "exposure_heat", "exposure_corrode", "color",
+                 "shear_rate", "exposure_heat", "exposure_corrode",
                  "sleep_counter"]:
         arr = getattr(w, name)
         assert isinstance(arr, cp.ndarray), f"{name} not CuPy"
@@ -428,7 +412,6 @@ if __name__ == "__main__":
     test_compact_preserves_mass()
     test_compact_preserves_health()
     test_compact_preserves_sleep_counter()
-    test_compact_preserves_color()
     test_compact_dead_with_nonzero_packed_info()
     test_compact_10k_kill_and_render()
     test_compact_spawn_after_compact()
