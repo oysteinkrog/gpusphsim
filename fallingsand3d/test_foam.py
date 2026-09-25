@@ -82,7 +82,7 @@ def test_spray_follows_new_gravity(world, sim, gy, expect):
     sim.set_gravity(gy)
     for _ in range(50):
         foam.foam_physics(world.foam_position, world.foam_velocity,
-                          world.foam_count, world._max_foam, last_foam_count=k)
+                          world.foam_count, world._max_foam)
     vy = cp.asnumpy(world.foam_velocity[:k, 1])
     py = cp.asnumpy(world.foam_position[:k, 1])
     world.foam_count[:] = 0
@@ -176,3 +176,82 @@ def test_step_frame_generates_once_per_frame_and_compacts_every_8(world, monkeyp
         world.foam_enabled = False
         world.foam_count[:] = 0
         sim.close()
+
+
+# ---------------------------------------------------------------------------
+# Dead foam is marked in position.w and culled (bd-r5-review-n28.146)
+# ---------------------------------------------------------------------------
+
+def _seed_foam(world, pos: np.ndarray, vel: np.ndarray) -> None:
+    k = pos.shape[0]
+    world.foam_position[:k] = cp.asarray(pos)
+    world.foam_velocity[:k] = cp.asarray(vel)
+    world.foam_count[:] = k
+
+
+def _mid(sim) -> np.ndarray:
+    wmin = np.array(sim._sim_params[0]["world_min"], dtype=np.float32)
+    wmax = np.array(sim._sim_params[0]["world_max"], dtype=np.float32)
+    return 0.5 * (wmin + wmax)
+
+
+def test_expired_foam_marked_dead_in_position(world, sim):
+    """A particle whose lifetime runs out gets position.w = -1 on that substep."""
+    pos = np.zeros((2, 4), dtype=np.float32)
+    pos[:, :3] = _mid(sim)
+    pos[:, 3] = [1.0, 0.0]  # FOAM, SPRAY
+    vel = np.zeros((2, 4), dtype=np.float32)
+    vel[:, 3] = [0.5 * sim.dt, 100.0]  # first dies this substep
+    _seed_foam(world, pos, vel)
+    foam.foam_physics(world.foam_position, world.foam_velocity,
+                      world.foam_count, world._max_foam)
+    p = cp.asnumpy(world.foam_position[:2])
+    v = cp.asnumpy(world.foam_velocity[:2])
+    world.foam_count[:] = 0
+    assert p[0, 3] < 0 and v[0, 3] < 0
+    assert p[1, 3] == 0.0 and v[1, 3] > 0
+
+
+def test_floor_kill_marks_dead_in_position(world, sim):
+    """A particle pushed below the floor gets position.w = -1 on that substep."""
+    wmin = np.array(sim._sim_params[0]["world_min"], dtype=np.float32)
+    pos = np.zeros((1, 4), dtype=np.float32)
+    pos[0, :3] = _mid(sim)
+    pos[0, 1] = wmin[1] - 0.01
+    pos[0, 3] = 0.0  # SPRAY
+    vel = np.zeros((1, 4), dtype=np.float32)
+    vel[0, 1] = -1.0
+    vel[0, 3] = 100.0
+    _seed_foam(world, pos, vel)
+    foam.foam_physics(world.foam_position, world.foam_velocity,
+                      world.foam_count, world._max_foam)
+    p = cp.asnumpy(world.foam_position[0])
+    v = cp.asnumpy(world.foam_velocity[0])
+    world.foam_count[:] = 0
+    assert p[3] < 0 and v[3] < 0
+
+
+def test_compaction_clears_stale_tail(world, sim):
+    """After compaction the active buffer has w < 0 from the alive count up."""
+    k = 20
+    pos = np.zeros((k, 4), dtype=np.float32)
+    pos[:, :3] = _mid(sim)
+    pos[:, 3] = 1.0
+    vel = np.zeros((k, 4), dtype=np.float32)
+    vel[:, 3] = np.where(np.arange(k) % 2 == 0, 100.0, -1.0)  # 10 alive
+    _seed_foam(world, pos, vel)
+    # Stale positions from an earlier cycle in the output buffer.
+    world.foam_position_b[:] = cp.float32(2.0)
+    sim._frame_counter = 8
+    enabled = world.foam_enabled
+    world.foam_enabled = True
+    try:
+        sim._maybe_compact_foam()
+    finally:
+        world.foam_enabled = enabled
+    count = int(world.foam_count[0])
+    p = cp.asnumpy(world.foam_position[:])
+    world.foam_count[:] = 0
+    assert count == 10
+    assert np.all(p[:10, 3] == 1.0)
+    assert np.all(p[10:, 3] < 0), "stale tail still drawable after compaction"

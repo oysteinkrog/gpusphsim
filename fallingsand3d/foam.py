@@ -193,29 +193,21 @@ def foam_generate(
     )
 
 
-# Minimum grid launch size for K_FoamPhysics to avoid pathologically tiny grids.
-_MIN_FOAM_GRID_SIZE = 1024
-
-
 def foam_physics(
     foam_position: cupy.ndarray,
     foam_velocity: cupy.ndarray,
     foam_count: cupy.ndarray,
     max_foam: int,
-    last_foam_count: int = 0,
 ) -> None:
     """Launch K_FoamPhysics: simple physics for each foam particle.
 
-    Grid is bounded by min(2 * last_foam_count + _MIN_FOAM_GRID_SIZE, max_foam)
-    rather than always max_foam (bd-mzc.44).  last_foam_count is the deferred
-    CPU readback in Simulation._last_foam_count.  It describes the end of the
-    frame before the previous one, so foam made since then is not in it; the
-    2x headroom plus the fixed pad covers a splash that grows during those
-    frames (bd-r5-review-n28.46).  It is zero on the first frame, which gives
-    the _MIN_FOAM_GRID_SIZE launch.
+    The grid covers the whole pool (max_foam threads). The kernel reads the
+    live count from the foam_count device pointer and threads past it exit at
+    once, so the full launch costs a few microseconds. A grid sized from the
+    deferred host count missed foam made in the frames since that readback
+    (bd-r5-review-n28.146).
 
-    No GPU->CPU sync required: the kernel reads the actual count from the
-    foam_count device pointer and early-exits for out-of-bounds threads.
+    No GPU->CPU sync required.
 
     Parameters
     ----------
@@ -224,19 +216,11 @@ def foam_physics(
     foam_count : cupy.ndarray
         Device scalar (shape (1,) uint32) with the live foam particle count.
     max_foam : int
-        Hard upper bound on foam capacity (used as grid size when
-        last_foam_count is 0 or exceeds it, and for safety clamping).
-    last_foam_count : int
-        1-frame-deferred foam count from async CPU readback.  0 means unknown
-        (first frame); in that case the grid falls back to _MIN_FOAM_GRID_SIZE.
+        Pool size, used as the grid size.
     """
     module = _get_module()
     kernel = module.get_function("K_FoamPhysics")
-    # Use the deferred count with headroom for growth since that readback.
-    effective = 2 * int(last_foam_count) + _MIN_FOAM_GRID_SIZE
-    # Never exceed the actual capacity.
-    effective = min(effective, max_foam)
-    grid = ((effective + _BLOCK - 1) // _BLOCK,)
+    grid = ((max_foam + _BLOCK - 1) // _BLOCK,)
     kernel(
         grid,
         (_BLOCK,),
@@ -259,7 +243,9 @@ def foam_compact(
 ) -> None:
     """Launch K_FoamCompact: remove dead foam particles.
 
-    After this, alive_count[0] has the new count.
+    After this, alive_count[0] has the new count and every slot of
+    foam_position_out from alive_count[0] up is marked dead (w = -1), so the
+    renderer never draws stale positions from an earlier cycle.
     Caller should swap in/out buffers and copy alive_count to foam_count.
     """
     # Reset alive counter
@@ -279,3 +265,5 @@ def foam_compact(
             foam_count,
         ),
     )
+    clear = module.get_function("K_FoamClearTail")
+    clear(grid, (_BLOCK,), (foam_position_out, alive_count, np.int32(max_foam)))

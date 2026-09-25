@@ -2,7 +2,7 @@
 
 // Foam/spray/bubble vertex shader.
 // Renders secondary particles as small point sprites.
-// Position in aPos.xyz, type in aPos.w (0=spray, 1=foam, 2=bubble).
+// Position in aPos.xyz, type in aPos.w (0=spray, 1=foam, 2=bubble, -1=dead).
 
 layout(location = 0) in vec4 aPos;
 
@@ -13,6 +13,14 @@ uniform float uPointScale;
 out float vAlpha;
 
 void main() {
+    // Dead foam (type -1, see foam.cu): move it outside clip space.
+    if (aPos.w < 0.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        vAlpha = 0.0;
+        return;
+    }
+
     vec4 eyePos = uMV * vec4(aPos.xyz, 1.0);
     float dist = length(eyePos.xyz);
     gl_Position = uMVP * vec4(aPos.xyz, 1.0);

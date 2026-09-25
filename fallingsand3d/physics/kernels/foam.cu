@@ -6,11 +6,13 @@
  *                   trapped air, wave crest, and kinetic energy criteria.
  *   K_FoamPhysics:  per foam particle, simple physics (no neighbor loops).
  *   K_FoamCompact:  remove dead foam particles (lifetime <= 0).
+ *   K_FoamClearTail: mark every slot past the compacted count as dead.
  *
  * Foam types (stored in foam_position.w as float):
  *   0.0 = SPRAY  (ballistic: gravity + air drag)
  *   1.0 = FOAM   (surface: follow fluid surface, diffuse, fade)
  *   2.0 = BUBBLE (buoyant: rise toward surface, dissolve)
+ *  -1.0 = DEAD   (foam.vert culls it; set on death and on the stale tail)
  */
 
 #include "common.cuh"
@@ -197,8 +199,10 @@ void K_FoamPhysics(
     // Decrement lifetime
     lifetime -= c_foam.dt;
     if (lifetime <= 0.0f) {
-        // Mark as dead (negative lifetime)
+        // Mark as dead: negative lifetime for compaction, negative type so
+        // foam.vert stops drawing it this frame.
         foam_velocity[i].w = -1.0f;
+        foam_position[i].w = -1.0f;
         return;
     }
 
@@ -241,7 +245,9 @@ void K_FoamPhysics(
     if (pos.z < wmin.z) { pos.z = wmin.z; vel.z = 0.0f; }
     if (pos.z > wmax.z) { pos.z = wmax.z; vel.z = 0.0f; }
 
-    // Write back (preserve foam_type in pos.w, lifetime in vel.w)
+    // Write back (foam_type in pos.w, lifetime in vel.w). A floor kill
+    // writes -1 in both, like the lifetime death above.
+    if (lifetime <= 0.0f) foam_type = -1.0f;
     foam_position[i] = make_float4(pos.x, pos.y, pos.z, foam_type);
     foam_velocity[i] = make_float4(vel.x, vel.y, vel.z, lifetime);
 }
@@ -274,4 +280,26 @@ void K_FoamCompact(
     uint slot = atomicAdd(alive_count, 1u);
     foam_position_out[slot] = foam_position_in[i];
     foam_velocity_out[slot] = foam_velocity_in[i];
+}
+
+
+/* ======================================================================
+ * K_FoamClearTail -- after compaction, mark slots [alive_count, max_foam)
+ * of the new buffer as dead (pos.w = -1).
+ *
+ * K_FoamCompact writes only [0, alive_count). The rest of the buffer still
+ * holds positions from an earlier cycle, and the draw count is a deferred
+ * readback that can be larger than alive_count, so without this those old
+ * sprites flash for a frame. foam.vert culls w < 0.
+ * ====================================================================== */
+
+extern "C" __global__
+void K_FoamClearTail(
+    float4*       foam_position,
+    const uint*   __restrict__ alive_count,
+    int           max_foam
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= max_foam || i < (int)alive_count[0]) return;
+    foam_position[i].w = -1.0f;
 }

@@ -334,8 +334,8 @@ def test_spawn_gas_forces_sort():
     assert int(max_disp.get()[0]) == 5
 
 
-def test_foam_physics_grid_headroom(monkeypatch):
-    """The foam physics grid covers 2x the deferred count plus the pad."""
+def test_foam_physics_grid_covers_pool(monkeypatch):
+    """The foam physics grid covers the whole pool, not the deferred count."""
     launched = {}
 
     class _K:
@@ -347,7 +347,5 @@ def test_foam_physics_grid_headroom(monkeypatch):
             return _K()
 
     monkeypatch.setattr(foam, "_get_module", lambda: _M())
-    foam.foam_physics(None, None, None, max_foam=100_000, last_foam_count=5000)
-    assert launched["threads"] >= 2 * 5000 + foam._MIN_FOAM_GRID_SIZE
-    foam.foam_physics(None, None, None, max_foam=3000, last_foam_count=5000)
-    assert launched["threads"] < 3000 + foam._BLOCK
+    foam.foam_physics(None, None, None, max_foam=100_000)
+    assert 100_000 <= launched["threads"] < 100_000 + foam._BLOCK
