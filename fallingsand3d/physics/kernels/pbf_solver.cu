@@ -787,9 +787,6 @@ void K_PBF_Finalize(
     uint*           __restrict__ packed_info_out,
     unsigned char*  __restrict__ sleep_counter_out,
     float*          __restrict__ temperature_out,
-    const float4*   __restrict__ sorted_particle_dye,
-    const float4*   __restrict__ sorted_dye_rate,
-    float4*         __restrict__ particle_dye_out,
     const float4*   __restrict__ vorticity_in,     // (omega_x,y,z, |omega|) from ComputeLambda, or NULL
     const float4*   __restrict__ normal_in,         // (n_x,n_y,n_z, neighbor_count) from ComputeLambda, or NULL
     const float4*   __restrict__ pressure_normal_in, // density gradient normal for GRANULAR friction, or NULL
@@ -837,7 +834,6 @@ void K_PBF_Finalize(
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sleep_counter_in[i];
         temperature_out[orig_idx] = temp;
-        particle_dye_out[orig_idx] = sorted_particle_dye[i];
         return;
     }
 
@@ -870,7 +866,6 @@ void K_PBF_Finalize(
             packed_info_out[orig_idx] = pi;
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
-            particle_dye_out[orig_idx] = sorted_particle_dye[i];
                 return;
         }
         pi = CLEAR_SLEEPING(pi);
@@ -1270,15 +1265,6 @@ void K_PBF_Finalize(
         color = compute_color(mat_id, temp, hlth, behavior);
     }
 
-    // Dye update: dye += dye_rate * dt
-    float4 dye = sorted_particle_dye[i];
-    if (sorted_dye_rate != 0) {
-        float4 drate = sorted_dye_rate[i];
-        dye.x = fmaxf(0.0f, fminf(1.0f, dye.x + drate.x * dt));
-        dye.y = fmaxf(0.0f, fminf(1.0f, dye.y + drate.y * dt));
-        dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt));
-    }
-
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
@@ -1307,5 +1293,4 @@ void K_PBF_Finalize(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
-    particle_dye_out[orig_idx] = dye;
 }

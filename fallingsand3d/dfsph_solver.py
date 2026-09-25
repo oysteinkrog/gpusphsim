@@ -389,9 +389,6 @@ def finalize(
     sleep_counter_out: cupy.ndarray,
     temperature_out: cupy.ndarray,
     kappa_out: cupy.ndarray,
-    sorted_particle_dye: "Optional[cupy.ndarray]" = None,
-    sorted_dye_rate: "Optional[cupy.ndarray]" = None,
-    particle_dye_out: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
     vorticity_in: "cupy.ndarray | None" = None,
@@ -416,11 +413,6 @@ def finalize(
     n = sorted_position.shape[0]
     _null = np.intp(0)
     _null_f = cupy.ndarray(0, dtype=cupy.float32)
-    if sorted_particle_dye is None:
-        sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
-    if particle_dye_out is None:
-        particle_dye_out = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_dye_rate = sorted_dye_rate if sorted_dye_rate is not None else _null
     skv_ptr = sorted_kappa_v if sorted_kappa_v is not None else _null
     kv_out_ptr = kappa_v_out if kappa_v_out is not None else np.intp(0)
     rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
@@ -445,7 +437,6 @@ def finalize(
         sorted_sleep_counter, sorted_kappa, sort_indexes, cell_start, cell_end,
         position_out, velocity_out, color_out, packed_info_out,
         sleep_counter_out, temperature_out, kappa_out,
-        sorted_particle_dye, s_dye_rate, particle_dye_out,
         skv_ptr, kv_out_ptr,
         rb_ptr, rf_ptr, rt_ptr,
         s_lifetime_ptr, health_out_ptr, lifetime_out_ptr, mass_out_ptr,

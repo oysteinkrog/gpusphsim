@@ -71,8 +71,6 @@ void K_Integrate(
     const float*    __restrict__ sorted_shear_rate,     // sorted shear rate (from Step1)
     const float*    __restrict__ sorted_dTdt,           // sorted dTdt (heat diffusion from Step1)
     const unsigned char* __restrict__ sorted_sleep_counter, // sorted sleep counter (uint8)
-    const float4*   __restrict__ sorted_dye_rate,       // sorted dye diffusion rate from Step1
-    const float4*   __restrict__ sorted_particle_dye,   // sorted current particle dye color
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
     // --- Grid arrays for STATIC boundary repulsion ---
     const uint*     __restrict__ cell_start,            // grid cell start indices
@@ -84,7 +82,6 @@ void K_Integrate(
     uint*           __restrict__ packed_info_out,       // unsorted packed_info (sleep flag updates)
     unsigned char*  __restrict__ sleep_counter_out,     // unsorted sleep counter
     float*          __restrict__ temperature_out,       // unsorted temperature (updated)
-    float4*         __restrict__ particle_dye_out,       // unsorted particle dye (updated)
     float*          __restrict__ health_out,             // unsorted health (reaction state carry-back)
     float*          __restrict__ lifetime_out,           // unsorted lifetime (reaction state carry-back)
     float*          __restrict__ mass_out,               // unsorted mass (spawn/reaction state carry-back)
@@ -134,7 +131,6 @@ void K_Integrate(
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
         temperature_out[orig_idx] = temp;
-        particle_dye_out[orig_idx] = sorted_particle_dye[i];
         return;
     }
 
@@ -188,7 +184,6 @@ void K_Integrate(
             packed_info_out[orig_idx] = pi;  // keep SLEEPING flag set
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
-            particle_dye_out[orig_idx] = sorted_particle_dye[i];
                 return;
         }
         // Wake up: clear sleeping flag, set just_woke flag, reset counter
@@ -452,14 +447,6 @@ void K_Integrate(
         color = compute_color(mat_id, temp, hlth, behavior);
     }
 
-    // --- Dye update: dye += dye_rate * dt ---
-    float4 dye = sorted_particle_dye[i];
-    float4 drate = sorted_dye_rate[i];
-    float dt_dye = c_sim.dt;
-    dye.x = fmaxf(0.0f, fminf(1.0f, dye.x + drate.x * dt_dye));
-    dye.y = fmaxf(0.0f, fminf(1.0f, dye.y + drate.y * dt_dye));
-    dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt_dye));
-
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
@@ -491,7 +478,6 @@ void K_Integrate(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
-    particle_dye_out[orig_idx] = dye;
 }
 
 /* ======================================================================

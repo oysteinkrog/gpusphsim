@@ -113,8 +113,6 @@ def integrate(
     sorted_shear_rate: "Optional[cupy.ndarray]" = None,
     sorted_dTdt: "Optional[cupy.ndarray]" = None,
     sorted_sleep_counter: "Optional[cupy.ndarray]" = None,
-    sorted_dye_rate: "Optional[cupy.ndarray]" = None,
-    sorted_particle_dye: "Optional[cupy.ndarray]" = None,
     sorted_vorticity: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
     sort_indexes: "Optional[cupy.ndarray]" = None,
@@ -124,7 +122,6 @@ def integrate(
     packed_info_out: "Optional[cupy.ndarray]" = None,
     sleep_counter_out: "Optional[cupy.ndarray]" = None,
     temperature_out: "Optional[cupy.ndarray]" = None,
-    particle_dye_out: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
     health_out: "Optional[cupy.ndarray]" = None,
     lifetime_out: "Optional[cupy.ndarray]" = None,
@@ -179,14 +176,12 @@ def integrate(
     sorted_vorticity, sorted_angular_velocity, angular_velocity_out
         Ignored. The micropolar angular velocity had no reader and was
         removed (bd-r5-review-n28.140). The parameters stay only so callers
-        that still pass them keep working; angular_velocity_out comes back
-        unchanged in slot 8 of the result.
+        that still pass them keep working.
 
     Returns
     -------
     (position_out, velocity_out, color_out, packed_info_out,
-     sleep_counter_out, temperature_out, particle_dye_out,
-     angular_velocity_out)
+     sleep_counter_out, temperature_out)
     """
     n = sorted_position.shape[0]
     if n == 0:
@@ -202,10 +197,6 @@ def integrate(
         sorted_dTdt = cupy.zeros(n, dtype=cupy.float32)
     if sorted_sleep_counter is None:
         sorted_sleep_counter = cupy.zeros(n, dtype=cupy.uint8)
-    if sorted_dye_rate is None:
-        sorted_dye_rate = cupy.zeros((n, 4), dtype=cupy.float32)
-    if sorted_particle_dye is None:
-        sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
     if sorted_lifetime is None:
         sorted_lifetime = cupy.zeros(n, dtype=cupy.float32)
 
@@ -225,8 +216,6 @@ def integrate(
         sleep_counter_out = cupy.zeros(max_idx, dtype=cupy.uint8)
     if temperature_out is None:
         temperature_out = cupy.zeros(max_idx, dtype=cupy.float32)
-    if particle_dye_out is None:
-        particle_dye_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
 
     module = _get_module()
     kernel = module.get_function("K_Integrate")  # type: ignore[union-attr]
@@ -265,8 +254,6 @@ def integrate(
             sorted_shear_rate,
             sorted_dTdt,
             sorted_sleep_counter,
-            sorted_dye_rate,
-            sorted_particle_dye,
             sort_indexes,
             cell_start_ptr,
             cell_end_ptr,
@@ -276,7 +263,6 @@ def integrate(
             packed_info_out,
             sleep_counter_out,
             temperature_out,
-            particle_dye_out,
             health_out_ptr,
             lifetime_out_ptr,
             mass_out_ptr,
@@ -286,8 +272,7 @@ def integrate(
     )
 
     return (position_out, velocity_out, color_out, packed_info_out,
-            sleep_counter_out, temperature_out, particle_dye_out,
-            angular_velocity_out)
+            sleep_counter_out, temperature_out)
 
 
 # ---------------------------------------------------------------------------

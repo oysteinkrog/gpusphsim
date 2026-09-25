@@ -224,8 +224,6 @@ def run_benchmark(
             sorted_shear_rate=world.sorted_shear_rate[:n],
             sorted_dTdt=world.sorted_dTdt[:n],
             sorted_sleep_counter=world.sorted_sleep_counter[:n],
-            sorted_dye_rate=world.sorted_dye_rate[:n],
-            sorted_particle_dye=world.sorted_particle_dye[:n],
             sorted_vorticity=world.sorted_vorticity[:n],
             sorted_angular_velocity=world.sorted_angular_velocity[:n],
             sort_indexes=sim._sort_perm[:n],
@@ -233,7 +231,6 @@ def run_benchmark(
             color_out=world.color, packed_info_out=world.packed_info,
             sleep_counter_out=world.sleep_counter,
             temperature_out=world.temperature,
-            particle_dye_out=world.particle_dye,
             angular_velocity_out=world.angular_velocity,
             max_displacement=world.max_displacement,
         )

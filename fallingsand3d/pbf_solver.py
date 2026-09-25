@@ -290,9 +290,6 @@ def pbf_finalize(
     packed_info_out: cupy.ndarray,
     sleep_counter_out: cupy.ndarray,
     temperature_out: cupy.ndarray,
-    sorted_particle_dye: "Optional[cupy.ndarray]" = None,
-    sorted_dye_rate: "Optional[cupy.ndarray]" = None,
-    particle_dye_out: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
     angular_velocity_out: "Optional[cupy.ndarray]" = None,
     vorticity_in: "cupy.ndarray | None" = None,
@@ -317,11 +314,6 @@ def pbf_finalize(
     n = predicted_pos.shape[0]
     _null = np.intp(0)
     _null_f = cupy.ndarray(0, dtype=cupy.float32)
-    if sorted_particle_dye is None:
-        sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
-    if particle_dye_out is None:
-        particle_dye_out = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_dye_rate = sorted_dye_rate if sorted_dye_rate is not None else _null
     vort_in = vorticity_in if vorticity_in is not None else _null
     norm_in = normal_in if normal_in is not None else _null
     pn_in = pressure_normal_in if pressure_normal_in is not None else _null
@@ -346,7 +338,6 @@ def pbf_finalize(
         sleep_counter, sort_indexes, cell_start, cell_end,
         position_out, velocity_out, color_out, packed_info_out,
         sleep_counter_out, temperature_out,
-        sorted_particle_dye, s_dye_rate, particle_dye_out,
         vort_in, norm_in, pn_in,
         rb_ptr, rf_ptr, rt_ptr,
         s_lifetime_ptr, health_out_ptr, lifetime_out_ptr, mass_out_ptr,

@@ -253,9 +253,7 @@ def run_full_pipeline_step(w, grid_params, scratch, frame=0):
         velocity_h=velocity_h,
     )
 
-    # Integrate — API drift: returns 8 values (added particle_dye_out, angular_velocity_out)
-    (pos_out, vel_out, color_out, pi_out, sc_out, temp_out,
-     _particle_dye_out, _angular_velocity_out) = integrate(
+    (pos_out, vel_out, color_out, pi_out, sc_out, temp_out) = integrate(
         sorted_pos, sorted_vel, veleval_out, sph_force,
         sorted_mass, sorted_pi, sorted_temp, sorted_health,
         sorted_density=density, sorted_shear_rate=shear_rate,

@@ -1358,9 +1358,6 @@ void K_DFSPH_Finalize(
     unsigned char*  __restrict__ sleep_counter_out,
     float*          __restrict__ temperature_out,
     float*          __restrict__ kappa_out,
-    const float4*   __restrict__ sorted_particle_dye,
-    const float4*   __restrict__ sorted_dye_rate,
-    float4*         __restrict__ particle_dye_out,
     const float*    __restrict__ sorted_kappa_v,        // divergence kappa for warm-start writeback
     float*          __restrict__ kappa_v_out,           // unsorted kappa_v output (warm-start next frame)
     const RigidBody* __restrict__ d_rigid_bodies,       // rigid body state (NULL if no bodies); gates the XSPH skip and the body push-out
@@ -1409,7 +1406,6 @@ void K_DFSPH_Finalize(
         temperature_out[orig_idx] = temp;
         kappa_out[orig_idx] = 0.0f;
         if (kappa_v_out) kappa_v_out[orig_idx] = 0.0f;
-        particle_dye_out[orig_idx] = sorted_particle_dye[i];
         return;
     }
 
@@ -1439,7 +1435,6 @@ void K_DFSPH_Finalize(
             temperature_out[orig_idx] = temp;
             kappa_out[orig_idx] = 0.0f;
             if (kappa_v_out) kappa_v_out[orig_idx] = 0.0f;
-            particle_dye_out[orig_idx] = sorted_particle_dye[i];
                 return;
         }
         pi = CLEAR_SLEEPING(pi);
@@ -1643,15 +1638,6 @@ void K_DFSPH_Finalize(
         color = compute_color(mat_id, temp, hlth, behavior);
     }
 
-    // Dye update: dye += dye_rate * dt
-    float4 dye = sorted_particle_dye[i];
-    if (sorted_dye_rate != 0) {
-        float4 drate = sorted_dye_rate[i];
-        dye.x = fmaxf(0.0f, fminf(1.0f, dye.x + drate.x * dt));
-        dye.y = fmaxf(0.0f, fminf(1.0f, dye.y + drate.y * dt));
-        dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt));
-    }
-
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
@@ -1682,5 +1668,4 @@ void K_DFSPH_Finalize(
     temperature_out[orig_idx] = temp;
     kappa_out[orig_idx] = sorted_kappa[i];
     if (kappa_v_out) kappa_v_out[orig_idx] = sorted_kappa_v[i];
-    particle_dye_out[orig_idx] = dye;
 }

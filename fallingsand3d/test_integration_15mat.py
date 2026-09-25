@@ -226,8 +226,7 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
         cell_start, cell_end,
     )
 
-    # Integrate -- now returns 8 values (added particle_dye_out, angular_velocity_out)
-    pos_out, vel_out, color_out, pi_out, sc_out, temp_out, _, _ = integrate(
+    pos_out, vel_out, color_out, pi_out, sc_out, temp_out = integrate(
         sorted_pos, sorted_vel, veleval_out, sph_force,
         sorted_mass, sorted_pi, sorted_temp, sorted_health,
         sorted_density=density, sorted_shear_rate=sorted_sr,
