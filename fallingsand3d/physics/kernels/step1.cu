@@ -235,9 +235,6 @@ void K_Step1(
 
                 uint hash = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash];
-
-                // Empty cell sentinel
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash];
 
                 for (uint index_j = start; index_j < end_idx; index_j++) {

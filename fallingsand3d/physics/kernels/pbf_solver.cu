@@ -319,7 +319,6 @@ void K_PBF_ComputeLambda(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -621,7 +620,6 @@ void K_PBF_ComputeDelta(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -1004,7 +1002,6 @@ void K_PBF_Finalize(
 
                     uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                     uint start = cell_start[hash_c];
-                    if (start == 0xFFFFFFFFu) continue;
                     uint end_idx = cell_end[hash_c];
 
                     for (uint j = start; j < end_idx; j++) {

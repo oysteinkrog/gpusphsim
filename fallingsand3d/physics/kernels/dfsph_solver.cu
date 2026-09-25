@@ -186,7 +186,6 @@ void K_DFSPH_ComputeDensityAlpha(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -520,7 +519,6 @@ void K_DFSPH_NonPressureForces(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -850,7 +848,6 @@ void K_DFSPH_ComputeKappaV(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -957,7 +954,6 @@ void K_DFSPH_CorrectVelocityDiv(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -1078,7 +1074,6 @@ void K_DFSPH_ComputePressureAccel(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -1209,7 +1204,6 @@ void K_DFSPH_DensitySolverUpdate(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
@@ -1492,7 +1486,6 @@ void K_DFSPH_Finalize(
                 for (int dx = -1; dx <= 1; dx++) {
                     uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                     uint start = cell_start[hash_c];
-                    if (start == 0xFFFFFFFFu) continue;
                     uint end_idx = cell_end[hash_c];
 
                     for (uint j = start; j < end_idx; j++) {

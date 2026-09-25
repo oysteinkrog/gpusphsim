@@ -618,7 +618,6 @@ void K_BlastWave(
             for (int dx = -1; dx <= 1; dx++) {
                 uint hash = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash];
-                if (start == 0xFFFFFFFF) continue;
                 uint end = cell_end[hash];
                 for (uint j = start; j < end; j++) {
                     if (j == i) continue;

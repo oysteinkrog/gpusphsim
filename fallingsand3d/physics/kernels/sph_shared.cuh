@@ -862,7 +862,6 @@ __device__ inline void static_particle_boundary(
             for (int dx = -1; dx <= 1; dx++) {
                 uint hash = spatialHash(cell.x+dx, cell.y+dy, cell.z+dz);
                 uint start = cell_start[hash];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end = cell_end[hash];
                 for (uint j = start; j < end; j++) {
                     if (j == self_idx) continue;

@@ -3,9 +3,15 @@
 3-phase counting sort pipeline (all CUDA-graph-capturable):
   1. K_CalcHashCS    -- compute per-particle grid cell hash
   2. K_Histogram     -- count particles per cell (atomicAdd)
-  3. cupy.cumsum     -- exclusive prefix sum on histogram -> cell_start
+  3. cupy.cumsum     -- prefix sum on histogram -> cell offsets table
   4. K_ScatterReorder -- scatter particles to sorted order + build sort_perm
-  5. K_BuildCellEnd  -- cell_end = cell_start + count
+
+Cell table layout: one uint32 offsets array of num_cells + 1 entries with
+offsets[0] == 0 and offsets[c + 1] = sum(histogram[0..c]). Cell c holds the
+sorted slots offsets[c] .. offsets[c + 1] - 1, and an empty cell has
+start == end. cell_start is the view offsets[:-1] and cell_end the view
+offsets[1:], so kernels that take (cell_start, cell_end) read two adjacent
+words of the same array. See allocate_cell_tables.
 
 Replaces: cupy.argsort + K_FusedSortReorderBuild.
 Advantage: entire pipeline is graph-capturable (no Thrust sync).
@@ -87,20 +93,36 @@ def upload_grid_params(params: np.ndarray) -> None:
 # ---------------------------------------------------------------------------
 
 
+def allocate_cell_tables(num_cells: int):
+    """Allocate the cell offsets table and its two views.
+
+    Returns (offsets, cell_start, cell_end). offsets has num_cells + 1 uint32
+    entries and starts zeroed, so offsets[0] stays 0 for its whole life
+    (counting_sort_full writes only offsets[1:]). cell_start = offsets[:-1] and
+    cell_end = offsets[1:] share its memory, so cell_end[c] == cell_start[c + 1]
+    and an empty cell has cell_start[c] == cell_end[c].
+    """
+    offsets = cupy.zeros(num_cells + 1, dtype=cupy.uint32)
+    return offsets, offsets[:-1], offsets[1:]
+
+
 def allocate_scratch(num_cells: int, max_particles: int) -> dict:
     """Allocate scratch buffers for counting sort.
 
     Returns a dict with:
       - histogram: (num_cells,) uint32  -- particle count per cell
       - write_offset: (num_cells,) uint32  -- scatter write position per cell
-      - cell_start: (num_cells,) uint32  -- prefix sum result = first particle index per cell
-      - cell_end: (num_cells,) uint32  -- one past last particle index per cell
+      - cell_offsets: (num_cells + 1,) uint32  -- see allocate_cell_tables
+      - cell_start: view cell_offsets[:-1]  -- first sorted slot per cell
+      - cell_end: view cell_offsets[1:]  -- one past the last sorted slot per cell
     """
+    offsets, cell_start, cell_end = allocate_cell_tables(num_cells)
     return {
         "histogram": cupy.zeros(num_cells, dtype=cupy.uint32),
         "write_offset": cupy.zeros(num_cells, dtype=cupy.uint32),
-        "cell_start": cupy.empty(num_cells, dtype=cupy.uint32),
-        "cell_end": cupy.zeros(num_cells, dtype=cupy.uint32),
+        "cell_offsets": offsets,
+        "cell_start": cell_start,
+        "cell_end": cell_end,
     }
 
 
@@ -153,7 +175,11 @@ def counting_sort_full(
     angular_velocity: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
 ) -> None:
-    """Run the full counting sort pipeline (hash + histogram + prefix_sum + scatter + cell_end).
+    """Run the full counting sort pipeline (hash + histogram + prefix sum + scatter).
+
+    cell_start and cell_end must be the two views of one offsets table from
+    allocate_cell_tables (cell_end starts one uint32 after cell_start). The
+    prefix sum writes cell_end only; cell_start[0] is the table's fixed zero.
 
     sorted_anchor, when given, receives a copy of sorted_position. gather_reorder
     never writes it, so it keeps the positions of the last full sort and the
@@ -164,12 +190,19 @@ def counting_sort_full(
     if num_particles == 0:
         return
 
+    # Host-side pointer check only (no device sync).
+    if (cell_end.data.ptr != cell_start.data.ptr + 4
+            or cell_start.shape[0] != num_cells
+            or cell_end.shape[0] != num_cells):
+        raise ValueError(
+            "cell_start/cell_end must be the views offsets[:-1] and offsets[1:] "
+            "of one table from counting_sort.allocate_cell_tables"
+        )
+
     module = _get_module()
 
     grid_p = ((num_particles + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block_p = (BLOCK_SIZE,)
-    grid_c = ((num_cells + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block_c = (BLOCK_SIZE,)
 
     # --- Phase 1: Hash ---
     k_hash = module.get_function("K_CalcHashCS")
@@ -190,29 +223,16 @@ def counting_sort_full(
         histogram,
     ))
 
-    # --- Phase 3: Exclusive prefix sum -> cell_start ---
-    # cell_start[c] = sum(histogram[0..c-1])
+    # --- Phase 3: Prefix sum -> cell offsets ---
+    # The inclusive sum goes into offsets[1:] (= cell_end). Because offsets[0]
+    # is fixed at 0, offsets[:-1] (= cell_start) is then the exclusive sum:
+    # cell_start[c] = sum(histogram[0..c-1]), cell_end[c] = cell_start[c+1].
     # cupy.cumsum is graph-capturable (uses CUB internally)
-    cupy.cumsum(histogram, out=cell_start)
-    # cumsum gives inclusive sum; shift to exclusive: cell_start[c] = cumsum[c] - histogram[c]
-    # Equivalent to: cell_start = [0, cumsum[0], cumsum[1], ..., cumsum[N-2]]
-    # But we can't do a shift in-place easily. Instead:
-    # exclusive_sum[i] = inclusive_sum[i] - histogram[i]
-    cell_start -= histogram
+    cupy.cumsum(histogram, out=cell_end)
 
     # --- Phase 4: Scatter + Reorder ---
     # Zero write_offset (graph-capturable memset)
     write_offset.data.memset_async(0x00, write_offset.nbytes)
-    # Zero cell_end.
-    # INVARIANT (bd-mzc.47): cell_end is zero-initialised here (and in
-    # allocate_scratch via cupy.zeros).  Value 0 is a safe empty-cell sentinel
-    # because valid cell_end indices are always >= 1: cell_end[c] =
-    # cell_start[c] + histogram[c], and for any non-empty cell histogram[c]>=1
-    # so cell_end[c] >= 1.  A cell_end[c]==0 therefore unambiguously means the
-    # cell is empty and contains no particles.
-    # DO NOT change cupy.zeros to cupy.empty in allocate_scratch, and do not
-    # remove this memset — both are load-bearing for correct empty-cell detection.
-    cell_end.data.memset_async(0x00, cell_end.nbytes)
 
     _null = cupy.ndarray(0, dtype=cupy.uint32)
 
@@ -251,15 +271,6 @@ def counting_sort_full(
         sorted_temperature_h if sorted_temperature_h is not None else _null,
         # Drift anchor (NULL = skip)
         sorted_anchor if sorted_anchor is not None else _null,
-    ))
-
-    # --- Phase 5: Build cell_end ---
-    k_cellend = module.get_function("K_BuildCellEnd")
-    k_cellend(grid_c, block_c, (
-        np.uint32(num_cells),
-        cell_start,
-        write_offset,
-        cell_end,
     ))
 
 

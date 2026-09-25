@@ -287,6 +287,7 @@ class Simulation:
         # Grid cell tables — allocated in _upload_constants based on world size
         self._cell_start = None
         self._cell_end = None
+        self._cell_offsets = None
 
         # Cell wake flags — allocated in _upload_constants based on world size
         self._cell_wake_flags = None
@@ -526,8 +527,10 @@ class Simulation:
         # Reallocate cell arrays if table size changed
         if table_size != self._table_size:
             self._table_size = table_size
-            self._cell_start = cupy.empty(table_size, dtype=cupy.uint32)
-            self._cell_end = cupy.empty(table_size, dtype=cupy.uint32)
+            # One offsets table of table_size + 1; cell_start and cell_end are
+            # its views [:-1] and [1:] (empty cell: start == end).
+            (self._cell_offsets, self._cell_start,
+             self._cell_end) = counting_sort.allocate_cell_tables(table_size)
             # Wake stamp table: never cleared per substep. Stamps come from
             # the monotonic device counter _frame_counter_d, so old marks never match.
             self._cell_wake_flags = wake.allocate_cell_wake_flags(table_size)

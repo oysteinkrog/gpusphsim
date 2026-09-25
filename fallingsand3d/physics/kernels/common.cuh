@@ -96,6 +96,16 @@ struct GridParams {
     uint   table_mask;  // table_size - 1 (for & masking)
 };
 
+/* Cell table layout (counting_sort.py, allocate_cell_tables):
+ * one uint32 offsets array of table_size + 1 entries, offsets[0] == 0 and
+ * offsets[h + 1] = number of particles in hash cells 0..h. Kernels take it as
+ * cell_start = offsets and cell_end = offsets + 1, so cell h holds the sorted
+ * slots cell_start[h] .. cell_end[h] - 1. An empty cell has
+ * cell_start[h] == cell_end[h]; there is no sentinel value, and a neighbour
+ * loop needs no empty-cell test: for (j = start; j < end; ++j) runs zero
+ * times. Test fixtures may pass separate arrays with any empty-cell encoding
+ * where end <= start. */
+
 __constant__ GridParams c_grid;
 
 /* ======================================================================

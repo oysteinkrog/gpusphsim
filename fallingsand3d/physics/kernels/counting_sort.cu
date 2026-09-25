@@ -5,7 +5,7 @@
  *   Phase 1: K_CalcHashCS   -- compute per-particle grid cell hash
  *   Phase 2: K_Histogram    -- count particles per cell via atomicAdd
  *   Phase 3: prefix sum     -- cupy.cumsum on histogram (CUB, graph-capturable)
- *   Phase 4: K_ScatterReorder -- scatter particles to sorted order + build cell_start/cell_end
+ *   Phase 4: K_ScatterReorder -- scatter particles to sorted order
  *
  * All phases are CUDA-graph-capturable (no Thrust synchronization).
  * K_ScatterReorder combines scatter, gather, and cell boundary detection in one kernel.
@@ -13,8 +13,10 @@
  * Pre-conditions:
  *   - histogram[] must be zeroed before K_Histogram
  *   - write_offset[] must be zeroed before K_ScatterReorder
- *   - cell_start[] is filled by the prefix-sum (cupy.cumsum) of histogram[] and
- *     needs no 0xFFFFFFFF sentinel: an empty cell has cell_end == 0.
+ *   - cell_start[] is filled by the prefix sum (cupy.cumsum) of histogram[].
+ *     It is the view offsets[:-1] of the cell offsets table described next to
+ *     GridParams in common.cuh; cell_end is offsets[1:], so no separate
+ *     cell_end pass exists. An empty cell has cell_start == cell_end.
  *
  * GridParams read from __constant__ c_grid declared in common.cuh.
  */
@@ -70,7 +72,7 @@ void K_Histogram(
  * write_offset[cell] starts at 0 and incremented via atomicAdd per particle.
  * sorted_pos = cell_start[hash] + atomicAdd(&write_offset[hash], 1)
  *
- * Also writes cell_end = cell_start + final_count (via write_offset at end).
+ * cell_end needs no write: it is cell_start shifted by one slot.
  * Since multiple threads write to the same cell concurrently, within-cell
  * ordering is non-deterministic (acceptable for SPH).
  *
@@ -229,28 +231,4 @@ void K_GatherReorder(
 
     // Fixed-point temperature (0.125 K) copy (PERF-011)
     if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + sorted_idx, temp);
-}
-
-/* ======================================================================
- * K_BuildCellEnd -- compute cell_end from cell_start + write_offset (= count).
- *
- * cell_end[c] = cell_start[c] + write_offset[c]
- * Only writes for cells with particles (write_offset > 0).
- * cell_end for empty cells stays at 0 (from memset).
- * ====================================================================== */
-extern "C" __global__
-void K_BuildCellEnd(
-    const uint    numCells,
-    const uint*   __restrict__ cell_start,
-    const uint*   __restrict__ write_offset,   // = count per cell after scatter
-    uint*         __restrict__ cell_end_out
-) {
-    const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numCells) return;
-
-    const uint count = write_offset[idx];
-    if (count > 0) {
-        cell_end_out[idx] = cell_start[idx] + count;
-    }
-    // else: cell_end stays at 0 from memset
 }

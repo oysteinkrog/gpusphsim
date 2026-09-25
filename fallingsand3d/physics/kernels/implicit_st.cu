@@ -118,7 +118,6 @@ void K_IST_Iterate(
 
                 uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
                 uint start = cell_start[hash_c];
-                if (start == 0xFFFFFFFFu) continue;
                 uint end_idx = cell_end[hash_c];
 
                 for (uint j = start; j < end_idx; j++) {
