@@ -1425,6 +1425,68 @@ def test_translating_block_zero_vorticity_strain_dye(build_nl: bool) -> None:
     assert max_dye == 0.0, f"spurious dye rate {max_dye}"
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.139: rigid rotation gives curl v = +2 Omega
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("build_nl", [False, True])
+def test_rigid_rotation_curl_is_two_omega(build_nl: bool) -> None:
+    """A 10^3 WATER lattice turning as a rigid body, v = Omega x r with
+    Omega = (0, 0, 1.5) rad/s. One step1 call must report vorticity.z within
+    10% of +2 * Omega for interior particles (full kernel support), and near
+    zero x and y components."""
+    from step1 import compute_step1_build_nl
+
+    omega = 1.5
+    k = 10
+    idx = np.arange(k, dtype=np.float32) * SPACING
+    xx, yy, zz = np.meshgrid(idx, idx, idx, indexing="ij")
+    n = xx.size
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0], pos[:, 1], pos[:, 2] = xx.ravel(), yy.ravel(), zz.ravel()
+    pos[:, 3] = 1.0
+    c = 0.5 * (k - 1) * SPACING
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[:, 0] = -omega * (pos[:, 1] - c)
+    vel[:, 1] = omega * (pos[:, 0] - c)
+
+    _upload_all_params()
+    scene = counting_sort_scene(
+        pos, velocity=vel, mass=np.full(n, MASS, dtype=np.float32),
+        packed_info=np.full(n, PACKED_WATER, dtype=np.uint32),
+        grid_params=default_grid_params(),
+    )
+    density_in = cupy.full(n, RHO0, dtype=cupy.float32)
+    vort = cupy.zeros((n, 4), dtype=cupy.float32)
+    args = (scene["position"], scene["velocity"], scene["mass"], density_in,
+            scene["packed_info"], scene["temperature"],
+            scene["cell_start"], scene["cell_end"])
+    kw = dict(vorticity_out=vort, velocity_h=scene["velocity_h"])
+    if build_nl:
+        max_nb = 96
+        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
+                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb, **kw)
+    else:
+        compute_step1(*args, **kw)
+    cupy.cuda.Device().synchronize()
+
+    v = cupy.asnumpy(vort)
+    spos = cupy.asnumpy(scene["position"][:, :3])
+    # Interior: at least h = 2 spacings from every face, so the kernel
+    # support is fully inside the lattice.
+    lo, hi = 2 * SPACING - 1e-4, (k - 3) * SPACING + 1e-4
+    interior = np.all((spos >= lo) & (spos <= hi), axis=1)
+    assert interior.sum() == (k - 4) ** 3
+    wz = v[interior, 2]
+    wxy = np.abs(v[interior, :2]).max()
+    print(f"  build_nl={build_nl}: interior omega_z min {wz.min():.4f} "
+          f"mean {wz.mean():.4f} max {wz.max():.4f} (expect {2 * omega:.4f}); "
+          f"max |omega_xy| {wxy:.3e}")
+    assert np.abs(wz - 2.0 * omega).max() < 0.10 * 2.0 * omega, (
+        f"omega_z {wz.min():.4f}..{wz.max():.4f}, expected {2 * omega} +- 10%")
+    assert wxy < 0.02 * omega, f"spurious in-plane vorticity {wxy:.3e}"
+
+
 def main() -> None:
     test_compilation()
     test_block_size()
