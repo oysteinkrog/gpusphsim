@@ -1,6 +1,6 @@
 """bd-r5-review-n28.70: world-box restitution and wall friction under PBF.
 
-K_PBF_Predict and K_PBF_ApplyDelta clamp the predicted position to the wall
+K_PBF_Predict and K_PBF_ComputeDelta clamp the predicted position to the wall
 margin, so K_PBF_Finalize sees a particle sitting exactly on the margin. The
 box collision in Finalize must still treat that as contact (pos <= margin with
 velocity into the wall), or PBF walls end up perfectly inelastic and

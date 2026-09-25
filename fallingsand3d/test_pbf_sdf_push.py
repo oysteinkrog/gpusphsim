@@ -1,9 +1,11 @@
 """bd-r5-review-n28.82: PBF keeps predicted positions outside SDF objects.
 
 K_PBF_Predict pushes predicted positions out of SDF colliders, but the delta
-passes in K_PBF_ApplyDelta used to clamp only to the world box. Water resting
-on an SDF box then had predicted positions up to 4 mm inside the box before
-K_PBF_Finalize. ApplyDelta now runs the same SDF push every iteration.
+passes used to clamp only to the world box. Water resting on an SDF box then
+had predicted positions up to 4 mm inside the box before K_PBF_Finalize. The
+delta pass (K_PBF_ComputeDelta, which applies its correction into the other
+predicted buffer since bd-r5-review-n28.185) now runs the same SDF push every
+iteration.
 
 The scene is a 10 x 12 x 10 water column (spacing 0.02) resting on an SDF box,
 run for 60 PBF substeps (dt = 1/120). The same column on the world floor is
@@ -68,15 +70,16 @@ def _run(on_box, monkeypatch):
     sim._spawn_substep = sim._damping_duration
 
     rho0 = float(MATERIALS[WATER].rest_density)
-    min_sdf = []   # per ApplyDelta iteration
+    min_sdf = []   # per delta iteration
     rms = []       # per substep, interior bottom layer, (rho / rho0 - 1) RMS
-    orig_apply = pbf_solver.pbf_apply_delta
+    orig_delta = pbf_solver.pbf_compute_delta
     orig_final = pbf_solver.pbf_finalize
 
-    def spy_apply(pred, *a, **k):
-        orig_apply(pred, *a, **k)
+    def spy_delta(*a, **k):
+        orig_delta(*a, **k)
+        pred_out = a[6] if len(a) > 6 else k["pred_out"]
         if on_box:
-            min_sdf.append(float(_sdf_box(pred[:n, :3]).min().get()))
+            min_sdf.append(float(_sdf_box(pred_out[:n, :3]).min().get()))
 
     def spy_final(pred, orig_pos, orig_vel, density, *a, **k):
         p = pred[:n, :3]
@@ -87,7 +90,7 @@ def _run(on_box, monkeypatch):
         rms.append(float(cp.sqrt(cp.mean((d / rho0 - 1.0) ** 2)).get()))
         return orig_final(pred, orig_pos, orig_vel, density, *a, **k)
 
-    monkeypatch.setattr(pbf_solver, "pbf_apply_delta", spy_apply)
+    monkeypatch.setattr(pbf_solver, "pbf_compute_delta", spy_delta)
     monkeypatch.setattr(pbf_solver, "pbf_finalize", spy_final)
     for _ in range(STEPS):
         sim._sim_step(n)
