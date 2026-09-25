@@ -571,8 +571,6 @@ void K_PBF_ComputeLambda(
  * particle sees the same iteration's positions (Jacobi). STATIC copies its
  * position through. .w of pred_out is the mass: mass[i] when the mass array
  * is given (the first pass after reactions and spawn), else predicted_pos.w.
- * vel_out (last iteration only) gets (x*_out - x) / dt, which Finalize reads
- * as the neighbour velocity for XSPH.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -587,9 +585,7 @@ void K_PBF_ComputeDelta(
     float4*         __restrict__ pred_out,      // corrected predicted position (other buffer)
     const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques,  // torque accumulator (NULL if no bodies)
-    const float4*   __restrict__ original_pos,  // substep start position, needed with vel_out
-    float4*         __restrict__ vel_out        // (x*_out - x) / dt, or NULL
+    float*          __restrict__ d_rigid_torques   // torque accumulator (NULL if no bodies)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -617,13 +613,6 @@ void K_PBF_ComputeDelta(
     // gas EOS pressure from GAS neighbours below (bd-r5-review-n28.91).
     if (behavior_i == STATIC) {
         pred_out[i] = make_float4(pos_i.x, pos_i.y, pos_i.z, m_i);
-        if (vel_out != 0) {
-            float inv_dt_s = 1.0f / fmaxf(c_sim.dt, 1e-8f);
-            float4 o4 = original_pos[i];
-            vel_out[i] = make_float4((pos_i.x - o4.x) * inv_dt_s,
-                                     (pos_i.y - o4.y) * inv_dt_s,
-                                     (pos_i.z - o4.z) * inv_dt_s, 0.0f);
-        }
         return;
     }
     // GAS: the lambda slot holds p/rho^2. The WCSPH acceleration
@@ -766,16 +755,6 @@ void K_PBF_ComputeDelta(
     // 0 when the scene has no SDF objects.
     push_out_of_sdf(pos);
     pred_out[i] = make_float4(pos.x, pos.y, pos.z, m_i);
-
-    // Last iteration: the PBF velocity (x* - x) / dt, so Finalize reads it
-    // per neighbour instead of loading both positions.
-    if (vel_out != 0) {
-        float inv_dt_v = 1.0f / fmaxf(c_sim.dt, 1e-8f);
-        float4 o4 = original_pos[i];
-        vel_out[i] = make_float4((pos.x - o4.x) * inv_dt_v,
-                                 (pos.y - o4.y) * inv_dt_v,
-                                 (pos.z - o4.z) * inv_dt_v, 0.0f);
-    }
 }
 
 /* ======================================================================
@@ -821,7 +800,6 @@ void K_PBF_Finalize(
     const float4*   __restrict__ displacement_anchor, // [N] sorted position at the last full sort, or NULL
     uint*           __restrict__ cell_wake_flags,  // wake stamp table, or NULL (bd-r5-review-n28.167)
     const uint*     __restrict__ frame_ptr,        // per-substep counter for the stamp, or NULL
-    const float4*   __restrict__ vel_pred_in,      // (x* - x) / dt from the last K_PBF_ComputeDelta, or NULL
     int             nbr_mass_in_pred_w             // 1: neighbour mass from predicted_pos.w
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1099,18 +1077,16 @@ void K_PBF_Finalize(
                             continue;
                         }
 
-                        float3 vel_j;
-                        if (vel_pred_in != 0) {
-                            float4 vj4 = __ldg(&vel_pred_in[j]);
-                            vel_j = make_float3(vj4.x, vj4.y, vj4.z);
-                        } else {
-                            float4 orig4_j = __ldg(&original_pos[j]);
-                            vel_j = make_float3(
-                                (pred4_j.x - orig4_j.x) * inv_dt,
-                                (pred4_j.y - orig4_j.y) * inv_dt,
-                                (pred4_j.z - orig4_j.z) * inv_dt
-                            );
-                        }
+                        // (x*_j - x_j) / dt. A per-particle velocity array
+                        // written by the last delta pass would replace this
+                        // 16 B load with another 16 B load and cost a 32 B
+                        // pass to fill, so it is not used (bd-r5-review-n28.185).
+                        float4 orig4_j = __ldg(&original_pos[j]);
+                        float3 vel_j = make_float3(
+                            (pred4_j.x - orig4_j.x) * inv_dt,
+                            (pred4_j.y - orig4_j.y) * inv_dt,
+                            (pred4_j.z - orig4_j.z) * inv_dt
+                        );
                         float w = W_poly6(r_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
                         float factor = (m_j / rho_avg) * w;

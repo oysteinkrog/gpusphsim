@@ -3,19 +3,17 @@
 K_PBF_ComputeDelta applies its correction into the other predicted-position
 buffer (K_PBF_ApplyDelta is gone). K_PBF_Predict writes the mass into
 predicted.w, the first delta pass rewrites it from sorted_mass, and the later
-passes and K_PBF_Finalize read it from .w. The last delta pass writes
-(x* - x) / dt for Finalize's XSPH neighbour loop.
+passes and K_PBF_Finalize read it from .w.
 
 Checks:
 - Predict writes predicted.w = mass, STATIC included.
 - One fused delta pass equals x* + clamp(dx) from a float64 reference of the
   delta formula (the old ComputeDelta + ApplyDelta pair) on a random cloud.
 - Reading mass from .w gives the same lambda and delta as the mass array.
-- vel_out is (pred_out - x) / dt.
 - The full _run_pbf_body at 4 and 5 iterations (even and odd final buffer)
   equals a reference pipeline that reads mass from the array every pass,
-  applies each delta back into buffer A, and lets Finalize derive the
-  neighbour velocity from positions.
+  applies each delta back into buffer A, and gives Finalize the mass
+  array.
 """
 
 import dataclasses
@@ -181,26 +179,6 @@ def test_mass_from_w_matches_mass_array(world, sim):
     assert bool(cp.array_equal(out_a, out_b))
 
 
-def test_vel_out_is_pbf_velocity(world, sim):
-    n = _random_cloud(world)
-    _sort_predict_lambda(sim, world, n)
-    w = world
-    out = cp.zeros((n, 4), dtype=cp.float32)
-    vel = cp.full((n, 4), 7.0, dtype=cp.float32)
-    pbf_solver.pbf_compute_delta(
-        w.sorted_predicted_position[:n], w.sorted_lambda_pbf[:n],
-        w.sorted_mass[:n], w.sorted_packed_info[:n],
-        sim._cell_start, sim._cell_end, out,
-        original_pos=w.sorted_position[:n], vel_out=vel,
-    )
-    dt = float(sim._sim_params[0]["dt"])
-    ref = (cp.asnumpy(out)[:, :3].astype(np.float64)
-           - cp.asnumpy(w.sorted_position[:n])[:, :3]) / dt
-    got = cp.asnumpy(vel)
-    np.testing.assert_allclose(got[:, :3], ref, rtol=1e-4, atol=1e-3)
-    assert (got[:, 3] == 0.0).all()
-
-
 def test_delta_rejects_aliased_output(world, sim):
     n = _random_cloud(world)
     _sort_predict_lambda(sim, world, n)
@@ -215,7 +193,7 @@ def test_delta_rejects_aliased_output(world, sim):
 
 def _reference_body(sim, world, n, iters):
     """Old data flow: mass array every pass, delta applied back into A,
-    pressure normal every lambda call, Finalize derives neighbour velocity."""
+    pressure normal every lambda call, Finalize reads the mass array."""
     w = world
     pbf_solver.pbf_predict(
         w.sorted_position[:n], w.sorted_velocity[:n],

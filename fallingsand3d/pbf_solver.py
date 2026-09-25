@@ -253,22 +253,17 @@ def pbf_compute_delta(
     d_rigid_bodies: "cupy.ndarray | None" = None,
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
-    original_pos: "cupy.ndarray | None" = None,
-    vel_out: "cupy.ndarray | None" = None,
 ) -> None:
     """Position correction, applied and clamped into pred_out.
 
     pred_out must not alias predicted_pos: every particle reads the same
     iteration's positions. pred_out.w is the mass: mass[i] when mass is
-    given, else predicted_pos.w. With vel_out (and original_pos), also
-    writes (pred_out - original_pos) / dt. With rigid bodies, also adds the
-    reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
+    given, else predicted_pos.w. With rigid bodies, also adds the reaction
+    of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
     """
     n = predicted_pos.shape[0]
     if pred_out.data.ptr == predicted_pos.data.ptr:
         raise ValueError("pbf_compute_delta: pred_out must not alias predicted_pos")
-    if vel_out is not None and original_pos is None:
-        raise ValueError("pbf_compute_delta: vel_out needs original_pos")
     module = _get_module()
     kernel = module.get_function("K_PBF_ComputeDelta")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -278,13 +273,10 @@ def pbf_compute_delta(
     rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null_f
     rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null_f
     m_ptr = mass if mass is not None else _null_f
-    op_ptr = original_pos if original_pos is not None else _null_f
-    vo_ptr = vel_out if vel_out is not None else _null_f
     kernel(grid, block, (
         np.uint32(n), predicted_pos, lambda_in, m_ptr, packed_info,
         cell_start, cell_end, pred_out,
         rb_ptr, rf_ptr, rt_ptr,
-        op_ptr, vo_ptr,
     ))
 
 
@@ -323,13 +315,10 @@ def pbf_finalize(
     displacement_anchor: "cupy.ndarray | None" = None,
     cell_wake_flags: "cupy.ndarray | None" = None,
     frame_counter: "cupy.ndarray | None" = None,
-    vel_pred_in: "cupy.ndarray | None" = None,
     mass_in_pred_w: bool = False,
 ) -> None:
     """Run K_PBF_Finalize.
 
-    vel_pred_in is the (x* - x) / dt array the last pbf_compute_delta wrote;
-    None derives neighbour velocity from predicted_pos and original_pos.
     mass_in_pred_w reads neighbour mass from predicted_pos.w instead of mass.
 
     sorted_angular_velocity and angular_velocity_out are ignored: the
@@ -357,7 +346,6 @@ def pbf_finalize(
     # NULL table: no mark, so the caller must run K_MarkWakeCells instead.
     wake_ptr = cell_wake_flags if cell_wake_flags is not None else np.intp(0)
     frame_ptr = frame_counter if frame_counter is not None else np.intp(0)
-    vp_ptr = vel_pred_in if vel_pred_in is not None else np.intp(0)
     module = _get_module()
     kernel = module.get_function("K_PBF_Finalize")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -374,5 +362,5 @@ def pbf_finalize(
         max_disp_ptr,
         anchor_ptr,
         wake_ptr, frame_ptr,
-        vp_ptr, np.int32(1 if mass_in_pred_w else 0),
+        np.int32(1 if mass_in_pred_w else 0),
     ))

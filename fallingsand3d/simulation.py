@@ -1391,8 +1391,7 @@ class Simulation:
         # Each iteration's delta moves the fluid, so each adds its rigid reaction.
         # Iteration 0 reads mass from sorted_mass: reactions and spawn may have
         # changed it since K_PBF_Predict, and that pass writes it into .w for
-        # the later passes. The last pass also writes (x* - x) / dt into
-        # sorted_veleval for Finalize's XSPH neighbour loop.
+        # the later passes.
         rbm = self.rigid_body_manager
         rigid_kw = self._rigid_kwargs()
         for i in range(num_iters):
@@ -1414,8 +1413,6 @@ class Simulation:
                 w.sorted_packed_info[:n],
                 self._cell_start, self._cell_end,
                 dst,
-                original_pos=w.sorted_position[:n] if last else None,
-                vel_out=w.sorted_veleval if last else None,
                 **rigid_kw,
             )
         mark("iterations")
@@ -1444,7 +1441,6 @@ class Simulation:
             displacement_anchor=w.sorted_anchor,
             cell_wake_flags=self._cell_wake_flags,
             frame_counter=self._frame_counter_d,
-            vel_pred_in=w.sorted_veleval[:n],
             mass_in_pred_w=True,
         )
         mark("finalize")
