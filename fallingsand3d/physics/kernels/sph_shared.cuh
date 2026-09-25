@@ -122,19 +122,67 @@ struct GranularParams {
 __constant__ GranularParams c_granular;
 
 /* ======================================================================
- * Per-lane accumulation for rigid body force/torque.
+ * Rigid body force/torque accumulation (bd-r5-review-n28.182).
  *
- * Each lane atomically adds its own contribution directly. The function
- * is called inside divergent neighbor-loop branches where lanes process
- * different neighbors and may belong to different body_ids, so a
- * full-warp __shfl_down_sync reduction is incorrect (it would blend
- * values across bodies and include inactive lanes).
+ * atomic_accumulate3 adds a float3 to slot body_id of a [MAX_RIGID_BODIES*4]
+ * accumulator with three plain global atomics. It does no warp reduction:
+ * callers sit inside divergent neighbour-loop branches where lanes may hold
+ * different body ids.
+ *
+ * RigidAccum keeps one body's force and torque sum in registers. A coupling
+ * loop calls rigid_accum_add per fluid-boundary pair. The sum is flushed with
+ * six atomics only when the pair's body id differs from the held one, and
+ * once more by rigid_accum_flush after the loop. Most fluid particles touch
+ * one body, so the atomic count drops from 6 per pair to 6 per particle.
+ * Only the float summation order changes.
  * ====================================================================== */
 
-__device__ inline void warp_reduce_accumulate(float* target, float3 val, int body_id) {
+__device__ __forceinline__ void atomic_accumulate3(float* target, float3 val, int body_id) {
     atomicAdd(&target[body_id * 4 + 0], val.x);
     atomicAdd(&target[body_id * 4 + 1], val.y);
     atomicAdd(&target[body_id * 4 + 2], val.z);
+}
+
+struct RigidAccum {
+    int    body;  // body id held in F/tau, -1 when empty
+    float3 F;
+    float3 tau;
+};
+
+__device__ __forceinline__ RigidAccum rigid_accum_init() {
+    RigidAccum a;
+    a.body = -1;
+    a.F   = make_float3(0.0f, 0.0f, 0.0f);
+    a.tau = make_float3(0.0f, 0.0f, 0.0f);
+    return a;
+}
+
+/* Write the held sum to the global accumulators and empty the holder. */
+__device__ __forceinline__ void rigid_accum_flush(
+    RigidAccum& a, float* d_rigid_forces, float* d_rigid_torques
+) {
+    if (a.body >= 0) {
+        atomic_accumulate3(d_rigid_forces, a.F, a.body);
+        atomic_accumulate3(d_rigid_torques, a.tau, a.body);
+        a.body = -1;
+    }
+}
+
+/* Add one pair's force and torque on body_id. Flushes the held sum first
+ * when it belongs to another body. */
+__device__ __forceinline__ void rigid_accum_add(
+    RigidAccum& a, float* d_rigid_forces, float* d_rigid_torques,
+    int body_id, float3 F, float3 tau
+) {
+    if (body_id != a.body) {
+        rigid_accum_flush(a, d_rigid_forces, d_rigid_torques);
+        a.body = body_id;
+        a.F = F;
+        a.tau = tau;
+    } else {
+        a.F.x += F.x;   a.F.y += F.y;   a.F.z += F.z;
+        a.tau.x += tau.x; a.tau.y += tau.y; a.tau.z += tau.z;
+    }
 }
 
 /* ======================================================================

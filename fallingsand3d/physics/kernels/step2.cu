@@ -188,6 +188,9 @@ void K_Step2(
     int    rb_pend = -1;
     float3 rb_fv   = make_float3(0.0f, 0.0f, 0.0f);
     float3 rb_tv   = make_float3(0.0f, 0.0f, 0.0f);
+    // Pressure and explicit viscous reaction on the rigid bodies, summed in
+    // registers and flushed on body change and after the loop.
+    RigidAccum rb_acc = rigid_accum_init();
 
     float h    = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
@@ -425,8 +428,8 @@ void K_Step2(
                                 r_b.z * F_on_body.x - r_b.x * F_on_body.z,
                                 r_b.x * F_on_body.y - r_b.y * F_on_body.x
                             );
-                            warp_reduce_accumulate(d_rigid_forces, F_on_body, body_id);
-                            warp_reduce_accumulate(d_rigid_torques, tau, body_id);
+                            rigid_accum_add(rb_acc, d_rigid_forces, d_rigid_torques,
+                                            body_id, F_on_body, tau);
                         } else {
                             // --- Regular STATIC boundary: Akinci pressure mirroring + friction ---
                             float press_sym_b = 2.0f * pr2_i;
@@ -597,11 +600,11 @@ void K_Step2(
     if (rb_pend >= 0) {
         // Deferred viscous reaction on the first rigid body, same scale.
         float k_rb = -m_i * fs_i * visc_s;
-        warp_reduce_accumulate(d_rigid_forces,
-            make_float3(k_rb * rb_fv.x, k_rb * rb_fv.y, k_rb * rb_fv.z), rb_pend);
-        warp_reduce_accumulate(d_rigid_torques,
-            make_float3(k_rb * rb_tv.x, k_rb * rb_tv.y, k_rb * rb_tv.z), rb_pend);
+        rigid_accum_add(rb_acc, d_rigid_forces, d_rigid_torques, rb_pend,
+            make_float3(k_rb * rb_fv.x, k_rb * rb_fv.y, k_rb * rb_fv.z),
+            make_float3(k_rb * rb_tv.x, k_rb * rb_tv.y, k_rb * rb_tv.z));
     }
+    rigid_accum_flush(rb_acc, d_rigid_forces, d_rigid_torques);
 
     // --- PostCalc: apply precalc coefficients and write output ---
     float3 total_force;
