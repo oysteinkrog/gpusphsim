@@ -1410,28 +1410,33 @@ class Simulation:
 
         # 3. Non-pressure forces (viscosity, gravity, mu(I), vorticity confinement, surface tension)
         rbm = self.rigid_body_manager
+        vel = w.sorted_veleval[:n]
         dfsph_solver.compute_non_pressure_forces(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n], w.sorted_shear_rate[:n],
             w.sorted_temperature[:n],
             self._cell_start, self._cell_end,
-            # Write to veleval scratch, not in-place: velocity is a __restrict__
+            # Write to veleval, not in-place: velocity is a __restrict__
             # neighbour input here, so aliasing it with the output is UB and a
             # read/write race (MED-3). K_DFSPH_NonPressureForces writes every
-            # particle in [0,n), so the copy-back below is complete.
-            w.sorted_veleval[:n],
+            # particle in [0,n), so from here on sorted_veleval is the DFSPH
+            # velocity: every later kernel in this substep, and foam
+            # generation, reads it. The routing is fixed (no per-substep
+            # buffer swap) because CUDA graphs bake the pointers
+            # (bd-r5-review-n28.173).
+            vel,
             vorticity_in=w.sorted_vorticity[:n],
             normal_in=w.sorted_normal[:n],
             d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
-            # Last substep's converged p/rho, still unscaled: the warm-start
-            # multiply runs later, before the density solver. mu(I) friction
-            # reads it as its confining pressure (bd-r5-review-n28.92).
+            # Last substep's converged p/rho, stored by K_DFSPH_Finalize times
+            # the warm-start carry; the kernel divides the carry back out.
+            # mu(I) friction reads it as its confining pressure
+            # (bd-r5-review-n28.92).
             p_prev=w.sorted_kappa[:n],
         )
-        w.sorted_velocity[:n] = w.sorted_veleval[:n]
         mark("non_pressure")
 
         # 4. Divergence solver (warm-started kappa_v -- PERF-008)
@@ -1440,25 +1445,27 @@ class Simulation:
         rigid_kw = self._rigid_kwargs()
         # sorted_kappa_v is the running total: the scaled warm start from the
         # previous substep plus every iteration's increment. Finalize writes it
-        # back as the next warm start. Each iteration applies only its own
+        # back times the div warm start, so it arrives here already scaled
+        # (bd-r5-review-n28.173). Each iteration applies only its own
         # increment, held in _kappa_v_delta (bd-r5-review-n28.83).
         self._ensure_kappa_v_delta()  # no-op here: _sim_step allocated it
         kv_total = w.sorted_kappa_v[:n]
         kv_delta = self._kappa_v_delta[:n]
         if self._profile.dfsph_div_warm_start > 0.0:
-            kv_total *= self._profile.dfsph_div_warm_start
             dfsph_solver.correct_velocity_div(
-                w.sorted_velocity[:n], w.sorted_density[:n],
+                vel, w.sorted_density[:n],
                 w.sorted_mass[:n], kv_total,
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
                 **rigid_kw,
             )
         else:
+            # Finalize already wrote 0 with a zero carry. This clears values
+            # carried from before a switch to a zero warm start.
             kv_total.fill(0)
         for _ in range(self._profile.dfsph_div_iters):
             dfsph_solver.compute_kappa_v(
-                w.sorted_velocity[:n], w.sorted_density[:n],
+                vel, w.sorted_density[:n],
                 w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
@@ -1466,7 +1473,7 @@ class Simulation:
                 kappa_v_total=kv_total,
             )
             dfsph_solver.correct_velocity_div(
-                w.sorted_velocity[:n], w.sorted_density[:n],
+                vel, w.sorted_density[:n],
                 w.sorted_mass[:n], kv_delta,
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
@@ -1488,8 +1495,12 @@ class Simulation:
         #               sorted_predicted_position -> a_press
         p_rho2 = w.sorted_kappa  # already contains warm-started values from reorder
         a_press = w.sorted_predicted_position
-        # Warm-start: scale previous pressure by decay factor (0.5 = carry 50%)
-        p_rho2[:n] *= self._profile.dfsph_warm_start
+        # Warm start: K_DFSPH_Finalize already scaled the previous pressure by
+        # dfsph_warm_start (0.5 = carry 50%) as it wrote it back
+        # (bd-r5-review-n28.173). With a zero warm start it keeps the
+        # unscaled value for mu(I), so start the solver from zero here.
+        if self._profile.dfsph_warm_start <= 0.0:
+            p_rho2[:n].fill(0)
         # Only the last a_press is applied to the fluid, so only the last
         # compute_pressure_accel call adds the rigid reaction.
         dens_iters = self._profile.dfsph_dens_iters
@@ -1504,7 +1515,7 @@ class Simulation:
         )
         for it in range(dens_iters):
             dfsph_solver.density_solver_update(
-                w.sorted_velocity[:n], a_press[:n],
+                vel, a_press[:n],
                 w.sorted_position[:n], w.sorted_density[:n],
                 w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
                 w.sorted_packed_info[:n],
@@ -1520,7 +1531,7 @@ class Simulation:
                 **(rigid_kw if it == dens_iters - 1 else {}),
             )
         dfsph_solver.apply_pressure_velocity(
-            w.sorted_velocity[:n], a_press[:n],
+            vel, a_press[:n],
             w.sorted_packed_info[:n],
         )
         mark("density_solve")
@@ -1528,7 +1539,7 @@ class Simulation:
         # 8. Finalize + writeback (includes sleep logic via velocity magnitude)
         # Pass sorted_kappa (= p_rho2) through to unsorted kappa for warm-start next frame
         dfsph_solver.finalize(
-            w.sorted_position[:n], w.sorted_velocity[:n],
+            w.sorted_position[:n], vel,
             w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_health[:n], w.sorted_dTdt[:n],
@@ -1800,10 +1811,13 @@ class Simulation:
         if not generate:
             return
 
-        # 2. Generate new foam from FLUID particles
+        # 2. Generate new foam from FLUID particles. DFSPH keeps its substep
+        # velocity in sorted_veleval (bd-r5-review-n28.173).
+        foam_vel = (w.sorted_veleval if self._profile.solver_type == SolverType.DFSPH
+                    else w.sorted_velocity)
         foam.foam_generate(
             w.sorted_position[:n],
-            w.sorted_velocity[:n],
+            foam_vel[:n],
             w.sorted_normal[:n],
             w.sorted_packed_info[:n],
             w.foam_position,

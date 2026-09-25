@@ -29,9 +29,9 @@ DFSPH_PARAMS_DTYPE = np.dtype(
         ("warm_start", np.float32),
         ("omega", np.float32),
         ("alpha_limit", np.float32),
-        ("_pad0", np.float32),
-        ("_pad1", np.float32),
-        ("_pad2", np.float32),
+        ("kappa_carry", np.float32),
+        ("kappa_v_carry", np.float32),
+        ("kappa_uncarry", np.float32),
     ],
     align=False,
 )
@@ -127,6 +127,15 @@ def upload_dfsph_params(profile) -> None:
     params[0]["warm_start"] = profile.dfsph_warm_start
     params[0]["omega"] = profile.dfsph_omega
     params[0]["alpha_limit"] = profile.dfsph_alpha_limit
+    # K_DFSPH_Finalize scales the warm start as it writes it back
+    # (bd-r5-review-n28.173). kappa keeps a nonzero carry so mu(I) can still
+    # recover the unscaled p/rho; with warm_start <= 0 the host zeroes p_rho2
+    # before the density solver instead.
+    ws = float(profile.dfsph_warm_start)
+    params[0]["kappa_carry"] = ws if ws > 0.0 else 1.0
+    params[0]["kappa_uncarry"] = 1.0 / ws if ws > 0.0 else 1.0
+    dws = float(profile.dfsph_div_warm_start)
+    params[0]["kappa_v_carry"] = dws if dws > 0.0 else 0.0
 
     module = _get_module()
     d_ptr = module.get_global("c_dfsph")
@@ -197,10 +206,15 @@ def compute_non_pressure_forces(
 ) -> None:
     """Viscosity, mu(I) friction and gravity into velocity_out.
 
-    p_prev is the previous substep's converged density-solver value p/rho
-    (w.sorted_kappa, before the warm-start scale). GRANULAR mu(I) friction
-    uses p = p_prev * rho as its confining pressure, floored at the one-layer
-    lithostatic pressure. None means floor only.
+    p_prev is the previous substep's converged density-solver value p/rho as
+    K_DFSPH_Finalize stored it, already times the warm-start carry
+    (w.sorted_kappa). The kernel divides the carry back out, so GRANULAR
+    mu(I) friction uses p = p/rho * rho as its confining pressure, floored at
+    the one-layer lithostatic pressure. None means floor only.
+
+    velocity and velocity_out must not alias. The DFSPH substep passes
+    sorted_velocity in and sorted_veleval out, and every later DFSPH kernel
+    reads sorted_veleval as the velocity (bd-r5-review-n28.173).
     """
     n = position.shape[0]
     _null = np.intp(0)

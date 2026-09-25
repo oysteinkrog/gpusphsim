@@ -60,7 +60,12 @@ struct DFSPHParams {
     float warm_start;
     float omega;          // under-relaxation factor for corrections (0.3-1.0)
     float alpha_limit;    // alpha cap in units of h^2 (interior alpha ~ 0.67 h^2); safety bound only
-    float _pad[3];        // pad to 32 bytes
+    // Warm-start scaling folded into the K_DFSPH_Finalize writeback
+    // (bd-r5-review-n28.173). Finalize writes kappa * kappa_carry and
+    // kappa_v * kappa_v_carry, so the next substep reads them already scaled.
+    float kappa_carry;    // warm_start, or 1 when warm_start <= 0 (the host zeroes p_rho2 then)
+    float kappa_v_carry;  // div warm start, or 0 when it is <= 0
+    float kappa_uncarry;  // 1 / kappa_carry: recovers the unscaled p/rho for mu(I)
 };
 
 __constant__ DFSPHParams c_dfsph;
@@ -440,7 +445,7 @@ void K_DFSPH_NonPressureForces(
     const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
     float*          __restrict__ d_rigid_torques,  // torque accumulator (NULL if no bodies)
-    const float*    __restrict__ p_prev            // previous substep's converged p/rho (sorted_kappa), or NULL
+    const float*    __restrict__ p_prev            // previous substep's p/rho times kappa_carry (sorted_kappa), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -480,7 +485,8 @@ void K_DFSPH_NonPressureForces(
         float gamma_dot_i = __ldg(&shear_rate[i]);
         float p_floor_i = c_materials[mat_id_i].rest_density
                         * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
-        float p_solver_i = (p_prev != 0) ? __ldg(&p_prev[i]) * rho_i : 0.0f;
+        float p_solver_i = (p_prev != 0)
+                         ? __ldg(&p_prev[i]) * c_dfsph.kappa_uncarry * rho_i : 0.0f;
         float p_eff_i = fmaxf(p_solver_i, p_floor_i);
         eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
     }
@@ -632,7 +638,8 @@ void K_DFSPH_NonPressureForces(
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         float p_floor_j = c_materials[mat_id_j].rest_density
                                         * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
-                        float p_solver_j = (p_prev != 0) ? __ldg(&p_prev[j]) * rho_j : 0.0f;
+                        float p_solver_j = (p_prev != 0)
+                                         ? __ldg(&p_prev[j]) * c_dfsph.kappa_uncarry * rho_j : 0.0f;
                         float p_eff_j = fmaxf(p_solver_j, p_floor_j);
                         float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j);
                         float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);
@@ -1658,6 +1665,8 @@ void K_DFSPH_Finalize(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
-    kappa_out[orig_idx] = sorted_kappa[i];
-    if (kappa_v_out) kappa_v_out[orig_idx] = sorted_kappa_v[i];
+    // Warm start for the next substep, scaled here instead of in two
+    // separate host-side multiply passes (bd-r5-review-n28.173).
+    kappa_out[orig_idx] = sorted_kappa[i] * c_dfsph.kappa_carry;
+    if (kappa_v_out) kappa_v_out[orig_idx] = sorted_kappa_v[i] * c_dfsph.kappa_v_carry;
 }
