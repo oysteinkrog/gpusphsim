@@ -375,8 +375,8 @@ xsph_sum_i = SUM_j (m_j / rho_avg_ij) * (v_j - v_i) * W_poly6(|r_ij|)   [j FLUID
 
 where rho_avg_ij = 0.5 * (rho_i + rho_j)
 
-veleval_out_i = v_i + epsilon * xsph_sum_i     [FLUID only]
-GRANULAR/GAS:  veleval_out_i = v_i             [plain velocity, no XSPH correction]
+veleval_out_i = v_i + epsilon * xsph_sum_i     [awake FLUID only]
+Other rows of veleval_out are not written.
 ```
 
 `epsilon` = `c_granular.xsph_epsilon`, built from the active WCSPH profile's
@@ -391,7 +391,8 @@ at dt 1 ms and 0.5 ms (bd-r5-review-n28.25), so the value was left at 0.8.
 `integrate.cu` adds the XSPH delta `veleval - v` only for FLUID. GRANULAR is advected
 with plain `vel_new`, so computing XSPH for GRANULAR would produce a correction that is
 immediately discarded.
-Non-FLUID particles write plain velocity to `veleval_out`.
+Step2 writes `veleval_out` for awake FLUID only, and `integrate.cu` reads it only for
+FLUID, so the plain velocity copy for other behaviours is gone (bd-r5-review-n28.170).
 
 **FLUID neighbours only**: the sum runs over FLUID neighbours only (`behavior_j == FLUID`,
 bd-r5-review-n28.104). STATIC and GAS neighbours are skipped earlier in the loop.
@@ -410,6 +411,15 @@ sph_force_out = total_force    [acceleration, m/s^2]
 ```
 
 **NO mass multiplication at output.** This is acceleration directly.
+
+STATIC and sleeping particles take an early return and write neither `sph_force_out`
+nor `veleval_out` (bd-r5-review-n28.170). `integrate.cu` never reads those rows: STATIC
+and still-sleeping particles return first, and a particle that wakes inside integrate
+(reactions, the blast wave, IST or a geometry push) uses zero SPH force and no XSPH delta
+for that substep, which are the values step2 used to store for it. No kernel between
+step2 and integrate changes the sleeping bit, so the two kernels agree on which rows
+were skipped. On a settled 1M SAND block this cut step2 from 0.045 to 0.008 ms.
+Test: `test_integrate.py::test_unwritten_force_and_veleval_rows_are_not_read`.
 
 **Source**: `step2.cu:392`
 
@@ -571,6 +581,9 @@ XSPH correction on top. Step2 writes `veleval_xsph = v_old + epsilon * xsph_sum`
 smooths compression artifacts at larger dt (Game SPH). A FLUID and a GRANULAR particle
 in free fall stay at the same height (`test_fluid_granular_freefall_match`,
 bd-r5-review-n28.44).
+
+A FLUID particle that woke in integrate this substep gets no XSPH delta: step2 skipped
+it while it was asleep and did not write its `veleval` row.
 
 PBF and DFSPH do their own position update in their Finalize kernels (PBF from the
 predicted position, DFSPH from the post-solve velocity plus XSPH), so they do not read
