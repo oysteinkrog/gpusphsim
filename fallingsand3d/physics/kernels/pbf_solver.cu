@@ -1010,31 +1010,35 @@ void K_PBF_Finalize(
                         uint pi_j = __ldg(&packed_info[j]);
                         int bj = GET_BEHAVIOR(pi_j);
 
+                        bool vort_j = do_vort_eta && bj == FLUID;
+                        bool xsph_j = do_xsph && bj != GAS;  // no XSPH across phases
+                        if (!vort_j && !xsph_j) continue;
+
+                        // One mass and one density load per neighbour, shared
+                        // by the vorticity and XSPH blocks (bd-r5-review-n28.175).
+                        float m_j = __ldg(&mass[j]);
+                        float rho_j = __ldg(&density[j]);
+
                         // Vorticity eta (FLUID neighbours only -- PERF-002).
                         // Use difference form (omega_j - omega_mag_i) to match step2.
                         // STATIC (incl. MAT_RIGID), GAS and GRANULAR neighbours have
                         // omega = 0 and would bias N toward the boundary
                         // (bd-r5-review-n28.66).
-                        if (do_vort_eta && bj == FLUID) {
+                        if (vort_j) {
                             float rlv = sqrtf(r_sq);
                             float h_rl = h - rlv;
                             float inv_rl = 1.0f / rlv;
                             float gs = c_precalc.spiky_grad_coeff * h_rl * h_rl * inv_rl;
-                            float omega_j = __ldg(&vorticity_in[j]).w;
-                            float mj_v = __ldg(&mass[j]);
-                            float rj_v = __ldg(&density[j]);
-                            float wt = mj_v / fmaxf(rj_v, 1.0f);
+                            // |omega| only: a 4 B load, not the full float4.
+                            float omega_j = __ldg(&((const float*)vorticity_in)[4 * j + 3]);
+                            float wt = m_j / fmaxf(rho_j, 1.0f);
                             float omega_diff = omega_j - omega_mag_i;
                             eta_vort.x += wt * omega_diff * gs * r.x;
                             eta_vort.y += wt * omega_diff * gs * r.y;
                             eta_vort.z += wt * omega_diff * gs * r.z;
                         }
 
-                        if (!do_xsph) continue;
-
-                        if (bj == GAS) continue;  // no XSPH across phases
-
-                        float m_j = __ldg(&mass[j]);
+                        if (!xsph_j) continue;
 
                         // Rigid boundary particle: XSPH toward the body surface
                         // velocity v_body + omega x r (K_UpdateBoundaryParticles
@@ -1065,7 +1069,6 @@ void K_PBF_Finalize(
                             (pred4_j.y - orig4_j.y) * inv_dt,
                             (pred4_j.z - orig4_j.z) * inv_dt
                         );
-                        float rho_j = __ldg(&density[j]);
                         float w = W_poly6(r_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
                         float factor = (m_j / rho_avg) * w;
