@@ -2170,6 +2170,8 @@ Artificial pressure (`s_corr`) is disabled by default (`k=0`). At our smoothing
 length (h=0.04), the Spiky gradient magnitudes are ~100x larger than in the
 original paper (h~0.1), making the fixed-coefficient s_corr term dominate lambda
 and cause instability. The weak attractive C provides surface cohesion instead.
+When `k=0`, `upload_pbf_params` uploads `s_corr_W_dq = 0`, so ComputeDelta
+skips the s_corr ratio for every neighbour (no W/W_dq division, no ratio^4).
 
 **Source**: `pbf_solver.cu:K_PBF_ComputeDelta`
 
