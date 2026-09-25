@@ -494,9 +494,14 @@ class World:
         self.angular_velocity[:num_alive] = self.sorted_angular_velocity[:num_alive]
         self.kappa_v[:num_alive] = self.sorted_kappa_v[:num_alive]
 
-        # Zero out the dead tail to prevent stale data
+        # Zero out the dead tail to prevent stale data. The DFSPH warm-start
+        # fields are cleared too, so a slot never hands its old pressure to
+        # whatever lands there next (bd-r5-review-n28.121). PBF has no
+        # unsorted lambda array; sorted_lambda_pbf is per-iteration scratch.
         if num_alive < n:
             self.packed_info[num_alive:n] = cp.uint32(DEAD_PACKED)
+            self.kappa[num_alive:n] = 0.0
+            self.kappa_v[num_alive:n] = 0.0
 
         self._high_water = num_alive
         return num_alive

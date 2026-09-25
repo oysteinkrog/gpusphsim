@@ -989,6 +989,9 @@ void K_DFSPH_CorrectVelocityDiv(
 
                     int bj = GET_BEHAVIOR(pi_j);
                     if (bj == GAS) continue;
+                    // STATIC never carries a divergence factor, whatever the
+                    // buffer holds (warm start of a fresh slot).
+                    if (bj == STATIC) kv_j = 0.0f;
 
                     float3 r = make_float3(
                         pos_i.x - pos4_j.x,
@@ -1107,6 +1110,9 @@ void K_DFSPH_ComputePressureAccel(
 
                     int bj = GET_BEHAVIOR(pi_j);
                     if (bj == GAS) continue;
+                    // STATIC never carries pressure, whatever the buffer
+                    // holds (warm start of a fresh slot).
+                    if (bj == STATIC) p_j = 0.0f;
 
                     float3 r = make_float3(
                         pos_i.x - pos4_j.x,

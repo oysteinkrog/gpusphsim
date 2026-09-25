@@ -762,6 +762,12 @@ class RigidBodyManager:
             world.health[sl] = 1.0
             world.lifetime[sl] = 0.0
             world.sleep_counter[sl] = 0
+            # DFSPH warm-start state: the slot's previous occupant must not
+            # give the boundary a pressure or divergence factor on the first
+            # substep (bd-r5-review-n28.121).
+            world.kappa[sl] = 0.0
+            world.kappa_v[sl] = 0.0
+            world.angular_velocity[sl] = 0.0
 
             # Color for rigid body particles
             world.color[sl, 0] = 0.6
