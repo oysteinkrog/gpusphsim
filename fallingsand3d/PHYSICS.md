@@ -1598,8 +1598,12 @@ Each item names its bead (`bd-r4fix-uup.N`).
   - PBF and DFSPH fill it from `sorted_density`. This removes the race, but the
     values are still in the previous sort order after a full re-sort. The
     effect is bounded noise in the weighting, not a blow-up.
-  - All five read sites replace a value `<= 0` with 1000, so a never-computed
-    or freshly spawned slot cannot produce `inf`.
+  - Every read site (K_Step1, K_Step1_BuildNL, K_DFSPH_ComputeDensityAlpha,
+    same-phase and cross-phase heat) replaces a value `<= 0` with the
+    neighbour's own `rest_density`, floored at `RHO_EPSILON` so GAS keeps its
+    low rest density (bd-r5-review-n28.110). A never-computed or freshly
+    spawned slot therefore gets `m_j / rho_j` equal to its rest volume and
+    cannot produce `inf`. See §13.2 for the effect on DFSPH alpha.
 - **Wake for PBF/DFSPH, foam seed, spawn freelist (.15).** See §8.2 and §19.3.
   The spawn freelist is reset every substep because it stores sorted indices.
   `K_Reactions` used to add only particles that died in that substep, so dead
@@ -2277,6 +2281,15 @@ two-layer STONE box (default profile, 4 s), mean |rho/rho0 - 1| within 2h of the
 moved from 0.281% to 0.267% and at the side walls from 0.32% to 0.28%, which is within
 run-to-run noise. `test_dfsph_alpha_static.py` checks the GPU alpha against a host
 recompute of this formula.
+
+**Zero `density_in` (bd-r5-review-n28.110).** `rho_j` comes from `density_in`, which is
+zero at program start and for slots that were never computed. A zero value falls back to
+the neighbour's `rest_density` (floored at `RHO_EPSILON`), so `m_j / rho_j` is the rest
+volume and the first-substep alpha matches a run with density pre-filled at rest. The
+fallback used to be 1000 kg/m^3, which for WATER (2500) made `V_j` 2.5x too large and
+alpha about 6.25x too small on that substep. `test_dfsph_density_fallback.py` checks that
+alpha from zero or null `density_in` matches alpha from `density_in = 2500` on a WATER
+block within 5% (measured difference 0).
 
 For GRANULAR particles, alpha is multiplied by a compliance factor (0.7) to allow
 some compression for granular packing without destabilizing the solver.
