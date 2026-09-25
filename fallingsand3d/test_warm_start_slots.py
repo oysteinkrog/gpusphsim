@@ -91,7 +91,7 @@ def _pool_on_floor(stale: bool):
     w = World(20_000)
     w.spawn_cube((-0.2, -0.6, -0.2), (0.2, -0.56, 0.2), STONE, SPACING)
     n_floor = w._high_water
-    w.spawn_cube((-0.15, -0.54, -0.15), (0.15, -0.44, 0.15), WATER, SPACING)
+    w.spawn_cube((-0.15, -0.56, -0.15), (0.15, -0.46, 0.15), WATER, SPACING)
     if stale:
         # A STATIC slot holding a fluid-sized warm start.
         w.kappa[:n_floor] = 17.0
@@ -105,8 +105,8 @@ def test_static_neighbour_warm_start_is_ignored():
     v_clean = _pool_on_floor(stale=False)
     v_stale = _pool_on_floor(stale=True)
     diff = np.abs(v_stale - v_clean).max()
-    # Without the STATIC guard the stale floor kicks the bottom layer by
-    # roughly a metre per second.
+    # Measured: 2e-6 m/s with the STATIC guard, 0.037 m/s without it (the
+    # bottom water layer sits 0.02 m above the floor, inside h = 0.04).
     assert diff < 1e-3, f"stale STATIC warm start moved fluid by {diff:.4g} m/s"
 
 
