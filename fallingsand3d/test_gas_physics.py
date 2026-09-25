@@ -43,7 +43,6 @@ from step1 import (
     build_sim_params,
     build_precalc_params,
     compute_step1,
-    pack_density,
 )
 from step2 import (
     build_granular_params,
@@ -240,10 +239,6 @@ def run_full_pipeline_step(w, grid_params, scratch, frame=0):
         velocity_h=velocity_h,
     )
 
-    # Pack density into position.w so Step2 can read it
-    # (API drift: Step2 no longer accepts density as a direct argument)
-    pack_density(sorted_pos, density, n)
-
     # Reactions
     compute_reactions(
         sorted_pi, sorted_temp, sorted_health, sorted_lifetime,
@@ -368,9 +363,6 @@ def test_gas_linear_eos():
         f"Max density {max_density:.4f} should exceed rho0_steam={rho0} "
         f"for 27 tightly packed particles — linear EOS needs rho > rho0 to fire"
     )
-
-    # Pack density into position.w before step2
-    pack_density(s_pos, density, n)
 
     # Step2: compute SPH forces (must pass pressure_in; without it step2 defaults to
     # zeros → zero force.  _pressure was pre-computed by step1 above.)

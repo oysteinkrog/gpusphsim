@@ -1,4 +1,4 @@
-"""Implicit viscous self-term in K_Step2 and K_Step2_NL (bd-r5-review-n28.52).
+"""Implicit viscous self-term in K_Step2 (bd-r5-review-n28.52).
 
 The viscous accel of particle i is fs_i * sum_j c_j (v_j - v_i). With
 explicit Euler, dt * fs_i * c_tot above 2 makes a velocity mode that
@@ -29,7 +29,6 @@ import cupy
 import numpy as np
 import pytest
 
-import neighbor_list as nl
 from conftest import counting_sort_scene, default_grid_params, unsort
 from materials import FLUID, GRANULAR, LAVA, MUD, OIL, SAND, WATER, build_material_array
 from step1 import build_precalc_params, build_sim_params
@@ -92,18 +91,6 @@ def _upload_step2() -> None:
     )
 
 
-def _upload_nl() -> None:
-    _upload(
-        (
-            nl.upload_grid_params,
-            nl.upload_sim_params,
-            nl.upload_precalc_params,
-            nl.upload_materials,
-            nl.upload_granular_params,
-        )
-    )
-
-
 def _lattice(mode: str):
     idx = np.arange(N_SIDE) - N_SIDE // 2
     xs, ys, zs = np.meshgrid(idx, idx, idx, indexing="ij")
@@ -117,7 +104,7 @@ def _lattice(mode: str):
     return pos, sign.astype(np.float32), interior
 
 
-def _run(mat, behav, mode: str, use_nl: bool):
+def _run(mat, behav, mode: str):
     pos, sign, interior = _lattice(mode)
     n = pos.shape[0]
     axis = 0 if mode == "checker" else 1
@@ -136,52 +123,30 @@ def _run(mat, behav, mode: str, use_nl: bool):
     pressure = cupy.zeros(n, dtype=cupy.float32)
     compute_pressure(density, scene["packed_info"], pressure)
     shear = cupy.zeros(n, dtype=cupy.float32)  # resting: eta = mu_max for SAND
-    if use_nl:
-        nb_idx, nb_cnt = nl.allocate_neighbor_buffers(n)
-        nl.build_neighbor_list(
-            scene["position"], scene["cell_start"], scene["cell_end"], nb_idx, nb_cnt
-        )
-        force, _ = nl.compute_step2_nl(
-            scene["position"],
-            scene["velocity"],
-            scene["mass"],
-            scene["packed_info"],
-            shear,
-            nb_idx,
-            nb_cnt,
-            velocity_h=scene["velocity_h"],
-            pressure_in=pressure,
-        )
-    else:
-        force, _ = compute_step2(
-            scene["position"],
-            scene["velocity"],
-            scene["mass"],
-            scene["packed_info"],
-            shear,
-            scene["cell_start"],
-            scene["cell_end"],
-            velocity_h=scene["velocity_h"],
-            pressure_in=pressure,
-        )
+    force, _ = compute_step2(
+        scene["position"],
+        scene["velocity"],
+        scene["mass"],
+        scene["packed_info"],
+        shear,
+        scene["cell_start"],
+        scene["cell_end"],
+        velocity_h=scene["velocity_h"],
+        pressure_in=pressure,
+    )
     acc = cupy.asnumpy(unsort(force, scene["sort_perm"]))
     v0 = vel[interior, axis]
     v1 = v0 + DT * acc[interior, axis]
     return v1 / v0
 
 
-@pytest.mark.parametrize("use_nl", [False, True], ids=["K_Step2", "K_Step2_NL"])
 @pytest.mark.parametrize("mode", ["checker", "planes"])
 @pytest.mark.parametrize(
     "mat,behav,max_ratio,keep_sign", CASES, ids=[str(c[0]) for c in CASES]
 )
-def test_alternating_mode_decays(mat, behav, max_ratio, keep_sign, mode, use_nl):
-    if use_nl:
-        _upload_step2()  # compute_pressure lives in the step2 module
-        _upload_nl()
-    else:
-        _upload_step2()
-    ratio = _run(mat, behav, mode, use_nl)
+def test_alternating_mode_decays(mat, behav, max_ratio, keep_sign, mode):
+    _upload_step2()
+    ratio = _run(mat, behav, mode)
     print(f"  mat={mat} {mode} v'/v min={ratio.min():+.4f} max={ratio.max():+.4f}")
     assert np.all(np.isfinite(ratio))
     assert np.abs(ratio).max() < max_ratio, (

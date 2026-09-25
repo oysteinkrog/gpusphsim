@@ -30,11 +30,11 @@
 #include "sph_shared.cuh"
 
 /* ======================================================================
- * K_ComputePressure -- pre-compute per-particle pressure from density.
+ * K_ComputePressure -- per-particle Tait pressure from a density array.
  *
- * Runs once after K_Step1 so that K_Step2 can read pressure from an array
- * instead of calling compute_pressure() ~50 times per particle (once per
- * neighbor). WCSPH only.
+ * Test-only. The simulation does not launch it: K_Step1 writes pressure_out
+ * itself. Tests that set density by hand use this kernel to get the matching
+ * pressure_in for K_Step2.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256)
@@ -115,7 +115,7 @@ __device__ __forceinline__ float cross_pair_visc(
 extern "C" __global__ __launch_bounds__(256, 3)
 void K_Step2(
     uint            numParticles,
-    const float4*   __restrict__ position,      // sorted positions (density packed in .w by K_PackDensity)
+    const float4*   __restrict__ position,      // sorted positions (density packed in .w by K_Step1)
     const float4*   __restrict__ velocity,      // sorted evaluation velocity
     const float*    __restrict__ mass,           // sorted per-particle mass
     const uint*     __restrict__ packed_info,    // sorted packed_info (material + behavior + flags)
@@ -171,7 +171,7 @@ void K_Step2(
         vel_i_pair = make_float3(vh_i.x, vh_i.y, vh_i.z);
     }
 
-    float rho_i = pos4_i.w;  // density packed into position.w by K_PackDensity (OPT-4.1)
+    float rho_i = pos4_i.w;  // density packed into position.w by K_Step1 (OPT-4.1)
     float p_i = __ldg(&pressure_in[index_i]);  // pre-computed (PERF-007)
 
     // Accumulators
@@ -305,7 +305,7 @@ void K_Step2(
                     if (is_gas_i != (behavior_j == GAS)
                         && !(is_gas_i && GET_MATERIAL_ID(pi_j) == MAT_RIGID)) continue;
 
-                    // density_j packed into position.w by K_PackDensity (OPT-4.1)
+                    // density_j packed into position.w by K_Step1 (OPT-4.1)
                     float3 vel_j = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
                     float rho_j = pos4_j.w;
 

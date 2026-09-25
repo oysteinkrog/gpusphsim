@@ -106,8 +106,6 @@ def run_benchmark(
     solver: str = "WCSPH",
     world_half_size: float = 1.0,
     verbose: bool = True,
-    use_neighbor_list: bool = False,
-    use_fused_nl: bool = False,
 ):
     """Run benchmark and return results dict."""
     import cupy
@@ -115,8 +113,6 @@ def run_benchmark(
     from world import World
     from simulation import Simulation
     from solver_profiles import PROFILES
-    import grid_params as grid_params_mod
-    import step1
 
     # Estimate max_particles needed (spawn may produce slightly different count)
     max_p = int(num_particles * 1.2) + 10000
@@ -130,8 +126,7 @@ def run_benchmark(
     actual = create_dam_break(world, num_particles)
 
     if verbose:
-        mode = "fused-nl" if use_fused_nl else ("neighbor-list" if use_neighbor_list else "grid")
-        print(f"  Spawned: {actual:,} particles (target: {num_particles:,}) [{mode} mode]")
+        print(f"  Spawned: {actual:,} particles (target: {num_particles:,})")
 
     # Create simulation with fixed dt for reproducibility
     sim = Simulation(
@@ -156,79 +151,6 @@ def run_benchmark(
         sim._sim_step(n)
     cupy.cuda.Device().synchronize()
 
-    # Neighbor list setup (after warmup so constants are uploaded)
-    nl_indices = None
-    nl_count = None
-    MAX_NB = 64
-    if use_neighbor_list or use_fused_nl:
-        nl_indices = cupy.empty(max_p * MAX_NB, dtype=cupy.uint32)
-        nl_count = cupy.empty(max_p, dtype=cupy.uint32)
-
-    if use_neighbor_list:
-        import neighbor_list as nl
-        import step2 as step2_mod
-        # Build and upload constant memory to neighbor_list module
-        hs = sim._world_half_size
-        wmin, wmax = (-hs, -hs, -hs), (hs, hs, hs)
-        grid_params, _ = grid_params_mod.build_grid_params_for_world(
-            wmin, wmax, sim._h, num_particles=n,
-        )
-        vel_limit = 0.9 * sim._h / max(sim.dt, 1e-8)
-        sim_params = step1.build_sim_params(
-            smoothing_length=sim._h, particle_mass=0.02, particle_spacing=0.02,
-            gravity=(0.0, -4.0, 0.0), dt=sim.dt, restitution=0.3,
-            wall_friction=0.5, world_min=wmin, world_max=wmax,
-            velocity_limit=vel_limit,
-        )
-        precalc_params = step1.build_precalc_params(smoothing_length=0.04, viscosity=1.0)
-        from materials import build_material_array, build_interaction_matrix
-        nl.upload_grid_params(grid_params)
-        nl.upload_sim_params(sim_params)
-        nl.upload_precalc_params(precalc_params)
-        nl.upload_materials(build_material_array())
-        nl.upload_interactions(build_interaction_matrix())
-        nl.upload_granular_params(step2_mod.build_granular_params())
-        # Compile NL kernels (warmup)
-        nl.build_neighbor_list(
-            world.sorted_position[:n], sim._cell_start, sim._cell_end,
-            nl_indices, nl_count,
-        )
-        cupy.cuda.Device().synchronize()
-    elif use_fused_nl:
-        import neighbor_list as nl
-        import step2 as step2_mod
-        # Upload constant memory to neighbor_list module for K_Step2_NL
-        hs = sim._world_half_size
-        wmin, wmax = (-hs, -hs, -hs), (hs, hs, hs)
-        grid_params, _ = grid_params_mod.build_grid_params_for_world(
-            wmin, wmax, sim._h, num_particles=n,
-        )
-        vel_limit = 0.9 * sim._h / max(sim.dt, 1e-8)
-        sim_params = step1.build_sim_params(
-            smoothing_length=sim._h, particle_mass=0.02, particle_spacing=0.02,
-            gravity=(0.0, -4.0, 0.0), dt=sim.dt, restitution=0.3,
-            wall_friction=0.5, world_min=wmin, world_max=wmax,
-            velocity_limit=vel_limit,
-        )
-        precalc_params = step1.build_precalc_params(smoothing_length=0.04, viscosity=1.0)
-        from materials import build_material_array, build_interaction_matrix
-        nl.upload_grid_params(grid_params)
-        nl.upload_sim_params(sim_params)
-        nl.upload_precalc_params(precalc_params)
-        nl.upload_materials(build_material_array())
-        nl.upload_interactions(build_interaction_matrix())
-        nl.upload_granular_params(step2_mod.build_granular_params())
-        # Warmup fused kernel
-        from step1 import compute_step1_build_nl
-        compute_step1_build_nl(
-            world.sorted_position[:n], world.sorted_velocity[:n],
-            world.sorted_mass[:n], world.sorted_density,
-            world.sorted_packed_info[:n], world.sorted_temperature[:n],
-            sim._cell_start, sim._cell_end,
-            nl_indices, nl_count, MAX_NB,
-        )
-        cupy.cuda.Device().synchronize()
-
     # Timed run: per-kernel event timing
     if verbose:
         print(f"  Running {num_steps} timed steps...")
@@ -246,156 +168,53 @@ def run_benchmark(
         sim._run_grid_setup(n)
         timer.mark("grid_setup")
 
-        if use_fused_nl:
-            # -- Step1 + build NL (fused) --
-            from step1 import compute_step1_build_nl
-            compute_step1_build_nl(
-                world.sorted_position[:n], world.sorted_velocity[:n],
-                world.sorted_mass[:n],
-                world.sorted_density if hasattr(world, '_density_initialized') else None,
-                world.sorted_packed_info[:n], world.sorted_temperature[:n],
-                sim._cell_start, sim._cell_end,
-                nl_indices, nl_count, MAX_NB,
-                density_out=world.sorted_density,
-                shear_rate_out=world.sorted_shear_rate,
-                dTdt_out=world.sorted_dTdt,
-                exposure_heat_out=world.sorted_exposure_heat,
-                exposure_corrode_out=world.sorted_exposure_corrode,
-                vorticity_out=world.sorted_vorticity,
-                normal_out=world.sorted_normal,
-                particle_dye_in=world.sorted_particle_dye[:n],
-                dye_rate_out=world.sorted_dye_rate,
-                velocity_h=world.sorted_velocity_h,
-                pressure_out=world.sorted_pressure,
-                temperature_h=world.sorted_temperature_h,
-                dye_h=world.sorted_dye_h,
-            )
-            timer.mark("step1+nl")
+        # -- Step1 (grid) --
+        from step1 import compute_step1
+        compute_step1(
+            world.sorted_position[:n], world.sorted_velocity[:n],
+            world.sorted_mass[:n],
+            world.sorted_density if hasattr(world, '_density_initialized') else None,
+            world.sorted_packed_info[:n], world.sorted_temperature[:n],
+            sim._cell_start, sim._cell_end,
+            density_out=world.sorted_density,
+            shear_rate_out=world.sorted_shear_rate,
+            dTdt_out=world.sorted_dTdt,
+            exposure_heat_out=world.sorted_exposure_heat,
+            exposure_corrode_out=world.sorted_exposure_corrode,
+            vorticity_out=world.sorted_vorticity,
+            normal_out=world.sorted_normal,
+            particle_dye_in=world.sorted_particle_dye[:n],
+            dye_rate_out=world.sorted_dye_rate,
+            velocity_h=world.sorted_velocity_h,
+            pressure_out=world.sorted_pressure,
+            temperature_h=world.sorted_temperature_h,
+            dye_h=world.sorted_dye_h,
+        )
+        timer.mark("step1")
 
-            # -- Reactions + Spawn --
-            sim._run_reactions_spawn(n)
-            timer.mark("reactions_spawn")
+        # -- Reactions + Spawn --
+        sim._run_reactions_spawn(n)
+        timer.mark("reactions_spawn")
 
-            # -- Step2 (neighbor-list) --
-            rbm = sim.rigid_body_manager
-            nl.compute_step2_nl(
-                world.sorted_position[:n], world.sorted_velocity[:n],
-                world.sorted_mass[:n], world.sorted_packed_info[:n],
-                world.sorted_shear_rate[:n],
-                nl_indices, nl_count,
-                vorticity_in=world.sorted_vorticity,
-                normal_in=world.sorted_normal,
-                sph_force_out=world.sorted_sph_force,
-                veleval_out=world.sorted_veleval,
-                velocity_h=world.sorted_velocity_h,
-                pressure_in=world.sorted_pressure,
-                d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
-                d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
-                d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
-            )
-            timer.mark("step2")
-        elif use_neighbor_list:
-            # -- Build neighbor list --
-            nl.build_neighbor_list(
-                world.sorted_position[:n],
-                sim._cell_start, sim._cell_end,
-                nl_indices, nl_count,
-            )
-            timer.mark("build_nl")
-
-            # -- Step1 (neighbor-list) --
-            nl.compute_step1_nl(
-                world.sorted_position[:n], world.sorted_velocity[:n],
-                world.sorted_mass[:n],
-                world.sorted_density if hasattr(world, '_density_initialized') else None,
-                world.sorted_packed_info[:n], world.sorted_temperature[:n],
-                nl_indices, nl_count,
-                density_out=world.sorted_density,
-                shear_rate_out=world.sorted_shear_rate,
-                dTdt_out=world.sorted_dTdt,
-                exposure_heat_out=world.sorted_exposure_heat,
-                exposure_corrode_out=world.sorted_exposure_corrode,
-                vorticity_out=world.sorted_vorticity,
-                normal_out=world.sorted_normal,
-                particle_dye_in=world.sorted_particle_dye[:n],
-                dye_rate_out=world.sorted_dye_rate,
-                velocity_h=world.sorted_velocity_h,
-                pressure_out=world.sorted_pressure,
-                temperature_h=world.sorted_temperature_h,
-                dye_h=world.sorted_dye_h,
-            )
-            timer.mark("step1")
-
-            # -- Reactions + Spawn --
-            sim._run_reactions_spawn(n)
-            timer.mark("reactions_spawn")
-
-            # -- Step2 (neighbor-list) --
-            rbm = sim.rigid_body_manager
-            nl.compute_step2_nl(
-                world.sorted_position[:n], world.sorted_velocity[:n],
-                world.sorted_mass[:n], world.sorted_packed_info[:n],
-                world.sorted_shear_rate[:n],
-                nl_indices, nl_count,
-                vorticity_in=world.sorted_vorticity,
-                normal_in=world.sorted_normal,
-                sph_force_out=world.sorted_sph_force,
-                veleval_out=world.sorted_veleval,
-                velocity_h=world.sorted_velocity_h,
-                pressure_in=world.sorted_pressure,
-                d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
-                d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
-                d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
-            )
-            timer.mark("step2")
-        else:
-            # -- Step1 (grid) --
-            from step1 import compute_step1
-            compute_step1(
-                world.sorted_position[:n], world.sorted_velocity[:n],
-                world.sorted_mass[:n],
-                world.sorted_density if hasattr(world, '_density_initialized') else None,
-                world.sorted_packed_info[:n], world.sorted_temperature[:n],
-                sim._cell_start, sim._cell_end,
-                density_out=world.sorted_density,
-                shear_rate_out=world.sorted_shear_rate,
-                dTdt_out=world.sorted_dTdt,
-                exposure_heat_out=world.sorted_exposure_heat,
-                exposure_corrode_out=world.sorted_exposure_corrode,
-                vorticity_out=world.sorted_vorticity,
-                normal_out=world.sorted_normal,
-                particle_dye_in=world.sorted_particle_dye[:n],
-                dye_rate_out=world.sorted_dye_rate,
-                velocity_h=world.sorted_velocity_h,
-                pressure_out=world.sorted_pressure,
-                temperature_h=world.sorted_temperature_h,
-                dye_h=world.sorted_dye_h,
-            )
-            timer.mark("step1")
-
-            # -- Reactions + Spawn --
-            sim._run_reactions_spawn(n)
-            timer.mark("reactions_spawn")
-
-            # -- Step2 (grid) --
-            from step2 import compute_step2
-            rbm = sim.rigid_body_manager
-            compute_step2(
-                world.sorted_position[:n], world.sorted_velocity[:n],
-                world.sorted_mass[:n], world.sorted_packed_info[:n],
-                world.sorted_shear_rate[:n],
-                sim._cell_start, sim._cell_end,
-                vorticity_in=world.sorted_vorticity,
-                normal_in=world.sorted_normal,
-                sph_force_out=world.sorted_sph_force,
-                veleval_out=world.sorted_veleval,
-                velocity_h=world.sorted_velocity_h,
-                pressure_in=world.sorted_pressure,
-                d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
-                d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
-                d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
-            )
-            timer.mark("step2")
+        # -- Step2 (grid) --
+        from step2 import compute_step2
+        rbm = sim.rigid_body_manager
+        compute_step2(
+            world.sorted_position[:n], world.sorted_velocity[:n],
+            world.sorted_mass[:n], world.sorted_packed_info[:n],
+            world.sorted_shear_rate[:n],
+            sim._cell_start, sim._cell_end,
+            vorticity_in=world.sorted_vorticity,
+            normal_in=world.sorted_normal,
+            sph_force_out=world.sorted_sph_force,
+            veleval_out=world.sorted_veleval,
+            velocity_h=world.sorted_velocity_h,
+            pressure_in=world.sorted_pressure,
+            d_rigid_bodies=rbm.d_rigid_bodies if rbm.num_bodies > 0 else None,
+            d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
+            d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
+        )
+        timer.mark("step2")
 
         # -- Integrate --
         from integrate import integrate as integrate_fn
@@ -445,9 +264,7 @@ def run_benchmark(
 
     # Aggregate results
     stages = list(all_timings[0].keys())
-    mode_str = "fused-nl" if use_fused_nl else ("neighbor-list" if use_neighbor_list else "grid")
-    results = {"num_particles": actual, "num_steps": num_steps, "solver": solver,
-                "mode": mode_str}
+    results = {"num_particles": actual, "num_steps": num_steps, "solver": solver}
 
     total_ms = 0.0
     for stage in stages:
@@ -515,9 +332,8 @@ def print_results(results: dict, compact: bool = False):
               f"{results['vram_used_mb']:.0f} MB VRAM")
         return
 
-    mode = results.get("mode", "grid")
     print(f"\n{'='*70}")
-    print(f"  BENCHMARK RESULTS: {n:,} particles, {solver} solver [{mode}]")
+    print(f"  BENCHMARK RESULTS: {n:,} particles, {solver} solver")
     print(f"{'='*70}")
 
     # Per-stage breakdown
@@ -625,12 +441,6 @@ def main():
                         help="Single profiling run (fewer steps, no warmup)")
     parser.add_argument("--world-size", type=float, default=1.0,
                         help="World half-size (default: 1.0, auto-scaled for large N)")
-    parser.add_argument("--neighbor-list", "--nl", action="store_true",
-                        help="Use neighbor-list kernels instead of grid-based")
-    parser.add_argument("--fused-nl", action="store_true",
-                        help="Use fused step1+NL build, step2 reads NL (best of both)")
-    parser.add_argument("--compare", action="store_true",
-                        help="Run grid, neighbor-list, and fused-nl side by side")
     args = parser.parse_args()
 
     _apply_ptx_workaround()
@@ -644,54 +454,7 @@ def main():
     print(f"{props['name'].decode()} ({props['totalGlobalMem'] // (1024**2)} MB)")
     print(f"  Compute: sm_{props['major']}{props['minor']}")
 
-    if args.compare:
-        # A/B comparison: grid vs neighbor-list
-        print(f"\n{'='*70}")
-        print(f"  A/B COMPARISON: grid vs neighbor-list ({args.particles:,} particles)")
-        print(f"{'='*70}\n")
-
-        print("  [A] Grid-based kernels...")
-        r_grid = run_benchmark(
-            num_particles=args.particles, num_steps=args.steps,
-            warmup_steps=args.warmup, solver=args.solver,
-            world_half_size=args.world_size, use_neighbor_list=False,
-        )
-        print_results(r_grid)
-
-        print("  [B] Fused step1+NL build, step2 reads NL...")
-        r_fused = run_benchmark(
-            num_particles=args.particles, num_steps=args.steps,
-            warmup_steps=args.warmup, solver=args.solver,
-            world_half_size=args.world_size, use_fused_nl=True,
-        )
-        print_results(r_fused)
-
-        # Summary comparison
-        print(f"\n{'='*70}")
-        print(f"  COMPARISON SUMMARY")
-        print(f"{'='*70}")
-        t_grid = r_grid["total_substep_avg_ms"]
-        t_fused = r_fused["total_substep_avg_ms"]
-        speedup = t_grid / t_fused if t_fused > 0 else 0
-        print(f"  Grid total:           {t_grid:.3f} ms/substep")
-        print(f"  Fused-NL total:       {t_fused:.3f} ms/substep")
-        print(f"  Speedup:              {speedup:.2f}x")
-
-        # Per-stage comparison
-        stages_grid = {k.replace("_avg_ms", ""): v for k, v in r_grid.items() if k.endswith("_avg_ms") and k != "total_substep_avg_ms"}
-        stages_fused = {k.replace("_avg_ms", ""): v for k, v in r_fused.items() if k.endswith("_avg_ms") and k != "total_substep_avg_ms"}
-        all_stages = list(dict.fromkeys(list(stages_grid.keys()) + list(stages_fused.keys())))
-        print(f"\n  {'Stage':<20} {'Grid (ms)':>10} {'Fused (ms)':>10} {'Speedup':>10}")
-        print(f"  {'-'*52}")
-        for stage in all_stages:
-            g = stages_grid.get(stage, 0)
-            f = stages_fused.get(stage, 0)
-            sp = g / f if f > 0 else float('inf') if g > 0 else 1.0
-            sp_str = f"{sp:.2f}x" if sp < 100 else "N/A"
-            print(f"  {stage:<20} {g:10.3f} {f:10.3f} {sp_str:>10}")
-        print(f"{'='*70}\n")
-
-    elif args.sweep:
+    if args.sweep:
         run_sweep(steps=args.steps, solver=args.solver)
     elif args.profile:
         results = run_benchmark(
@@ -700,8 +463,6 @@ def main():
             warmup_steps=2,
             solver=args.solver,
             world_half_size=args.world_size,
-            use_neighbor_list=args.neighbor_list,
-            use_fused_nl=args.fused_nl,
         )
         print_results(results)
     else:
@@ -711,8 +472,6 @@ def main():
             warmup_steps=args.warmup,
             solver=args.solver,
             world_half_size=args.world_size,
-            use_neighbor_list=args.neighbor_list,
-            use_fused_nl=args.fused_nl,
         )
         print_results(results)
 

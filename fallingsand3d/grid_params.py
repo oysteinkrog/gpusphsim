@@ -2,7 +2,7 @@
 
 Kernel-free: this module only builds the numpy ``GridParams`` struct.
 Each kernel module uploads it to its own ``__constant__ GridParams c_grid``
-(counting_sort, step1, step2, solvers, neighbor_list, ...).
+(counting_sort, step1, step2, solvers, ...).
 
 Uses a spatial hash with a fixed-size table (power of 2) instead of dense
 arrays sized grid_res^3, so world size does not drive memory use.

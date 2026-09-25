@@ -12,7 +12,7 @@ force_scale, the same number and formula DFSPH uses.
 Checks (the viscous part is the force with velocities minus the force
 with zero velocities, so pressure cancels):
   - WATER pair with rho_i != rho_j and different masses:
-    m_a a_a + m_b a_b = 0 for K_Step2 and K_Step2_NL.
+    m_a a_a + m_b a_b = 0 for K_Step2.
   - The pair accel matches the analytic dynamic form value.
   - A WATER block with a free-surface density profile and random
     velocities: total viscous momentum is at float round-off.
@@ -35,7 +35,6 @@ import cupy
 import numpy as np
 import pytest
 
-import neighbor_list as nl
 from conftest import counting_sort_scene, default_grid_params, unsort
 from materials import FLUID, MATERIALS, OIL, WATER, build_material_array
 from step1 import build_precalc_params, build_sim_params
@@ -82,37 +81,10 @@ def _upload_step2() -> None:
     upload_granular_params(gr)
 
 
-def _upload_nl() -> None:
-    g, s, p, m, gr = _params()
-    nl.upload_grid_params(g)
-    nl.upload_sim_params(s)
-    nl.upload_precalc_params(p)
-    nl.upload_materials(m)
-    nl.upload_granular_params(gr)
-
-
-def _run(data: dict, use_nl: bool) -> np.ndarray:
+def _run(data: dict) -> np.ndarray:
     data = dict(data)
     perm = data.pop("sort_perm")
-    if use_nl:
-        n = data["position"].shape[0]
-        nb_idx, nb_cnt = nl.allocate_neighbor_buffers(n)
-        nl.build_neighbor_list(
-            data["position"], data["cell_start"], data["cell_end"], nb_idx, nb_cnt
-        )
-        force, _ = nl.compute_step2_nl(
-            data["position"],
-            data["velocity"],
-            data["mass"],
-            data["packed_info"],
-            data["shear_rate"],
-            nb_idx,
-            nb_cnt,
-            velocity_h=data["velocity_h"],
-            pressure_in=data["pressure_in"],
-        )
-    else:
-        force, _ = compute_step2(**data)
+    force, _ = compute_step2(**data)
     return cupy.asnumpy(unsort(force, perm))[:, :3].astype(np.float64)
 
 
@@ -143,13 +115,10 @@ def _pair(mat_b: int, moving: bool) -> dict:
     )
 
 
-@pytest.mark.parametrize("use_nl", [False, True], ids=["K_Step2", "K_Step2_NL"])
 @pytest.mark.parametrize("mat_b", [WATER, OIL], ids=["water-water", "water-oil"])
-def test_pair_viscous_momentum_and_value(use_nl: bool, mat_b: int) -> None:
+def test_pair_viscous_momentum_and_value(mat_b: int) -> None:
     _upload_step2()
-    if use_nl:
-        _upload_nl()
-    a_visc = _run(_pair(mat_b, True), use_nl) - _run(_pair(mat_b, False), use_nl)
+    a_visc = _run(_pair(mat_b, True)) - _run(_pair(mat_b, False))
 
     p = np.array([MASS_A, MASS_B])[:, None] * a_visc
     total = p.sum(axis=0)
@@ -215,16 +184,13 @@ def _free_surface_block(moving: bool, seed: int = 7) -> dict:
     }
 
 
-@pytest.mark.parametrize("use_nl", [False, True], ids=["K_Step2", "K_Step2_NL"])
-def test_free_surface_block_viscous_momentum(use_nl: bool) -> None:
+def test_free_surface_block_viscous_momentum() -> None:
     _upload_step2()
-    if use_nl:
-        _upload_nl()
     moving = _free_surface_block(True)
     still = _free_surface_block(False)
     m = moving.pop("_mass_host").astype(np.float64)
     still.pop("_mass_host")
-    a_visc = _run(moving, use_nl) - _run(still, use_nl)
+    a_visc = _run(moving) - _run(still)
     p = m[:, None] * a_visc
     total = p.sum(axis=0)
     gross = np.abs(p).sum(axis=0)

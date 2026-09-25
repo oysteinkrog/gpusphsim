@@ -6,8 +6,8 @@ force_scale (1.0 GRANULAR, 0.02 FLUID). A water-sand pair then gave sand
 submerged sand was thrown out at the ACCEL_MAX_GRANULAR clamp.
 
 Checks:
-  - WATER-SAND pair, both compressed and moving: m_a*a_a + m_b*a_b ~ 0,
-    for K_Step2 and K_Step2_NL.
+  - WATER-SAND pair, both compressed and moving: m_a*a_a + m_b*a_b ~ 0
+    for K_Step2.
   - One SAND particle inside a WATER block with a vertical pressure
     gradient gets the same upward push as the water around it (neutral
     buoyancy for equal particle mass), not 50x.
@@ -26,7 +26,6 @@ import cupy
 import numpy as np
 import pytest
 
-import neighbor_list as nl
 from conftest import counting_sort_scene, default_grid_params, unsort
 from materials import FLUID, GRANULAR, MATERIALS, SAND, WATER, build_material_array
 from step1 import build_precalc_params, build_sim_params
@@ -74,18 +73,6 @@ def _upload_step2() -> None:
     )
 
 
-def _upload_nl() -> None:
-    _upload(
-        (
-            nl.upload_grid_params,
-            nl.upload_sim_params,
-            nl.upload_precalc_params,
-            nl.upload_materials,
-            nl.upload_granular_params,
-        )
-    )
-
-
 def _mixed_pair() -> dict:
     """Compressed WATER and SAND particle with different masses and velocities."""
     rho0_w = float(MATERIALS[WATER].rest_density)
@@ -125,31 +112,6 @@ def test_mixed_pair_momentum_step2() -> None:
     force, _ = compute_step2(**data)
     acc = cupy.asnumpy(unsort(force, perm))
     _check_momentum(acc, np.array([MASS, 0.75 * MASS]), "K_Step2")
-
-
-def test_mixed_pair_momentum_step2_nl() -> None:
-    _upload_step2()  # compute_pressure lives in the step2 module
-    _upload_nl()
-    data = _mixed_pair()
-    perm = data.pop("sort_perm")
-    n = data["position"].shape[0]
-    nb_idx, nb_cnt = nl.allocate_neighbor_buffers(n)
-    nl.build_neighbor_list(
-        data["position"], data["cell_start"], data["cell_end"], nb_idx, nb_cnt
-    )
-    force, _ = nl.compute_step2_nl(
-        data["position"],
-        data["velocity"],
-        data["mass"],
-        data["packed_info"],
-        data["shear_rate"],
-        nb_idx,
-        nb_cnt,
-        velocity_h=data["velocity_h"],
-        pressure_in=data["pressure_in"],
-    )
-    acc = cupy.asnumpy(unsort(force, perm))
-    _check_momentum(acc, np.array([MASS, 0.75 * MASS]), "K_Step2_NL")
 
 
 def test_submerged_sand_not_ejected() -> None:

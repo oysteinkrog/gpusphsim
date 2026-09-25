@@ -42,7 +42,6 @@ from step1 import (
     build_sim_params,
     build_precalc_params,
     compute_step1,
-    pack_density,
 )
 from step2 import (
     build_granular_params,
@@ -214,9 +213,6 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
         sorted_pos, sorted_vel, sorted_mass, None, sorted_pi,
         sorted_temp, cell_start, cell_end,
     )
-
-    # Pack density into position.w for Step2 (required by current API)
-    pack_density(sorted_pos, density, n)
 
     # Reactions
     compute_reactions(

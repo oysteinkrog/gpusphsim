@@ -140,7 +140,7 @@ def _make_two_particle_setup(
     if vel_b is None:
         vel_b = [0.0, 0.0, 0.0]
 
-    # Pack density into position.w (Step2 reads rho from pos.w after K_PackDensity)
+    # Pack density into position.w (Step2 reads rho from pos.w; K_Step1 writes it in the sim)
     position = np.array(
         [pos_a + [density_a], pos_b + [density_b]], dtype=np.float32
     )
@@ -171,7 +171,7 @@ def _make_two_particle_setup(
     position_gpu = scene["position"]
     packed_info_gpu = scene["packed_info"]
 
-    # Pre-compute pressure via K_ComputePressure (PERF-007: Step2 reads from pressure_in)
+    # Pressure via the test-only K_ComputePressure (PERF-007: Step2 reads from pressure_in)
     # Density is packed in position.w; extract as a contiguous array for K_ComputePressure
     density_gpu = cupy.ascontiguousarray(position_gpu[:, 3])
     pressure_gpu = cupy.zeros(len(position), dtype=cupy.float32)
@@ -807,7 +807,7 @@ def test_500k_no_errors() -> None:
     cell_start_gpu = scene["cell_start"]
     cell_end_gpu = scene["cell_end"]
 
-    # Pre-compute pressure via K_ComputePressure before calling Step2
+    # Pressure via the test-only K_ComputePressure before calling Step2
     # Density is packed in pos.w; extract as a contiguous array for K_ComputePressure
     density_gpu = cupy.ascontiguousarray(pos_gpu[:, 3])
     pressure_gpu = cupy.zeros(n, dtype=cupy.float32)
@@ -1089,7 +1089,7 @@ def test_granular_friction_coeff_zero_falls_back_to_global_mu_s() -> None:
 APP_MASS = 0.02  # app particle mass: WATER rho0 (2500) * spacing^3
 
 
-def _water_next_to_static_force(mat_id_b: int, use_nl: bool) -> np.ndarray:
+def _water_next_to_static_force(mat_id_b: int) -> np.ndarray:
     """Force on a moving, compressed WATER particle with one STATIC neighbour
     of mass 0.02 at 0.3h. Returns the WATER force (x, y, z)."""
     from materials import WATER
@@ -1108,32 +1108,16 @@ def _water_next_to_static_force(mat_id_b: int, use_nl: bool) -> np.ndarray:
         bclass_b=STATIC,
     )
     perm = data.pop("sort_perm")
-    if use_nl:
-        import neighbor_list as nl
-        from test_cross_force_scale import _upload_nl
-        _upload_nl()
-        n = data["position"].shape[0]
-        nb_idx, nb_cnt = nl.allocate_neighbor_buffers(n)
-        nl.build_neighbor_list(
-            data["position"], data["cell_start"], data["cell_end"], nb_idx, nb_cnt
-        )
-        force, _ = nl.compute_step2_nl(
-            data["position"], data["velocity"], data["mass"], data["packed_info"],
-            data["shear_rate"], nb_idx, nb_cnt,
-            velocity_h=data["velocity_h"], pressure_in=data["pressure_in"],
-        )
-    else:
-        force, _ = compute_step2(**data)
+    force, _ = compute_step2(**data)
     return cupy.asnumpy(unsort(force, perm))[0, :3]
 
 
-@pytest.mark.parametrize("use_nl", [False, True], ids=["K_Step2", "K_Step2_NL"])
-def test_stone_neighbour_control_pushes_fluid(use_nl: bool) -> None:
+def test_stone_neighbour_control_pushes_fluid() -> None:
     """Control for the DEAD test below: a STONE neighbour at the same place
     pushes the WATER particle away (-x) and drags it."""
     from materials import STONE
     _upload_all_params()
-    f = _water_next_to_static_force(STONE, use_nl)
+    f = _water_next_to_static_force(STONE)
     print(f"  WATER force next to STONE: {f}")
     assert f[0] < 0.0, f"STONE control did not push WATER away: {f}"
 
@@ -1143,13 +1127,12 @@ def test_stone_neighbour_control_pushes_fluid(use_nl: bool) -> None:
     reason="bd-r5-review-n28.23 fix step 2: step2 has no MAT_DEAD skip, so a "
            "DEAD/STATIC slot that still has mass acts as an Akinci wall",
 )
-@pytest.mark.parametrize("use_nl", [False, True], ids=["K_Step2", "K_Step2_NL"])
-def test_fluid_next_to_dead_static_slot_gets_zero_force(use_nl: bool) -> None:
+def test_fluid_next_to_dead_static_slot_gets_zero_force() -> None:
     """A MAT_DEAD/STATIC neighbour with a stale mass of 0.02 gives WATER no
     pressure push and no drag. An isolated WATER particle gets zero force."""
     from materials import DEAD
     _upload_all_params()
-    f = _water_next_to_static_force(DEAD, use_nl)
+    f = _water_next_to_static_force(DEAD)
     print(f"  WATER force next to DEAD slot: {f}")
     assert np.all(f == 0.0), f"DEAD slot exerted a force on WATER: {f}"
 

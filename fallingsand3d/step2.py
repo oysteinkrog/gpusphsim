@@ -209,10 +209,11 @@ def compute_pressure(
     packed_info: cupy.ndarray,
     pressure_out: cupy.ndarray,
 ) -> None:
-    """Launch K_ComputePressure to pre-compute per-particle pressure (PERF-007).
+    """Launch K_ComputePressure: Tait pressure from a density array.
 
-    Must be called after Step1 (density available) and before Step2.
-    WCSPH only -- PBF/DFSPH have their own constraint forces.
+    Test-only. The simulation gets pressure from K_Step1 (pressure_out).
+    Tests that set density by hand call this to build pressure_in for
+    compute_step2.
     """
     n = density.shape[0]
     module = _get_module()
@@ -242,12 +243,12 @@ def compute_step2(
 ) -> tuple:
     """Launch K_Step2 and return (sph_force, veleval_out).
 
-    Density is read from position.w (packed by K_PackDensity after Step1).
+    Density is read from position.w (K_Step1 writes it there).
 
     Parameters
     ----------
     position : cupy.ndarray, (N, 4) float32
-        Sorted particle positions (density packed in .w by K_PackDensity).
+        Sorted particle positions (density packed in .w by K_Step1).
     velocity : cupy.ndarray, (N, 4) float32
         Sorted evaluation velocities.
     mass : cupy.ndarray, (N,) float32
@@ -291,7 +292,7 @@ def compute_step2(
     # velocity_h can be None -- pass null pointer (kernel falls back to float4 reads)
     velocity_h_ptr = velocity_h if velocity_h is not None else cupy.ndarray(0, dtype=cupy.uint32)
 
-    # Pressure array (PERF-007): must be pre-computed via compute_pressure()
+    # Pressure array (PERF-007): K_Step1 pressure_out, or compute_pressure() in tests
     if pressure_in is None:
         pressure_in = cupy.zeros(n, dtype=cupy.float32)
 

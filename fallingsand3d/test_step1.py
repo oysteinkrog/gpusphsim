@@ -1138,10 +1138,10 @@ def _reaction_define(name: str) -> float:
     return float(m.group(1))
 
 
-def _exposure_both_kernels(positions, packed_info, temperature):
-    """Sort the scene, run K_Step1 and K_Step1_BuildNL, and return
-    [(exposure_heat, exposure_corrode)] for original particle 0 from each."""
-    from step1 import compute_step1_build_nl
+def _exposure_step1(positions, packed_info, temperature):
+    """Sort the scene, run K_Step1 and return a one-item list
+    [(exposure_heat, exposure_corrode, all exposure_corrode)] for original
+    particle 0."""
     _upload_all_params()
     n = positions.shape[0]
     mass = np.full(n, MASS, dtype=np.float32)
@@ -1157,13 +1157,6 @@ def _exposure_both_kernels(positions, packed_info, temperature):
     out = []
     _, _, _, eh, ec, _ = compute_step1(*args, velocity_h=scene["velocity_h"])
     out.append((float(eh[k0].get()), float(ec[k0].get()), cupy.asnumpy(ec)))
-    max_nb = 64
-    nl_idx = cupy.zeros(n * max_nb, dtype=cupy.uint32)
-    nl_cnt = cupy.zeros(n, dtype=cupy.uint32)
-    res = compute_step1_build_nl(*args, nl_idx, nl_cnt, max_nb=max_nb,
-                                 velocity_h=scene["velocity_h"])
-    eh, ec = res[3], res[4]
-    out.append((float(eh[k0].get()), float(ec[k0].get()), cupy.asnumpy(ec)))
     cupy.cuda.Device().synchronize()
     return out
 
@@ -1175,7 +1168,7 @@ def _w_var(offsets):
 
 def test_exposure_corrode_is_support_fraction() -> None:
     """SAND with 10 WATER and 20 SAND neighbours inside h: exposure_corrode is
-    0.4 * (water share of sum W) within 5%, in both K_Step1 and K_Step1_BuildNL,
+    0.4 * (water share of sum W) within 5%, in K_Step1,
     and no particle exceeds the largest reaction_rate."""
     rng = np.random.default_rng(48)
     offsets = []
@@ -1195,8 +1188,8 @@ def test_exposure_corrode_is_support_fraction() -> None:
     w = _w_var(offsets)
     expected = 0.4 * w[:10].sum() / w.sum()
     max_rate = float(build_interaction_matrix()["reaction_rate"].max())
-    for name, (_, exp_c, all_c) in zip(("K_Step1", "K_Step1_BuildNL"),
-                                       _exposure_both_kernels(pos, packed, temp)):
+    for name, (_, exp_c, all_c) in zip(("K_Step1",),
+                                       _exposure_step1(pos, packed, temp)):
         print(f"  {name}: exposure_corrode {exp_c:.5f}, expected {expected:.5f}")
         assert abs(exp_c - expected) <= 0.05 * expected, (name, exp_c, expected)
         assert np.all(all_c <= max_rate + 1e-6), (name, all_c.max())
@@ -1228,10 +1221,10 @@ def test_exposure_heat_one_fire_neighbour_near_wood_threshold() -> None:
         temp[1 + fire_idx] = 1200.0
         w = _w_var(offs)
         expected = heat_exchange * (1200.0 - 293.0) * w[fire_idx] / w.sum()
-        return expected, _exposure_both_kernels(pos, packed, temp)
+        return expected, _exposure_step1(pos, packed, temp)
 
     expected, results = run(offsets, fire_k)
-    for name, (exp_h, _, _) in zip(("K_Step1", "K_Step1_BuildNL"), results):
+    for name, (exp_h, _, _) in zip(("K_Step1",), results):
         print(f"  {name}: exposure_heat {exp_h:.1f} K, expected {expected:.1f}, "
               f"threshold {threshold}")
         assert abs(exp_h - expected) <= 0.05 * expected, (name, exp_h, expected)
@@ -1242,7 +1235,7 @@ def test_exposure_heat_one_fire_neighbour_near_wood_threshold() -> None:
     far = offsets.copy()
     far[fire_k] = [0.85 * H, 0.0, 0.0]
     expected, results = run(far, fire_k)
-    for name, (exp_h, _, _) in zip(("K_Step1", "K_Step1_BuildNL"), results):
+    for name, (exp_h, _, _) in zip(("K_Step1",), results):
         assert abs(exp_h - expected) <= 0.05 * expected, (name, exp_h, expected)
         assert exp_h < threshold, (name, exp_h)
 
@@ -1251,7 +1244,7 @@ def test_exposure_heat_one_fire_neighbour_near_wood_threshold() -> None:
 # Rigid neighbours in the surface normal (bd-r5-review-n28.68)
 # ===================================================================
 
-def _wall_contact_normals(wall: str, layers: int, build_nl: bool):
+def _wall_contact_normals(wall: str, layers: int):
     """Water block (10 x 6 x 10 at spacing 0.02) on a wall of `layers` planes.
 
     `wall` is "stone" (STONE, mass = water mass), "rigid" (MAT_RIGID, mass =
@@ -1263,7 +1256,6 @@ def _wall_contact_normals(wall: str, layers: int, build_nl: bool):
     """
     from materials import MAT_RIGID, STATIC, STONE, WATER
     from rigid_bodies import compute_boundary_volumes
-    from step1 import compute_step1_build_nl
 
     s, rho = 0.02, 2500.0
     m_water = rho * s**3
@@ -1300,13 +1292,7 @@ def _wall_contact_normals(wall: str, layers: int, build_nl: bool):
     args = (scene["position"], scene["velocity"], scene["mass"], density_in,
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
-    if build_nl:
-        max_nb = 96
-        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
-                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb,
-                               normal_out=normal, velocity_h=scene["velocity_h"])
-    else:
-        compute_step1(*args, normal_out=normal, velocity_h=scene["velocity_h"])
+    compute_step1(*args, normal_out=normal, velocity_h=scene["velocity_h"])
     cupy.cuda.Device().synchronize()
 
     out = np.zeros((n, 4), dtype=np.float32)
@@ -1330,35 +1316,33 @@ def test_rigid_wall_contact_layer_matches_stone() -> None:
     the body at about 0.6 of a free-surface normal. Every consumer gates on
     nc < 25, so an interior particle gets no force from it.
     """
-    for build_nl in (False, True):
-        stone, top = _wall_contact_normals("stone", 3, build_nl)
-        n_free = abs(float(top[1]))
-        assert n_free > 0.0 and top[1] < 0.0, top  # normal points into the bulk
+    stone, top = _wall_contact_normals("stone", 3)
+    n_free = abs(float(top[1]))
+    assert n_free > 0.0 and top[1] < 0.0, top  # normal points into the bulk
 
-        hidden, _ = _wall_contact_normals("massless", 1, build_nl)
-        assert hidden[3] < 25.0, hidden
-        assert hidden[1] > 0.9 * n_free, hidden  # the old anti-wetting normal
+    hidden, _ = _wall_contact_normals("massless", 1)
+    assert hidden[3] < 25.0, hidden
+    assert hidden[1] > 0.9 * n_free, hidden  # the old anti-wetting normal
 
-        for layers in (1, 3):
-            rigid, _ = _wall_contact_normals("rigid", layers, build_nl)
-            assert abs(rigid[3] - stone[3]) <= 0.10 * stone[3], (build_nl, layers, rigid, stone)
-            assert rigid[3] >= 25.0, (build_nl, layers, rigid)
-            assert rigid[1] <= 0.10 * n_free, (build_nl, layers, rigid, n_free)
-            assert abs(rigid[1]) < n_free, (build_nl, layers, rigid, n_free)
-            # Lateral components cancel like STONE's.
-            assert abs(rigid[0]) <= 0.10 * n_free and abs(rigid[2]) <= 0.10 * n_free, rigid
+    for layers in (1, 3):
+        rigid, _ = _wall_contact_normals("rigid", layers)
+        assert abs(rigid[3] - stone[3]) <= 0.10 * stone[3], (layers, rigid, stone)
+        assert rigid[3] >= 25.0, (layers, rigid)
+        assert rigid[1] <= 0.10 * n_free, (layers, rigid, n_free)
+        assert abs(rigid[1]) < n_free, (layers, rigid, n_free)
+        # Lateral components cancel like STONE's.
+        assert abs(rigid[0]) <= 0.10 * n_free and abs(rigid[2]) <= 0.10 * n_free, rigid
 
 
 # ---------------------------------------------------------------------------
 # bd-r5-review-n28.69: FP16 pairing rule for pair velocity and dye differences
 # ---------------------------------------------------------------------------
 
-def _translating_block_step1(packed: int, build_nl: bool) -> tuple:
+def _translating_block_step1(packed: int) -> tuple:
     """Step1 on a 10^3 lattice moving at (1.3, -0.7, 2.1) with uniform dye 0.3.
 
     Returns (vorticity, shear_rate, dye_rate) as numpy arrays.
     """
-    from step1 import compute_step1_build_nl
 
     k = 10
     idx = np.arange(k, dtype=np.float32) * SPACING
@@ -1394,12 +1378,7 @@ def _translating_block_step1(packed: int, build_nl: bool) -> tuple:
             scene["cell_start"], scene["cell_end"])
     kw = dict(shear_rate_out=shear, vorticity_out=vort, particle_dye_in=dye,
               dye_rate_out=dye_rate, velocity_h=scene["velocity_h"], dye_h=dye_h)
-    if build_nl:
-        max_nb = 96
-        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
-                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb, **kw)
-    else:
-        compute_step1(*args, **kw)
+    compute_step1(*args, **kw)
     cupy.cuda.Device().synchronize()
     out = (cupy.asnumpy(vort), cupy.asnumpy(shear), cupy.asnumpy(dye_rate))
     # Leave dye off for the other tests.
@@ -1407,18 +1386,17 @@ def _translating_block_step1(packed: int, build_nl: bool) -> tuple:
     return out
 
 
-@pytest.mark.parametrize("build_nl", [False, True])
-def test_translating_block_zero_vorticity_strain_dye(build_nl: bool) -> None:
+def test_translating_block_zero_vorticity_strain_dye() -> None:
     """A uniformly translating block has exactly zero vorticity, strain rate
     and dye rate. Neighbour velocity and dye come from the FP16 mirrors; the
     particle's own value must come from the same mirror, or every pair
     difference is fp16(x) - x instead of zero."""
-    vort, _, dye_rate = _translating_block_step1(PACKED_WATER, build_nl)
-    _, shear, _ = _translating_block_step1(PACKED_SAND, build_nl)
+    vort, _, dye_rate = _translating_block_step1(PACKED_WATER)
+    _, shear, _ = _translating_block_step1(PACKED_SAND)
     max_vort = np.abs(vort[:, :3]).max()
     max_shear = np.abs(shear).max()
     max_dye = np.abs(dye_rate[:, :3]).max()
-    print(f"  build_nl={build_nl}: max |curl v| = {max_vort:.3e}, "
+    print(f"  max |curl v| = {max_vort:.3e}, "
           f"max gamma_dot = {max_shear:.3e}, max |dye rate| = {max_dye:.3e}")
     assert max_vort == 0.0, f"spurious vorticity {max_vort}"
     assert max_shear == 0.0, f"spurious strain rate {max_shear}"
@@ -1429,13 +1407,11 @@ def test_translating_block_zero_vorticity_strain_dye(build_nl: bool) -> None:
 # bd-r5-review-n28.139: rigid rotation gives curl v = +2 Omega
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("build_nl", [False, True])
-def test_rigid_rotation_curl_is_two_omega(build_nl: bool) -> None:
+def test_rigid_rotation_curl_is_two_omega() -> None:
     """A 10^3 WATER lattice turning as a rigid body, v = Omega x r with
     Omega = (0, 0, 1.5) rad/s. One step1 call must report vorticity.z within
     10% of +2 * Omega for interior particles (full kernel support), and near
     zero x and y components."""
-    from step1 import compute_step1_build_nl
 
     omega = 1.5
     k = 10
@@ -1462,12 +1438,7 @@ def test_rigid_rotation_curl_is_two_omega(build_nl: bool) -> None:
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
     kw = dict(vorticity_out=vort, velocity_h=scene["velocity_h"])
-    if build_nl:
-        max_nb = 96
-        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
-                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb, **kw)
-    else:
-        compute_step1(*args, **kw)
+    compute_step1(*args, **kw)
     cupy.cuda.Device().synchronize()
 
     v = cupy.asnumpy(vort)
@@ -1479,7 +1450,7 @@ def test_rigid_rotation_curl_is_two_omega(build_nl: bool) -> None:
     assert interior.sum() == (k - 4) ** 3
     wz = v[interior, 2]
     wxy = np.abs(v[interior, :2]).max()
-    print(f"  build_nl={build_nl}: interior omega_z min {wz.min():.4f} "
+    print(f"  interior omega_z min {wz.min():.4f} "
           f"mean {wz.mean():.4f} max {wz.max():.4f} (expect {2 * omega:.4f}); "
           f"max |omega_xy| {wxy:.3e}")
     assert np.abs(wz - 2.0 * omega).max() < 0.10 * 2.0 * omega, (
@@ -1521,7 +1492,7 @@ def main() -> None:
 # bd-r5-review-n28.77: rigid boundary psi_b uses the fluid's own rest density
 # ---------------------------------------------------------------------------
 
-def _fluid_rigid_pair_density(fluid_mat: int, build_nl: bool) -> tuple[float, float, float]:
+def _fluid_rigid_pair_density(fluid_mat: int) -> tuple[float, float, float]:
     """One FLUID particle of `fluid_mat` with one MAT_RIGID neighbour at 0.5 h.
 
     The rigid particle carries mass RIGID_PSI_RHO0 * V_b, as
@@ -1531,7 +1502,6 @@ def _fluid_rigid_pair_density(fluid_mat: int, build_nl: bool) -> tuple[float, fl
     """
     from materials import MAT_RIGID, MATERIALS, STATIC
     from rigid_bodies import RIGID_PSI_RHO0
-    from step1 import compute_step1_build_nl
 
     V_b = 1.5e-5  # arbitrary boundary volume (m^3)
     m_fluid = MATERIALS[fluid_mat].rest_density * SPACING**3
@@ -1549,14 +1519,7 @@ def _fluid_rigid_pair_density(fluid_mat: int, build_nl: bool) -> tuple[float, fl
     args = (scene["position"], scene["velocity"], scene["mass"], None,
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
-    if build_nl:
-        max_nb = 32
-        density = compute_step1_build_nl(
-            *args, cupy.zeros(2 * max_nb, dtype=cupy.uint32),
-            cupy.zeros(2, dtype=cupy.uint32), max_nb=max_nb,
-            velocity_h=scene["velocity_h"])[0]
-    else:
-        density = compute_step1(*args, velocity_h=scene["velocity_h"])[0]
+    density = compute_step1(*args, velocity_h=scene["velocity_h"])[0]
     cupy.cuda.Device().synchronize()
 
     perm = cupy.asnumpy(scene["sort_perm"]).astype(np.int64)
@@ -1567,12 +1530,10 @@ def _fluid_rigid_pair_density(fluid_mat: int, build_nl: bool) -> tuple[float, fl
     return float(rho[0]), self_term, w_ij * V_b
 
 
-@pytest.mark.parametrize("build_nl", [False, True])
 @pytest.mark.parametrize("fluid_name,rho0", [
     ("OIL", 2125.0), ("WATER", 2500.0), ("MUD", 4500.0), ("LAVA", 6500.0),
 ])
-def test_rigid_neighbour_density_uses_fluid_rest_density(fluid_name: str, rho0: float,
-                                                          build_nl: bool) -> None:
+def test_rigid_neighbour_density_uses_fluid_rest_density(fluid_name: str, rho0: float) -> None:
     """A rigid neighbour adds rho0_i * V_b * W_ij, with the fluid's own rho0.
 
     Before the fix it added RIGID_PSI_RHO0 * V_b * W_ij = 2500 * V_b * W_ij
@@ -1583,10 +1544,10 @@ def test_rigid_neighbour_density_uses_fluid_rest_density(fluid_name: str, rho0: 
     from materials import MATERIALS
     fluid_mat = getattr(materials, fluid_name)
     assert MATERIALS[fluid_mat].rest_density == rho0
-    rho, self_term, vw = _fluid_rigid_pair_density(fluid_mat, build_nl)
+    rho, self_term, vw = _fluid_rigid_pair_density(fluid_mat)
     got = rho - self_term
     want = rho0 * vw
-    assert abs(got - want) <= 1e-4 * want, (fluid_mat, build_nl, got, want, 2500.0 * vw)
+    assert abs(got - want) <= 1e-4 * want, (fluid_mat, got, want, 2500.0 * vw)
 
 
 
@@ -1594,14 +1555,13 @@ def test_rigid_neighbour_density_uses_fluid_rest_density(fluid_name: str, rho0: 
 # bd-r5-review-n28.94: GAS conducts heat to non-GAS neighbours, capped per pair
 # ---------------------------------------------------------------------------
 
-def _water_fire_pair_dTdt(dt: float, build_nl: bool) -> tuple[float, float]:
+def _water_fire_pair_dTdt(dt: float) -> tuple[float, float]:
     """WATER at 293 K with one FIRE neighbour at 1200 K at r = h/2.
 
     Both carry the spawn mass 0.02 and their previous-substep density
     (WATER 2500, FIRE 1000). Returns (dTdt_water, dTdt_fire) from K_Step1
-    or K_Step1_BuildNL with SimParams.dt = dt.
+    with SimParams.dt = dt.
     """
-    from step1 import compute_step1_build_nl
     _upload_all_params()
     upload_sim_params(build_sim_params(smoothing_length=H, particle_mass=MASS,
                                        particle_spacing=SPACING, dt=dt))
@@ -1620,13 +1580,7 @@ def _water_fire_pair_dTdt(dt: float, build_nl: bool) -> tuple[float, float]:
     args = (scene["position"], scene["velocity"], scene["mass"], rho_in,
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
-    if build_nl:
-        nl_idx = cupy.zeros(2 * 64, dtype=cupy.uint32)
-        nl_cnt = cupy.zeros(2, dtype=cupy.uint32)
-        dTdt = compute_step1_build_nl(*args, nl_idx, nl_cnt, max_nb=64,
-                                      velocity_h=scene["velocity_h"])[2]
-    else:
-        dTdt = compute_step1(*args, velocity_h=scene["velocity_h"])[2]
+    dTdt = compute_step1(*args, velocity_h=scene["velocity_h"])[2]
     out = np.zeros(2, np.float64)
     out[perm] = cupy.asnumpy(dTdt)
     # Put the default dt back for the tests that follow.
@@ -1635,8 +1589,7 @@ def _water_fire_pair_dTdt(dt: float, build_nl: bool) -> tuple[float, float]:
     return float(out[0]), float(out[1])
 
 
-@pytest.mark.parametrize("build_nl", [False, True])
-def test_fire_heats_water_across_phase(build_nl: bool) -> None:
+def test_fire_heats_water_across_phase() -> None:
     """One FIRE neighbour heats WATER and cools itself, within 0.5 dT per substep.
 
     Before bd-r5-review-n28.94 the GAS/non-GAS branch skipped heat, so both
@@ -1644,8 +1597,8 @@ def test_fire_heats_water_across_phase(build_nl: bool) -> None:
     """
     dt = 0.001
     gap = 1200.0 - 293.0
-    d_w, d_f = _water_fire_pair_dTdt(dt, build_nl)
-    print(f"  build_nl={build_nl}: WATER dTdt {d_w:.1f} K/s, FIRE dTdt {d_f:.1f} K/s")
+    d_w, d_f = _water_fire_pair_dTdt(dt)
+    print(f"  WATER dTdt {d_w:.1f} K/s, FIRE dTdt {d_f:.1f} K/s")
     assert d_w > 0.0, d_w
     assert d_f < 0.0, d_f
     assert d_w * dt < 0.5 * gap
@@ -1655,15 +1608,14 @@ def test_fire_heats_water_across_phase(build_nl: bool) -> None:
     assert d_w > 16.0, d_w
 
 
-@pytest.mark.parametrize("build_nl", [False, True])
-def test_cross_phase_heat_capped_at_half_gap(build_nl: bool) -> None:
+def test_cross_phase_heat_capped_at_half_gap() -> None:
     """With a 10 s step the uncapped pair would overshoot; the cap holds each
     side to exactly 0.5 * dT per step (the isolated pair's density is its
     own self term, which is the bound the cap uses)."""
     dt = 10.0
     gap = 1200.0 - 293.0
-    d_w, d_f = _water_fire_pair_dTdt(dt, build_nl)
-    print(f"  build_nl={build_nl}: WATER dT/step {d_w * dt:.1f} K, "
+    d_w, d_f = _water_fire_pair_dTdt(dt)
+    print(f"  WATER dT/step {d_w * dt:.1f} K, "
           f"FIRE dT/step {d_f * dt:.1f} K (cap {0.5 * gap:.1f} K)")
     assert d_w * dt == pytest.approx(0.5 * gap, rel=1e-3)
     assert -d_f * dt == pytest.approx(0.5 * gap, rel=1e-3)
@@ -1682,13 +1634,11 @@ T_MIRROR_STEP = 0.125  # K per uint16 step in the temperature mirror
 MAT_STONE = 1
 
 
-def _step1_with_temp_mirror(pos, packed_info, temperature, density_in=None,
-                            build_nl=False):
+def _step1_with_temp_mirror(pos, packed_info, temperature, density_in=None):
     """Counting sort (which writes the temperature mirror) then step1 reading it.
 
     Returns (dTdt, exposure_heat, density, sort_perm) in sorted order.
     """
-    from step1 import compute_step1_build_nl
 
     n = pos.shape[0]
     scene = counting_sort_scene(
@@ -1707,12 +1657,7 @@ def _step1_with_temp_mirror(pos, packed_info, temperature, density_in=None,
             scene["cell_start"], scene["cell_end"])
     kw = dict(density_out=rho, dTdt_out=dTdt, exposure_heat_out=heat,
               velocity_h=scene["velocity_h"], temperature_h=scene["temperature_h"])
-    if build_nl:
-        max_nb = 96
-        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
-                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb, **kw)
-    else:
-        compute_step1(*args, **kw)
+    compute_step1(*args, **kw)
     return dTdt, heat, rho, scene["sort_perm"]
 
 
@@ -1729,8 +1674,7 @@ def _walled_block(offset_x: float, k: int = 8):
     return pos, wall
 
 
-@pytest.mark.parametrize("build_nl", [False, True])
-def test_uniform_off_grid_temperature_zero_dTdt(build_nl: bool) -> None:
+def test_uniform_off_grid_temperature_zero_dTdt() -> None:
     """WATER at 293.2 K and LAVA at 1499.7 K (neither on the FP16 grid) in
     STATIC STONE walls at the same temperature: every dTdt and exposure_heat
     is exactly zero. Neighbour T comes from the fixed-point mirror, so the
@@ -1746,11 +1690,11 @@ def test_uniform_off_grid_temperature_zero_dTdt(build_nl: bool) -> None:
     temperature = np.concatenate([
         np.full(pos_w.shape[0], 293.2), np.full(pos_l.shape[0], 1499.7),
     ]).astype(np.float32)
-    dTdt, heat, _, _ = _step1_with_temp_mirror(pos, fluid, temperature, build_nl=build_nl)
+    dTdt, heat, _, _ = _step1_with_temp_mirror(pos, fluid, temperature)
     cupy.cuda.Device().synchronize()
     max_dTdt = float(cupy.abs(dTdt).max())
     max_heat = float(cupy.abs(heat).max())
-    print(f"  build_nl={build_nl}: max |dTdt| = {max_dTdt:.3e}, max exposure_heat = {max_heat:.3e}")
+    print(f"  max |dTdt| = {max_dTdt:.3e}, max exposure_heat = {max_heat:.3e}")
     assert max_dTdt == 0.0, f"uniform off-grid T gives dTdt {max_dTdt}"
     assert max_heat == 0.0, f"uniform off-grid T gives exposure_heat {max_heat}"
 
