@@ -442,6 +442,16 @@ void K_DFSPH_ComputeDensityAlpha(
 }
 
 /* ======================================================================
+ * akinci_cohesion_df -- Akinci 2013 cohesion spline C(r) times h^3, with
+ * q = r / h. Same function as akinci_cohesion_st2 in step2.cu.
+ * ====================================================================== */
+__device__ __forceinline__ float akinci_cohesion_df(float q) {
+    const float k = 32.0f / 3.14159265f;
+    float a = (1.0f - q) * (1.0f - q) * (1.0f - q) * q * q * q;
+    return (q > 0.5f) ? k * a : k * (2.0f * a - 1.0f / 64.0f);
+}
+
+/* ======================================================================
  * K_DFSPH_NonPressureForces -- Viscosity + gravity -> velocity update
  * v*_i = v_i + dt * (gravity + viscosity)
  * ====================================================================== */
@@ -531,17 +541,14 @@ void K_DFSPH_NonPressureForces(
     }
 
     // Akinci surface tension (FLUID only): per-pair sum in the viscosity loop
-    // (bd-r5-review-n28.125). DFSPH uses only the curvature half of the
-    // WCSPH step2 pair term. The density solver holds rho at rho0, so the
-    // cohesion attraction cannot compress the surface; measured on a 2.5:1
-    // zero-g water block, it locked the particles (aspect ratio stuck at
-    // 2.1-2.6 over 2 s for gamma 0.5-1), while curvature alone rounds it
-    // (2.5 -> 1.15 in 2 s at gamma 1).
+    // (bd-r5-review-n28.125). Same pair term as WCSPH step2.
     bool st_on = (behavior_i == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f);
     float3 f_st_pair = make_float3(0.0f, 0.0f, 0.0f);
     float3 n_i_st = make_float3(0.0f, 0.0f, 0.0f);
     float rho0_i_st = c_materials[mat_id_i].rest_density;
     float m_i_st = __ldg(&mass[i]);
+    float inv_h_st = 1.0f / h;
+    float inv_h3_st = inv_h_st * inv_h_st * inv_h_st;
     if (st_on) {
         float4 n4_i = __ldg(&normal_in[i]);
         n_i_st = make_float3(n4_i.x, n4_i.y, n4_i.z);
@@ -712,17 +719,17 @@ void K_DFSPH_NonPressureForces(
                         f_visc.z += (vel_j.z - vel_i.z) * visc_factor;
                     }
 
-                    // Akinci curvature pair term, FLUID-FLUID only:
-                    // a_i += gamma K_ij h m_ij (n_i - n_j) / m_i, as in step2.cu.
-                    // Antisymmetric, so the pair adds no net momentum.
+                    // Akinci pair term, FLUID-FLUID only. See step2.cu for the
+                    // formula; the pair adds no net momentum.
                     if (st_on && behavior_j == FLUID) {
                         float4 n4_j = __ldg(&normal_in[j]);
                         float rho0_j = c_materials[GET_MATERIAL_ID(pi_j)].rest_density;
                         float K_ij = (rho0_i_st + rho0_j) / fmaxf(rho_i + rho_j, RHO_EPSILON);
-                        float c_curv = K_ij * h * 2.0f * m_j / fmaxf(m_i_st + m_j, 1e-12f);
-                        f_st_pair.x += c_curv * (n_i_st.x - n4_j.x);
-                        f_st_pair.y += c_curv * (n_i_st.y - n4_j.y);
-                        f_st_pair.z += c_curv * (n_i_st.z - n4_j.z);
+                        float c_coh = -m_j * akinci_cohesion_df(rlen * inv_h_st) * inv_h3_st / rlen;
+                        float c_curv = h * 2.0f * m_j / fmaxf(m_i_st + m_j, 1e-12f);
+                        f_st_pair.x += K_ij * (c_coh * r.x + c_curv * (n_i_st.x - n4_j.x));
+                        f_st_pair.y += K_ij * (c_coh * r.y + c_curv * (n_i_st.y - n4_j.y));
+                        f_st_pair.z += K_ij * (c_coh * r.z + c_curv * (n_i_st.z - n4_j.z));
                     }
                 }
             }
