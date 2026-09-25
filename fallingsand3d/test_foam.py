@@ -446,8 +446,8 @@ def test_spray_lands_on_sdf_box(world, sim):
     half = np.array([0.1, 0.05, 0.1], dtype=np.float32)
     center = mid.copy()
     center[1] = wmin[1] + 0.2  # box well above the floor kill plane
-    box = rb.make_sdf_object(rb.SDF_BOX, position=tuple(center.tolist()),
-                             size=tuple(half.tolist()))
+    box = np.atleast_1d(rb.make_sdf_object(rb.SDF_BOX, position=tuple(center.tolist()),
+                             size=tuple(half.tolist())))
     top = float(center[1] + half[1])
 
     pos = np.zeros((1, 4), dtype=np.float32)
@@ -483,7 +483,7 @@ def test_sdf_replay_reaches_late_foam_module(world, sim):
     """A foam module compiled after the SDF upload gets the objects too."""
     import rigid_bodies as rb
 
-    box = rb.make_sdf_object(rb.SDF_BOX, position=(0.0, 0.0, 0.0))
+    box = np.atleast_1d(rb.make_sdf_object(rb.SDF_BOX, position=(0.0, 0.0, 0.0)))
     rb.upload_sdf_objects(box, 1)
     try:
         saved = foam._module
