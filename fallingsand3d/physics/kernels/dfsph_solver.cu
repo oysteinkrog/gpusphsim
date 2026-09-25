@@ -3,12 +3,12 @@
  *
  * Kernels:
  *   K_DFSPH_ComputeDensityAlpha -- Density + alpha precompute + shear_rate + heat
+ *   K_DFSPH_PackVolume          -- Volume carrier into position.w for the solver loops
  *   K_DFSPH_NonPressureForces   -- Viscosity + gravity -> velocity update
  *   K_DFSPH_ComputeKappaV       -- Divergence correction factor
  *   K_DFSPH_CorrectVelocityDiv  -- Apply divergence correction
- *   K_DFSPH_ComputePressureAccel  -- a_press from p/rho^2 (Jacobi density solver)
- *   K_DFSPH_DensitySolverUpdate   -- Predict density, Jacobi update of p/rho^2
- *   K_DFSPH_ApplyPressureVelocity -- v += dt * a_press after the density loop
+ *   K_DFSPH_ComputePressureAccel  -- a_press from p/rho^2, writes vt = v + dt * a_press
+ *   K_DFSPH_DensitySolverUpdate   -- Predict density from vt, Jacobi update of p/rho^2
  *   K_DFSPH_Finalize              -- Final position, boundary, writeback
  *
  * The divergence and density iteration loops run on the host
@@ -27,8 +27,38 @@
  * METAL or WOOD wall pushes the same (bd-r5-review-n28.116). Its stored
  * density is its rest_density, which would make V_j depend on the wall
  * material. MAT_RIGID keeps density RIGID_PSI_RHO0, so m_j / rho_j = V_b. */
+__device__ __forceinline__ bool dfsph_is_wall(uint pi) {
+    return GET_BEHAVIOR(pi) == STATIC && GET_MATERIAL_ID(pi) != MAT_RIGID;
+}
+
 __device__ __forceinline__ float dfsph_vol_rho(float rho_j, uint pi_j, float rho0_i) {
-    return (GET_BEHAVIOR(pi_j) == STATIC && GET_MATERIAL_ID(pi_j) != MAT_RIGID) ? rho0_i : rho_j;
+    return dfsph_is_wall(pi_j) ? rho0_i : rho_j;
+}
+
+/* Volume carrier in sorted_position.w (bd-r5-review-n28.184).
+ * K_DFSPH_PackVolume writes it once per substep, after reactions and spawn,
+ * so the four solver loops (ComputeKappaV, CorrectVelocityDiv,
+ * ComputePressureAccel, DensitySolverUpdate) read V_j from the float4 they
+ * already load for the position, instead of loading mass and density.
+ *   regular STATIC wall: .w = m_j (the loops divide by the right density)
+ *   everything else:     .w = m_j / max(rho_j, RHO_EPSILON)
+ * A wall stores its mass because the two loop families use different
+ * divisors for it: rho0_i (Akinci, dfsph_vol_rho) and its own density. */
+__device__ __forceinline__ float dfsph_volume_carrier(float m, float rho, uint pi) {
+    return dfsph_is_wall(pi) ? m : m / fmaxf(rho, RHO_EPSILON);
+}
+
+/* Akinci volume m_j / max(dfsph_vol_rho(rho_j, pi_j, rho0_i), eps) from the
+ * carrier: the divergence and density-prediction sums. */
+__device__ __forceinline__ float dfsph_vol_akinci(float w_j, uint pi_j, float rho0_i) {
+    return dfsph_is_wall(pi_j) ? w_j / fmaxf(rho0_i, RHO_EPSILON) : w_j;
+}
+
+/* Plain volume m_j / max(rho_j, eps) from the carrier: the pressure and
+ * divergence-correction sums. Only a wall neighbour loads its density. */
+__device__ __forceinline__ float dfsph_vol_plain(float w_j, uint pi_j,
+                                                 const float* __restrict__ density, uint j) {
+    return dfsph_is_wall(pi_j) ? w_j / fmaxf(__ldg(&density[j]), RHO_EPSILON) : w_j;
 }
 
 /* Add F_on_body and its torque about the body centre to the accumulators of
@@ -422,6 +452,25 @@ void K_DFSPH_ComputeDensityAlpha(
 }
 
 /* ======================================================================
+ * K_DFSPH_PackVolume -- write the volume carrier into position.w
+ * (see dfsph_volume_carrier). Runs after reactions and spawn, which change
+ * mass and material, and before the first solver loop.
+ * ====================================================================== */
+
+extern "C" __global__ __launch_bounds__(256)
+void K_DFSPH_PackVolume(
+    uint            numParticles,
+    float4*         __restrict__ position,
+    const float*    __restrict__ density,
+    const float*    __restrict__ mass,
+    const uint*     __restrict__ packed_info
+) {
+    uint i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numParticles) return;
+    position[i].w = dfsph_volume_carrier(mass[i], density[i], packed_info[i]);
+}
+
+/* ======================================================================
  * K_DFSPH_NonPressureForces -- Viscosity + gravity -> velocity update
  * v*_i = v_i + dt * (gravity + viscosity)
  * ====================================================================== */
@@ -787,7 +836,8 @@ void K_DFSPH_NonPressureForces(
 
 /* ======================================================================
  * K_DFSPH_ComputeKappaV -- Divergence correction factor
- * div_v = SUM_j m_j/rho_j * (v*_i - v*_j) . gradW_ij = +(1/rho) Drho/Dt,
+ * div_v = SUM_j V_j * (v*_i - v*_j) . gradW_ij = +(1/rho) Drho/Dt,
+ *   V_j the Akinci volume from the position.w carrier (dfsph_vol_akinci),
  *   positive under compression (grad_spiky points toward j)
  * dkappa_v_i = max(div_v, 0) * alpha_i * omega / dt
  *   (multiply by alpha = 1/denom, never divide)
@@ -805,8 +855,6 @@ extern "C" __global__ __launch_bounds__(256, 4)
 void K_DFSPH_ComputeKappaV(
     uint            numParticles,
     const float4*   __restrict__ velocity,
-    const float*    __restrict__ density,
-    const float*    __restrict__ mass,
     const float*    __restrict__ alpha,
     const uint*     __restrict__ packed_info,
     const float4*   __restrict__ position,
@@ -853,12 +901,10 @@ void K_DFSPH_ComputeKappaV(
                 for (uint j = start; j < end_idx; j++) {
                     if (j == i) continue;
 
-                    // Speculative ILP (OPT-4.2)
+                    // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
                     float4 pos4_j = __ldg(&position[j]);
                     uint pi_j = __ldg(&packed_info[j]);
                     float4 vel4_j = __ldg(&velocity[j]);
-                    float rho_j = __ldg(&density[j]);
-                    float m_j = __ldg(&mass[j]);
 
                     int bj = GET_BEHAVIOR(pi_j);
                     if (bj == GAS) continue;
@@ -877,7 +923,7 @@ void K_DFSPH_ComputeKappaV(
                     float dv_dot_gW = (vel_i.x - vel4_j.x) * gW.x
                                     + (vel_i.y - vel4_j.y) * gW.y
                                     + (vel_i.z - vel4_j.z) * gW.z;
-                    div_v += (m_j / fmaxf(dfsph_vol_rho(rho_j, pi_j, rho0_vol_i), RHO_EPSILON)) * dv_dot_gW;
+                    div_v += dfsph_vol_akinci(pos4_j.w, pi_j, rho0_vol_i) * dv_dot_gW;
                 }
             }
         }
@@ -907,15 +953,15 @@ void K_DFSPH_ComputeKappaV(
 /* ======================================================================
  * K_DFSPH_CorrectVelocityDiv -- Apply divergence correction
  * v*_i -= dt * SUM_j V_j * (kv_i + kv_j) * gradW_ij, V_j = m_j / rho_j
- * (kv >= 0). Not momentum-symmetric where rho_i != rho_j: see bd-r5-review-n28.100.
+ * from the position.w carrier (dfsph_vol_plain) (kv >= 0). Not momentum-symmetric where rho_i != rho_j: see bd-r5-review-n28.100.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_DFSPH_CorrectVelocityDiv(
     uint            numParticles,
     float4*         __restrict__ velocity,        // in-out
-    const float*    __restrict__ density,
-    const float*    __restrict__ mass,
+    const float*    __restrict__ density,         // read for wall neighbours only
+    const float*    __restrict__ mass,            // own mass, rigid reaction only
     const float*    __restrict__ kappa_v,
     const uint*     __restrict__ packed_info,
     const float4*   __restrict__ position,
@@ -942,7 +988,6 @@ void K_DFSPH_CorrectVelocityDiv(
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
     float dt = c_sim.dt;
-    float rho_i = density[i];
     float kv_i = kappa_v[i];
 
     float3 dv = make_float3(0.0f, 0.0f, 0.0f);
@@ -959,11 +1004,9 @@ void K_DFSPH_CorrectVelocityDiv(
                 for (uint j = start; j < end_idx; j++) {
                     if (j == i) continue;
 
-                    // Speculative ILP (OPT-4.2)
+                    // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
                     float4 pos4_j = __ldg(&position[j]);
                     uint pi_j = __ldg(&packed_info[j]);
-                    float rho_j = __ldg(&density[j]);
-                    float m_j = __ldg(&mass[j]);
                     float kv_j = __ldg(&kappa_v[j]);
 
                     int bj = GET_BEHAVIOR(pi_j);
@@ -983,7 +1026,7 @@ void K_DFSPH_CorrectVelocityDiv(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = m_j / fmaxf(rho_j, RHO_EPSILON);
+                    float V_j = dfsph_vol_plain(pos4_j.w, pi_j, density, j);
                     float coeff = V_j * (kv_i + kv_j);
                     dv.x += coeff * gW.x;
                     dv.y += coeff * gW.y;
@@ -1021,24 +1064,36 @@ void K_DFSPH_CorrectVelocityDiv(
 }
 
 /* ======================================================================
- * K_DFSPH_ComputePressureAccel -- Pressure acceleration from p/rho^2
+ * K_DFSPH_ComputePressureAccel -- Pressure acceleration and predicted velocity
  *
- * Jacobi density solver kernel 1 of 3:
+ * Jacobi density solver kernel 1 of 2:
  * a_press_i = -SUM_j V_j * (p_rho2_i + p_rho2_j) * grad_W_ij
- * where V_j = m_j / rho_j (particle volume)
+ * where V_j = m_j / rho_j (particle volume, from the position.w carrier)
+ *
+ * Writes the predicted velocity, not a_press (bd-r5-review-n28.184):
+ *   vt_i = clamp_v(v_i + dt * clamp_a(a_press_i))
+ * clamp_a limits |a_press| to h/dt^2 (velocity change of at most h/dt per
+ * substep), clamp_v limits |vt| to VELOCITY_LIMIT. DensitySolverUpdate reads
+ * vt for i and every neighbour, so the clamps run once per particle instead
+ * of once per pair. The last call of a substep writes vt into the velocity
+ * buffer itself, which applies the pressure (there is no separate apply
+ * pass). velocity and vt_out may be the same buffer: each thread reads and
+ * writes only its own index, so they are not __restrict__.
+ * STATIC, GAS and sleeping particles write vt = v unchanged.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_DFSPH_ComputePressureAccel(
     uint            numParticles,
     const float*    __restrict__ p_rho2,
+    const float4*   velocity,                      // own index only; may alias vt_out
     const float4*   __restrict__ position,
-    const float*    __restrict__ density,
-    const float*    __restrict__ mass,
+    const float*    __restrict__ density,          // read for wall neighbours only
+    const float*    __restrict__ mass,             // own mass, rigid reaction only
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float4*         __restrict__ accel_out,
+    float4*         vt_out,                        // predicted velocity; may alias velocity
     const RigidBody* __restrict__ d_rigid_bodies,  // non-NULL only on the final call (see below)
     float*          __restrict__ d_rigid_forces,
     float*          __restrict__ d_rigid_torques
@@ -1046,24 +1101,26 @@ void K_DFSPH_ComputePressureAccel(
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
 
+    float4 vel4_i = velocity[i];
     uint pi_i = packed_info[i];
     int behavior_i = GET_BEHAVIOR(pi_i);
     if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) {
-        accel_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        vt_out[i] = vel4_i;
         return;
     }
 
     float4 pos4_i = __ldg(&position[i]);
     float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
     float p_i = p_rho2[i];
-    // Rigid reaction: only the last a_press is applied (ApplyPressureVelocity),
-    // so the caller passes the rigid buffers on the final call only. The pair
-    // adds -V_j * p_i * gW to a_i (p_j = 0 for STATIC), so the body gets
-    // +m_i * V_j * p_i * gW.
+    // Rigid reaction: only the last a_press is applied (the final call writes
+    // the velocity), so the caller passes the rigid buffers on the final call
+    // only. The pair adds -V_j * p_i * gW to a_i (p_j = 0 for STATIC), so the
+    // body gets +m_i * V_j * p_i * gW.
     float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
 
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
+    float dt = c_sim.dt;
 
     float3 a = make_float3(0.0f, 0.0f, 0.0f);
 
@@ -1079,11 +1136,10 @@ void K_DFSPH_ComputePressureAccel(
                 for (uint j = start; j < end_idx; j++) {
                     if (j == i) continue;
 
-                    // Speculative ILP: issue all loads before distance check (OPT-4.2)
+                    // Speculative ILP: issue all loads before distance check (OPT-4.2).
+                    // pos4_j.w is the volume carrier.
                     float4 pos4_j = __ldg(&position[j]);
                     uint pi_j = __ldg(&packed_info[j]);
-                    float rho_j = __ldg(&density[j]);
-                    float m_j = __ldg(&mass[j]);
                     float p_j = __ldg(&p_rho2[j]);
 
                     int bj = GET_BEHAVIOR(pi_j);
@@ -1103,7 +1159,7 @@ void K_DFSPH_ComputePressureAccel(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = m_j / fmaxf(rho_j, RHO_EPSILON);
+                    float V_j = dfsph_vol_plain(pos4_j.w, pi_j, density, j);
                     float coeff = -V_j * (p_i + p_j);
                     a.x += coeff * gW.x;
                     a.y += coeff * gW.y;
@@ -1121,15 +1177,43 @@ void K_DFSPH_ComputePressureAccel(
         }
     }
 
-    accel_out[i] = make_float4(a.x, a.y, a.z, 0.0f);
+    // Clamp pressure acceleration: limit velocity change to h/dt per substep.
+    // Prevents single-particle oscillation from Jacobi overcorrection.
+    float a_sq = a.x * a.x + a.y * a.y + a.z * a.z;
+    float a_press_max = c_sim.smoothing_length / (dt * dt);  // h/dt^2
+    if (a_sq > a_press_max * a_press_max) {
+        float scale = a_press_max / sqrtf(a_sq);
+        a.x *= scale;
+        a.y *= scale;
+        a.z *= scale;
+    }
+
+    float3 vt = make_float3(
+        vel4_i.x + dt * a.x,
+        vel4_i.y + dt * a.y,
+        vel4_i.z + dt * a.z
+    );
+    // Velocity clamp. In the density prediction it also stops a large a_press
+    // overshoot in one Jacobi iteration from producing a huge drho that drives
+    // the next iteration further out (runaway oscillation).
+    float vt_sq = vt.x * vt.x + vt.y * vt.y + vt.z * vt.z;
+    if (vt_sq > VELOCITY_LIMIT_SQ) {
+        float scale = VELOCITY_LIMIT / sqrtf(vt_sq);
+        vt.x *= scale;
+        vt.y *= scale;
+        vt.z *= scale;
+    }
+
+    vt_out[i] = make_float4(vt.x, vt.y, vt.z, vel4_i.w);
 }
 
 /* ======================================================================
  * K_DFSPH_DensitySolverUpdate -- Jacobi update for density pressure
  *
- * Jacobi density solver kernel 2 of 3:
- * 1) Compute predicted density using v_total = v + dt * a_press:
- *    drho = SUM_j (m_j/rho_j) * (v_total_i - v_total_j) . grad_W_ij
+ * Jacobi density solver kernel 2 of 2:
+ * 1) Compute predicted density from the predicted velocity vt (written by
+ *    K_DFSPH_ComputePressureAccel, already clamped):
+ *    drho = SUM_j V_j * (vt_i - vt_j) . grad_W_ij, V_j the Akinci volume
  *    density_adv = (rho_i / rho0) * (1 + dt * drho)
  * 2) Jacobi update pressure:
  *    residual = density_adv - 1.0
@@ -1142,11 +1226,9 @@ void K_DFSPH_ComputePressureAccel(
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_DFSPH_DensitySolverUpdate(
     uint            numParticles,
-    const float4*   __restrict__ velocity,
-    const float4*   __restrict__ accel_press,
+    const float4*   __restrict__ vt,             // predicted velocity v + dt * a_press, clamped
     const float4*   __restrict__ position,
-    const float*    __restrict__ density,
-    const float*    __restrict__ mass,
+    const float*    __restrict__ density,        // own density only
     const float*    __restrict__ alpha,
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
@@ -1165,8 +1247,7 @@ void K_DFSPH_DensitySolverUpdate(
 
     float4 pos4_i = __ldg(&position[i]);
     float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
-    float4 vel4_i = velocity[i];
-    float4 ap4_i = accel_press[i];
+    float4 vt_i = vt[i];
 
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
@@ -1174,25 +1255,6 @@ void K_DFSPH_DensitySolverUpdate(
     float rho_i = density[i];
     // Floor at 1: DEAD has rest_density 0, and rho_i / rho0 would be inf.
     float rho0 = fmaxf(c_materials[GET_MATERIAL_ID(pi_i)].rest_density, 1.0f);
-
-    // Total velocity = v + dt * a_press (includes pressure effect)
-    float3 vt_i = make_float3(
-        vel4_i.x + dt * ap4_i.x,
-        vel4_i.y + dt * ap4_i.y,
-        vel4_i.z + dt * ap4_i.z
-    );
-    // Clamp v_total to velocity limit before density prediction.
-    // Without this, a large a_press overshoot in one Jacobi iteration can produce
-    // a huge drho that drives the next iteration further out (runaway oscillation).
-    {
-        float vt_sq = vt_i.x * vt_i.x + vt_i.y * vt_i.y + vt_i.z * vt_i.z;
-        if (vt_sq > VELOCITY_LIMIT_SQ) {
-            float scale = VELOCITY_LIMIT / sqrtf(vt_sq);
-            vt_i.x *= scale;
-            vt_i.y *= scale;
-            vt_i.z *= scale;
-        }
-    }
 
     // Compute density rate-of-change from total velocity
     float drho = 0.0f;
@@ -1209,13 +1271,11 @@ void K_DFSPH_DensitySolverUpdate(
                 for (uint j = start; j < end_idx; j++) {
                     if (j == i) continue;
 
-                    // Speculative ILP: issue all loads before distance check (OPT-4.2)
+                    // Speculative ILP: issue all loads before distance check (OPT-4.2).
+                    // pos4_j.w is the volume carrier.
                     float4 pos4_j = __ldg(&position[j]);
                     uint pi_j = __ldg(&packed_info[j]);
-                    float m_j = __ldg(&mass[j]);
-                    float rho_j = __ldg(&density[j]);
-                    float4 vel4_j = __ldg(&velocity[j]);
-                    float4 ap4_j = __ldg(&accel_press[j]);
+                    float4 vt_j = __ldg(&vt[j]);
 
                     int bj = GET_BEHAVIOR(pi_j);
                     if (bj == GAS) continue;
@@ -1230,29 +1290,11 @@ void K_DFSPH_DensitySolverUpdate(
 
                     float rlen = sqrtf(r_sq);
 
-                    float3 vt_j = make_float3(
-                        vel4_j.x + dt * ap4_j.x,
-                        vel4_j.y + dt * ap4_j.y,
-                        vel4_j.z + dt * ap4_j.z
-                    );
-                    // Clamp vt_j symmetrically with vt_i — a neighbor with large a_press
-                    // can produce vt_j >> VELOCITY_LIMIT, which drives an asymmetric drho
-                    // contribution and a minor stability inconsistency.
-                    {
-                        float vt_j_sq = vt_j.x * vt_j.x + vt_j.y * vt_j.y + vt_j.z * vt_j.z;
-                        if (vt_j_sq > VELOCITY_LIMIT_SQ) {
-                            float scale = VELOCITY_LIMIT / sqrtf(vt_j_sq);
-                            vt_j.x *= scale;
-                            vt_j.y *= scale;
-                            vt_j.z *= scale;
-                        }
-                    }
-
                     float3 gW = grad_spiky(r, rlen, h);
                     float dv_dot_gW = (vt_i.x - vt_j.x) * gW.x
                                     + (vt_i.y - vt_j.y) * gW.y
                                     + (vt_i.z - vt_j.z) * gW.z;
-                    drho += (m_j / fmaxf(dfsph_vol_rho(rho_j, pi_j, rho0), RHO_EPSILON)) * dv_dot_gW;
+                    drho += dfsph_vol_akinci(pos4_j.w, pi_j, rho0) * dv_dot_gW;
                 }
             }
         }
@@ -1275,59 +1317,6 @@ void K_DFSPH_DensitySolverUpdate(
     float old_p = p_rho2[i];
     float new_p = old_p + c_dfsph.omega * residual * alpha_i / (dt * dt);
     p_rho2[i] = fmaxf(new_p, 0.0f);
-}
-
-/* ======================================================================
- * K_DFSPH_ApplyPressureVelocity -- Apply converged pressure to velocity
- *
- * Jacobi density solver kernel 3 of 3:
- * v_i += dt * a_press_i
- * Called once after Jacobi iteration converges.
- * ====================================================================== */
-
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_DFSPH_ApplyPressureVelocity(
-    uint            numParticles,
-    float4*         __restrict__ velocity,
-    const float4*   __restrict__ accel_press,
-    const uint*     __restrict__ packed_info
-) {
-    uint i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numParticles) return;
-
-    uint pi = packed_info[i];
-    if (GET_BEHAVIOR(pi) == STATIC || GET_BEHAVIOR(pi) == GAS || IS_SLEEPING(pi))
-        return;
-
-    float dt = c_sim.dt;
-    float4 vel = velocity[i];
-    float4 ap = accel_press[i];
-
-    // Clamp pressure acceleration: limit velocity change to h/dt per substep
-    // Prevents single-particle oscillation from Jacobi overcorrection
-    float ap_sq = ap.x * ap.x + ap.y * ap.y + ap.z * ap.z;
-    float a_press_max = c_sim.smoothing_length / (dt * dt);  // h/dt^2
-    if (ap_sq > a_press_max * a_press_max) {
-        float scale = a_press_max / sqrtf(ap_sq);
-        ap.x *= scale;
-        ap.y *= scale;
-        ap.z *= scale;
-    }
-
-    vel.x += dt * ap.x;
-    vel.y += dt * ap.y;
-    vel.z += dt * ap.z;
-
-    // Velocity clamp
-    float v_sq = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
-    if (v_sq > VELOCITY_LIMIT_SQ) {
-        float scale = VELOCITY_LIMIT / sqrtf(v_sq);
-        vel.x *= scale;
-        vel.y *= scale;
-        vel.z *= scale;
-    }
-
-    velocity[i] = vel;
 }
 
 /* ======================================================================
@@ -1707,7 +1696,8 @@ void K_DFSPH_Finalize(
 
     // Writeback. .w carries this substep's density for K_ComputeColor,
     // which runs once per frame on the unsorted arrays
-    // (bd-r5-review-n28.145). No DFSPH kernel reads position.w.
+    // (bd-r5-review-n28.145). The sorted position.w holds the solver's
+    // volume carrier (K_DFSPH_PackVolume), not the density.
     position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, sorted_density[i]);
     velocity_out[orig_idx] = make_float4(vel.x, vel.y, vel.z, 0.0f);
     packed_info_out[orig_idx] = pi;

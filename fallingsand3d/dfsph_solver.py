@@ -1,9 +1,14 @@
 """DFSPH solver kernel wrapper -- Divergence-Free SPH (Bender & Koschier, SCA 2015).
 
 Compiles physics/kernels/dfsph_solver.cu via CuPy RawModule and provides
-launch functions for the 8 DFSPH kernels: ComputeDensityAlpha,
+launch functions for the 8 DFSPH kernels: ComputeDensityAlpha, PackVolume,
 NonPressureForces, ComputeKappaV, CorrectVelocityDiv, ComputePressureAccel,
-DensitySolverUpdate, ApplyPressureVelocity and Finalize.
+DensitySolverUpdate and Finalize.
+
+The solver loops read each neighbour's volume from position.w (the volume
+carrier), so pack_volume must run after compute_density_alpha (and after
+reactions and spawn) and before compute_kappa_v, correct_velocity_div,
+compute_pressure_accel and density_solver_update.
 
 Constant memory (each RawModule has its own address space):
   c_grid, c_sim, c_precalc, c_materials -- shared with other kernels
@@ -186,6 +191,26 @@ def compute_density_alpha(
     ))
 
 
+def pack_volume(
+    position: cupy.ndarray,
+    density: cupy.ndarray,
+    mass: cupy.ndarray,
+    packed_info: cupy.ndarray,
+) -> None:
+    """Write the volume carrier into position[:, 3] (bd-r5-review-n28.184).
+
+    A regular STATIC wall gets its mass, every other particle
+    m / max(rho, RHO_EPSILON). The four solver loops read V_j from there
+    instead of loading mass and density per neighbour.
+    """
+    n = position.shape[0]
+    module = _get_module()
+    kernel = module.get_function("K_DFSPH_PackVolume")
+    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    block = (BLOCK_SIZE,)
+    kernel(grid, block, (np.uint32(n), position, density, mass, packed_info))
+
+
 def compute_non_pressure_forces(
     position: cupy.ndarray,
     velocity: cupy.ndarray,
@@ -251,8 +276,6 @@ def _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques):
 
 def compute_kappa_v(
     velocity: cupy.ndarray,
-    density: cupy.ndarray,
-    mass: cupy.ndarray,
     alpha: cupy.ndarray,
     packed_info: cupy.ndarray,
     position: cupy.ndarray,
@@ -267,7 +290,9 @@ def compute_kappa_v(
     increment added in place; it is the warm start that finalize writes back.
 
     normal_in is sorted_normal from compute_density_alpha; its .w neighbour count
-    gates the solve (fewer than 20 neighbours gives kappa_v = 0). None disables the gate."""
+    gates the solve (fewer than 20 neighbours gives kappa_v = 0). None disables the gate.
+
+    Neighbour volumes come from position[:, 3]; run pack_volume first."""
     n = velocity.shape[0]
     module = _get_module()
     kernel = module.get_function("K_DFSPH_ComputeKappaV")
@@ -276,7 +301,7 @@ def compute_kappa_v(
     norm_in = normal_in if normal_in is not None else np.intp(0)
     kv_total = kappa_v_total if kappa_v_total is not None else np.intp(0)
     kernel(grid, block, (
-        np.uint32(n), velocity, density, mass, alpha,
+        np.uint32(n), velocity, alpha,
         packed_info, position, cell_start, cell_end,
         kappa_v_out, norm_in, kv_total,
     ))
@@ -296,7 +321,10 @@ def correct_velocity_div(
     d_rigid_torques: "cupy.ndarray | None" = None,
 ) -> None:
     """Apply the divergence correction. With rigid bodies, also adds the
-    reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques."""
+    reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
+
+    Neighbour volumes come from position[:, 3] (run pack_volume first);
+    density is read only for wall neighbours, mass only for the reaction."""
     n = velocity.shape[0]
     module = _get_module()
     kernel = module.get_function("K_DFSPH_CorrectVelocityDiv")
@@ -312,22 +340,29 @@ def correct_velocity_div(
 
 def compute_pressure_accel(
     p_rho2: cupy.ndarray,
+    velocity: cupy.ndarray,
     position: cupy.ndarray,
     density: cupy.ndarray,
     mass: cupy.ndarray,
     packed_info: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
-    accel_out: cupy.ndarray,
+    vt_out: cupy.ndarray,
     d_rigid_bodies: "cupy.ndarray | None" = None,
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
 ) -> None:
-    """Compute pressure acceleration from p/rho^2 (Jacobi density solver step 1).
+    """Pressure acceleration from p/rho, written as the predicted velocity.
 
-    Pass the rigid buffers only on the final call, whose a_press is the one
-    K_DFSPH_ApplyPressureVelocity applies; the kernel then adds the reaction
-    of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
+    vt_out gets clamp_v(v + dt * clamp_a(a_press)): |a_press| capped at
+    h/dt^2, |vt| at the velocity limit. STATIC, GAS and sleeping particles
+    get vt = v. density_solver_update reads vt for i and its neighbours.
+
+    vt_out may be velocity itself (each thread touches only its own index).
+    The last call of a substep does that: it applies the pressure to the
+    velocity, and only that call gets the rigid buffers, so the kernel adds
+    the reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques
+    once. Neighbour volumes come from position[:, 3]; run pack_volume first.
     """
     n = position.shape[0]
     module = _get_module()
@@ -336,49 +371,36 @@ def compute_pressure_accel(
     block = (BLOCK_SIZE,)
     rb_ptr, rf_ptr, rt_ptr = _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques)
     kernel(grid, block, (
-        np.uint32(n), p_rho2, position, density, mass,
-        packed_info, cell_start, cell_end, accel_out,
+        np.uint32(n), p_rho2, velocity, position, density, mass,
+        packed_info, cell_start, cell_end, vt_out,
         rb_ptr, rf_ptr, rt_ptr,
     ))
 
 
 def density_solver_update(
-    velocity: cupy.ndarray,
-    accel_press: cupy.ndarray,
+    vt: cupy.ndarray,
     position: cupy.ndarray,
     density: cupy.ndarray,
-    mass: cupy.ndarray,
     alpha: cupy.ndarray,
     packed_info: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     p_rho2: cupy.ndarray,
 ) -> None:
-    """Jacobi update: predict density with pressure, update p_rho2 (step 2)."""
-    n = velocity.shape[0]
+    """Jacobi update: predict density from vt, update p_rho2.
+
+    vt is the predicted velocity from compute_pressure_accel (already
+    clamped). Neighbour volumes come from position[:, 3]; run pack_volume
+    first. density is read for the particle's own density only.
+    """
+    n = vt.shape[0]
     module = _get_module()
     kernel = module.get_function("K_DFSPH_DensitySolverUpdate")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     kernel(grid, block, (
-        np.uint32(n), velocity, accel_press, position, density, mass,
+        np.uint32(n), vt, position, density,
         alpha, packed_info, cell_start, cell_end, p_rho2,
-    ))
-
-
-def apply_pressure_velocity(
-    velocity: cupy.ndarray,
-    accel_press: cupy.ndarray,
-    packed_info: cupy.ndarray,
-) -> None:
-    """Apply converged pressure acceleration to velocity (step 3)."""
-    n = velocity.shape[0]
-    module = _get_module()
-    kernel = module.get_function("K_DFSPH_ApplyPressureVelocity")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-    kernel(grid, block, (
-        np.uint32(n), velocity, accel_press, packed_info,
     ))
 
 

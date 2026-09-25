@@ -1037,7 +1037,7 @@ class Simulation:
         already run, so K_SpawnGas writes each steam child's prediction there,
         and the gunpowder burst and blast wave add dt * dv to it so Finalize's
         (x* - x)/dt keeps their kicks.
-        WCSPH and DFSPH pass None (DFSPH reuses that buffer as a_press scratch).
+        WCSPH and DFSPH pass None (DFSPH reuses that buffer as vt scratch).
         """
         w = self.world
         # Reset freelist counter (graph-safe memset)
@@ -1489,6 +1489,15 @@ class Simulation:
         # 2. Reactions + Spawn
         self._run_reactions_spawn(n, mark)
 
+        # Volume carrier into sorted_position.w for the four solver loops
+        # (bd-r5-review-n28.184). After reactions and spawn, which change mass
+        # and material. The next reorder overwrites .w, so it lives only
+        # inside this substep.
+        dfsph_solver.pack_volume(
+            w.sorted_position[:n], w.sorted_density[:n],
+            w.sorted_mass[:n], w.sorted_packed_info[:n],
+        )
+
         # 3. Non-pressure forces (viscosity, gravity, mu(I), vorticity confinement, surface tension)
         rbm = self.rigid_body_manager
         vel = w.sorted_veleval[:n]
@@ -1546,8 +1555,7 @@ class Simulation:
             kv_total.fill(0)
         for _ in range(self._profile.dfsph_div_iters):
             dfsph_solver.compute_kappa_v(
-                vel, w.sorted_density[:n],
-                w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
+                vel, w.sorted_alpha_dfsph[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
                 kv_delta,
@@ -1568,14 +1576,16 @@ class Simulation:
         # 5. Density solver (SPlisHSPlasH-style Jacobi iteration on pressure)
         # Key insight: iterate on PRESSURE variable p/rho^2, not velocity.
         # Each iteration:
-        #   a) DensitySolverUpdate: predict density using v + dt*a_press,
+        #   a) DensitySolverUpdate: predict density from vt = v + dt*a_press,
         #      compute residual, update p_rho2 via Jacobi step
-        #   b) ComputePressureAccel: compute a_press from updated p_rho2
-        # After convergence: apply final a_press to velocity once.
+        #   b) ComputePressureAccel: a_press from the updated p_rho2, written
+        #      as the clamped predicted velocity vt (bd-r5-review-n28.184)
+        # The last ComputePressureAccel writes vt into vel itself, which
+        # applies the converged pressure; there is no separate apply pass.
         # Buffer reuse: sorted_kappa -> p_rho2 (warm-started from prev frame),
-        #               sorted_predicted_position -> a_press
+        #               sorted_predicted_position -> vt
         p_rho2 = w.sorted_kappa  # already contains warm-started values from reorder
-        a_press = w.sorted_predicted_position
+        vt = w.sorted_predicted_position
         # Warm start: K_DFSPH_Finalize already scaled the previous pressure by
         # dfsph_warm_start (0.5 = carry 50%) as it wrote it back
         # (bd-r5-review-n28.173). With a zero warm start it keeps the
@@ -1585,36 +1595,31 @@ class Simulation:
         # Only the last a_press is applied to the fluid, so only the last
         # compute_pressure_accel call adds the rigid reaction.
         dens_iters = self._profile.dfsph_dens_iters
-        # Compute initial a_press from warm-started p_rho2
+        # Initial vt from the warm-started p_rho2
         dfsph_solver.compute_pressure_accel(
-            p_rho2[:n], w.sorted_position[:n],
+            p_rho2[:n], vel, w.sorted_position[:n],
             w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n],
             self._cell_start, self._cell_end,
-            a_press,
+            vel if dens_iters == 0 else vt,
             **(rigid_kw if dens_iters == 0 else {}),
         )
         for it in range(dens_iters):
+            last = it == dens_iters - 1
             dfsph_solver.density_solver_update(
-                vel, a_press[:n],
-                w.sorted_position[:n], w.sorted_density[:n],
-                w.sorted_mass[:n], w.sorted_alpha_dfsph[:n],
-                w.sorted_packed_info[:n],
+                vt[:n], w.sorted_position[:n], w.sorted_density[:n],
+                w.sorted_alpha_dfsph[:n], w.sorted_packed_info[:n],
                 self._cell_start, self._cell_end,
                 p_rho2,
             )
             dfsph_solver.compute_pressure_accel(
-                p_rho2[:n], w.sorted_position[:n],
+                p_rho2[:n], vel, w.sorted_position[:n],
                 w.sorted_density[:n], w.sorted_mass[:n],
                 w.sorted_packed_info[:n],
                 self._cell_start, self._cell_end,
-                a_press,
-                **(rigid_kw if it == dens_iters - 1 else {}),
+                vel if last else vt,
+                **(rigid_kw if last else {}),
             )
-        dfsph_solver.apply_pressure_velocity(
-            vel, a_press[:n],
-            w.sorted_packed_info[:n],
-        )
         mark("density_solve")
 
         # 8. Finalize + writeback (includes sleep logic via velocity magnitude)
