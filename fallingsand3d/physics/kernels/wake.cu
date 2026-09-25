@@ -2,7 +2,10 @@
  * wake.cu -- Two-phase wake propagation kernels.
  *
  * Phase 1 (K_MarkWakeCells): just-woke and fast awake particles write
- * this substep's stamp into their OWN grid cell (one plain store).
+ * this substep's stamp into their OWN grid cell (one plain store). The
+ * solvers do this in K_Integrate, K_PBF_Finalize and K_DFSPH_Finalize via
+ * wake_mark_own_cell() and skip this kernel (bd-r5-review-n28.166, n28.167).
+ * It stays as the reference path for direct callers and the unit tests.
  *
  * Phase 1b (K_MarkWakeCellsRigid): moving rigid bodies stamp every cell
  * their bounding cube covers.

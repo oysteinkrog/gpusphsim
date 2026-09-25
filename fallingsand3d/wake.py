@@ -4,7 +4,9 @@ Compiles physics/kernels/wake.cu via CuPy RawModule and provides functions
 to launch the wake propagation pipeline:
 
   Phase 1 (K_MarkWakeCells):  Just-woke and fast awake particles stamp their
-                              own grid cell.
+                              own grid cell. The solvers write this stamp
+                              from K_Integrate / K_*_Finalize instead and
+                              pass mark=False (bd-r5-review-n28.166).
   Phase 1b (K_MarkWakeCellsRigid): Moving rigid bodies stamp the cells
                               their bounding cube covers.
   Phase 2+3 (K_WakeSleepersAndClearJustWoke): A sleeping particle wakes when
@@ -293,9 +295,11 @@ def run_wake_propagation(
         Per-substep device counter; must change every substep.
     mark : bool
         False when the solver's final kernel already wrote the own-cell
-        stamps this substep (K_PBF_Finalize and K_DFSPH_Finalize given
-        cell_wake_flags, bd-r5-review-n28.167). Needs frame_counter, since
-        clearing the table would erase those stamps.
+        stamps this substep (K_Integrate, K_PBF_Finalize and K_DFSPH_Finalize
+        given cell_wake_flags, bd-r5-review-n28.166 and n28.167). All three
+        solvers pass False, so K_MarkWakeCells only runs for direct callers
+        such as the unit tests. Needs frame_counter, since clearing the
+        table would erase those stamps.
     """
     if not mark and frame_counter is None:
         raise ValueError("mark=False needs frame_counter: the table clear "

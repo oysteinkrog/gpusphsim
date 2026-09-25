@@ -89,7 +89,9 @@ void K_Integrate(
     float*          __restrict__ lifetime_out,           // unsorted lifetime (reaction state carry-back)
     float*          __restrict__ mass_out,               // unsorted mass (spawn/reaction state carry-back)
     uint*           __restrict__ max_displacement_out,   // [1] atomicMax of displacement^2 (float-as-uint)
-    const float4*   __restrict__ displacement_anchor  // [N] sorted position at the last full sort, or NULL
+    const float4*   __restrict__ displacement_anchor, // [N] sorted position at the last full sort, or NULL
+    uint*           __restrict__ cell_wake_flags,     // wake stamp table, or NULL (bd-r5-review-n28.166)
+    const uint*     __restrict__ frame_ptr            // per-substep counter for the stamp, or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -484,6 +486,14 @@ void K_Integrate(
         float disp_sq = dx_d * dx_d + dy_d * dy_d + dz_d * dz_d;
         atomicMax(max_displacement_out, __float_as_uint(disp_sq));
     }
+
+    // Own-cell wake mark from registers, so wake.py skips K_MarkWakeCells
+    // (bd-r5-review-n28.166). vel_sq_sleep is the final |v|^2 and pi the
+    // final packed_info, so this is the K_MarkWakeCells test on the same
+    // values it would reread. It covers the wake transition above (pi has
+    // JUST_WOKE). The STATIC and still-sleeping early returns never mark:
+    // STATIC is excluded and a sleeper never carries JUST_WOKE.
+    wake_mark_own_cell(cell_wake_flags, frame_ptr, pi, behavior, vel_sq_sleep, pos_new);
 
     // --- Write to UNSORTED arrays ---
     // .w carries this substep's density to the next substep: the reorder gathers it

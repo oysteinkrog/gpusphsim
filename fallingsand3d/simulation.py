@@ -1253,10 +1253,13 @@ class Simulation:
             displacement_anchor=w.sorted_anchor,
             cell_start=self._cell_start,
             cell_end=self._cell_end,
+            cell_wake_flags=self._cell_wake_flags,
+            frame_counter=self._frame_counter_d,
         )
         mark("integrate")
 
-        # Wake propagation (2 kernels; per-substep stamp, no memset)
+        # Wake propagation: integrate wrote the own-cell stamps, so only the
+        # rigid marks and the sleeper probe run (per-substep stamp, no memset)
         wake.run_wake_propagation(
             w.position[:n],
             w.velocity[:n],
@@ -1265,6 +1268,7 @@ class Simulation:
             self._cell_wake_flags,
             num_particles=n,
             frame_counter=self._frame_counter_d,
+            mark=False,  # K_Integrate wrote the own-cell stamps
             **self._wake_rigid_kwargs(),
         )
         mark("wake")

@@ -131,6 +131,8 @@ def integrate(
     displacement_anchor: "Optional[cupy.ndarray]" = None,
     cell_start: "Optional[cupy.ndarray]" = None,
     cell_end: "Optional[cupy.ndarray]" = None,
+    cell_wake_flags: "Optional[cupy.ndarray]" = None,
+    frame_counter: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Integrate and return outputs tuple.
 
@@ -174,6 +176,14 @@ def integrate(
         Pre-allocated (N,) uint8 unsorted output for updated sleep counter.
     temperature_out : cupy.ndarray, optional
         Pre-allocated (N,) float32 unsorted output for updated temperature.
+    cell_wake_flags : cupy.ndarray, optional, (table_size,) uint32
+        Wake stamp table. When given, each just-woke or fast awake particle
+        (not STATIC or GAS, |v| > V_WAKE) stores the stamp in its own grid
+        cell, the same test as K_MarkWakeCells, so the caller runs
+        run_wake_propagation with mark=False (bd-r5-review-n28.166).
+    frame_counter : cupy.ndarray, optional, (1,) uint32
+        Per-substep device counter; the stamp is its value + 1. None gives
+        stamp 1.
 
     sorted_vorticity, sorted_angular_velocity, angular_velocity_out
         Ignored. The micropolar angular velocity had no reader and was
@@ -237,6 +247,10 @@ def integrate(
     # Use null pointer when cell_start/cell_end not provided (disables STATIC repulsion)
     cell_start_ptr = cell_start if cell_start is not None else np.intp(0)
     cell_end_ptr = cell_end if cell_end is not None else np.intp(0)
+    # Own-cell wake stamp written from registers (bd-r5-review-n28.166).
+    # NULL table: no mark, so the caller must run K_MarkWakeCells instead.
+    wake_ptr = cell_wake_flags if cell_wake_flags is not None else np.intp(0)
+    frame_ptr = frame_counter if frame_counter is not None else np.intp(0)
 
     kernel(
         grid,
@@ -269,6 +283,8 @@ def integrate(
             mass_out_ptr,
             max_disp_ptr,
             anchor_ptr,
+            wake_ptr,
+            frame_ptr,
         ),
     )
 
