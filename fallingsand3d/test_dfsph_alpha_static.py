@@ -53,7 +53,7 @@ def world():
     return World(max_particles=20_000)
 
 
-def _host_denom(pos, mass, rho_in, behavior, idx, h, skip_static_sq):
+def _host_denom(pos, mass, rho_in, behavior, idx, h, skip_static_sq, rho0_i=2500.0):
     """denom for particle idx, brute force over all particles."""
     coeff = -45.0 / (np.pi * h**6)
     r = pos[idx] - pos
@@ -64,7 +64,11 @@ def _host_denom(pos, mass, rho_in, behavior, idx, h, skip_static_sq):
     gW = (coeff * (h - rl) ** 2 / rl)[:, None] * r[nb]
     rho_j = np.where(rho_in[nb] <= 0.0, 1000.0, rho_in[nb])
     w = mass[nb] / np.maximum(rho_j, RHO_EPSILON)
-    grad_sum = (w[:, None] * gW).sum(axis=0)
+    # grad_sum gives a STATIC wall the Akinci volume m_j / rho0_i with the
+    # fluid's own rest density (bd-r5-review-n28.116).
+    rho_grad = np.where(behavior[nb] == STATIC, rho0_i, rho_j)
+    w_grad = mass[nb] / np.maximum(rho_grad, RHO_EPSILON)
+    grad_sum = (w_grad[:, None] * gW).sum(axis=0)
     sq = w * w * np.einsum("ij,ij->i", gW, gW)
     n_static = int((behavior[nb] == STATIC).sum())
     if skip_static_sq:
