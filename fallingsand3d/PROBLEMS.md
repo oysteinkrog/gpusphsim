@@ -333,7 +333,11 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 - **Problem:** `_frame_counter += 1` inside `_sim_step()` (per substep). WCSPH runs ~40
   substeps/frame, so foam compaction (`% 8`) fires every 0.2 frames, particle compaction
   (`% 60`) fires every 1.5 frames — much more often than intended.
-- **Fix:** Move increment to `step_frame()` or use separate substep counter.
+- **Fix:** `_frame_counter` increments once per frame in `step_frame()`. The foam
+  compaction gate was still checked inside the per-substep foam step, so every substep of
+  every 8th frame compacted. Compaction now runs from `step_frame()` after the substep loop,
+  once per frame at most, and foam generation runs once per frame with a dt-scaled
+  emission probability (bd-r5-review-n28.122).
 
 ### I5. FIXED: Boundary clamp can create r=0 with STATIC particles
 - **File:** `sph_shared.cuh:187-273`

@@ -2971,19 +2971,34 @@ kinetic     = 0.5 * |v_i|^2
 phi = k_ta * trapped_air + k_wc * wave_crest + k_ke * kinetic
 ```
 
-Generation occurs when `phi > threshold` AND `neighbor_count < 25` (surface proximity check).
+A particle qualifies when `phi > threshold` AND `neighbor_count < 25` (surface
+proximity check). A qualifying particle emits one foam particle with probability
 
-Default parameters: `k_ta=0.5`, `k_wc=1.0`, `k_ke=0.2`, `threshold=2.0`
+```
+p = min(1, k_rate * (phi - threshold) * dt_emit)
+```
+
+so the expected rate is `k_rate * (phi - threshold)` per second (Ihmsen et al. 2012
+use `n = dt * phi`). `dt_emit` is the sim time the launch covers, passed as a kernel
+argument. The draw is `hash_rand(i, seed + 4)`.
+
+Default parameters: `k_ta=0.5`, `k_wc=1.0`, `k_ke=0.2`, `threshold=2.0`,
+`k_rate=5.0` 1/s (a surface particle with `phi = 4` emits about 10 per second).
+
+Cadence: `K_FoamGenerate` runs once per frame, on the last substep. `step_frame`
+passes `last_substep` to the step function, and `dt_emit` is the sim time since the
+previous launch (`sim_steps * dt` in normal frames). Direct `_sim_step` callers keep
+`last_substep=True` and emit every substep with `dt_emit = dt`. The emitted amount
+therefore does not depend on the substep count: Dam Break peaks at about 37K foam
+particles at 17 substeps per frame and about 41K at 34, well under the 200K pool.
 
 Type selection:
 - SPRAY: `v_y > 0.5` and `speed > 1.0` (fast upward motion)
 - FOAM: `neighbor_count < 15` (surface particle with few neighbors)
 - BUBBLE: otherwise (near-surface interior)
 
-The RNG seed is `Simulation._substep_counter`, which is unique per substep.
-Foam generation runs every substep, and the old seed (`_frame_counter`) repeated
-across all substeps of a frame, so each frame produced correlated, duplicated
-foam at a multiple of the intended rate.
+The RNG seed is `Simulation._substep_counter` at the launch substep, which is
+unique per launch. `_frame_counter` would repeat for launches within one frame.
 
 Spawn position: parent position + random jitter (±0.01).
 Spawn velocity: parent velocity × scale (1.2 for spray, 0.5 for others).
@@ -3015,7 +3030,9 @@ Dam Break splash fills the 200K pool in one frame).
 
 ### 19.5 Compaction (K_FoamCompact)
 
-Stream compaction every 8 frames (amortized cost):
+Stream compaction runs once per frame at most, from `step_frame` after the
+substep loop (`_maybe_compact_foam`). It runs every 8th frame, and every frame
+while the deferred foam count is above 80% of the pool:
 1. Atomic scatter alive particles to output buffer
 2. Swap input/output buffers
 3. Device-to-device copy of alive_count → foam_count (no GPU→CPU sync)
@@ -3029,7 +3046,7 @@ Foam rendered as separate draw call after main scene (both point sprite and SSFR
 - Alpha varies by type: SPRAY=0.8, FOAM=0.5, BUBBLE=0.3
 
 **Source**: `foam.cu`, `foam.py`, `world.py` (foam pool), `renderer.py` (foam draw),
-`simulation.py:_run_foam_step`
+`simulation.py:_run_foam_step`, `simulation.py:_maybe_compact_foam`
 
 ## 20. GPU Data Optimizations
 
