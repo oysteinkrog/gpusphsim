@@ -8,7 +8,7 @@ The app builds its neighbour grid only with counting_sort_full
   - the FP16 velocity mirror decodes to the sorted velocity
   - cell_end[c] - cell_start[c] == histogram[c] for occupied cells
   - cell_end[c] == 0 for empty cells (the live empty-cell marker; the retired
-    build_grid path used a 0xFFFFFFFF cell_start sentinel instead)
+    argsort pipeline used a 0xFFFFFFFF cell_start sentinel instead)
   - two grid cells that collide in the 2^18 hash table share one bucket
   - a 27-cell grid walk finds every neighbour within h that an O(N^2)
     brute force finds, on ~2K particles
