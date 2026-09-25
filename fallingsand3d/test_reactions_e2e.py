@@ -25,15 +25,18 @@ SPAWN_LIFETIME = {SMOKE: 3.0, STEAM: 12.0}
 
 
 def _spawn_scene(w):
+    # Groups sit in three far corners. Splashed ACID at 293 K cools STEAM
+    # below its 360 K condense point, and condensation keeps mass only on
+    # average, so the mass check needs them apart.
     n_fire = w.spawn_sphere((-0.6, -0.6, -0.6), 0.08, FIRE, 200,
                             lifetime=FIRE_LIFETIME)
     w0 = w._high_water
-    n_water = w.spawn_cube((0.4, -1.0, 0.4), (0.5, -0.84, 0.5), WATER, spacing=0.02)
+    n_water = w.spawn_cube((0.6, -1.0, -0.7), (0.7, -0.84, -0.6), WATER, spacing=0.02)
     w.temperature[w0:w0 + n_water] = 400.0  # WATER boils above 373 K
     m0 = w._high_water
-    n_metal = w.spawn_cube((-0.05, -1.0, -0.05), (0.05, -0.92, 0.05), METAL, spacing=0.02)
+    n_metal = w.spawn_cube((-0.7, -1.0, 0.6), (-0.6, -0.92, 0.7), METAL, spacing=0.02)
     metal = slice(m0, m0 + n_metal)
-    n_acid = w.spawn_cube((-0.05, -0.92, -0.05), (0.05, -0.84, 0.05), ACID, spacing=0.02)
+    n_acid = w.spawn_cube((-0.7, -0.92, 0.6), (-0.6, -0.84, 0.7), ACID, spacing=0.02)
     assert (n_fire, n_water, n_metal, n_acid) == (200, 200, 100, 100)
     return metal
 
