@@ -1872,10 +1872,11 @@ def test_rotated_body_uses_world_frame_inertia():
     """A torque on a rotated non-cubic body gives R diag(Iinv) R^T tau.
 
     Round-4 fix (63c76c0): the world-frame inverse inertia is
-    R * diag(Iinv) * R^T. The body is turned 90 degrees about z, so body y lies
-    along world x, and a world-x torque must use Iinv_y = 0.25. The pre-fix
-    order R^T * diag(Iinv) * R, or skipping the rotation, uses Iinv_x = 1.0.
-    One step from rest: omega = Iinv_y * tau * dt * (1 - 0.05 * dt).
+    R * diag(Iinv) * R^T. The body is turned 30 degrees about z with
+    Iinv = (1, 0.25, 1) and gets a world-x torque. One step from rest:
+    omega = R diag(Iinv) R^T tau * dt * (1 - 0.05 * dt), which has
+    omega_x = 0.8125e-3 and omega_y = +0.3248e-3. R^T diag(Iinv) R flips the
+    sign of omega_y, and R diag(Iinv) tau gives (0.866e-3, 0.5e-3, 0).
     """
     from integrate import integrate_rigid_bodies
     from rigid_bodies import RigidBodyManager, MAX_RIGID_BODIES
@@ -1885,18 +1886,23 @@ def test_rotated_body_uses_world_frame_inertia():
     mgr.add_rigid_body(position=(0.0, 0.0, 0.0), half_extents=(0.1, 0.1, 0.1), mass=1.0)
     bodies = mgr._bodies_cpu.copy()
     bodies[0]["position"][3] = 1.0
-    bodies[0]["inertia_inv"][:3] = [1.0, 0.25, 1.0]
-    s = math.sin(math.pi / 4.0)
-    bodies[0]["rotation"][:] = [0.0, 0.0, s, s]
+    iinv = np.array([1.0, 0.25, 1.0])
+    bodies[0]["inertia_inv"][:3] = iinv
+    theta = math.pi / 6.0
+    bodies[0]["rotation"][:] = [0.0, 0.0, math.sin(theta / 2.0), math.cos(theta / 2.0)]
     d_bodies = cupy.asarray(bodies.view(np.float32))
     d_forces = cupy.zeros((MAX_RIGID_BODIES, 4), dtype=cupy.float32)
     d_torques = cupy.zeros((MAX_RIGID_BODIES, 4), dtype=cupy.float32)
-    d_torques[0, :3] = cupy.asarray([1.0, 0.0, 0.0], dtype=cupy.float32)
+    tau = np.array([1.0, 0.0, 0.0])
+    d_torques[0, :3] = cupy.asarray(tau, dtype=cupy.float32)
 
     dt = 1e-3
     integrate_rigid_bodies(d_bodies, d_forces, d_torques, 1, dt, gravity=(0.0, 0.0, 0.0))
     w = cupy.asnumpy(d_bodies).view(bodies.dtype)[0]["ang_vel"][:3]
-    expected = np.array([0.25 * dt * (1.0 - 0.05 * dt), 0.0, 0.0])
+    c, s = math.cos(theta), math.sin(theta)
+    R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    expected = R @ np.diag(iinv) @ R.T @ tau * dt * (1.0 - 0.05 * dt)
+    assert expected[1] > 3e-4  # the term the R / R^T order decides
     np.testing.assert_allclose(w, expected, rtol=0.0, atol=1e-7)
 
 
