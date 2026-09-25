@@ -2114,7 +2114,7 @@ dead occupant's values. (bd-r5-review-n28.42)
   the source. It also zeroes `lambda`.
 - **DFSPH.** `kappa` and `kappa_v` are zeroed. DFSPH skips GAS in its pressure
   solvers, so the slot's `alpha` from the pre-spawn density pass is not used.
-  `predicted_position` is not written: DFSPH reuses it as `a_press` scratch.
+  `predicted_position` is not written: DFSPH reuses it as `vt` scratch.
 - **All solvers.** The spawn writes the
   `+inf` bits into `max_displacement`, so the next grid-reuse decision forces a
   full sort (see 20.5 on the readback lag).
@@ -2660,6 +2660,8 @@ reaches positions from the next substep. With `sigma = 0`, IST on matches IST of
 Per substep:
   1. Hash + Sort + Build grid
   2. Compute density rho_i + precompute alpha_i factor
+     (reactions and spawn run here)
+     Pack the volume carrier into sorted position.w (see below)
   3. Compute non-pressure forces: f_visc, f_gravity
   4. Predict velocity: v* = v + dt * a_nonpressure   (gravity + viscosity/rho_i)
   5. Divergence-free solver (warm-started from the previous substep's
@@ -2670,12 +2672,12 @@ Per substep:
      kappa_v_i += dkappa_v_i                                  [warm-start total]
   6. Density solver (Jacobi iteration on pressure, N_dens iterations):
      Initialize p_rho2 from warm-start (previous frame, scaled by 0.5)
-     Compute initial a_press from warm-started p_rho2
+     Compute initial vt = clamp_v(v + dt * clamp_a(a_press)) from warm-started p_rho2
      For each iteration:
-       Predict density with v_total = v + dt*a_press
+       Predict density from vt
        Jacobi-update p_rho2 from density residual
-       Recompute a_press from updated p_rho2
-     Apply final: v* += dt * a_press
+       Recompute vt from updated p_rho2
+     The last vt pass writes the velocity itself: v* = vt
   7. Final position: x_final = x + dt * v*_final
   8. Boundary handling, writeback (kappa + kappa_v written back for warm-start,
      already scaled by their warm-start factors; position.w gets the density
@@ -2685,14 +2687,34 @@ Per substep:
 **Velocity buffer routing (bd-r5-review-n28.173):** NonPressureForces reads
 `sorted_velocity` and writes `sorted_veleval` (the two must not alias). From then on
 `sorted_veleval` is the substep velocity: CorrectVelocityDiv, ComputeKappaV,
-DensitySolverUpdate, ApplyPressureVelocity and Finalize read or update it, and foam
-generation reads it after the substep. `sorted_velocity` keeps the reordered start
+ComputePressureAccel and Finalize read or update it, and foam generation reads it
+after the substep. DensitySolverUpdate reads the predicted velocity `vt` from
+`sorted_predicted_position` instead (13.4). `sorted_velocity` keeps the reordered start
 velocity. The routing is fixed, never swapped per substep, because CUDA graphs bake
 buffer pointers.
 
-Kernels (`dfsph_solver.cu`, 8 in total): ComputeDensityAlpha (step 2),
+**Volume carrier in position.w (bd-r5-review-n28.184):** `K_DFSPH_PackVolume` runs
+after reactions and spawn (they change mass and material) and writes into the sorted
+`position.w`:
+```
+regular STATIC wall (not MAT_RIGID):  .w = m_j
+every other particle:                 .w = V_j = m_j / max(rho_j, RHO_EPSILON)
+```
+The four solver loops (ComputeKappaV, CorrectVelocityDiv, ComputePressureAccel,
+DensitySolverUpdate) read the neighbour volume from the position float4 they already
+load, so they no longer load `mass[j]` and `density[j]`. A wall stores its mass because
+the loops use two divisors for it: the divergence and density-prediction sums use the
+Akinci volume `m_j / rho0_i` (13.3), the pressure and divergence-correction sums use
+`m_j / rho_j` with the wall's own stored density, which those two kernels load only for
+a wall neighbour. The volumes are the same as before the carrier, except
+for a particle that a reaction turned into a wall in this substep, whose stored density
+is still its fluid density. The next reorder overwrites `.w`, so the carrier lives only
+inside the substep; Finalize writes this substep's density into the unsorted
+`position.w` for K_ComputeColor.
+
+Kernels (`dfsph_solver.cu`, 8 in total): ComputeDensityAlpha (step 2), PackVolume (2),
 NonPressureForces (3-4), ComputeKappaV and CorrectVelocityDiv (5),
-ComputePressureAccel, DensitySolverUpdate and ApplyPressureVelocity (6), Finalize (7-8).
+ComputePressureAccel and DensitySolverUpdate (6), Finalize (7-8).
 The Jacobi loop on p/rho^2 is the only density solver; the velocity-space density
 solver (ComputeDensityAdv, ComputeKappa, ComputeKappaFromVelocity, CorrectVelocityDens,
 PredictPosition) was removed. Iteration counts N_div and N_dens are host-side loop
@@ -2833,19 +2855,25 @@ The density solver uses a SPlisHSPlasH-style Jacobi iteration on the **pressure 
 (`p/rho^2`), not velocity. This allows multiple iterations to converge because the pressure
 field carries information between iterations through the `A*p` feedback term.
 
-**Three kernels per iteration:**
+**Two kernels per iteration** (bd-r5-review-n28.184):
 
-1. **K_DFSPH_ComputePressureAccel** — Compute pressure acceleration from current p/rho^2:
+1. **K_DFSPH_ComputePressureAccel**: pressure acceleration from current p/rho^2,
+written as the clamped predicted velocity:
 ```
 a_press_i = -SUM_j V_j * (p_rho2_i + p_rho2_j) * grad_W_ij
-where V_j = m_j / rho_j
+where V_j = m_j / rho_j (from the position.w carrier, 13.1)
+a_press_i = clamp(a_press_i, h/dt^2)     [velocity change at most h/dt per substep]
+vt_i = clamp(v_i + dt * a_press_i, VELOCITY_LIMIT)   [bd-mzc.33: prevent Jacobi runaway]
 ```
+STATIC, GAS and sleeping particles write `vt_i = v_i`. `vt` goes to
+`sorted_predicted_position`; the last call of the substep writes it into the velocity
+buffer instead, which applies the converged pressure. Each thread reads and writes only
+its own velocity, so the in-place write is safe. With `dens_iters = 0` the initial call
+is the last one.
 
-2. **K_DFSPH_DensitySolverUpdate** — Predict density using total velocity, Jacobi-update pressure:
+2. **K_DFSPH_DensitySolverUpdate**: predict density from `vt`, Jacobi-update pressure:
 ```
-v_total_i = v_i + dt * a_press_i        [velocity including current pressure effect]
-v_total_i = clamp(v_total_i, VELOCITY_LIMIT)   [bd-mzc.33: prevent Jacobi runaway]
-drho = SUM_j (m_j/rho_j) * (v_total_i - v_total_j) . grad_W_ij
+drho = SUM_j V_j * (vt_i - vt_j) . grad_W_ij   [V_j: Akinci volume, m_j/rho0_i for a wall]
 density_adv = (rho_i/rho_0) * (1 + dt * drho)  [predicted rho*/rho_0]
 residual = density_adv - 1.0             [positive = compressed]
 p_rho2 = max(p_rho2 + omega * residual * alpha / dt^2, 0)
@@ -2864,20 +2892,18 @@ applied, and `p_rho2` grows linearly with the iteration count. The divergence so
 interior particle lowers its own predicted residual by `1.02 * dt^2 / alpha_i`
 (`test_solvers.py::test_dfsph_density_convergence`).
 
-**Velocity clamping before density prediction (bd-mzc.33)**: `v_total = v + dt*a_press` is
+**Velocity clamping before density prediction (bd-mzc.33)**: `vt = v + dt*a_press` is
 clamped to `VELOCITY_LIMIT` before computing `drho`. Without this clamp, a large `a_press`
 overshoot in one Jacobi iteration can produce a huge `drho` that drives the next iteration
-further out — runaway Jacobi oscillation. The clamp prevents this feedback from diverging.
+further out: runaway Jacobi oscillation. The clamp prevents this feedback from diverging.
+The `h/dt^2` clamp on `a_press` is applied inside the prediction too, so the density the
+solver predicts comes from the same velocity the fluid gets. Both clamps run once per
+particle in ComputePressureAccel instead of once per pair in DensitySolverUpdate.
 
 The `A*p` feedback comes from including `a_press` in the density prediction, which
 accounts for the effect of current pressure on neighbors. This is what makes multiple
 iterations converge — pure velocity correction without pressure feedback would repeat
 the same correction.
-
-3. **K_DFSPH_ApplyPressureVelocity** — Apply final pressure to velocity (once after convergence):
-```
-v*_i += dt * a_press_i
-```
 
 **Warm-starting:** Pressure values (`p_rho2`) are carried from the previous frame
 through the sort-reorder pipeline (`kappa` → `sorted_kappa`). K_DFSPH_Finalize applies
@@ -2928,7 +2954,7 @@ KE Decay Ratio).
 **Profiles (bd-r5-review-n28.37).** omega 0.7 for both solvers (omega 1.0 still overshoots
 the short-wavelength modes, 13.4 table above), velocity limit 0.4*h/dt (0.9 left surface
 particles at 9.9 m/s after 3 s), pressure acceleration clamped to h/dt^2 in
-K_DFSPH_ApplyPressureVelocity, warm start 0.5 for both solvers, alpha_limit 1.0.
+K_DFSPH_ComputePressureAccel, warm start 0.5 for both solvers, alpha_limit 1.0.
 
 | profile      | dt    | div + dens iters | sweeps / substep | sweeps / sim s | ms / sim s at 1M |
 |--------------|-------|------------------|------------------|----------------|------------------|
@@ -2964,8 +2990,26 @@ pass (DFSPH COM_y -0.498 to -0.603, WCSPH -0.601). Still failing: WCSPH Fluid Se
 PBF Sand Friction and KE Decay Ratio (DFSPH 5.71 to 2.89, PBF 2.58; the ratio compares
 final KE with the peak over the first 0.3 s, before the block lands).
 
+**Neighbour bytes (bd-r5-review-n28.184).** Per neighbour, with the volume carrier and
+`vt`: DensitySolverUpdate 60 B to 36 B, ComputeKappaV 44 to 36, ComputePressureAccel 32 to
+24, CorrectVelocityDiv 32 to 24, and the ApplyPressureVelocity launch is gone (PackVolume
+adds one 16 B per particle launch). `bench_substep.py` at 500K particles, Stable profile,
+full sort every substep, GPU shared with other jobs, three runs each (median ms):
+
+| stage         | before      | after       |
+|---------------|-------------|-------------|
+| divergence    | 5.22-5.39   | 4.97-5.04   |
+| density_solve | 7.90-8.08   | 6.31-6.39   |
+| substep total | 17.92-18.42 | 16.16-16.47 |
+
+The substep is about 10 percent faster, the density solve about 20 percent.
+Settling 36K WATER block and 48K dam break at 1, 2 and 5 s: compression error, KE,
+99th-percentile speed and COM_y stay inside the run-to-run spread of the old code
+(for example block at 5 s: comp 0.32-0.36 % before, 0.32-0.33 % after; KE 12.6-13.2 J
+before, 12.9-13.3 J after).
+
 **Source**: `dfsph_solver.cu:K_DFSPH_ComputePressureAccel`, `K_DFSPH_DensitySolverUpdate`,
-`K_DFSPH_ApplyPressureVelocity`, `simulation.py` (step 5, density solver loop)
+`K_DFSPH_PackVolume`, `simulation.py` (step 5, density solver loop)
 
 ### 13.5 Non-Pressure Forces
 
@@ -3437,9 +3481,9 @@ global memory load per neighbor interaction in the Step2 inner loop.
 
 Pipeline order: Step1 (writes density and `.w`) → Step2
 
-Applied to WCSPH path only. PBF and DFSPH use their own density pipelines
-(PBF computes density from predicted positions; DFSPH reads density from a
-separate buffer across multiple correction kernels).
+Applied to WCSPH path only. PBF computes density from predicted positions. DFSPH
+keeps density in a separate buffer and puts the neighbour volume (not the density)
+into the sorted `position.w` for its four solver loops (13.1, volume carrier).
 
 K_Step1 also reads its own neighbour density from `.w` (bd-r5-review-n28.163).
 `K_Integrate` writes this substep's density into the unsorted `position.w` and the
@@ -4094,7 +4138,7 @@ row uses `m_b` without the `rho0_i` scale.
 The PBF position correction over a substep is an impulse `m_i * dx / dt` and a
 force `m_i * dx / dt^2`, summed over the iterations. The DFSPH density solver
 runs ComputePressureAccel `dens_iters + 1` times but only the last `a_press` is
-applied (ApplyPressureVelocity), so `simulation.py` passes the rigid buffers on
+applied (that call writes the velocity), so `simulation.py` passes the rigid buffers on
 that call only. Torque is `(r_b - COM) x F` in every case. DFSPH Finalize computes no rigid
 force. PBF Finalize adds the drag below.
 
