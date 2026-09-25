@@ -1356,6 +1356,41 @@ last batch can pass the budget by at most its own size.
 
 ---
 
+### 9.7 Thermal gate for cold scenes (WCSPH)
+
+`c_sim.thermal_enabled` (int, last field of SimParams, 76 bytes) lets
+K_Step1 skip heat diffusion (§9.1) and exposure (§9.4). With the flag 0 the
+kernel does not load T_j and writes `dTdt = exposure_heat = exposure_corrode
+= 0`. Density, pressure, vorticity, normal and strain rate do not change.
+K_Step1 is one kernel whose body is a template on the gate, so the thermal
+path carries no extra branches (bd-r5-review-n28.172).
+
+Simulation sets the flag on the host from `World._spawned_material_ids`, with
+no GPU sync. The flag is 0 only when all of these hold:
+
+- at least one material was spawned;
+- every spawned material starts at T_AMBIENT (none of LAVA, FIRE, STEAM,
+  SMOKE, ICE, see §9.3);
+- no pair of spawned materials, a material with itself included, has a
+  non-zero `reaction_rate` or `heat_exchange`.
+
+In such a scene every temperature stays at T_AMBIENT and every heat and
+exposure term is exactly 0, so the gate changes no result. Water alone and
+water with stone qualify; sand with water does not (wetting pair). The rule
+runs once per substep and re-uploads c_sim only when the flag changes. A
+load or undo replaces the material set with one rebuilt from the restored
+particles, whose temperatures are unknown, so the flag then stays 1. The
+set only grows while a World lives, so after a hot preset the flag stays 1
+for later presets. PBF and DFSPH ignore the flag.
+
+Measured with `benchmark.py` on the water-only dam break at 992K particles
+(RTX 5070 Ti, shared GPU): step1 2.34 to 1.95 ms, substep 8.35 to 7.85 ms.
+The Volcano preset (flag 1) gives the same material counts, temperatures
+and centre of mass after 600 substeps, and its step1 time did not go up.
+
+**Source**: `step1.cu` (step1_body, K_Step1), `simulation.py`
+(`_thermal_rule`, `_update_thermal_gate`), `step1.py` (`SIM_PARAMS_DTYPE`)
+
 ## 10. Known Issues and Discrepancies
 
 ### 10.1 FIXED: integrate.cu divided sph_force by mass
