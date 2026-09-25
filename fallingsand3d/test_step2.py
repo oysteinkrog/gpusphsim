@@ -1082,6 +1082,140 @@ def test_granular_friction_coeff_zero_falls_back_to_global_mu_s() -> None:
     np.testing.assert_allclose(fallback, explicit, rtol=1e-5)
 
 
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.118: regression pins for the round-5 review findings
+# ---------------------------------------------------------------------------
+
+APP_MASS = 0.02  # app particle mass: WATER rho0 (2500) * spacing^3
+
+
+def _water_next_to_static_force(mat_id_b: int, use_nl: bool) -> np.ndarray:
+    """Force on a moving, compressed WATER particle with one STATIC neighbour
+    of mass 0.02 at 0.3h. Returns the WATER force (x, y, z)."""
+    from materials import WATER
+    rho0_w = float(MATERIALS[WATER].rest_density)
+    data = _make_two_particle_setup(
+        pos_a=[0.0, 0.0, 0.0],
+        pos_b=[0.3 * H, 0.0, 0.0],
+        vel_a=[0.4, -0.3, 0.2],
+        density_a=1.2 * rho0_w,
+        density_b=1.2 * rho0_w,
+        mass_a=APP_MASS,
+        mass_b=APP_MASS,
+        mat_id_a=WATER,
+        mat_id_b=mat_id_b,
+        bclass_a=FLUID,
+        bclass_b=STATIC,
+    )
+    perm = data.pop("sort_perm")
+    if use_nl:
+        import neighbor_list as nl
+        from test_cross_force_scale import _upload_nl
+        _upload_nl()
+        n = data["position"].shape[0]
+        nb_idx, nb_cnt = nl.allocate_neighbor_buffers(n)
+        nl.build_neighbor_list(
+            data["position"], data["cell_start"], data["cell_end"], nb_idx, nb_cnt
+        )
+        force, _ = nl.compute_step2_nl(
+            data["position"], data["velocity"], data["mass"], data["packed_info"],
+            data["shear_rate"], nb_idx, nb_cnt,
+            velocity_h=data["velocity_h"], pressure_in=data["pressure_in"],
+        )
+    else:
+        force, _ = compute_step2(**data)
+    return cupy.asnumpy(unsort(force, perm))[0, :3]
+
+
+@pytest.mark.parametrize("use_nl", [False, True], ids=["K_Step2", "K_Step2_NL"])
+def test_stone_neighbour_control_pushes_fluid(use_nl: bool) -> None:
+    """Control for the DEAD test below: a STONE neighbour at the same place
+    pushes the WATER particle away (-x) and drags it."""
+    from materials import STONE
+    _upload_all_params()
+    f = _water_next_to_static_force(STONE, use_nl)
+    print(f"  WATER force next to STONE: {f}")
+    assert f[0] < 0.0, f"STONE control did not push WATER away: {f}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="bd-r5-review-n28.23 fix step 2: step2 has no MAT_DEAD skip, so a "
+           "DEAD/STATIC slot that still has mass acts as an Akinci wall",
+)
+@pytest.mark.parametrize("use_nl", [False, True], ids=["K_Step2", "K_Step2_NL"])
+def test_fluid_next_to_dead_static_slot_gets_zero_force(use_nl: bool) -> None:
+    """A MAT_DEAD/STATIC neighbour with a stale mass of 0.02 gives WATER no
+    pressure push and no drag. An isolated WATER particle gets zero force."""
+    from materials import DEAD
+    _upload_all_params()
+    f = _water_next_to_static_force(DEAD, use_nl)
+    print(f"  WATER force next to DEAD slot: {f}")
+    assert np.all(f == 0.0), f"DEAD slot exerted a force on WATER: {f}"
+
+
+def _confinement_lattice_force(eps_v: float) -> tuple:
+    """7^3 WATER lattice at rest and rest density, with a prescribed vorticity
+    omega = (0, 0, 5 + 100 x). Returns (force, sorted position) in sorted
+    order. Pressure is 0 and velocity is 0, so only confinement can differ
+    between two runs with different vorticity_epsilon."""
+    from materials import WATER
+    rho0_w = float(MATERIALS[WATER].rest_density)
+    k = 7
+    idx = (np.arange(k, dtype=np.float32) - 3) * SPACING
+    xx, yy, zz = np.meshgrid(idx, idx, idx, indexing="ij")
+    n = xx.size
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0], pos[:, 1], pos[:, 2] = xx.ravel(), yy.ravel(), zz.ravel()
+    pos[:, 3] = rho0_w
+    scene = counting_sort_scene(
+        pos, velocity=np.zeros((n, 4), dtype=np.float32),
+        mass=np.full(n, APP_MASS, dtype=np.float32),
+        packed_info=np.full(n, MAKE_PACKED(WATER, FLUID), dtype=np.uint32),
+        grid_params=default_grid_params(),
+    )
+    pressure = cupy.zeros(n, dtype=cupy.float32)
+    sorted_x = scene["position"][:, 0]
+    vort = cupy.zeros((n, 4), dtype=cupy.float32)
+    vort[:, 2] = 5.0 + 100.0 * sorted_x
+    vort[:, 3] = cupy.abs(vort[:, 2])
+    upload_granular_params(build_granular_params(
+        mu0=VISCOSITY, vorticity_epsilon=eps_v, surface_tension_gamma=0.0))
+    f, _ = compute_step2(
+        scene["position"], scene["velocity"], scene["mass"],
+        scene["packed_info"], cupy.zeros(n, dtype=cupy.float32),
+        scene["cell_start"], scene["cell_end"],
+        vorticity_in=vort, pressure_in=pressure, velocity_h=scene["velocity_h"],
+    )
+    return cupy.asnumpy(f), cupy.asnumpy(scene["position"]), cupy.asnumpy(vort)
+
+
+def test_vorticity_confinement_sign() -> None:
+    """Confinement force is eps * fs * (N x omega), with N = grad|omega| / |grad|omega||
+    pointing toward higher |omega|.
+
+    |omega| grows along +x and omega is along +z, so N = +x and the force on
+    the centre particle is -eps * fs * omega_z * y. That is the rotation
+    direction of a vortex whose core is at +x, so confinement spins it up.
+    A reversed N (the old sign bug) gives +y and spins the vortex down.
+    """
+    _upload_all_params()
+    eps_v = 0.05
+    f_on, pos, vort = _confinement_lattice_force(eps_v)
+    f_off, _, _ = _confinement_lattice_force(0.0)
+    upload_granular_params(build_granular_params(mu0=VISCOSITY))
+    centre = int(np.argmin(np.linalg.norm(pos[:, :3], axis=1)))
+    fs = float(build_granular_params()[0]["force_scale"])
+    diff = f_on[centre, :3] - f_off[centre, :3]
+    expected_y = -eps_v * fs * float(vort[centre, 2])
+    print(f"  confinement force {diff}, expected y {expected_y:.4e}")
+    assert expected_y < 0.0
+    assert abs(diff[1] - expected_y) <= 1e-3 * abs(expected_y), (
+        f"confinement f_y {diff[1]:.4e}, expected {expected_y:.4e}")
+    assert abs(diff[0]) <= 1e-3 * abs(expected_y) and abs(diff[2]) <= 1e-3 * abs(expected_y), (
+        f"confinement force has off-axis parts: {diff}")
+
+
 def main() -> None:
     test_compilation()
     test_struct_sizes()
