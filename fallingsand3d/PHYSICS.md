@@ -2111,7 +2111,8 @@ dead occupant's values. (bd-r5-review-n28.42)
   position in `predicted_position[slot]`. `K_SpawnGas` writes
   `x* = x_child + dt * v_child` (clamped to the world box) there, so
   `K_PBF_Finalize` gives the child `v = (x* - x) / dt = v_child` and keeps it at
-  the source. It also zeroes `lambda`.
+  the source. The x* `.w` gets the child mass (12.1, mass carrier). It also
+  zeroes `lambda`.
 - **DFSPH.** `kappa` and `kappa_v` are zeroed. DFSPH skips GAS in its pressure
   solvers, so the slot's `alpha` from the pre-spawn density pass is not used.
   `predicted_position` is not written: DFSPH reuses it as `vt` scratch.
@@ -2256,11 +2257,28 @@ Per substep:
      b. Compute lambda_i = -C_i / (SUM_j |grad_pj C_i|^2 + epsilon)
         where C_i = rho_i/rho_0 - 1
      c. Compute dx_i = (1/rho_0) SUM_j (lambda_i + lambda_j + s_corr) grad_W_spiky(x*_ij)
-     d. x* += dx, then clamp x* to the world box and push it out of SDF objects
+     d. x*_out = x* + dx, clamped to the world box and pushed out of SDF objects,
+        written to the other predicted-position buffer (same kernel as c)
   4. v_new = (x* - x_old) / dt
   5. XSPH viscosity: v_new += c SUM (m_j/rho_j) (v_j - v_i) W_poly6
   6. Boundary handling + writeback
 ```
+
+**Ping-pong buffers and mass carrier.** Steps 3c and 3d are one kernel,
+`K_PBF_ComputeDelta`. It reads x* from one buffer and writes x*_out into the
+other (`sorted_predicted_position` and `sorted_delta_position`), so every
+particle in an iteration sees the same x* (Jacobi) without a separate apply
+pass. STATIC copies its x* through. After N iterations the result is in
+`sorted_predicted_position` for even N and `sorted_delta_position` for odd N;
+N is fixed per graph capture and `_run_pbf_body` hands the right one to
+Finalize. `.w` of x* holds the particle mass: `K_PBF_Predict` writes
+`mass[i]`, and the neighbour loops of ComputeLambda, ComputeDelta and Finalize
+read `m_j` from the float4 they already load. Reactions and `K_SpawnGas` run
+after the first lambda pass and can change `mass` (material rescale, dead
+slots, steam children), so the first ComputeDelta reads `mass[]` and writes it
+into `.w` for the later passes. Only the last lambda call of the substep writes
+the GRANULAR pressure normal, the one Finalize reads. The result is bitwise the
+same as the old delta-then-apply pipeline (checked at 4 and 5 iterations).
 
 **Grid from predicted positions.** Steps 1 and 2 run in this order on a full
 sort: `_run_grid_setup` runs `K_PBF_Predict` on the unsorted arrays into
@@ -2283,7 +2301,7 @@ What this does not cover:
   the x* the cells were built from.
 
 **SDF projection every iteration.** `K_PBF_Predict` and every
-`K_PBF_ApplyDelta` pass call `push_out_of_sdf`: any x* closer than
+`K_PBF_ComputeDelta` pass call `push_out_of_sdf`: any x* closer than
 `BOUNDARY_MARGIN` to an SDF object (or inside it) moves along the SDF normal to
 `BOUNDARY_MARGIN` outside. So the density constraint near an SDF collider is
 solved with the collider in place, and Finalize derives v_new from an x* that
@@ -2397,7 +2415,7 @@ correction. WCSPH and DFSPH pass NULL and are unchanged. Two limits:
   iterations of that substep miss some of its neighbours. The next full sort
   fixes it.
 
-**World box walls in Finalize.** `K_PBF_Predict` and `K_PBF_ApplyDelta` clamp
+**World box walls in Finalize.** `K_PBF_Predict` and `K_PBF_ComputeDelta` clamp
 x\* to `world_min + BOUNDARY_MARGIN` (and `world_max - BOUNDARY_MARGIN`), so a
 particle that hits a wall arrives in `K_PBF_Finalize` sitting exactly on the
 margin plane with `v_new` pointing into the wall. `pbf_box_boundary` applies the
@@ -2568,7 +2586,7 @@ This implementation achieves similar angle-of-repose results without the
 deformation gradient overhead by leveraging the density gradient already
 available from the PBF constraint computation.
 
-**Source**: `pbf_solver.cu:K_PBF_ApplyDelta` (Drucker-Prager friction),
+**Source**: `pbf_solver.cu:K_PBF_Finalize` (Drucker-Prager friction),
 `pbf_solver.cu:K_PBF_ComputeLambda` (pressure normal output),
 `solver_profiles.py` (`pbf_friction_ratio`, `pbf_friction_cohesion`),
 `step2.py:build_granular_params()` (builds params uploaded to PBF module)
