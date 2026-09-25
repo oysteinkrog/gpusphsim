@@ -76,6 +76,20 @@ def get_module() -> "object":
 # ---------------------------------------------------------------------------
 
 
+def upload_grid_params(params: np.ndarray) -> None:
+    """Upload GridParams to ``__constant__ GridParams c_grid``.
+
+    K_Integrate maps positions to grid cells for the STATIC push-out and the
+    own-cell wake mark (bd-r5-review-n28.166). Without this upload c_grid is
+    all zero and every particle maps to hash 0.
+    """
+    module = _get_module()
+    d_ptr = module.get_global("c_grid")  # type: ignore[union-attr]
+    cupy.cuda.runtime.memcpy(
+        int(d_ptr), params.ctypes.data, params.nbytes, 1
+    )
+
+
 def upload_sim_params(params: np.ndarray) -> None:
     """Upload SimParams to ``__constant__ SimParams c_sim``."""
     module = _get_module()

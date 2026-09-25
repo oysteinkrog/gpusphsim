@@ -588,7 +588,10 @@ class Simulation:
         step2.upload_materials(materials_data)
         step2.upload_granular_params(granular_params)
 
-        # --- integrate module: c_sim, c_materials ---
+        # --- integrate module: c_grid, c_sim, c_materials ---
+        # c_grid feeds the STATIC push-out and the own-cell wake mark
+        # (bd-r5-review-n28.166); it was never uploaded before.
+        integrate.upload_grid_params(grid_params)
         integrate.upload_sim_params(sim_params)
         integrate.upload_materials(materials_data)
 
