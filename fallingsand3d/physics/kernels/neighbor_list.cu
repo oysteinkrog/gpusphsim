@@ -146,7 +146,12 @@ void K_Step1_NL(
     float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (dye_on) dye_i = __ldg(&particle_dye_in[index_i]);
 
-    float T_i = __ldg(&temperature_in[index_i]);
+    // Same pairing rule for temperature (bd-r5-review-n28.132): T_i appears only
+    // in pair differences against T_j from the 0.125 K fixed-point mirror, so it
+    // is read from that mirror too. The pair flux is then exactly antisymmetric
+    // and a uniform field gives exactly zero.
+    float T_i = temperature_h ? load_t16((const unsigned short*)temperature_h + index_i)
+                              : __ldg(&temperature_in[index_i]);
     float kappa_i = c_materials[mat_id_i].thermal_conductivity;
 
     // Accumulators
@@ -177,7 +182,7 @@ void K_Step1_NL(
         float4 pos4_j = __ldg(&position_ro[index_j]);
         float m_j = __ldg(&mass[index_j]);
         uint pi_j = __ldg(&packed_info[index_j]);
-        float T_j = temperature_h ? load_half1((const __half*)temperature_h + index_j)
+        float T_j = temperature_h ? load_t16((const unsigned short*)temperature_h + index_j)
                                    : __ldg(&temperature_in[index_j]);
 
         float3 r = make_float3(

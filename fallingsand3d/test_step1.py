@@ -1609,3 +1609,141 @@ def test_cross_phase_heat_capped_at_half_gap(build_nl: bool) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.132: neighbour temperature mirror is uint16 fixed point,
+# 0.125 K per step, and T_i in pair differences reads the same mirror.
+# ---------------------------------------------------------------------------
+
+T_MIRROR_STEP = 0.125  # K per uint16 step in the temperature mirror
+MAT_STONE = 1
+
+
+def _step1_with_temp_mirror(pos, packed_info, temperature, density_in=None,
+                            build_nl=False):
+    """Counting sort (which writes the temperature mirror) then step1 reading it.
+
+    Returns (dTdt, exposure_heat, density, sort_perm) in sorted order.
+    """
+    from step1 import compute_step1_build_nl
+
+    n = pos.shape[0]
+    scene = counting_sort_scene(
+        pos, mass=np.full(n, MASS, dtype=np.float32),
+        packed_info=packed_info, temperature=temperature,
+        grid_params=default_grid_params(),
+    )
+    assert scene["temperature_h"].dtype == cupy.uint16
+    perm = scene["sort_perm"].astype(cupy.int64)
+    dens = None if density_in is None else cupy.asarray(density_in, dtype=cupy.float32)[perm]
+    dTdt = cupy.zeros(n, dtype=cupy.float32)
+    heat = cupy.zeros(n, dtype=cupy.float32)
+    rho = cupy.zeros(n, dtype=cupy.float32)
+    args = (scene["position"], scene["velocity"], scene["mass"], dens,
+            scene["packed_info"], scene["temperature"],
+            scene["cell_start"], scene["cell_end"])
+    kw = dict(density_out=rho, dTdt_out=dTdt, exposure_heat_out=heat,
+              velocity_h=scene["velocity_h"], temperature_h=scene["temperature_h"])
+    if build_nl:
+        max_nb = 96
+        compute_step1_build_nl(*args, cupy.zeros(n * max_nb, dtype=cupy.uint32),
+                               cupy.zeros(n, dtype=cupy.uint32), max_nb=max_nb, **kw)
+    else:
+        compute_step1(*args, **kw)
+    return dTdt, heat, rho, scene["sort_perm"]
+
+
+def _walled_block(offset_x: float, k: int = 8):
+    """k^3 lattice whose outer layer is STATIC STONE; returns (pos, is_wall)."""
+    idx = np.arange(k, dtype=np.float32) * SPACING
+    xx, yy, zz = np.meshgrid(idx, idx, idx, indexing="ij")
+    pos = np.zeros((xx.size, 4), dtype=np.float32)
+    pos[:, 0], pos[:, 1], pos[:, 2] = xx.ravel() + offset_x, yy.ravel(), zz.ravel()
+    pos[:, 3] = 1.0
+    edge = lambda a: (a == 0) | (a == k - 1)
+    ii, jj, kk = np.meshgrid(np.arange(k), np.arange(k), np.arange(k), indexing="ij")
+    wall = (edge(ii) | edge(jj) | edge(kk)).ravel()
+    return pos, wall
+
+
+@pytest.mark.parametrize("build_nl", [False, True])
+def test_uniform_off_grid_temperature_zero_dTdt(build_nl: bool) -> None:
+    """WATER at 293.2 K and LAVA at 1499.7 K (neither on the FP16 grid) in
+    STATIC STONE walls at the same temperature: every dTdt and exposure_heat
+    is exactly zero. Neighbour T comes from the fixed-point mirror, so the
+    particle's own T must come from it too."""
+    _upload_all_params()
+    pos_w, wall_w = _walled_block(0.0)
+    pos_l, wall_l = _walled_block(1.0)
+    pos = np.vstack([pos_w, pos_l])
+    fluid = np.concatenate([
+        np.where(wall_w, MAT_STONE | (STATIC << 8), MAT_WATER | (FLUID << 8)),
+        np.where(wall_l, MAT_STONE | (STATIC << 8), MAT_LAVA | (FLUID << 8)),
+    ]).astype(np.uint32)
+    temperature = np.concatenate([
+        np.full(pos_w.shape[0], 293.2), np.full(pos_l.shape[0], 1499.7),
+    ]).astype(np.float32)
+    dTdt, heat, _, _ = _step1_with_temp_mirror(pos, fluid, temperature, build_nl=build_nl)
+    cupy.cuda.Device().synchronize()
+    max_dTdt = float(cupy.abs(dTdt).max())
+    max_heat = float(cupy.abs(heat).max())
+    print(f"  build_nl={build_nl}: max |dTdt| = {max_dTdt:.3e}, max exposure_heat = {max_heat:.3e}")
+    assert max_dTdt == 0.0, f"uniform off-grid T gives dTdt {max_dTdt}"
+    assert max_heat == 0.0, f"uniform off-grid T gives exposure_heat {max_heat}"
+
+
+def test_temp_mirror_is_fixed_point_eighth_kelvin() -> None:
+    """The counting sort writes round(T * 8) as uint16 (0.125 K steps, T_MAX 5000 fits)."""
+    temps = np.array([0.0, 293.0, 293.2, 1499.7, 2047.9, 4999.94, 5000.0], dtype=np.float32)
+    n = temps.size
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = np.arange(n, dtype=np.float32) * 1.0
+    pos[:, 3] = 1.0
+    scene = counting_sort_scene(pos, temperature=temps, grid_params=default_grid_params())
+    perm = cupy.asnumpy(scene["sort_perm"]).astype(np.int64)
+    mirror = cupy.asnumpy(scene["temperature_h"])
+    expected = np.rint(temps.astype(np.float64) * 8.0).astype(np.uint16)
+    np.testing.assert_array_equal(mirror, expected[perm])
+    decoded = mirror.astype(np.float64) * T_MIRROR_STEP
+    assert np.all(np.abs(decoded - temps[perm]) <= 0.0625 + 1e-4)
+
+
+def test_heat_energy_conserved_with_temp_mirror() -> None:
+    """LAVA (1499.7 K) against WATER (293.2 K) through the temperature mirror:
+    sum m cp T stays constant to 1e-6 relative over 1000 substeps. Conduction
+    is the only heat term in step1 (cooling lives in integrate)."""
+    _upload_all_params()
+    cp_table = build_material_array()["heat_capacity"].astype(np.float64)
+    coords = np.arange(-0.07, 0.07 + SPACING * 0.5, SPACING, dtype=np.float32)
+    xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
+    n = xx.size
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = xx.ravel() + 0.5 * SPACING
+    pos[:, 1], pos[:, 2] = yy.ravel(), zz.ravel()
+    pos[:, 3] = 1.0
+    hot = pos[:, 0] < 0.0
+    mat = np.where(hot, MAT_LAVA, MAT_WATER).astype(np.uint32)
+    packed = (mat | (FLUID << 8)).astype(np.uint32)
+    temperature = cupy.asarray(np.where(hot, 1499.7, 293.2).astype(np.float32))
+    mcp = cupy.asarray(MASS * cp_table[mat])
+
+    # Self-consistent density (see _two_material_slab_energy_drift).
+    _, _, rho_s, perm = _step1_with_temp_mirror(pos, packed, cupy.asnumpy(temperature))
+    density_in = cupy.empty_like(rho_s)
+    density_in[perm.astype(cupy.int64)] = rho_s
+
+    dt = 1.0e-4
+    e0 = float(cupy.sum(mcp * temperature.astype(cupy.float64)))
+    for _ in range(1000):
+        dTdt_s, _, _, perm = _step1_with_temp_mirror(pos, packed, temperature, density_in)
+        dTdt = cupy.empty_like(dTdt_s)
+        dTdt[perm.astype(cupy.int64)] = dTdt_s
+        temperature = (temperature + cupy.float32(dt) * dTdt).astype(cupy.float32)
+    e1 = float(cupy.sum(mcp * temperature.astype(cupy.float64)))
+    drift = abs(e1 - e0) / e0
+    t_min, t_max = float(temperature.min()), float(temperature.max())
+    print(f"  LAVA/WATER via mirror: energy drift {drift:.2e} after 1000 substeps, "
+          f"T range [{t_min:.2f}, {t_max:.2f}]")
+    assert t_max < 1499.7 and t_min > 293.2, "no conduction happened"
+    assert drift < 1e-6, f"energy drift {drift:.2e} through the temperature mirror"

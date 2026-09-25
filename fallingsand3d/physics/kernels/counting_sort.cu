@@ -117,8 +117,8 @@ void K_ScatterReorder(
     float*        __restrict__ kappa_v_out,         // DFSPH div warm-start (PERF-008), NULL = skip
     // FP16 velocity output (OPT-4.3: half bandwidth in neighbor loops)
     void*         __restrict__ velocity_h_out,      // half4, 8 bytes per particle (NULL = skip)
-    // FP16 temperature + dye outputs (PERF-011)
-    void*         __restrict__ temperature_h_out,   // half, 2 bytes per particle (NULL = skip)
+    // Fixed-point temperature + FP16 dye outputs (PERF-011)
+    void*         __restrict__ temperature_h_out,   // uint16 T*8 (0.125 K), 2 bytes per particle (NULL = skip)
     void*         __restrict__ dye_h_out,           // half4, 8 bytes per particle (NULL = skip)
     // Grid-reuse drift anchor: position at this full sort, in sorted order.
     // K_GatherReorder never writes it, so between full sorts anchor_out[i]
@@ -165,8 +165,8 @@ void K_ScatterReorder(
     // NULL when the active solver has no FP16 neighbor reads (PBF).
     if (velocity_h_out) store_half4((uint2*)velocity_h_out + sorted_idx, vel);
 
-    // FP16 temperature + dye copies for neighbor loop bandwidth (PERF-011)
-    if (temperature_h_out) store_half1((__half*)temperature_h_out + sorted_idx, temp);
+    // Fixed-point temperature (0.125 K) + FP16 dye copies for neighbor loop bandwidth (PERF-011)
+    if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + sorted_idx, temp);
     if (dye_h_out) store_half4((uint2*)dye_h_out + sorted_idx, dye);
 }
 
@@ -213,8 +213,8 @@ void K_GatherReorder(
     float*        __restrict__ kappa_v_out,          // DFSPH div warm-start (PERF-008), NULL = skip
     // FP16 velocity output (OPT-4.3)
     void*         __restrict__ velocity_h_out,      // NULL = skip
-    // FP16 temperature + dye outputs (PERF-011)
-    void*         __restrict__ temperature_h_out,   // half, 2 bytes per particle (NULL = skip)
+    // Fixed-point temperature + FP16 dye outputs (PERF-011)
+    void*         __restrict__ temperature_h_out,   // uint16 T*8 (0.125 K), 2 bytes per particle (NULL = skip)
     void*         __restrict__ dye_h_out            // half4, 8 bytes per particle (NULL = skip)
 ) {
     const uint sorted_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -243,8 +243,8 @@ void K_GatherReorder(
     // FP16 velocity copy (OPT-4.3); NULL = skip (PBF)
     if (velocity_h_out) store_half4((uint2*)velocity_h_out + sorted_idx, vel);
 
-    // FP16 temperature + dye copies (PERF-011)
-    if (temperature_h_out) store_half1((__half*)temperature_h_out + sorted_idx, temp);
+    // Fixed-point temperature (0.125 K) + FP16 dye copies (PERF-011)
+    if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + sorted_idx, temp);
     if (dye_h_out) store_half4((uint2*)dye_h_out + sorted_idx, dye);
 }
 

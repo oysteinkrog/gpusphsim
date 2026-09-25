@@ -64,7 +64,7 @@ void K_Step1(
     float4*         __restrict__ dye_rate_out,         // output: dye diffusion rate (dr, dg, db, unused)
     const void*     __restrict__ velocity_h,           // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
     float*          __restrict__ pressure_out,         // output: pre-computed pressure per particle (PERF-007)
-    const void*     __restrict__ temperature_h,        // FP16 temperature for neighbor reads (PERF-011), may be NULL
+    const void*     __restrict__ temperature_h,        // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
     const void*     __restrict__ dye_h                 // FP16 dye for neighbor reads (PERF-011), may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -123,7 +123,12 @@ void K_Step1(
                               : __ldg(&particle_dye_in[index_i]);
 
     // Read temperature for heat diffusion
-    float T_i = __ldg(&temperature_in[index_i]);
+    // Same pairing rule for temperature (bd-r5-review-n28.132): T_i appears only
+    // in pair differences against T_j from the 0.125 K fixed-point mirror, so it
+    // is read from that mirror too. The pair flux is then exactly antisymmetric
+    // and a uniform field gives exactly zero.
+    float T_i = temperature_h ? load_t16((const unsigned short*)temperature_h + index_i)
+                              : __ldg(&temperature_in[index_i]);
     float kappa_i = c_materials[mat_id_i].thermal_conductivity;
     // Cross-phase heat cap (bd-r5-review-n28.94). The self term bounds rho_i from
     // below, so capping a cross-phase pair coefficient at a_x_max keeps
@@ -181,7 +186,7 @@ void K_Step1(
                     float4 pos4_j = __ldg(&position_ro[index_j]);
                     float m_j = __ldg(&mass[index_j]);
                     uint pi_j = __ldg(&packed_info[index_j]);
-                    float T_j = temperature_h ? load_half1((const __half*)temperature_h + index_j)
+                    float T_j = temperature_h ? load_t16((const unsigned short*)temperature_h + index_j)
                                               : __ldg(&temperature_in[index_j]);
 
                     float3 r = make_float3(
@@ -511,7 +516,12 @@ void K_Step1_BuildNL(
     if (dye_on) dye_i = dye_h ? load_half4((const uint2*)dye_h + index_i)
                               : __ldg(&particle_dye_in[index_i]);
 
-    float T_i = __ldg(&temperature_in[index_i]);
+    // Same pairing rule for temperature (bd-r5-review-n28.132): T_i appears only
+    // in pair differences against T_j from the 0.125 K fixed-point mirror, so it
+    // is read from that mirror too. The pair flux is then exactly antisymmetric
+    // and a uniform field gives exactly zero.
+    float T_i = temperature_h ? load_t16((const unsigned short*)temperature_h + index_i)
+                              : __ldg(&temperature_in[index_i]);
     float kappa_i = c_materials[mat_id_i].thermal_conductivity;
     // Cross-phase heat cap (bd-r5-review-n28.94). The self term bounds rho_i from
     // below, so capping a cross-phase pair coefficient at a_x_max keeps
@@ -550,7 +560,7 @@ void K_Step1_BuildNL(
                     float4 pos4_j = __ldg(&position_ro[index_j]);
                     float m_j = __ldg(&mass[index_j]);
                     uint pi_j = __ldg(&packed_info[index_j]);
-                    float T_j = temperature_h ? load_half1((const __half*)temperature_h + index_j)
+                    float T_j = temperature_h ? load_t16((const unsigned short*)temperature_h + index_j)
                                               : __ldg(&temperature_in[index_j]);
 
                     float3 r = make_float3(

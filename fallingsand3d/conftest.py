@@ -198,7 +198,7 @@ def counting_sort_scene(
         "angular_velocity": cupy.empty_like(omega),
         "kappa_v": cupy.empty_like(kappa_v),
         "velocity_h": cupy.zeros((n, 2), dtype=cupy.uint32),
-        "temperature_h": cupy.zeros(n, dtype=cupy.float16),
+        "temperature_h": cupy.zeros(n, dtype=cupy.uint16),
         "dye_h": cupy.zeros((n, 2), dtype=cupy.uint32),
         "hashes": cupy.zeros(n, dtype=cupy.uint32),
         "sorted_hashes": cupy.zeros(n, dtype=cupy.uint32),

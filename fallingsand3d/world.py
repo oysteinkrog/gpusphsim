@@ -255,8 +255,8 @@ class World:
         # Written during sort (counting_sort), read by step1/step2 neighbor loops.
         # 8 bytes per particle (half4) vs 16 bytes (float4) = 50% bandwidth savings on velocity reads.
         self.sorted_velocity_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
-        # FP16 temperature + dye copies for neighbor loop bandwidth (PERF-011)
-        self.sorted_temperature_h = cp.zeros(n, dtype=cp.float16)  # half = 2 bytes per particle
+        # Fixed-point temperature + FP16 dye copies for neighbor loop bandwidth (PERF-011)
+        self.sorted_temperature_h = cp.zeros(n, dtype=cp.uint16)  # round(T * 8): 0.125 K fixed point, 2 bytes
         self.sorted_dye_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
         # Sort index arrays (hash + sorted versions)
         self.hashes = cp.zeros(n, dtype=cp.uint32)

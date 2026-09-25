@@ -150,7 +150,7 @@ def counting_sort_full(
     sorted_kappa_v: "Optional[cupy.ndarray]",
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
-    # FP16 temperature + dye outputs (PERF-011)
+    # Fixed-point temperature (uint16, T*8) + FP16 dye outputs (PERF-011)
     sorted_temperature_h: "Optional[cupy.ndarray]" = None,
     sorted_dye_h: "Optional[cupy.ndarray]" = None,
     # Grid-reuse drift anchor (bd-r5-review-n28.54)
@@ -256,7 +256,7 @@ def counting_sort_full(
         sorted_kappa_v if sorted_kappa_v is not None else _null,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,
-        # FP16 temperature + dye (PERF-011)
+        # Fixed-point temperature + FP16 dye (PERF-011)
         sorted_temperature_h if sorted_temperature_h is not None else _null,
         sorted_dye_h if sorted_dye_h is not None else _null,
         # Drift anchor (NULL = skip)
@@ -304,7 +304,7 @@ def gather_reorder(
     sorted_kappa_v: "Optional[cupy.ndarray]",
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
-    # FP16 temperature + dye outputs (PERF-011)
+    # Fixed-point temperature (uint16, T*8) + FP16 dye outputs (PERF-011)
     sorted_temperature_h: "Optional[cupy.ndarray]" = None,
     sorted_dye_h: "Optional[cupy.ndarray]" = None,
 ) -> None:
@@ -357,7 +357,7 @@ def gather_reorder(
         sorted_kappa_v if sorted_kappa_v is not None else _null,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,
-        # FP16 temperature + dye (PERF-011)
+        # Fixed-point temperature + FP16 dye (PERF-011)
         sorted_temperature_h if sorted_temperature_h is not None else _null,
         sorted_dye_h if sorted_dye_h is not None else _null,
     ))

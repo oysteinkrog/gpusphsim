@@ -40,7 +40,7 @@ def _run(world, profile_name, full_sort_substeps=1):
     world.sorted_kappa_v[:] = SENTINEL
     world.sorted_velocity_h[:] = cp.uint32(0xDEADBEEF)
     world.sorted_dye_h[:] = cp.uint32(0xDEADBEEF)
-    world.sorted_temperature_h[:] = cp.float16(-1.0)
+    world.sorted_temperature_h[:] = cp.uint16(0xBEEF)
     for _ in range(full_sort_substeps):
         sim._run_grid_setup(n, force_sort=True)
     # And once through the grid-reuse gather path.
@@ -61,7 +61,7 @@ def test_pbf_reorder_skips_unread_buffers(world):
     assert (cp.asnumpy(world.sorted_kappa_v[:n]) == SENTINEL).all()
     assert (cp.asnumpy(world.sorted_velocity_h[:n]) == 0xDEADBEEF).all()
     assert (cp.asnumpy(world.sorted_dye_h[:n]) == 0xDEADBEEF).all()
-    assert (cp.asnumpy(world.sorted_temperature_h[:n]) == np.float16(-1.0)).all()
+    assert (cp.asnumpy(world.sorted_temperature_h[:n]) == 0xBEEF).all()
 
 
 def test_dfsph_reorder_still_writes_buffers(world):

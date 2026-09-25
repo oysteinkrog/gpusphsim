@@ -326,15 +326,23 @@ __device__ inline void store_half4(void* ptr, float4 v) {
     *reinterpret_cast<uint2*>(ptr) = raw;
 }
 
-/* --- FP16 scalar: load/store half as float (2 bytes) --- */
+/* --- Temperature mirror: uint16 fixed point, 0.125 K per step (2 bytes) ---
+ * Contract (bd-r5-review-n28.132): the mirror holds round(T * 8), so it is
+ * exact for every multiple of 0.125 K (T_AMBIENT = 293 included) and covers
+ * 0 to 8191.875 K (T_MAX = 5000). Uniform steps replace FP16, whose spacing
+ * grows to 1 K at 1024 K and 2 K at 2048 K. Readers take both T_i and T_j of
+ * a pair difference from this mirror, so the pair flux is antisymmetric.
+ */
+#define TEMP_MIRROR_SCALE     8.0f
+#define TEMP_MIRROR_INV_SCALE 0.125f
 
-__device__ inline float load_half1(const void* ptr) {
-    __half h = __ldg((const __half*)ptr);
-    return __half2float(h);
+__device__ inline float load_t16(const void* ptr) {
+    return (float)__ldg((const unsigned short*)ptr) * TEMP_MIRROR_INV_SCALE;
 }
 
-__device__ inline void store_half1(void* ptr, float v) {
-    *(__half*)ptr = __float2half(v);
+__device__ inline void store_t16(void* ptr, float T) {
+    float q = fminf(fmaxf(T * TEMP_MIRROR_SCALE, 0.0f), 65535.0f);
+    *(unsigned short*)ptr = (unsigned short)__float2uint_rn(q);
 }
 
 #endif /* FALLINGSAND3D_COMMON_CUH */
