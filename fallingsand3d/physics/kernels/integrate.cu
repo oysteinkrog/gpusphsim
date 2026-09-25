@@ -30,6 +30,18 @@
 #include "sph_shared.cuh"
 #include "state_dirty.cuh"
 
+/* Max of the float-as-uint drift bits over the lanes that reach this call,
+ * then one atomicMax per warp instead of one per thread (bd-r5-review-n28.178).
+ * Lanes that returned early are not in __activemask(); a warp split by
+ * divergence only issues one atomic per converged group. A zero maximum skips
+ * the atomic because the word is cleared to 0 on a full sort. */
+__device__ __forceinline__ void warp_atomic_max_uint(uint* out, uint bits) {
+    const unsigned lanes = __activemask();
+    const unsigned wmax = __reduce_max_sync(lanes, bits);
+    if (wmax != 0u && (threadIdx.x & 31u) == (unsigned)(__ffs(lanes) - 1))
+        atomicMax(out, wmax);
+}
+
 /* ======================================================================
  * Constants (integrate-specific, not in sph_shared.cuh)
  * ====================================================================== */
@@ -467,7 +479,7 @@ void K_Integrate(
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
-    // same particle. atomicMax over all substeps since that sort then holds the
+    // same particle. The max over all substeps since that sort then holds the
     // largest drift any particle has made from the cell it was binned in.
     // NULL anchor: fall back to this substep's start position.
     // Positive IEEE754 floats order like their uint bits, so atomicMax on
@@ -482,7 +494,7 @@ void K_Integrate(
         float dy_d = pos_new.y - ref.y;
         float dz_d = pos_new.z - ref.z;
         float disp_sq = dx_d * dx_d + dy_d * dy_d + dz_d * dz_d;
-        atomicMax(max_displacement_out, __float_as_uint(disp_sq));
+        warp_atomic_max_uint(max_displacement_out, __float_as_uint(disp_sq));
     }
 
     // --- Write to UNSORTED arrays ---
@@ -981,6 +993,6 @@ void K_UpdateBoundaryParticles(
         const float dy = 2.0f * pos.y - old_pos.y - a.y;
         const float dz = 2.0f * pos.z - old_pos.z - a.z;
         const float disp_sq = dx * dx + dy * dy + dz * dz;
-        atomicMax(max_displacement_out, __float_as_uint(disp_sq));
+        warp_atomic_max_uint(max_displacement_out, __float_as_uint(disp_sq));
     }
 }
