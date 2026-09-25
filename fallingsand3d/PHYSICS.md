@@ -1115,6 +1115,20 @@ occupant:
 for the whole pool, so no DFSPH or PBF warm-start pressure from the previous
 scene reaches the first substep of the next one.
 
+Two other paths reuse slots, and both clear the DFSPH warm start too
+(bd-r5-review-n28.121):
+
+- `World.compact()` zeroes `kappa` and `kappa_v` in the freed tail
+  `[num_alive, old _high_water)`, along with `packed_info`.
+- `RigidBodyManager.inject_boundary_particles` zeroes `kappa`, `kappa_v` and
+  `angular_velocity` in the boundary block.
+
+The DFSPH neighbour loops also ignore whatever a STATIC neighbour holds: in
+K_DFSPH_CorrectVelocityDiv `kv_j = 0` and in K_DFSPH_ComputePressureAccel
+`p_j = 0` when j is STATIC. So a wall particle adds only its `kv_i` or `p_i`
+mirror term (§13), even on the first substep after a slot was reused. PBF has
+no unsorted lambda array (§12.4), so there is no PBF warm start to clear.
+
 K_Reactions counts `lifetime` down only while it is above 0. A spawned GAS
 particle gets a default lifetime from `_DEFAULT_LIFETIMES` in `world.py`:
 
@@ -1136,7 +1150,9 @@ spawn once `_high_water` is above the spawner's `budget` (default
 0.9 × `max_particles`; Fire and Ice and Water Mill set it explicitly). The
 last batch can pass the budget by at most its own size.
 
-**Source**: `world.py` (`_init_slot_state`, `_DEFAULT_LIFETIMES`),
+**Source**: `world.py` (`_init_slot_state`, `_DEFAULT_LIFETIMES`, `compact`),
+`rigid_bodies.py` (`inject_boundary_particles`),
+`dfsph_solver.cu` (K_DFSPH_CorrectVelocityDiv, K_DFSPH_ComputePressureAccel),
 `presets.py` (`_clear_world`, `run_spawner`), `reactions.cu` (GAS lifetime decay)
 
 ---
