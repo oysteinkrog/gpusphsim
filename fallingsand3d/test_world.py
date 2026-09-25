@@ -511,11 +511,13 @@ _REMOVED_BUFFERS = ("veleval", "sph_force", "density", "shear_rate",
 
 # Bytes per particle of every max_particles-sized World array after
 # World(n), allocate_pbf_arrays() and allocate_dfsph_arrays(). Unsorted
-# state 65 B + sorted scratch 183 B + lazy solver arrays 52 B
+# state 65 B + sorted scratch 183 B + lazy solver arrays 68 B
 # (predicted_position and its sorted twin, sorted_delta_position,
 # sorted_pressure_normal, sorted_alpha_dfsph). Before n28.152 the total
-# was 368 B: the removed buffers were 68 B.
-_BYTES_PER_PARTICLE_MAX = 65 + 183 + 52
+# was 388 B: the removed buffers were 52 B always (veleval, sph_force,
+# density, shear_rate, exposure_heat, exposure_corrode, sorted_hashes)
+# plus 20 B with the solver arrays (delta_position, alpha_dfsph).
+_BYTES_PER_PARTICLE_MAX = 65 + 183 + 68
 
 
 def _per_particle_bytes(w):
@@ -540,7 +542,9 @@ def test_removed_buffers_are_gone():
 def test_world_memory_per_particle():
     """Device memory of World(n) matches the arrays it holds, and the
     per-particle footprint is at most the post-n28.152 sum."""
-    n = 200_000
+    # Not MAX_FOAM_PARTICLES (200_000), so the foam pool is not counted
+    # as per-particle state.
+    n = 150_000
     pool = cp.get_default_memory_pool()
     cp.cuda.Device().synchronize()
     before = pool.used_bytes()
