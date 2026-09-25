@@ -205,6 +205,17 @@ def upload_materials(materials_data: np.ndarray) -> None:
     )
 
 
+def upload_granular_params(params: np.ndarray) -> None:
+    """Upload GranularParams to ``__constant__ GranularParams c_granular``.
+
+    K_Step1 reads it for the mu(I) eta it writes to eta_out. step2's
+    upload_granular_params calls this, so both modules hold the same values.
+    """
+    module = _get_module()
+    d_ptr = module.get_global("c_granular")  # type: ignore[union-attr]
+    cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
+
+
 def upload_interactions(interactions_data: np.ndarray) -> None:
     """Upload Interaction[32][32] to ``__constant__ Interaction c_interactions[32][32]``."""
     module = _get_module()
@@ -241,6 +252,7 @@ def compute_step1(
     pressure_out: Optional[cupy.ndarray] = None,
     temperature_h: Optional[cupy.ndarray] = None,
     pr2_omega_out: Optional[cupy.ndarray] = None,
+    eta_out: Optional[cupy.ndarray] = None,
 ) -> tuple:
     """Launch K_Step1 and return (density, shear_rate, dTdt, exposure_heat, exposure_corrode).
 
@@ -277,6 +289,11 @@ def compute_step1(
         (N, 2) float32 output of (p / rho^2, |omega|), the packed neighbour
         carrier K_Step2 reads (pass the same array as its pr2_omega_in).
         If None, K_Step1 skips the write.
+    eta_out : cupy.ndarray, optional
+        (N,) float32 output of the mu(I) viscosity eta per GRANULAR particle
+        (0 for the rest), which K_Step2 reads as eta_in instead of
+        recomputing it per pair. Needs c_granular in this module, which
+        step2.upload_granular_params uploads. If None, K_Step1 skips it.
 
     Returns
     -------
@@ -312,6 +329,7 @@ def compute_step1(
     velocity_h_ptr = velocity_h if velocity_h is not None else _null
     temperature_h_ptr = temperature_h if temperature_h is not None else _null
     pr2_omega_ptr = pr2_omega_out if pr2_omega_out is not None else _null
+    eta_ptr = eta_out if eta_out is not None else _null
 
     module = _get_module()
     kernel = module.get_function("K_Step1")  # type: ignore[union-attr]
@@ -343,6 +361,7 @@ def compute_step1(
             pressure_out,
             temperature_h_ptr,
             pr2_omega_ptr,
+            eta_ptr,
         ),
     )
 

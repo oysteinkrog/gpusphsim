@@ -181,12 +181,18 @@ def upload_precalc_params(params: np.ndarray) -> None:
 
 
 def upload_granular_params(params: Optional[np.ndarray] = None) -> None:
-    """Upload GranularParams to ``__constant__ GranularParams c_granular``."""
+    """Upload GranularParams to ``__constant__ GranularParams c_granular``.
+
+    Also uploads the same values to K_Step1's module, which computes the
+    mu(I) eta that K_Step2 reads as eta_in (bd-r5-review-n28.169).
+    """
     if params is None:
         params = build_granular_params()
     module = _get_module()
     d_ptr = module.get_global("c_granular")  # type: ignore[union-attr]
     cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
+    import step1  # local import: step1 does not import step2, this keeps it that way
+    step1.upload_granular_params(params)
 
 
 def upload_materials(materials_data: np.ndarray) -> None:
@@ -242,6 +248,7 @@ def compute_step2(
     d_rigid_forces: "Optional[cupy.ndarray]" = None,
     d_rigid_torques: "Optional[cupy.ndarray]" = None,
     pr2_omega_in: "Optional[cupy.ndarray]" = None,
+    eta_in: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Step2 and return (sph_force, veleval_out).
 
@@ -272,6 +279,10 @@ def compute_step2(
         FLUID neighbours then read p_j / rho_j^2 and |omega_j| from it (8 B)
         instead of pressure_in and vorticity_in (20 B). If None, the kernel
         uses pressure_in and vorticity_in for every neighbour.
+    eta_in : cupy.ndarray, optional
+        (N,) float32 mu(I) eta written by K_Step1 (its eta_out) this substep.
+        GRANULAR pairs then read eta_j (4 B) instead of recomputing mu(I)
+        per pair. If None, the kernel recomputes eta from shear_rate.
 
     Returns
     -------
@@ -309,6 +320,7 @@ def compute_step2(
     rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null
     rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null
     pk_ptr = pr2_omega_in if pr2_omega_in is not None else _null
+    eta_ptr = eta_in if eta_in is not None else _null
 
     kernel(
         grid,
@@ -332,6 +344,7 @@ def compute_step2(
             rf_ptr,
             rt_ptr,
             pk_ptr,
+            eta_ptr,
         ),
     )
 

@@ -63,7 +63,8 @@ void K_Step1(
     const void*     __restrict__ velocity_h,           // FP16 velocity for neighbor reads (OPT-4.3), .w = mass / MASS_H_UNIT, may be NULL
     float*          __restrict__ pressure_out,         // output: pre-computed pressure per particle (PERF-007)
     const void*     __restrict__ temperature_h,        // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
-    float2*         __restrict__ pr2_omega_out         // output: (p / rho^2, |omega|) for K_Step2 neighbour reads, may be NULL
+    float2*         __restrict__ pr2_omega_out,        // output: (p / rho^2, |omega|) for K_Step2 neighbour reads, may be NULL
+    float*          __restrict__ eta_out               // output: mu(I) viscosity eta (0 for non-GRANULAR) for K_Step2, may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -95,6 +96,7 @@ void K_Step1(
         density_out[index_i] = RIGID_PSI_RHO0;  // rest density placeholder (V_j = m_j / rho_j = V_b)
         pressure_out[index_i] = 0.0f;
         shear_rate_out[index_i] = 0.0f;
+        if (eta_out) eta_out[index_i] = 0.0f;
         dTdt_out[index_i] = 0.0f;
         exposure_heat_out[index_i] = 0.0f;
         exposure_corrode_out[index_i] = 0.0f;
@@ -384,8 +386,23 @@ void K_Step1(
                    + 2.0f * (Dxy * Dxy + Dxz * Dxz + Dyz * Dyz);
         float gamma_dot = sqrtf(fmaxf(2.0f * D_sq, 0.0f));
         shear_rate_out[index_i] = gamma_dot;
+
+        // --- PostCalc: mu(I) viscosity eta (bd-r5-review-n28.169) ---
+        // eta depends only on this particle, so K_Step2 reads it per
+        // neighbour instead of recomputing it for every GRANULAR pair.
+        // Same inputs K_Step2 used: density_out (= position.w), pressure_out,
+        // and the lithostatic floor rho0 * |g| * spacing on the pressure.
+        // Needs c_granular, which step2.upload_granular_params also uploads here.
+        if (eta_out) {
+            float rho0_i = c_materials[mat_id_i].rest_density;
+            float p_floor = rho0_i * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
+            float p_eff = fmaxf(pressure_out[index_i], p_floor);
+            eta_out[index_i] = compute_muI_eta(gamma_dot, p_eff, density_out[index_i],
+                                               granular_mu_s(mat_id_i));
+        }
     } else {
         shear_rate_out[index_i] = 0.0f;
+        if (eta_out) eta_out[index_i] = 0.0f;
     }
 
     // Pack density into position.w for Step2 neighbor reads (PERF-004)

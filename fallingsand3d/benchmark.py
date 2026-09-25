@@ -187,6 +187,7 @@ def run_benchmark(
             pressure_out=world.sorted_pressure,
             temperature_h=world.sorted_temperature_h,
             pr2_omega_out=world.sorted_pr2_omega,
+            eta_out=world.sorted_eta,
         )
         timer.mark("step1")
 
@@ -212,6 +213,7 @@ def run_benchmark(
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
             pr2_omega_in=world.sorted_pr2_omega,
+            eta_in=world.sorted_eta,
         )
         timer.mark("step2")
 

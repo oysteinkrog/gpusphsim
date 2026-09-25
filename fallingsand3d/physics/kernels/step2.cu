@@ -3,7 +3,8 @@
  *
  * Per-particle computation:
  *   1. Tait EOS pressure from density and per-material EOS parameters
- *   2. For GRANULAR: read gamma_dot from shear_rate_in (computed by Step1)
+ *   2. For GRANULAR: read mu(I) eta from eta_in (computed by Step1), or
+ *      recompute it from shear_rate_in when eta_in is NULL
  *   3. Neighbor loop: accumulate pressure force (spiky gradient),
  *      viscosity force (viscosity Laplacian), and XSPH correction (FLUID only)
  *   4. Write sph_force (float4) and veleval (float4, XSPH-corrected)
@@ -131,7 +132,8 @@ void K_Step2(
     const RigidBody* __restrict__ d_rigid_bodies, // rigid body state array (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,  // force accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
     float*          __restrict__ d_rigid_torques, // torque accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
-    const float2*   __restrict__ pr2_omega_in   // (p / rho^2, |omega|) from K_Step1 for FLUID neighbours, may be NULL
+    const float2*   __restrict__ pr2_omega_in,  // (p / rho^2, |omega|) from K_Step1 for FLUID neighbours, may be NULL
+    const float*    __restrict__ eta_in         // mu(I) eta per particle from K_Step1 (0 for non-GRANULAR), may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -217,7 +219,10 @@ void K_Step2(
     float gamma_dot_i = 0.0f;
     float eta_i = 0.0f;
 
-    if (is_granular_i) {
+    if (is_granular_i && eta_in) {
+        // Pre-computed by K_Step1 PostCalc (bd-r5-review-n28.169).
+        eta_i = __ldg(&eta_in[index_i]);
+    } else if (is_granular_i) {
         gamma_dot_i = __ldg(&shear_rate_in[index_i]);
 
         // mu(I) rheology computation for particle i.
@@ -463,15 +468,21 @@ void K_Step2(
                     float lap_v = lap_visc_variable(rlen, h);
 
                     if (is_granular_i && behavior_j == GRANULAR) {
-                        // mu(I) viscosity for GRANULAR-GRANULAR pairs
-                        // Use tensor-based shear_rate from Step1 (less noisy than |dv|/r)
-                        float gamma_dot_j = __ldg(&shear_rate_in[index_j]);
-
-                        float rho0_j = c_materials[mat_id_j].rest_density;
-                        float p_floor_j = rho0_j * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
-                        float p_eff_j = fmaxf(p_j, p_floor_j);
-                        float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j,
-                                                      granular_mu_s(mat_id_j));
+                        // mu(I) viscosity for GRANULAR-GRANULAR pairs.
+                        // eta_j comes from K_Step1 (bd-r5-review-n28.169); without
+                        // eta_in it is recomputed here from the tensor-based
+                        // shear_rate (less noisy than |dv|/r).
+                        float eta_j;
+                        if (eta_in) {
+                            eta_j = __ldg(&eta_in[index_j]);
+                        } else {
+                            float gamma_dot_j = __ldg(&shear_rate_in[index_j]);
+                            float rho0_j = c_materials[mat_id_j].rest_density;
+                            float p_floor_j = rho0_j * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
+                            float p_eff_j = fmaxf(p_j, p_floor_j);
+                            eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j,
+                                                    granular_mu_s(mat_id_j));
+                        }
 
                         // Harmonic mean viscosity
                         float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);

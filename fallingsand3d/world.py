@@ -242,6 +242,10 @@ class World:
         # by K_Step2 for FLUID neighbours (8 B instead of 20 B, bd-r5-review-n28.158).
         # Valid only between step1 and step2 of one substep; never reordered.
         self.sorted_pr2_omega = cp.zeros((n, 2), dtype=cp.float32)
+        # mu(I) viscosity eta per GRANULAR particle (0 for the rest), written
+        # by K_Step1 and read by K_Step2 per neighbour (bd-r5-review-n28.169).
+        # Valid only between step1 and step2 of one substep; never reordered.
+        self.sorted_eta = cp.zeros(n, dtype=cp.float32)
         # Surface normal (float4: n_x, n_y, n_z, neighbor_count_as_float) -- computed in step1
         self.sorted_normal = cp.zeros((n, 4), dtype=cp.float32)
         # The micropolar angular velocity had no reader and was removed
