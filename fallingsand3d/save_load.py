@@ -490,10 +490,8 @@ def load_scene(world, sim, camera, filename: str, report: dict | None = None) ->
     if hasattr(world, "foam_count"):
         world.foam_count.fill(0)
 
-    # The save holds no color, so rebuild it from the material table; a
-    # paused load would otherwise show the slots' old colors
-    # (bd-r5-review-n28.63).
-    world.refresh_color(n)
+    # No color to rebuild: K_ComputeColor colors the loaded state on the
+    # next frame, paused or not (bd-r5-review-n28.145).
 
     # Rebuild _spawned_material_ids from loaded packed_info
     unique_mats = cp.unique(world.packed_info[:n] & 0xFF).get()

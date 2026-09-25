@@ -105,7 +105,6 @@ void K_SpawnGas(
     float*          __restrict__ temperature,
     float*          __restrict__ health,
     float*          __restrict__ lifetime,
-    float4*         __restrict__ color,
     unsigned char*  __restrict__ sleep_counter,
     float*          __restrict__ density,
     float*          __restrict__ shear_rate,
@@ -179,11 +178,6 @@ void K_SpawnGas(
     // Steam material packed info
     uint steam_pi = MAKE_PACKED(MAT_STEAM, GAS);
 
-    // Steam color from c_materials
-    float cr = c_materials[MAT_STEAM].color_r;
-    float cg = c_materials[MAT_STEAM].color_g;
-    float cb = c_materials[MAT_STEAM].color_b;
-
     // Ring rotation: hashed from the source index and position so repeated
     // spawns do not all line up. The three directions sum to zero.
     uint seed = spawn_hash(i ^ __float_as_uint(src_pos.x) ^ (__float_as_uint(src_pos.z) * 0x9E3779B9u));
@@ -243,14 +237,6 @@ void K_SpawnGas(
         density[slot] = steam_rho0;
         shear_rate[slot] = 0.0f;
         sleep_counter[slot] = 0;
-
-        // Color
-        float4 child_color;
-        child_color.x = cr;
-        child_color.y = cg;
-        child_color.z = cb;
-        child_color.w = (float)GAS * 0.25f;  // behavior code, as behavior_to_alpha
-        color[slot] = child_color;
 
         // Material info
         packed_info[slot] = steam_pi;

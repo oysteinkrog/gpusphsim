@@ -1006,7 +1006,6 @@ class Simulation:
             w.sorted_temperature[:n],
             w.sorted_health[:n],
             w.sorted_lifetime[:n],
-            w.sorted_color[:n],
             w.sorted_sleep_counter[:n],
             w.sorted_density[:n],
             w.sorted_shear_rate[:n],

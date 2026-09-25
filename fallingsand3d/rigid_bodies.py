@@ -788,12 +788,8 @@ class RigidBodyManager:
             # substep (bd-r5-review-n28.121).
             world.kappa[sl] = 0.0
             world.kappa_v[sl] = 0.0
-
-            # Color for rigid body particles
-            world.color[sl, 0] = 0.6
-            world.color[sl, 1] = 0.6
-            world.color[sl, 2] = 0.65
-            world.color[sl, 3] = 0.75  # STATIC alpha
+            # No color write: K_ComputeColor colors the block from MAT_RIGID
+            # in the material table every frame (bd-r5-review-n28.145).
 
         self.boundary_offset = n_fluid
         world._high_water = total

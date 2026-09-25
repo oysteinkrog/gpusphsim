@@ -203,11 +203,8 @@ class SnapshotRing:
         cp.copyto(world.mass[:n], slot["mass"][:n])
         cp.copyto(world.veleval[:n], world.velocity[:n])
         world._high_water = n
-
-        # The slot holds no color, so rebuild it from the material table; a
-        # paused undo would otherwise show the current colors
-        # (bd-r5-review-n28.63).
-        world.refresh_color(n)
+        # No color to rebuild: K_ComputeColor colors the restored state on
+        # the next frame, paused or not (bd-r5-review-n28.145).
 
         # bd-r4-epic-x2j.6: zero warm-start fields so restored particles start fresh
         # (matches load_scene in save_load.py lines ~272-276).

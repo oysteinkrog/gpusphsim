@@ -17,7 +17,7 @@ from typing import Callable, Optional, Tuple
 import cupy as cp
 import numpy as np
 
-from materials import MATERIALS, MAX_MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER, ICE, FIRE, SMOKE, STEAM
+from materials import MATERIALS, FLUID, GRANULAR, GAS, STATIC, MAT_RIGID, WATER, ICE, FIRE, SMOKE, STEAM
 
 # packed_info bitfield macros (mirrors common.cuh)
 _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
@@ -26,27 +26,12 @@ _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
 # MAKE_PACKED(MAT_DEAD, STATIC) in spawn.cu and reactions.cu.
 DEAD_PACKED = _MAKE_PACKED(0, STATIC)
 
-# (MAX_MATERIALS, 3) float32 table of base material colors, indexed by
-# material id. Built once on first use by World.refresh_color.
-_rgb_table = None
-
-
-def _material_rgb_table():
-    """Return the cached GPU lookup of base material colors (r, g, b)."""
-    global _rgb_table
-    if _rgb_table is None:
-        host = np.zeros((MAX_MATERIALS, 3), dtype=np.float32)
-        for mat_id, mat in MATERIALS.items():
-            host[mat_id] = (mat.color_r, mat.color_g, mat.color_b)
-        _rgb_table = cp.asarray(host)
-    return _rgb_table
-
 # Kill every live, non-rigid particle inside a sphere (bd-r5-review-n28.34).
 # One launch. The optional killed_count counter is only read back when the
 # caller asks for the count (the UI brush); otherwise there is no host sync. A killed slot becomes DEAD_PACKED with zero
 # mass, health and velocity, so no solver sees it as fluid, it adds nothing
-# to neighbour density and it cannot move. Its color is (0, 0, 0, -1): the
-# negative w makes every particle vertex shader cull it.
+# to neighbour density and it cannot move. K_ComputeColor gives a DEAD slot
+# color.w = -1 on the next frame, so every particle vertex shader culls it.
 _KILL_SPHERE_SRC = r"""
 extern "C" __global__
 void K_KillSphere(const float4* __restrict__ position,
@@ -54,7 +39,6 @@ void K_KillSphere(const float4* __restrict__ position,
                   float* __restrict__ mass,
                   float* __restrict__ health,
                   float4* __restrict__ velocity,
-                  float4* __restrict__ color,
                   float cx, float cy, float cz, float r2,
                   unsigned int mat_rigid, unsigned int dead_packed, int n,
                   unsigned int* __restrict__ killed_count)
@@ -70,9 +54,6 @@ void K_KillSphere(const float4* __restrict__ position,
     mass[i] = 0.0f;
     health[i] = 0.0f;
     velocity[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    // color.w = -1 marks the slot DEAD for the vertex shaders, which cull it
-    // (matches DEAD_COLOR_ALPHA in sph_shared.cuh).
-    color[i] = make_float4(0.0f, 0.0f, 0.0f, -1.0f);
     // NULL = the caller does not want the count (no host readback).
     if (killed_count) atomicAdd(killed_count, 1u);
 }
@@ -190,7 +171,6 @@ class World:
         self.velocity = cp.zeros((n, 4), dtype=cp.float32)
         self.veleval = cp.zeros((n, 4), dtype=cp.float32)
         self.sph_force = cp.zeros((n, 4), dtype=cp.float32)
-        self.color = cp.zeros((n, 4), dtype=cp.float32)
         # float arrays
         self.density = cp.zeros(n, dtype=cp.float32)
         self.mass = cp.zeros(n, dtype=cp.float32)
@@ -213,7 +193,6 @@ class World:
         self.sorted_velocity = cp.zeros((n, 4), dtype=cp.float32)
         self.sorted_veleval = cp.zeros((n, 4), dtype=cp.float32)
         self.sorted_sph_force = cp.zeros((n, 4), dtype=cp.float32)
-        self.sorted_color = cp.zeros((n, 4), dtype=cp.float32)
         self.sorted_density = cp.zeros(n, dtype=cp.float32)
         # Previous-substep density snapshot, read as density_in for strain-rate
         # m_j/rho_j weighting.  Kept separate from sorted_density (the density_out
@@ -377,30 +356,6 @@ class World:
             return 0
         return int(cp.count_nonzero(self.packed_info[:n] & cp.uint32(0xFF)))
 
-    def refresh_color(self, n: int | None = None) -> None:
-        """Rebuild ``color[:n]`` from the material table and ``packed_info``.
-
-        Writes the base material color (r, g, b) and ``behavior * 0.25`` in w,
-        the same encoding as ``compute_color`` in sph_shared.cuh. DEAD slots
-        get (0, 0, 0, -1) so the shaders cull them. Temperature glow is left
-        out; the next substep adds it. One gather on the GPU, no host sync.
-
-        Call after anything that rewrites ``packed_info`` outside a substep
-        (load_scene, snapshot restore), so a paused scene shows the right
-        colors (bd-r5-review-n28.63).
-        """
-        if n is None:
-            n = self._high_water
-        if n <= 0:
-            return
-        pi = self.packed_info[:n]
-        mat = (pi & cp.uint32(0xFF)).astype(cp.int32)
-        rgb = _material_rgb_table()
-        self.color[:n, :3] = rgb[mat]
-        behavior = ((pi >> cp.uint32(8)) & cp.uint32(0x3)).astype(cp.float32)
-        self.color[:n, 3] = cp.where(mat == 0, cp.float32(-1.0),
-                                     behavior * cp.float32(0.25))
-
     def compact(self, num_alive: int = -1) -> int:
         """Compact particle arrays by moving alive particles to the front.
 
@@ -454,7 +409,6 @@ class World:
         self.sorted_velocity[:num_alive] = self.velocity[:n][alive_idx]
         self.sorted_veleval[:num_alive] = self.veleval[:n][alive_idx]
         self.sorted_sph_force[:num_alive] = self.sph_force[:n][alive_idx]
-        self.sorted_color[:num_alive] = self.color[:n][alive_idx]
         # float arrays
         self.sorted_density[:num_alive] = self.density[:n][alive_idx]
         self.sorted_mass[:num_alive] = self.mass[:n][alive_idx]
@@ -477,7 +431,6 @@ class World:
         self.velocity[:num_alive] = self.sorted_velocity[:num_alive]
         self.veleval[:num_alive] = self.sorted_veleval[:num_alive]
         self.sph_force[:num_alive] = self.sorted_sph_force[:num_alive]
-        self.color[:num_alive] = self.sorted_color[:num_alive]
         self.density[:num_alive] = self.sorted_density[:num_alive]
         self.mass[:num_alive] = self.sorted_mass[:num_alive]
         self.temperature[:num_alive] = self.sorted_temperature[:num_alive]
@@ -583,7 +536,7 @@ class World:
         sl = slice(start, start + count)
         self.position[sl] = self.park_positions(
             cp.arange(start, start + count), spacing, grid_min)
-        for arr in (self.velocity, self.veleval, self.sph_force, self.color):
+        for arr in (self.velocity, self.veleval, self.sph_force):
             arr[sl] = 0.0
         self.temperature[sl] = T_AMBIENT
         for arr in (self.density, self.mass, self.health, self.lifetime, self.shear_rate, self.exposure_heat,
@@ -591,10 +544,9 @@ class World:
             arr[sl] = 0.0
         # DEAD with behavior STATIC. Plain 0 would read as behavior FLUID
         # (FLUID = 0), and K_Integrate would drop the parked slot under gravity.
+        # K_ComputeColor gives material DEAD color.w = -1, so the vertex
+        # shaders cull the parked slot.
         self.packed_info[sl] = cp.uint32(_MAKE_PACKED(0, STATIC))
-        # color.w = -1 marks the slot DEAD, so the vertex shaders cull it
-        # (DEAD_COLOR_ALPHA in sph_shared.cuh).
-        self.color[sl, 3] = -1.0
         self.sleep_counter[sl] = 0
         self._high_water += count
         return count
@@ -641,11 +593,6 @@ class World:
         for arr in (self.shear_rate, self.exposure_heat, self.exposure_corrode,
                     self.kappa, self.kappa_v):
             arr[sl] = 0.0
-
-        self.color[sl, 0] = mat.color_r
-        self.color[sl, 1] = mat.color_g
-        self.color[sl, 2] = mat.color_b
-        self.color[sl, 3] = mat.behavior_class * 0.25
 
         self.density[sl] = mat.rest_density
         self.sleep_counter[sl] = 0
@@ -977,9 +924,10 @@ class World:
         """Mark live particles within a sphere as DEAD.
 
         Killed slots get DEAD_PACKED (material DEAD, behavior STATIC), zero
-        mass, health and velocity, and color (0, 0, 0, -1), the same state
-        K_SpawnGas and K_Reactions leave behind once a solver writes their
-        color. The vertex shaders cull any slot with color.w < 0. Rigid boundary particles are never killed:
+        mass, health and velocity, the same state K_SpawnGas and K_Reactions
+        leave behind. K_ComputeColor gives a DEAD slot color.w = -1 on the
+        next frame, paused or not, and the vertex shaders cull any slot with
+        color.w < 0. Rigid boundary particles are never killed:
         the rigid body manager owns that block (bd-r5-review-n28.22).
 
         Runs as one kernel. With count=False (the default) there is no GPU
@@ -1001,7 +949,7 @@ class World:
         _get_kill_sphere_kernel()(
             (blocks,), (threads,),
             (self.position, self.packed_info, self.mass, self.health,
-             self.velocity, self.color,
+             self.velocity,
              np.float32(cx), np.float32(cy), np.float32(cz),
              np.float32(radius * radius),
              np.uint32(MAT_RIGID), np.uint32(DEAD_PACKED), np.int32(n),

@@ -16,8 +16,8 @@ extern "C"
 __global__ void K_FusedReorder(
     const uint    num_particles,
     const uint*  __restrict__ sorted_index,    // sorted->original mapping
-    // Unsorted inputs (read) -- 8 arrays (veleval/color/shear_rate omitted:
-    //   veleval overwritten by K_Step2, color by K_Integrate, shear_rate by K_Step1)
+    // Unsorted inputs (read) -- 8 arrays (veleval/shear_rate omitted:
+    //   veleval overwritten by K_Step2, shear_rate by K_Step1)
     const float4* __restrict__ position_in,
     const float4* __restrict__ velocity_in,
     const float*  __restrict__ mass_in,

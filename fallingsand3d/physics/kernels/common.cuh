@@ -230,7 +230,7 @@ __constant__ PrecalcParams c_precalc;
  * Array type conventions (documented per acceptance criteria)
  *
  * float4 arrays (w component unused, set to 0):
- *   position, velocity, veleval, sph_force, color
+ *   position, velocity, veleval, sph_force
  *
  * half4 arrays (FP16 copies for bandwidth reduction in neighbor loops):
  *   sorted_velocity_h -- populated during sort, read in step1/step2

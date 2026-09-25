@@ -12,7 +12,7 @@ Operates on SORTED arrays, runs after Reactions and before Step2.
 
 Uses shared constant memory from common.cuh:
   c_sim       -- SimParams
-  c_materials -- MaterialProps[32] (for steam color/rest_density)
+  c_materials -- MaterialProps[32] (for steam rest_density)
 """
 
 from __future__ import annotations
@@ -141,7 +141,6 @@ def compute_spawn(
     sorted_temperature: cupy.ndarray,
     sorted_health: cupy.ndarray,
     sorted_lifetime: cupy.ndarray,
-    sorted_color: cupy.ndarray,
     sorted_sleep_counter: cupy.ndarray,
     sorted_density: cupy.ndarray,
     sorted_shear_rate: cupy.ndarray,
@@ -174,7 +173,6 @@ def compute_spawn(
     sorted_temperature : cupy.ndarray, (N,) float32
     sorted_health : cupy.ndarray, (N,) float32
     sorted_lifetime : cupy.ndarray, (N,) float32
-    sorted_color : cupy.ndarray, (N, 4) float32
     sorted_sleep_counter : cupy.ndarray, (N,) uint8
     sorted_density : cupy.ndarray, (N,) float32
     sorted_shear_rate : cupy.ndarray, (N,) float32
@@ -228,7 +226,6 @@ def compute_spawn(
             sorted_temperature,
             sorted_health,
             sorted_lifetime,
-            sorted_color,
             sorted_sleep_counter,
             sorted_density,
             sorted_shear_rate,

@@ -92,7 +92,7 @@ def get_module() -> "object":
 def fused_reorder(
     num_particles: int,
     sorted_index: cupy.ndarray,
-    # Unsorted source arrays (8 arrays; veleval/color/shear_rate omitted)
+    # Unsorted source arrays (8 arrays; veleval/shear_rate omitted)
     position: cupy.ndarray,
     velocity: cupy.ndarray,
     mass: cupy.ndarray,
@@ -113,8 +113,8 @@ def fused_reorder(
 ) -> None:
     """Launch K_FusedReorder to gather 8 SoA arrays into sorted order.
 
-    veleval, color, and shear_rate are omitted because they are overwritten
-    by K_Step2, K_Integrate, and K_Step1 respectively before being read.
+    veleval and shear_rate are omitted because they are overwritten by
+    K_Step2 and K_Step1 respectively before being read.
 
     Parameters
     ----------
