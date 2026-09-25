@@ -1527,5 +1527,85 @@ def test_rigid_neighbour_density_uses_fluid_rest_density(fluid_name: str, rho0: 
     assert abs(got - want) <= 1e-4 * want, (fluid_mat, build_nl, got, want, 2500.0 * vw)
 
 
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.94: GAS conducts heat to non-GAS neighbours, capped per pair
+# ---------------------------------------------------------------------------
+
+def _water_fire_pair_dTdt(dt: float, build_nl: bool) -> tuple[float, float]:
+    """WATER at 293 K with one FIRE neighbour at 1200 K at r = h/2.
+
+    Both carry the spawn mass 0.02 and their previous-substep density
+    (WATER 2500, FIRE 1000). Returns (dTdt_water, dTdt_fire) from K_Step1
+    or K_Step1_BuildNL with SimParams.dt = dt.
+    """
+    from step1 import compute_step1_build_nl
+    _upload_all_params()
+    upload_sim_params(build_sim_params(smoothing_length=H, particle_mass=MASS,
+                                       particle_spacing=SPACING, dt=dt))
+    pos = np.zeros((2, 4), np.float32)
+    pos[:, 3] = 1.0
+    pos[1, 0] = 0.5 * H
+    packed = np.array([PACKED_WATER, PACKED_FIRE], np.uint32)
+    temp = np.array([293.0, 1200.0], np.float32)
+    mass = np.full(2, 0.02, np.float32)
+    scene = counting_sort_scene(
+        pos, velocity=np.zeros((2, 4), np.float32), mass=mass,
+        packed_info=packed, temperature=temp, grid_params=default_grid_params(),
+    )
+    perm = cupy.asnumpy(scene["sort_perm"]).astype(np.int64)
+    rho_in = cupy.asarray(np.array([2500.0, 1000.0], np.float32)[perm])
+    args = (scene["position"], scene["velocity"], scene["mass"], rho_in,
+            scene["packed_info"], scene["temperature"],
+            scene["cell_start"], scene["cell_end"])
+    if build_nl:
+        nl_idx = cupy.zeros(2 * 64, dtype=cupy.uint32)
+        nl_cnt = cupy.zeros(2, dtype=cupy.uint32)
+        dTdt = compute_step1_build_nl(*args, nl_idx, nl_cnt, max_nb=64,
+                                      velocity_h=scene["velocity_h"])[2]
+    else:
+        dTdt = compute_step1(*args, velocity_h=scene["velocity_h"])[2]
+    out = np.zeros(2, np.float64)
+    out[perm] = cupy.asnumpy(dTdt)
+    # Put the default dt back for the tests that follow.
+    upload_sim_params(build_sim_params(smoothing_length=H, particle_mass=MASS,
+                                       particle_spacing=SPACING))
+    return float(out[0]), float(out[1])
+
+
+@pytest.mark.parametrize("build_nl", [False, True])
+def test_fire_heats_water_across_phase(build_nl: bool) -> None:
+    """One FIRE neighbour heats WATER and cools itself, within 0.5 dT per substep.
+
+    Before bd-r5-review-n28.94 the GAS/non-GAS branch skipped heat, so both
+    rates were exactly 0 and fire never warmed water or ice.
+    """
+    dt = 0.001
+    gap = 1200.0 - 293.0
+    d_w, d_f = _water_fire_pair_dTdt(dt, build_nl)
+    print(f"  build_nl={build_nl}: WATER dTdt {d_w:.1f} K/s, FIRE dTdt {d_f:.1f} K/s")
+    assert d_w > 0.0, d_w
+    assert d_f < 0.0, d_f
+    assert d_w * dt < 0.5 * gap
+    assert -d_f * dt < 0.5 * gap
+    # A fire layer must be able to bring water to a boil in a few seconds:
+    # one neighbour at h/2 already gives well over 16 K/s (80 K in 5 s).
+    assert d_w > 16.0, d_w
+
+
+@pytest.mark.parametrize("build_nl", [False, True])
+def test_cross_phase_heat_capped_at_half_gap(build_nl: bool) -> None:
+    """With a 10 s step the uncapped pair would overshoot; the cap holds each
+    side to exactly 0.5 * dT per step (the isolated pair's density is its
+    own self term, which is the bound the cap uses)."""
+    dt = 10.0
+    gap = 1200.0 - 293.0
+    d_w, d_f = _water_fire_pair_dTdt(dt, build_nl)
+    print(f"  build_nl={build_nl}: WATER dT/step {d_w * dt:.1f} K, "
+          f"FIRE dT/step {d_f * dt:.1f} K (cap {0.5 * gap:.1f} K)")
+    assert d_w * dt == pytest.approx(0.5 * gap, rel=1e-3)
+    assert -d_f * dt == pytest.approx(0.5 * gap, rel=1e-3)
+
+
 if __name__ == "__main__":
     main()
