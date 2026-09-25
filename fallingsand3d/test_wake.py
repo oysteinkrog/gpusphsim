@@ -1,11 +1,12 @@
 """Integration test for wake.py -- cell-flag wake propagation kernels.
 
 Acceptance criteria:
-  - cell_wake_flags array (num_cells uint32) allocated and cleared to 0 each frame
-  - Phase 1 kernel (K_MarkWakeCells): for each particle with HAS_JUST_WOKE flag,
-    atomicOr(1) on its own cell and 26 neighboring cells
-  - Phase 2 kernel (K_WakeSleepers): for each sleeping particle, if
-    cell_wake_flags[my_cell] != 0: CLEAR_SLEEPING in packed_info, reset
+  - cell_wake_flags stamp table (num_cells uint32), zero at allocation and
+    never cleared per substep when a frame counter is passed
+  - Phase 1 kernel (K_MarkWakeCells): each particle with HAS_JUST_WOKE (or an
+    awake mover above V_WAKE) writes the stamp into its own cell
+  - Phase 2 kernel (K_WakeSleepers): a sleeping particle wakes if any of its
+    27 cells holds the stamp: CLEAR_SLEEPING in packed_info, reset
     sleep_counter to 0
   - JUST_WOKE flag cleared after Phase 1 runs
   - Test: drop a fast-moving particle onto sleeping sand pile -- sand near
@@ -126,7 +127,7 @@ def test_cell_wake_flags_allocation() -> None:
 
 
 def test_mark_wake_cells_single_particle() -> None:
-    """A single just-woke particle should mark up to 27 cells."""
+    """A single just-woke particle marks only its own cell."""
     print("--- Mark wake cells: single particle ---")
     setup_params()
 
@@ -145,11 +146,10 @@ def test_mark_wake_cells_single_particle() -> None:
     flags = allocate_cell_wake_flags(NUM_CELLS)
     mark_wake_cells(pos, vel, pi, flags, num_particles=1)
 
-    # Count flagged cells: 27 (3x3x3, particle is interior). The additive
-    # spatial hash maps every 3x3x3 stencil to 27 distinct buckets.
+    # Own cell only (bd-r5-review-n28.141); sleepers probe their 27 cells.
     flagged_count = int(cupy.count_nonzero(flags))
     print(f"  Flagged cells: {flagged_count}")
-    assert flagged_count == 27, f"Expected 27 flagged cells, got {flagged_count}"
+    assert flagged_count == 1, f"Expected 1 flagged cell, got {flagged_count}"
 
     # The center cell (25,25,25) uses spatial hash with large primes & TABLE_MASK
     # hash = (25*73856093 + 25*19349669 + 25*83492791) & TABLE_MASK (additive, see common.cuh)
@@ -160,7 +160,7 @@ def test_mark_wake_cells_single_particle() -> None:
 
 
 def test_mark_wake_cells_corner_particle() -> None:
-    """A just-woke particle at grid corner marks fewer than 27 cells."""
+    """A just-woke particle at the grid corner also marks one cell."""
     print("--- Mark wake cells: corner particle ---")
     setup_params()
 
@@ -176,12 +176,10 @@ def test_mark_wake_cells_corner_particle() -> None:
     flags = allocate_cell_wake_flags(NUM_CELLS)
     mark_wake_cells(pos, vel, pi, flags, num_particles=1)
 
-    # With a spatial hash (not a dense bounded grid), negative cell coordinates are
-    # allowed — all 27 neighbors hash to valid table entries (no clamping).
-    # Hash collisions may reduce the distinct flagged count below 27.
+    # The spatial hash has no bounds, so the corner cell is an ordinary entry.
     flagged_count = int(cupy.count_nonzero(flags))
     print(f"  Flagged cells (corner): {flagged_count}")
-    assert 1 <= flagged_count <= 27, f"Expected 1-27 flagged cells at corner, got {flagged_count}"
+    assert flagged_count == 1, f"Expected 1 flagged cell at corner, got {flagged_count}"
 
 
 def test_mark_wake_cells_no_just_woke() -> None:
@@ -706,6 +704,112 @@ def test_mark_wake_cells_rigid_zero_bodies() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Generation stamp (bd-r5-review-n28.141)
+# ---------------------------------------------------------------------------
+
+
+def _pair(woke_pos, sleep_pos, woke_packed=None):
+    """Arrays for one marker particle and one sleeping SAND particle."""
+    pos = cupy.zeros((2, 4), dtype=cupy.float32)
+    vel = cupy.zeros((2, 4), dtype=cupy.float32)
+    pos[0] = cupy.array([*woke_pos, 1.0], dtype=cupy.float32)
+    pos[1] = cupy.array([*sleep_pos, 1.0], dtype=cupy.float32)
+    if woke_packed is None:
+        woke_packed = SET_JUST_WOKE(MAKE_PACKED(SAND, GRANULAR))
+    pi = cupy.array([woke_packed, SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR))],
+                    dtype=cupy.uint32)
+    sc = cupy.array([0, 100], dtype=cupy.uint8)
+    return pos, vel, pi, sc
+
+
+def test_stamp_no_memset() -> None:
+    """Two substeps with no memset between them: a mark from substep 1 does
+    not wake a sleeper in substep 2, because substep 2 uses a new stamp."""
+    setup_params()
+    flags = allocate_cell_wake_flags(NUM_CELLS)
+    frame = cupy.array([41], dtype=cupy.uint32)
+
+    # Substep 1: a just-woke marker at the origin, sleeper far away.
+    pos, vel, pi, sc = _pair((0.0, 0.0, 0.0), (0.9, 0.9, 0.9))
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=2,
+                         frame_counter=frame)
+    assert IS_SLEEPING(int(pi.get()[1])) == 1
+    assert int(cupy.count_nonzero(flags)) == 1, "marker stamps its own cell"
+
+    # Substep 2: the marker is at rest now (no mark); a sleeper sits one
+    # cell from the old mark. The old mark is still in the table.
+    rest = MAKE_PACKED(SAND, GRANULAR)
+    pos, vel, pi, sc = _pair((0.0, 0.0, 0.0), (0.04, 0.0, 0.0), woke_packed=rest)
+    frame.fill(42)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=2,
+                         frame_counter=frame)
+    assert int(cupy.count_nonzero(flags)) == 1, "no memset between substeps"
+    assert IS_SLEEPING(int(pi.get()[1])) == 1, "stale mark woke a sleeper"
+    assert int(sc.get()[1]) == 100
+
+    # Control: with the substep-1 stamp the same sleeper would wake, so the
+    # test above really exercises a stale mark.
+    frame.fill(41)
+    wake_sleepers_and_clear_just_woke(pos, pi, sc, flags, num_particles=2,
+                                      frame_counter=frame)
+    assert IS_SLEEPING(int(pi.get()[1])) == 0
+
+
+def _cascade_with_stamp(sleep_pos) -> int:
+    """Run one stamped substep on a table full of stale stamps; return the
+    sleeper's packed_info."""
+    setup_params()
+    flags = cupy.full(NUM_CELLS, 7, dtype=cupy.uint32)  # stamp of substep 6
+    frame = cupy.array([100], dtype=cupy.uint32)
+    pos, vel, pi, sc = _pair((0.0, 0.0, 0.0), sleep_pos)
+    run_wake_propagation(pos, vel, pi, sc, flags, num_particles=2,
+                         frame_counter=frame)
+    return int(pi.get()[1])
+
+
+def test_stamp_cascade_matches_flag_semantics() -> None:
+    """With the stamp and a dirty table, the cascade keeps the old reach:
+    own, face and diagonal cells wake; two cells away stays asleep."""
+    assert IS_SLEEPING(_cascade_with_stamp((0.0, 0.0, 0.0))) == 0
+    assert IS_SLEEPING(_cascade_with_stamp((0.04, 0.0, 0.0))) == 0
+    assert IS_SLEEPING(_cascade_with_stamp((-0.04, 0.04, 0.04))) == 0
+    assert IS_SLEEPING(_cascade_with_stamp((0.09, 0.0, 0.0))) == 1
+    assert IS_SLEEPING(_cascade_with_stamp((0.0, -0.09, 0.0))) == 1
+
+
+def test_rigid_stamp_reach() -> None:
+    """A moving body stamps its cube; a sleeper one cell past the cube wakes,
+    one two cells past stays asleep."""
+    from rigid_bodies import RIGID_BODY_DTYPE
+
+    setup_params()
+    body = np.zeros(1, dtype=RIGID_BODY_DTYPE)
+    body["position"][0] = (0.0, 0.0, 0.0, 1.0)
+    body["rotation"][0] = (0.0, 0.0, 0.0, 1.0)
+    body["lin_vel"][0] = (0.0, -1.0, 0.0, 0.5)
+    body["ang_vel"][0] = (0.0, 0.0, 0.0, 0.3)
+    body["half_extents"][0] = (0.02, 0.02, 0.02, 0.0)  # r = 0.0346
+    d_bodies = cupy.asarray(body.view(np.float32))
+
+    def sleeper_after(x: float) -> int:
+        flags = cupy.full(NUM_CELLS, 3, dtype=cupy.uint32)
+        frame = cupy.array([9], dtype=cupy.uint32)
+        pos = cupy.array([[x, 0.0, 0.0, 1.0]], dtype=cupy.float32)
+        vel = cupy.zeros((1, 4), dtype=cupy.float32)
+        pi = cupy.array([SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR))], dtype=cupy.uint32)
+        sc = cupy.array([100], dtype=cupy.uint8)
+        run_wake_propagation(pos, vel, pi, sc, flags, num_particles=1,
+                             rigid_bodies=d_bodies, num_bodies=1,
+                             frame_counter=frame)
+        return int(pi.get()[0])
+
+    # Cube [-0.0346, 0.0346] covers cells 24..25 in x (cell 0.04, origin at
+    # cell 25). Cell 26 (x=0.05) is adjacent, cell 27 (x=0.09) is not.
+    assert IS_SLEEPING(sleeper_after(0.05)) == 0
+    assert IS_SLEEPING(sleeper_after(0.09)) == 1
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -738,6 +842,9 @@ def main() -> None:
     test_resting_rigid_body_does_not_wake()
     test_far_rigid_body_does_not_wake()
     test_mark_wake_cells_rigid_zero_bodies()
+    test_stamp_no_memset()
+    test_stamp_cascade_matches_flag_semantics()
+    test_rigid_stamp_reach()
 
     print()
     print("=" * 60)

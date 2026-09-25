@@ -3,11 +3,18 @@
 Compiles physics/kernels/wake.cu via CuPy RawModule and provides functions
 to launch the wake propagation pipeline:
 
-  Phase 1 (K_MarkWakeCells):  Just-woke particles mark 3x3x3 neighbor cells.
-  Phase 1b (K_MarkWakeCellsRigid): Moving rigid bodies mark the cells
-                              around them.
-  Phase 2 (K_WakeSleepers):   Sleeping particles in flagged cells wake up.
-  Phase 3 (K_ClearJustWoke):  Clear JUST_WOKE flag from all particles.
+  Phase 1 (K_MarkWakeCells):  Just-woke and fast awake particles stamp their
+                              own grid cell.
+  Phase 1b (K_MarkWakeCellsRigid): Moving rigid bodies stamp the cells
+                              their bounding cube covers.
+  Phase 2+3 (K_WakeSleepersAndClearJustWoke): A sleeping particle wakes when
+                              any of its 27 cells holds this substep's stamp;
+                              JUST_WOKE is cleared on every particle.
+
+Cells hold a generation stamp, frame_counter[0] + 1, instead of a 0/1 flag,
+so the table is never cleared per substep (bd-r5-review-n28.141). Pass the
+per-substep device counter as ``frame_counter``. Without it the stamp is 1
+and run_wake_propagation clears the table first.
 
 Uses shared constant memory from common.cuh:
   c_grid -- GridParams (for position -> grid cell mapping)
@@ -90,9 +97,10 @@ BLOCK_SIZE = 256
 
 
 def allocate_cell_wake_flags(num_cells: int = 125_000) -> cupy.ndarray:
-    """Allocate the cell_wake_flags array (uint32, num_cells).
+    """Allocate the cell_wake_flags stamp table (uint32, num_cells).
 
-    Returns a CuPy uint32 array of size num_cells, initialized to 0.
+    Returns a CuPy uint32 array of size num_cells, initialized to 0. A
+    stamp is never 0, so a fresh table marks nothing.
     """
     return cupy.zeros(num_cells, dtype=cupy.uint32)
 
@@ -101,6 +109,14 @@ def allocate_cell_wake_flags(num_cells: int = 125_000) -> cupy.ndarray:
 # Kernel launches
 # ---------------------------------------------------------------------------
 
+_NULL = np.intp(0)
+
+
+def _frame_arg(frame_counter: Optional[cupy.ndarray]):
+    """Kernel argument for frame_ptr: the device counter, or NULL (stamp 1)."""
+    return frame_counter if frame_counter is not None else _NULL
+
+
 
 def mark_wake_cells(
     position: cupy.ndarray,
@@ -108,10 +124,11 @@ def mark_wake_cells(
     packed_info: cupy.ndarray,
     cell_wake_flags: cupy.ndarray,
     num_particles: Optional[int] = None,
+    frame_counter: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_MarkWakeCells (Phase 1).
 
-    Marks 3x3x3 neighbor cells for:
+    Writes the stamp into the own grid cell of:
     1. Particles with HAS_JUST_WOKE flag (wake cascade).
     2. Active non-sleeping particles moving above V_WAKE threshold
        (so flowing water wakes sleeping sand in adjacent cells).
@@ -125,9 +142,12 @@ def mark_wake_cells(
     packed_info : cupy.ndarray, (N,) uint32
         Unsorted packed_info (read-only for this kernel).
     cell_wake_flags : cupy.ndarray, (num_cells,) uint32
-        Cell flags array. Must be cleared to 0 before calling this.
+        Cell stamp table.
     num_particles : int, optional
         Number of active particles. Defaults to position.shape[0].
+    frame_counter : cupy.ndarray, (1,) uint32, optional
+        Per-substep device counter; the stamp is its value + 1. None gives
+        stamp 1, so the caller must clear the table first.
     """
     n = num_particles if num_particles is not None else position.shape[0]
     if n == 0:
@@ -139,7 +159,8 @@ def mark_wake_cells(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
 
-    kernel(grid, block, (np.uint32(n), position, velocity, packed_info, cell_wake_flags))
+    kernel(grid, block, (np.uint32(n), position, velocity, packed_info,
+                         cell_wake_flags, _frame_arg(frame_counter)))
 
 
 RIGID_BLOCK_SIZE = 128
@@ -149,12 +170,13 @@ def mark_wake_cells_rigid(
     rigid_bodies: cupy.ndarray,
     num_bodies: int,
     cell_wake_flags: cupy.ndarray,
+    frame_counter: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_MarkWakeCellsRigid (Phase 1b), one block per body.
 
-    A body whose fastest point can move faster than V_WAKE marks every cell
-    of its bounding cube grown by one cell, so sleeping sand next to a
-    moving body wakes and feels the rigid coupling (bd-r5-review-n28.87).
+    A body whose fastest point can move faster than V_WAKE stamps every cell
+    of its bounding cube. Sleepers probe their 27 cells, so sleeping sand
+    up to one cell past a moving body wakes and feels the rigid coupling (bd-r5-review-n28.87).
     Rigid boundary particles are STATIC, so K_MarkWakeCells never marks
     for them. A body at rest marks nothing.
 
@@ -165,7 +187,9 @@ def mark_wake_cells_rigid(
     num_bodies : int
         Number of live bodies (host-side count, no sync).
     cell_wake_flags : cupy.ndarray, (num_cells,) uint32
-        Cell flags array (already cleared for this substep).
+        Cell stamp table.
+    frame_counter : cupy.ndarray, (1,) uint32, optional
+        Per-substep device counter (see mark_wake_cells).
     """
     if num_bodies <= 0:
         return
@@ -173,7 +197,8 @@ def mark_wake_cells_rigid(
     kernel = module.get_function("K_MarkWakeCellsRigid")  # type: ignore[union-attr]
     kernel(
         (int(num_bodies),), (RIGID_BLOCK_SIZE,),
-        (rigid_bodies, np.int32(num_bodies), cell_wake_flags),
+        (rigid_bodies, np.int32(num_bodies), cell_wake_flags,
+         _frame_arg(frame_counter)),
     )
 
 
@@ -183,10 +208,11 @@ def wake_sleepers_and_clear_just_woke(
     sleep_counter: cupy.ndarray,
     cell_wake_flags: cupy.ndarray,
     num_particles: Optional[int] = None,
+    frame_counter: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_WakeSleepersAndClearJustWoke (Phase 2+3 fused).
 
-    For each sleeping particle, if cell_wake_flags[my_cell] != 0,
+    For each sleeping particle, if any of its 27 cells holds the stamp,
     clear SLEEPING flag and reset sleep_counter to 0.
     Also clears the JUST_WOKE flag from all particles.
 
@@ -199,9 +225,11 @@ def wake_sleepers_and_clear_just_woke(
     sleep_counter : cupy.ndarray, (N,) uint8
         Unsorted sleep counter (write: reset to 0 on wake).
     cell_wake_flags : cupy.ndarray, (num_cells,) uint32
-        Cell flags from Phase 1.
+        Cell stamps from Phase 1.
     num_particles : int, optional
         Number of active particles. Defaults to position.shape[0].
+    frame_counter : cupy.ndarray, (1,) uint32, optional
+        Per-substep device counter (see mark_wake_cells).
     """
     n = num_particles if num_particles is not None else position.shape[0]
     if n == 0:
@@ -215,7 +243,8 @@ def wake_sleepers_and_clear_just_woke(
 
     kernel(
         grid, block,
-        (np.uint32(n), position, packed_info, sleep_counter, cell_wake_flags),
+        (np.uint32(n), position, packed_info, sleep_counter, cell_wake_flags,
+         _frame_arg(frame_counter)),
     )
 
 
@@ -228,14 +257,18 @@ def run_wake_propagation(
     num_particles: Optional[int] = None,
     rigid_bodies: Optional[cupy.ndarray] = None,
     num_bodies: int = 0,
+    frame_counter: Optional[cupy.ndarray] = None,
 ) -> None:
     """Run the 2-phase wake propagation pipeline.
 
-    1. Clear cell_wake_flags to 0
-    2. K_MarkWakeCells (Phase 1)
-    3. K_MarkWakeCellsRigid (Phase 1b), when rigid_bodies is given and
+    1. K_MarkWakeCells (Phase 1)
+    2. K_MarkWakeCellsRigid (Phase 1b), when rigid_bodies is given and
        num_bodies > 0
-    4. K_WakeSleepersAndClearJustWoke (Phase 2+3 fused)
+    3. K_WakeSleepersAndClearJustWoke (Phase 2+3 fused)
+
+    With frame_counter the table is not cleared: each substep writes a new
+    stamp, so older marks stop matching. Without it (stamp 1) the table is
+    cleared first.
 
     Parameters
     ----------
@@ -248,29 +281,35 @@ def run_wake_propagation(
     sleep_counter : cupy.ndarray, (N,) uint8
         Unsorted sleep counter (write on wake).
     cell_wake_flags : cupy.ndarray, (num_cells,) uint32
-        Pre-allocated cell flags array.
+        Pre-allocated cell stamp table.
     num_particles : int, optional
         Number of active particles.
     rigid_bodies : cupy.ndarray, optional
         Device rigid body state. Moving bodies wake sleepers near them.
     num_bodies : int
         Number of live rigid bodies (host-side count).
+    frame_counter : cupy.ndarray, (1,) uint32, optional
+        Per-substep device counter; must change every substep.
     """
     n = num_particles if num_particles is not None else position.shape[0]
     if n == 0:
         return
 
-    # Clear cell flags to 0 (async memset: graph-capture safe)
-    cell_wake_flags.data.memset_async(0x00, cell_wake_flags.nbytes)
+    if frame_counter is None:
+        # Fixed stamp 1: clear old marks (async memset, graph-capture safe)
+        cell_wake_flags.data.memset_async(0x00, cell_wake_flags.nbytes)
 
-    # Phase 1: mark cells near just-woke and fast-moving particles
-    mark_wake_cells(position, velocity, packed_info, cell_wake_flags, n)
+    # Phase 1: stamp the own cell of just-woke and fast-moving particles
+    mark_wake_cells(position, velocity, packed_info, cell_wake_flags, n,
+                    frame_counter=frame_counter)
 
-    # Phase 1b: moving rigid bodies mark the cells around them
+    # Phase 1b: moving rigid bodies stamp the cells they cover
     if rigid_bodies is not None and num_bodies > 0:
-        mark_wake_cells_rigid(rigid_bodies, num_bodies, cell_wake_flags)
+        mark_wake_cells_rigid(rigid_bodies, num_bodies, cell_wake_flags,
+                              frame_counter=frame_counter)
 
     # Phase 2+3 fused: wake sleepers + clear JUST_WOKE flag
     wake_sleepers_and_clear_just_woke(
-        position, packed_info, sleep_counter, cell_wake_flags, n
+        position, packed_info, sleep_counter, cell_wake_flags, n,
+        frame_counter=frame_counter,
     )

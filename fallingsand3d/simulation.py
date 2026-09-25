@@ -438,6 +438,8 @@ class Simulation:
             self._table_size = table_size
             self._cell_start = cupy.empty(table_size, dtype=cupy.uint32)
             self._cell_end = cupy.empty(table_size, dtype=cupy.uint32)
+            # Wake stamp table: never cleared per substep. Stamps come from
+            # the monotonic _substep_counter, so old marks never match.
             self._cell_wake_flags = wake.allocate_cell_wake_flags(table_size)
             # Counting sort scratch buffers
             self._cs_histogram = cupy.zeros(table_size, dtype=cupy.uint32)
@@ -1128,7 +1130,7 @@ class Simulation:
         )
         mark("integrate")
 
-        # Wake propagation (memset + 2 kernels)
+        # Wake propagation (2 kernels; per-substep stamp, no memset)
         wake.run_wake_propagation(
             w.position[:n],
             w.velocity[:n],
@@ -1136,6 +1138,7 @@ class Simulation:
             w.sleep_counter[:n],
             self._cell_wake_flags,
             num_particles=n,
+            frame_counter=self._frame_counter_d,
             **self._wake_rigid_kwargs(),
         )
         mark("wake")
@@ -1281,6 +1284,7 @@ class Simulation:
             w.sleep_counter[:n],
             self._cell_wake_flags,
             num_particles=n,
+            frame_counter=self._frame_counter_d,
             **self._wake_rigid_kwargs(),
         )
         mark("wake")
@@ -1490,6 +1494,7 @@ class Simulation:
             w.sleep_counter[:n],
             self._cell_wake_flags,
             num_particles=n,
+            frame_counter=self._frame_counter_d,
             **self._wake_rigid_kwargs(),
         )
         mark("wake")
