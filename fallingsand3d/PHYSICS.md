@@ -3104,11 +3104,14 @@ Simple per-particle physics, no neighbor interaction:
 
 Integration: symplectic Euler. World boundary clamp kills particles at floor.
 
-Launch size: `min(2 * last_foam_count + 1024, max_foam)` threads, where
-`last_foam_count` is the deferred readback (section 20.5). The kernel reads the
-live count from device memory. Foam that grows faster than the 2x headroom in
-the readback lag gets no physics for those frames (seen for 2 frames when the
-Dam Break splash fills the 200K pool in one frame).
+Death: when the lifetime runs out, or the floor clamp kills a particle, the
+kernel writes -1 to both `foam_velocity.w` (lifetime, read by compaction) and
+`foam_position.w` (type, read by `foam.vert`). The particle stops drawing on
+the substep it dies.
+
+Launch size: `max_foam` threads. The kernel reads the live count from device
+memory and threads past it exit at once, so foam made since the deferred
+readback (section 20.5) gets physics on its next substep.
 
 ### 19.5 Compaction (K_FoamCompact)
 
@@ -3116,8 +3119,11 @@ Stream compaction runs once per frame at most, from `step_frame` after the
 substep loop (`_maybe_compact_foam`). It runs every 8th frame, and every frame
 while the deferred foam count is above 80% of the pool:
 1. Atomic scatter alive particles to output buffer
-2. Swap input/output buffers
-3. Device-to-device copy of alive_count → foam_count (no GPU→CPU sync)
+2. `K_FoamClearTail` sets `pos.w = -1` for slots `[alive_count, max_foam)` of
+   the output buffer. Those slots hold positions from an earlier cycle, and the
+   draw count is the deferred readback, which can be above alive_count.
+3. Swap input/output buffers
+4. Device-to-device copy of alive_count → foam_count (no GPU→CPU sync)
 
 ### 19.6 Rendering
 
@@ -3126,6 +3132,9 @@ Foam rendered as separate draw call after main scene (both point sprite and SSFR
 - No depth writes (`glDepthMask(GL_FALSE)`)
 - Small white point sprites with soft circular falloff
 - Alpha varies by type: SPRAY=0.8, FOAM=0.5, BUBBLE=0.3
+- `foam.vert` culls dead slots (`aPos.w < 0`) by placing them outside clip space
+  with point size 0. The draw count is still the deferred readback, so new foam
+  appears one frame late.
 
 **Source**: `foam.cu`, `foam.py`, `world.py` (foam pool), `renderer.py` (foam draw),
 `simulation.py:_run_foam_step`, `simulation.py:_maybe_compact_foam`
