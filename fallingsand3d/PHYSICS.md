@@ -2475,9 +2475,18 @@ Per substep:
        Recompute a_press from updated p_rho2
      Apply final: v* += dt * a_press
   7. Final position: x_final = x + dt * v*_final
-  8. Boundary handling, writeback (kappa + kappa_v written back for warm-start;
-     position.w gets the density for the per-frame K_ComputeColor)
+  8. Boundary handling, writeback (kappa + kappa_v written back for warm-start,
+     already scaled by their warm-start factors; position.w gets the density
+     for the per-frame K_ComputeColor)
 ```
+
+**Velocity buffer routing (bd-r5-review-n28.173):** NonPressureForces reads
+`sorted_velocity` and writes `sorted_veleval` (the two must not alias). From then on
+`sorted_veleval` is the substep velocity: CorrectVelocityDiv, ComputeKappaV,
+DensitySolverUpdate, ApplyPressureVelocity and Finalize read or update it, and foam
+generation reads it after the substep. `sorted_velocity` keeps the reordered start
+velocity. The routing is fixed, never swapped per substep, because CUDA graphs bake
+buffer pointers.
 
 Kernels (`dfsph_solver.cu`, 8 in total): ComputeDensityAlpha (step 2),
 NonPressureForces (3-4), ComputeKappaV and CorrectVelocityDiv (5),
@@ -2595,9 +2604,11 @@ percent and 16 reach 94 percent.
 
 **Warm-starting (bd-r5-review-n28.83):** the warm start is the accumulated stiffness,
 as in SPlisHSPlasH. `sorted_kappa_v` holds the running total and is persisted across
-substeps through the sort-reorder pipeline (kappa_v → sorted_kappa_v). At the start of
-each divergence solve the total is scaled by `dfsph_div_warm_start` (default 0.5) and
-applied once as a velocity correction (with warm start 0 it is zeroed instead). Each
+substeps through the sort-reorder pipeline (kappa_v → sorted_kappa_v). K_DFSPH_Finalize
+writes the total back times `dfsph_div_warm_start` (default 0.5; `c_dfsph.kappa_v_carry`),
+so the next divergence solve starts from the scaled value and applies it once as a
+velocity correction. With warm start 0 the carry is 0 and the host skips that pass and
+zeroes the total (which also clears values from before a profile change). Each
 iteration then writes its increment `dkappa_v` to a scratch buffer
 (`Simulation._kappa_v_delta`, allocated outside the CUDA graph body),
 `K_DFSPH_CorrectVelocityDiv` applies only that increment, and `K_DFSPH_ComputeKappaV`
@@ -2667,11 +2678,15 @@ v*_i += dt * a_press_i
 ```
 
 **Warm-starting:** Pressure values (`p_rho2`) are carried from the previous frame
-through the sort-reorder pipeline (`kappa` → `sorted_kappa`). At the start of each
-density solve, the warm-started values are scaled by a decay factor:
+through the sort-reorder pipeline (`kappa` → `sorted_kappa`). K_DFSPH_Finalize applies
+the decay factor as it writes them back (bd-r5-review-n28.173), so the next density
+solve starts from the scaled value:
 ```
-p_rho2 *= warm_start     (default 0.5 = carry 50% from previous frame)
+kappa_out = p_rho2 * kappa_carry     (kappa_carry = warm_start, default 0.5 = carry 50%)
 ```
+With `dfsph_warm_start <= 0` the carry is 1 (mu(I) still needs the unscaled value) and
+the host zeroes `p_rho2` before the density solver instead. A profile change takes
+effect on the writeback, so the first substep after it starts from the old factor.
 Warm-starting reduces the number of iterations needed: 2 iters with warm-start ≈ 4 iters
 without. Values above 0.8 cause pressure accumulation (particles ejected to boundaries).
 
@@ -2768,7 +2783,8 @@ GAS:      a_i = gravity + buoyancy - drag * v_i + viscosity (same as FLUID)
 
 **GRANULAR confining pressure** (bd-r5-review-n28.92). `p_prev` is
 `sorted_kappa`: the density solver's converged value from the previous
-substep, read before the warm-start scale. The solver stores p/rho, not
+substep, which Finalize stored times `kappa_carry`; the kernel multiplies by
+`kappa_uncarry = 1/kappa_carry` to get the unscaled value. The solver stores p/rho, not
 p/rho^2: ComputePressureAccel uses `V_j * (p_i + p_j)` with `V_j = m_j/rho_j`,
 which matches `m_j * (p_i/rho_i^2 + p_j/rho_j^2)` when the stored value is
 p/rho. So `p = p_prev * rho` (Pa); `p_prev * rho^2` would be about 4000x too
