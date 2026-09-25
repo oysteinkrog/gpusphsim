@@ -2,8 +2,8 @@
 
 bd-r4-epic-x2j.1: the per-lane accumulation helper (now atomic_accumulate3,
 bd-r5-review-n28.182) must not blend lanes of different bodies.
-bd-r5-review-n28.182: RigidAccum sums a thread's pairs in registers and
-flushes on body change, and must give the same per-body sums.
+bd-r5-review-n28.182: K_Step2 sums a particle's reaction on its first body
+in registers; per-body force and torque must match the per-pair build.
 
 The old code used a full-warp __shfl_down_sync reduction then let only lane 0
 atomicAdd. When called from a divergent neighbor-loop branch where different
@@ -235,92 +235,134 @@ extern "C" __global__ void test_aa3(float* out) {
     assert b1 == pytest.approx(EXP_B1, rel=1e-5)
 
 
-# Harness for RigidAccum (bd-r5-review-n28.182). Thread t walks its row of
-# `pairs` (body id, -1 = no rigid neighbour) the way a coupling loop walks its
-# neighbours, adding F = vals[t][p] and tau = 2 * vals[t][p] per pair, then
-# flushes once after the loop.
-_ACCUM_SRC = r"""
-#include "sph_shared.cuh"
+# ---------------------------------------------------------------------------
+# K_Step2 per-particle rigid reaction (bd-r5-review-n28.182)
+# ---------------------------------------------------------------------------
+#
+# K_Step2 sums a fluid particle's pressure reaction on the first body it
+# touches in registers and writes it once after the loop, with the torque
+# (x_i - COM) x F. Pairs on any other body keep per-pair atomics. The
+# reference build (-DSTEP2_RIGID_PER_PAIR_REFERENCE) writes every pair at
+# once, with the torque (x_j - COM) x F, as before the change.
+#
+# Scene: two kinematic 12 cm boxes 4 cm apart in a water block, so the fluid
+# in the gap touches both bodies. Each K_Step2 launch in the substep is also
+# run with the reference module on the same inputs; the per-body force and
+# torque must agree, and the fluid-side output must match within float noise.
 
-extern "C" __global__ void test_rigid_accum(
-    const int* pairs, const float* vals, int n_threads, int n_pairs,
-    float* forces, float* torques
-) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= n_threads) return;
-    RigidAccum acc = rigid_accum_init();
-    for (int p = 0; p < n_pairs; p++) {
-        int body = pairs[t * n_pairs + p];
-        if (body < 0) continue;
-        const float* v = vals + 3 * (t * n_pairs + p);
-        float3 F = make_float3(v[0], v[1], v[2]);
-        float3 tau = make_float3(2.0f * v[0], 2.0f * v[1], 2.0f * v[2]);
-        rigid_accum_add(acc, forces, torques, body, F, tau);
+HALF = 0.06
+GAP = 0.04
+H = 0.04
+
+
+def _two_body_sim():
+    from materials import WATER
+    from simulation import Simulation
+    from solver_profiles import PROFILES
+    from world import World
+
+    xc = HALF + GAP / 2.0
+    world = World(120_000)
+    ex = HALF + 0.005
+    world.spawn_cube((-0.3, -0.2, -0.2), (0.3, 0.2, 0.2), WATER, 0.02,
+                     exclude_box=((-xc - ex, -ex, -ex), (xc + ex, ex, ex)))
+    # Fluid in the gap between the two boxes.
+    world.spawn_cube((-0.01, -HALF, -HALF), (0.01, HALF, HALF), WATER, 0.02)
+    sim = Simulation(world, dt=0.001, fixed_dt=True, world_half_size=1.0)
+    sim.set_solver_profile(PROFILES["WCSPH"])
+    sim._spawn_substep = sim._damping_duration
+    rbm = sim.rigid_body_manager
+    for x in (-xc, xc):
+        rbm.add_rigid_body_with_particles(
+            position=(x, 0.0, 0.0), half_extents=(HALF, HALF, HALF),
+            mass=4.32, is_kinematic=True)
+    # Spin body 1 so its viscous reaction and torque are not trivial.
+    rbm._bodies_cpu[1]["ang_vel"][:3] = (0.0, 3.0, 1.0)
+    rbm.finalize_boundary_data()
+    rbm.upload(sim.get_all_modules())
+    return world, sim, rbm
+
+
+def _copy_constants(dst_mod, src_mod) -> None:
+    """Copy K_Step2's constant memory from src_mod to dst_mod."""
+    import step1
+    import step2
+    from materials import build_material_array
+
+    sizes = {
+        "c_grid": 32,
+        "c_sim": step1.build_sim_params(smoothing_length=H).nbytes,
+        "c_precalc": step1.build_precalc_params(smoothing_length=H, viscosity=1.0).nbytes,
+        "c_materials": build_material_array().nbytes,
+        "c_granular": step2.build_granular_params().nbytes,
     }
-    rigid_accum_flush(acc, forces, torques);
-}
-"""
+    for name, size in sizes.items():
+        cp.cuda.runtime.memcpy(int(dst_mod.get_global(name)),
+                               int(src_mod.get_global(name)), size, 3)
 
 
-def _run_accum(pairs: np.ndarray, vals: np.ndarray, n_bodies: int):
-    kernel = _compile_shared(_ACCUM_SRC).get_function("test_rigid_accum")
-    n_threads, n_pairs = pairs.shape
-    d_pairs = cp.asarray(pairs.astype(np.int32))
-    d_vals = cp.asarray(vals.astype(np.float32))
-    forces = cp.zeros((n_bodies, 4), dtype=cp.float32)
-    torques = cp.zeros((n_bodies, 4), dtype=cp.float32)
-    block = 128
-    grid = (n_threads + block - 1) // block
-    kernel((grid,), (block,), (d_pairs, d_vals, np.int32(n_threads),
-                               np.int32(n_pairs), forces, torques))
-    return forces.get(), torques.get()
+def test_step2_rigid_reaction_matches_per_pair_reference(monkeypatch):
+    import kernel_loader
+    import step2
 
+    world, sim, rbm = _two_body_sim()
+    sim._sim_step(world._high_water)  # inject the boundary block
+    assert rbm.boundary_injected
 
-def _naive_sums(pairs: np.ndarray, vals: np.ndarray, n_bodies: int):
-    """Per-pair sums in float64, the result the old per-pair atomics gave."""
-    F = np.zeros((n_bodies, 4))
-    for t in range(pairs.shape[0]):
-        for p in range(pairs.shape[1]):
-            b = pairs[t, p]
-            if b >= 0:
-                F[b, :3] += vals[t, p].astype(np.float64)
-    return F, 2.0 * F
+    # Some fluid particles must sit in the gap, within h of both boxes.
+    n = world._high_water
+    pos = world.position[:n, :3].get()
+    mat = world.packed_info[:n].get() & 0xFF
+    from materials import WATER
+    gap = (mat == WATER) & (np.abs(pos[:, 0]) < GAP / 2.0) \
+        & (np.abs(pos[:, 1]) < HALF) & (np.abs(pos[:, 2]) < HALF)
+    assert gap.sum() > 20, gap.sum()
 
+    ref_mod = kernel_loader.load_module("step2.cu", ("-DSTEP2_RIGID_PER_PAIR_REFERENCE",))
+    new_mod = step2._get_module()
+    real = step2.compute_step2
+    got = []
 
-def test_rigid_accum_two_particles_two_bodies():
-    """Flush on switch sends each pair to its own body.
+    def both(*args, **kw):
+        F, T = kw["d_rigid_forces"], kw["d_rigid_torques"]
+        F0, T0 = F.copy(), T.copy()
+        # K_Step2 writes nothing for STATIC and sleeping particles, so the
+        # reference output starts from the same buffer contents.
+        out0 = kw["sph_force_out"].copy()
+        real(*args, **kw)
+        dF, dT = (F - F0).get(), (T - T0).get()
+        out_new = kw["sph_force_out"].copy()
+        # Same inputs through the reference build, into separate accumulators.
+        _copy_constants(ref_mod, new_mod)
+        rF, rT = cp.zeros_like(F), cp.zeros_like(T)
+        ref_out = out0
+        kw_ref = dict(kw, d_rigid_forces=rF, d_rigid_torques=rT,
+                      sph_force_out=ref_out, veleval_out=cp.zeros_like(kw["veleval_out"]))
+        monkeypatch.setattr(step2, "_get_module", lambda: ref_mod)
+        try:
+            real(*args, **kw_ref)
+        finally:
+            monkeypatch.setattr(step2, "_get_module", lambda: new_mod)
+        # The two builds may contract the fluid-side math differently, so
+        # compare within float noise rather than bitwise.
+        diff = float(cp.abs(out_new - ref_out).max())
+        scale = float(cp.abs(ref_out).max())
+        got.append((dF, dT, rF.get(), rT.get(), diff <= 1e-5 * scale))
 
-    Particle 0 touches body 0, then body 1, then body 0 again (two switches).
-    Particle 1 touches body 1 twice with a non-rigid neighbour between.
-    """
-    pairs = np.array([[0, 1, 0],
-                      [1, -1, 1]])
-    vals = np.array([[[1.0, 2.0, 3.0], [10.0, 20.0, 30.0], [100.0, 200.0, 300.0]],
-                     [[1000.0, 0.0, -1.0], [9e9, 9e9, 9e9], [0.5, 0.25, 0.125]]])
-    forces, torques = _run_accum(pairs, vals, 2)
+    monkeypatch.setattr(step2, "compute_step2", both)
+    for _ in range(5):
+        sim._sim_step(world._high_water)
+    cp.cuda.Device().synchronize()
+    assert len(got) == 5
 
-    np.testing.assert_allclose(forces[0, :3], [101.0, 202.0, 303.0], rtol=1e-6)
-    np.testing.assert_allclose(forces[1, :3], [1010.5, 20.25, 29.125], rtol=1e-6)
-    np.testing.assert_allclose(torques, 2.0 * forces, rtol=1e-6)
-    assert np.all(forces[:, 3] == 0.0) and np.all(torques[:, 3] == 0.0)
-
-
-def test_rigid_accum_matches_naive_many_threads():
-    """Random neighbour lists over 8 bodies match the per-pair sum within 1e-5."""
-    rng = np.random.default_rng(182)
-    n_threads, n_pairs, n_bodies = 4096, 24, 8
-    # Mostly one body per particle, like a fluid shell around a body, with
-    # some non-rigid neighbours and some particles between two bodies.
-    home = rng.integers(0, n_bodies, n_threads)
-    pairs = np.repeat(home[:, None], n_pairs, axis=1)
-    pairs[rng.random(pairs.shape) < 0.3] = -1
-    mixed = rng.random(pairs.shape) < 0.1
-    pairs[mixed] = rng.integers(0, n_bodies, int(mixed.sum()))
-    vals = rng.uniform(-1.0, 1.0, (n_threads, n_pairs, 3))
-
-    forces, torques = _run_accum(pairs, vals, n_bodies)
-    F_ref, T_ref = _naive_sums(pairs, vals.astype(np.float32), n_bodies)
-
-    scale = np.abs(vals).sum() / n_bodies
-    np.testing.assert_allclose(forces, F_ref, rtol=0, atol=1e-5 * scale)
-    np.testing.assert_allclose(torques, T_ref, rtol=0, atol=2e-5 * scale)
+    for dF, dT, rF, rT, fluid_same in got:
+        assert fluid_same, "fluid-side K_Step2 output differs from the reference"
+        for b in range(2):
+            f_ref, t_ref = rF[b, :3], rT[b, :3]
+            assert np.linalg.norm(f_ref) > 1e-3, f_ref
+            assert np.linalg.norm(t_ref) > 1e-6, t_ref
+            np.testing.assert_allclose(dF[b, :3], f_ref, rtol=0,
+                                       atol=1e-4 * np.linalg.norm(f_ref))
+            np.testing.assert_allclose(dT[b, :3], t_ref, rtol=0,
+                                       atol=1e-4 * np.linalg.norm(t_ref) + 1e-7)
+        assert np.all(dF[2:] == 0.0) and np.all(rF[2:] == 0.0)
