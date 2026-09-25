@@ -2940,7 +2940,10 @@ as `dv × grad_i W`.
 
 Output: `vorticity_out[i] = float4(omega_x, omega_y, omega_z, |omega|)`
 
-The magnitude `|omega|` is stored in `.w` for use by the Step2 confinement force.
+The magnitude `|omega|` is stored in `.w`. WCSPH `K_Step1` also writes it into
+the `.y` lane of the packed `sorted_pr2_omega` carrier (section 20.3b), which is
+where `K_Step2` reads `|omega_j|` for FLUID neighbours. Particle i's own
+`vort_i` still comes from the float4.
 
 **Source**: `step1.cu` (K_Step1, FLUID branch),
 `pbf_solver.cu` (K_PBF_ComputeLambda), `dfsph_solver.cu`
@@ -3260,6 +3263,29 @@ it, and tests that set density by hand use it to build `pressure_in`.
 
 **Source**: `step1.cu:K_Step1` (`pressure_out`), `step2.cu:K_Step2`,
 `simulation.py:_run_wcsph_body`
+
+### 20.3b Packed neighbour carrier (p / rho^2, |omega|)
+
+`K_Step1` writes `sorted_pr2_omega[i] = float2(p_i / rho_i^2, |omega_i|)`
+right after pressure and vorticity (rigid particles write `(0, 0)`).
+`K_Step2` reads this 8 B pair for each FLUID neighbour j instead of
+`pressure_in[j]` (4 B) and `vorticity_in[j]` (16 B, of which only `.w` was used),
+and forms the pressure term as `pr2_i + pr2_j` with no per-pair divide.
+`p / (rho * rho)` is the same expression K_Step2 used before, so the forces are
+unchanged to float rounding (`test_step2_packed_carrier.py`, rtol 1e-5).
+
+GRANULAR and GAS neighbours keep the `pressure_in[j]` read: GRANULAR needs
+`p_j` for the mu(I) pressure floor, and `K_SpawnGas` rewrites the pressure of
+new GAS slots between Step1 and Step2 without touching the carrier. The carrier
+is valid only between Step1 and Step2 of one substep and is not reordered.
+Passing no carrier (`pr2_omega_in=None`) makes K_Step2 use `pressure_in` and
+`vorticity_in` for every neighbour, which tests that build inputs by hand rely on.
+
+At 1M particles (Dam Break, RTX 5070 Ti, shared GPU) K_Step2 median went from
+about 5.1-5.2 ms to 4.6-4.8 ms in uncontended runs (bench_substep.py).
+
+**Source**: `step1.cu:K_Step1` (`pr2_omega_out`), `step2.cu:K_Step2`
+(`pr2_omega_in`), `world.py` (`sorted_pr2_omega`), `simulation.py:_run_wcsph_body`
 
 ### 20.3a No neighbour-list path
 
