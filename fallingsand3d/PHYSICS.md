@@ -868,7 +868,9 @@ dTdt = [1 / (rho_i * cp_i)] * [45/(pi*h^6)] * SUM_j k_ij * (m_j/rho_j) * (T_j - 
 ```
 
 Where `kappa = c_materials[mat_id].thermal_conductivity`,
-`cp_i = c_materials[mat_id].heat_capacity` and `rho_i` is the computed SPH density.
+`cp_i = c_materials[mat_id].heat_capacity` and `rho_i` is the density the solver
+stores for particle i: the computed SPH density, or `max(rest_density, 1)` for a
+STATIC wall particle (11.1).
 
 `k_ij` and `heat_boost` are the same seen from i and from j, so the energy rate
 `m_i cp_i dTdt_i` of a pair is equal and opposite: heat lost by i is gained by j and
@@ -1698,7 +1700,7 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
 - **Rest density floor.** DEAD has `rest_density = 0`. DFSPH
   (`K_DFSPH_DensitySolverUpdate`) and PBF (`K_PBF_ComputeLambda`,
   `K_PBF_ComputeDelta`) use `rho0 = max(rest_density, 1)`, so a DEAD slot that
-  still has FLUID behavior cannot divide by zero. The density both solvers
+  still has FLUID behavior cannot divide by zero. The density all three solvers
   write for STATIC particles is floored at 1 too, so `V_j = m_j / rho_j` stays
   finite. The Akinci rigid pressure term floors `rho0_i` at `RHO_EPSILON`
   (0.01), which leaves GAS (0.2 to 0.6) unchanged.
@@ -1826,6 +1828,36 @@ All three solvers now support the complete material behavior set:
 | Drucker-Prager friction | Step2 (force-space) | Finalize (vel-space) | NonPressure (force-space) |
 | Sleep/wake system | Integrate | Finalize | Finalize |
 | Temperature/reactions | Integrate | Finalize | Finalize |
+
+**STATIC wall volume convention** (bd-r5-review-n28.116). A regular STATIC
+particle (STONE, METAL, WOOD, ...; not MAT_RIGID) has mass 0.02 whatever its
+material, and every solver stores `max(rest_density, 1)` as its density:
+K_Step1 and K_Step1_BuildNL (WCSPH), K_PBF_ComputeLambda and
+K_DFSPH_ComputeDensityAlpha. So:
+
+- Heat, normal, vorticity and dye sums weight a wall neighbour by
+  `m_j / rest_density_j` in all three solvers. The wall's own dTdt divides by the
+  same `rest_density * cp`, which keeps the pair term conservative (9).
+- WCSPH forces do not read the wall density: step2 mirrors the fluid's own
+  `p_i` (3.2) and the boundary drag uses `m_j`.
+- DFSPH solver terms (alpha `grad_sum`, `div_v` in K_DFSPH_ComputeKappaV,
+  `drho` in K_DFSPH_DensitySolverUpdate, XSPH in K_DFSPH_Finalize) use the Akinci
+  boundary volume with the fluid's own rest density, `V_j = m_j / rho0_i`
+  (`dfsph_vol_rho`). A STONE, METAL or WOOD floor then gives WATER the same
+  alpha to 3e-7 (`test_static_wall_volume.py`). With `m_j / rest_density_j` the
+  boundary gradient was 2.6x too weak against STONE, 7.8x against METAL and
+  1.7x too strong against WOOD, and alpha of the bottom WATER layer differed by
+  up to 5% between STONE and WOOD. MAT_RIGID keeps density `RIGID_PSI_RHO0`, so
+  its volume stays `V_b` (22).
+
+A hot two-layer STONE wall (1000 K) next to a 10 x 10 x 10 WATER block raises the
+mean water temperature by 0.00247 K (WCSPH), 0.00233 K (PBF) and 0.00248 K
+(DFSPH) in 5 substeps of 1 ms, and 0.0245, 0.0183 and 0.0242 K in 50. Before this
+convention WCSPH stored the kernel sum (1300 to 2540 for that wall) and heated
+the water 2.8x faster. A one-layer STONE wall next to LAVA heats 17.7 K (WCSPH),
+15.9 K (PBF) and 17.3 K (DFSPH) in 5 substeps (`test_static_heat_cross_solver.py`).
+PBF runs about 10% low at the start and drifts lower with time; that is a PBF
+effect, not the wall convention.
 
 **Key solver-specific differences:**
 - PBF vorticity epsilon is 50x lower (0.001 vs 0.05) to prevent energy injection at fixed dt
@@ -2597,11 +2629,9 @@ Velocity updated: `v*_i = v_i + dt * a_i`
   (`eval_gas_repulsion.py --free`).
 - **STATIC**: Skips all solver kernels, contributes to neighbor density sums.
   `K_DFSPH_ComputeDensityAlpha` writes `max(rest_density, 1)` as its density
-  (for alpha and the boundary volume `m_j / rho_j`), but its heat rate divides
-  by the SPH-summed `rho * cp`, as WCSPH and PBF do (9.1). A one-layer STONE wall
-  (rest_density 6500, kernel sum about 2600) next to LAVA heats 42.9 K in 5
-  substeps of 1 ms under DFSPH, against 43.8 K under WCSPH and 39.9 K under PBF
-  (`test_static_heat_cross_solver.py`, bd-r5-review-n28.103).
+  and divides its heat rate by that value, as WCSPH and PBF do (11.1). The
+  solver terms (alpha `grad_sum`, `div_v`, `drho`, XSPH) give a regular STATIC
+  neighbour the Akinci volume `m_j / rho0_i` instead (`dfsph_vol_rho`).
 
 ### 13.7 DFSPH Sleep System
 
