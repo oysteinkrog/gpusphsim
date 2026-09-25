@@ -663,12 +663,38 @@ class Simulation:
             # c_granular, so re-upload them from the new profile.
             step2.upload_granular_params(self._wcsph_granular_params())
 
+        # Drop the old solver's stage timings so the panel never shows them
+        # as live numbers for the new solver.
+        self._clear_timings()
+
         # Invalidate CUDA graphs and reset grid reuse
         self._invalidate_graphs()
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
         # Reset spawn damping for new solver
         self._spawn_substep = 0
+
+    def _clear_timings(self) -> None:
+        """Forget all per-stage timings, including the unread events."""
+        self._last_timings = {}
+        self._timing_ema = {}
+        self._pending_timing_events = []
+        self._pending_timing_labels = []
+
+    def timing_stages(self) -> tuple:
+        """Stage labels _sim_step_timed records for the active solver, in order.
+
+        The solver body stages followed by the epilogue stages.  Optional
+        stages ('blast', 'ist', 'rigid') only get a timing when active.
+        """
+        solver = self._profile.solver_type
+        if solver == SolverType.PBF:
+            body = PBF_STAGES
+        elif solver == SolverType.DFSPH:
+            body = DFSPH_STAGES
+        else:
+            body = WCSPH_STAGES
+        return body + EPILOGUE_STAGES
 
     def _wcsph_granular_params(self):
         """GranularParams for step2 built from the active WCSPH profile."""

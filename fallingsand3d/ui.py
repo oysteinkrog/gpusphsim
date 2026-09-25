@@ -321,6 +321,16 @@ def _raycast_sdf_objects(origin, direction, sdf_manager):
     return best_id, best_t
 
 
+def timing_rows(sim) -> list:
+    """Kernel Timings panel rows: the active solver's stages that have a timing.
+
+    Follows sim.timing_stages() (the labels _sim_step_timed records, foam
+    included), so the total is the sum of every recorded stage.
+    """
+    ema = sim._timing_ema
+    return [name for name in sim.timing_stages() if name in ema]
+
+
 class UI:
     """ImGui user interface manager.
 
@@ -1212,12 +1222,10 @@ class UI:
                 imgui.WindowFlags_.always_auto_resize,
             )[0]:
                 total = 0.0
-                order = [
-                    "hash", "sort", "reorder", "step1",
-                    "reactions", "spawn", "step2", "integrate", "wake",
-                ]
-                for name in order:
-                    ms = sim._timing_ema.get(name, 0.0)
+                # Rows are the active solver's recorded stages; stages with no
+                # timing yet (inactive blast/ist/rigid) are left out.
+                for name in timing_rows(sim):
+                    ms = sim._timing_ema[name]
                     total += ms
                     bar_frac = min(ms / 2.0, 1.0)  # 2ms = full bar
                     imgui.text(f"{name:>9s}")
