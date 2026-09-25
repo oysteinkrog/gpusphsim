@@ -3507,6 +3507,58 @@ Parameters per SDF object: restitution (e), friction (mu).
 
 **Source**: `sph_shared.cuh:sdf_object_boundary()`, `integrate.cu:K_Integrate`
 
+### 22.2.1 Positional Collision Against Rigid Bodies
+
+The Akinci force from a body's single boundary layer (one 2 cm spacing)
+cannot stop a body that moves more than about one spacing per substep. A
+12 cm box driven down into still water at 3 m/s left up to 444 (WCSPH) and
+36 (PBF) water particles inside the hollow box. So every non-STATIC particle
+also collides with each rigid body's own SDF (bd-r5-review-n28.123).
+
+`rigid_body_boundary` runs in `K_Integrate`, `K_PBF_Finalize` and
+`K_DFSPH_Finalize`, after the SDF object loop. For each body b:
+
+```
+(c, q) = pose of b advanced by one dt with its lin_vel v_b and ang_vel w_b
+         (rigid_integrate_pose, the same update K_IntegrateRigidBodies uses)
+r      = pos - c
+skip b if |r| >= R_bound + BOUNDARY_MARGIN      (R_bound = |half_extents| or radius)
+d, n   = sdf_box(q^-1 r, half_extents), q * sdf_box_normal(...)    (box)
+         sdf_sphere(r, radius), r / |r|                             (sphere)
+if d < BOUNDARY_MARGIN:
+    pos += (BOUNDARY_MARGIN - d) * n
+    v_s   = v_b + w_b x (pos - c)
+    v_rel = vel - v_s,  v_n = dot(v_rel, n)
+    if v_n < 0:
+        vel -= (1 + e_b) * v_n * n
+        v_t  = v_rel - v_n * n
+        vel -= min(mu_b * |v_n| / |v_t|, 1) * v_t
+```
+
+e_b is the body's restitution (lin_vel.w) and mu_b its friction (ang_vel.w).
+
+- **End-of-substep pose.** The fluid kernels run before
+  `K_IntegrateRigidBodies`. Testing the current pose would leave a particle
+  in front of a moving face up to v_b * dt inside once the body moves. For a
+  kinematic body the advanced pose is exactly the pose the body gets; for a
+  dynamic body it misses only this substep's velocity change.
+- **No reaction on the body.** The push is a positional safety net. The
+  fluid force on the body is still the Akinci pressure coupling (22.5).
+- **Sleeping particles.** `K_Integrate`'s geometry wake test also wakes a
+  sleeping particle that is strictly inside a body (d < 0) at that pose.
+- **Body array access.** `K_PBF_Finalize` and `K_DFSPH_Finalize` use their
+  `d_rigid_bodies` argument (NULL when there are no bodies). `K_Integrate`
+  reads the `c_rigid_bodies` constant, which `RigidBodyManager.upload()`
+  writes with `c_num_rigid_bodies`. A new `RigidBodyManager` writes a zero
+  count and its own array address to the integrate module, so a count left by
+  an earlier manager never points `K_Integrate` at a freed array.
+- **Cost.** One bounding-sphere test per body per particle, and the SDF only
+  near a body. WCSPH at 1M particles with one body: substep median 13.26 ms
+  with the push against 13.28 ms without (inside noise on a shared GPU).
+
+**Source**: `sph_shared.cuh:rigid_body_boundary()`, `rigid_body_sdf()`,
+`rigid_body_penetrates()`; test `test_rigid_fluid_sdf_push.py`
+
 ### 22.3 Akinci Boundary Particle Sampling
 
 Dynamic rigid bodies use boundary particles for hydrodynamic coupling (Akinci et al. 2012).
