@@ -21,6 +21,16 @@
 
 #include "sph_shared.cuh"
 
+/* Volume divisor for neighbour j in the DFSPH solver terms (alpha, div_v,
+ * drho, XSPH). A regular STATIC wall particle takes the Akinci boundary
+ * volume with the fluid's own rest density, V_j = m_j / rho0_i, so a STONE,
+ * METAL or WOOD wall pushes the same (bd-r5-review-n28.116). Its stored
+ * density is its rest_density, which would make V_j depend on the wall
+ * material. MAT_RIGID keeps density RIGID_PSI_RHO0, so m_j / rho_j = V_b. */
+__device__ __forceinline__ float dfsph_vol_rho(float rho_j, uint pi_j, float rho0_i) {
+    return (GET_BEHAVIOR(pi_j) == STATIC && GET_MATERIAL_ID(pi_j) != MAT_RIGID) ? rho0_i : rho_j;
+}
+
 /* Add F_on_body and its torque about the body centre to the accumulators of
  * the body that owns boundary particle j. */
 __device__ inline void dfsph_rigid_reaction(
@@ -109,6 +119,8 @@ void K_DFSPH_ComputeDensityAlpha(
 
     // Rigid neighbour density scale: psi_b = rho0_i * V_b (bd-r5-review-n28.77)
     float rigid_dens_scale = __fdiv_rn(c_materials[mat_id_i].rest_density, RIGID_PSI_RHO0);
+    // Akinci wall volume divisor (dfsph_vol_rho); floor at 1 for DEAD
+    float rho0_vol_i = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
 
     // MAT_RIGID boundary particles: early-return, no density/alpha needed
     if (mat_id_i == MAT_RIGID) {
@@ -276,9 +288,10 @@ void K_DFSPH_ComputeDensityAlpha(
                         // (SPlisHSPlasH computeDFSPHFactor, bd-r5-review-n28.108).
                         float3 gW = grad_spiky(r, rlen, h);
                         float w_j = m_j / fmaxf(rho_j, RHO_EPSILON);
-                        grad_sum.x += w_j * gW.x;
-                        grad_sum.y += w_j * gW.y;
-                        grad_sum.z += w_j * gW.z;
+                        float w_a = m_j / fmaxf(dfsph_vol_rho(rho_j, pi_j, rho0_vol_i), RHO_EPSILON);
+                        grad_sum.x += w_a * gW.x;
+                        grad_sum.y += w_a * gW.y;
+                        grad_sum.z += w_a * gW.z;
                         if (behavior_j != STATIC)
                             grad_norm_sum += w_j * w_j * (gW.x * gW.x + gW.y * gW.y + gW.z * gW.z);
 
@@ -349,12 +362,12 @@ void K_DFSPH_ComputeDensityAlpha(
         alpha_out[i] = 0.0f;
         shear_rate_out[i] = 0.0f;
         // Still write heat/exposure outputs (computed above). Divide by the
-        // SPH-summed rho, as K_Step1 and K_PBF_ComputeLambda do, not by
-        // rest_density: STONE/METAL rest_density is 2.6x/7.8x the kernel sum,
-        // so a rest_density divisor made walls heat that much slower under
-        // DFSPH (bd-r5-review-n28.103).
+        // stored density (rest_density), as K_Step1 and K_PBF_ComputeLambda
+        // do: neighbours weight this wall by m / density_out, and the same
+        // value in the divisor keeps the heat pair term conservative
+        // (bd-r5-review-n28.116).
         float cp_i_s = c_materials[mat_id_i].heat_capacity;
-        dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i_s, RHO_EPSILON);
+        dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(density_out[i] * cp_i_s, RHO_EPSILON);
         float inv_sum_W_s = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
         exposure_heat_out[i] = sum_exposure_heat * inv_sum_W_s;
         exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W_s;
@@ -844,6 +857,8 @@ void K_DFSPH_ComputeKappaV(
     float dt = c_sim.dt;
 
     float div_v = 0.0f;
+    // Akinci wall volume divisor (dfsph_vol_rho); floor at 1 for DEAD
+    float rho0_vol_i = fmaxf(c_materials[GET_MATERIAL_ID(pi_i)].rest_density, 1.0f);
 
     int3 cell_i = get_cell(pos_i);
     for (int dz = -1; dz <= 1; dz++) {
@@ -882,7 +897,7 @@ void K_DFSPH_ComputeKappaV(
                     float dv_dot_gW = (vel_i.x - vel4_j.x) * gW.x
                                     + (vel_i.y - vel4_j.y) * gW.y
                                     + (vel_i.z - vel4_j.z) * gW.z;
-                    div_v += (m_j / fmaxf(rho_j, RHO_EPSILON)) * dv_dot_gW;
+                    div_v += (m_j / fmaxf(dfsph_vol_rho(rho_j, pi_j, rho0_vol_i), RHO_EPSILON)) * dv_dot_gW;
                 }
             }
         }
@@ -1257,7 +1272,7 @@ void K_DFSPH_DensitySolverUpdate(
                     float dv_dot_gW = (vt_i.x - vt_j.x) * gW.x
                                     + (vt_i.y - vt_j.y) * gW.y
                                     + (vt_i.z - vt_j.z) * gW.z;
-                    drho += (m_j / fmaxf(rho_j, RHO_EPSILON)) * dv_dot_gW;
+                    drho += (m_j / fmaxf(dfsph_vol_rho(rho_j, pi_j, rho0), RHO_EPSILON)) * dv_dot_gW;
                 }
             }
         }
@@ -1464,6 +1479,8 @@ void K_DFSPH_Finalize(
         float h = c_sim.smoothing_length;
         float h_sq = c_sim.smoothing_length_sq;
         float rho_i = sorted_density[i];
+        // Akinci wall volume divisor (dfsph_vol_rho); floor at 1 for DEAD
+        float rho0_vol_i = fmaxf(c_materials[mat_id].rest_density, 1.0f);
         float3 xsph = make_float3(0.0f, 0.0f, 0.0f);
 
         int3 cell_i = get_cell(pos);
@@ -1497,7 +1514,7 @@ void K_DFSPH_Finalize(
                         }
 
                         float4 vj4 = __ldg(&sorted_velocity[j]);
-                        float rho_j = __ldg(&sorted_density[j]);
+                        float rho_j = dfsph_vol_rho(__ldg(&sorted_density[j]), pi_j, rho0_vol_i);
 
                         float w = W_poly6(r_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);

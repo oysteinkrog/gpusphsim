@@ -344,7 +344,14 @@ void K_Step1(
     // is always above either floor.
     float density = c_precalc.poly6_coeff * sum_density;
     float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
-    density_out[index_i] = fmaxf(density, rho_floor);
+    // STATIC walls store rest_density, as PBF and DFSPH do, so every solver
+    // gives a wall neighbour the same V_j = m_j / rho_j in heat, normal and
+    // dye sums (bd-r5-review-n28.116). Floor at 1: DEAD has rest_density 0.
+    // The STATIC dTdt divisor below reads the same value, so the heat pair
+    // term stays conservative. Step2 mirrors p_i, so wall forces do not change.
+    density_out[index_i] = (behavior_i == STATIC)
+        ? fmaxf(c_materials[mat_id_i].rest_density, 1.0f)
+        : fmaxf(density, rho_floor);
 
     // --- PostCalc: pressure (PERF-007) ---
     pressure_out[index_i] = compute_pressure(density_out[index_i], behavior_i, mat_id_i);
@@ -700,7 +707,10 @@ void K_Step1_BuildNL(
     // PostCalc (identical to K_Step1)
     float density = c_precalc.poly6_coeff * sum_density;
     float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
-    density_out[index_i] = fmaxf(density, rho_floor);
+    // STATIC walls store rest_density (bd-r5-review-n28.116, see K_Step1)
+    density_out[index_i] = (behavior_i == STATIC)
+        ? fmaxf(c_materials[mat_id_i].rest_density, 1.0f)
+        : fmaxf(density, rho_floor);
     pressure_out[index_i] = compute_pressure(density_out[index_i], behavior_i, mat_id_i);
 
     float cp_i = c_materials[mat_id_i].heat_capacity;

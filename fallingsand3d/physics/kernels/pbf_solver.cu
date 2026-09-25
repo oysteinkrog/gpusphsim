@@ -477,7 +477,11 @@ void K_PBF_ComputeLambda(
     // Heat diffusion + exposure + dye output
     if (do_heat) {
         float cp_i = c_materials[mat_id_i].heat_capacity;
-        dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho * cp_i, RHO_EPSILON);
+        // STATIC divides by its stored density (rest_density, written below):
+        // neighbours weight the wall by m / density_out, and the same value
+        // here keeps the heat pair term conservative (bd-r5-review-n28.116).
+        float rho_heat = (behavior_i == STATIC) ? fmaxf(c_materials[mat_id_i].rest_density, 1.0f) : rho;
+        dTdt_out[i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_heat * cp_i, RHO_EPSILON);
         // Exposure: support fraction, sum(rate*W) / sum(W) (same as K_Step1)
         float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
         exposure_heat_out[i] = sum_exposure_heat * inv_sum_W;
