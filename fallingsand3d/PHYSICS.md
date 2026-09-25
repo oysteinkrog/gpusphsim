@@ -1340,6 +1340,29 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
    100% of substeps, was 1.2%). DFSPH gap 1.49 dx to 0.77 dx, jitter unchanged.
    No leaks in either.
 
+   Single neighbour scan in PBF and DFSPH Finalize (bd-r5-review-n28.164).
+   The push shares the XSPH loop's 27-cell scan through the `StaticPush`
+   helpers (`sph_shared.cuh`) instead of running a second one. The result
+   equals the separate scan to float rounding in every case:
+   - PBF FLUID and GRANULAR: the push is summed in the XSPH loop.
+     `final_pos == pred`, so the distances are the ones the scan would use.
+   - DFSPH: the push is measured at `pos_new = pos + dt * v_advect`, which
+     needs the XSPH sum. The loop tests walls against
+     `pos_adv = pos + dt * v` instead. GRANULAR has no XSPH, so
+     `pos_adv == pos_new` and the loop sums the push. FLUID only flags a
+     wall particle within `0.5 h + 0.1 h` of `pos_adv`. With no flag and
+     `|pos_new - pos_adv| < 0.1 h` there is no push; otherwise the particle
+     runs the separate scan at `pos_new`. The loop path needs
+     `dt * |v| < 0.4 h` so the 27 cells around `pos` (cell size h) hold
+     every wall particle in reach; faster particles run the separate scan.
+   - GAS skips the XSPH loop and always runs the separate scan.
+
+   Measured with `bench_substep.py` at 500K (dam break, no STONE, shared
+   GPU, 2 interleaved runs each): Finalize median PBF 2.04 to 1.74 ms (-15%),
+   DFSPH 1.26 to 0.96 ms (-24%). `test_static_push_fold.py` replays every
+   Finalize of a water, sand and smoke drop on STONE with the fold switched
+   off: max difference 6e-8 m, 8e-7 m/s.
+
    Known gap: the integrate module never receives `c_grid` (simulation.py
    uploads only `c_sim` and `c_materials` to it), so in WCSPH `calcGridCell`
    and `spatialHash` see zeros and this push scans one wrong bucket. It has
