@@ -84,10 +84,9 @@ __device__ inline void pbf_box_boundary(
     pbf_box_wall(pos.z, vel.z, vel.x, vel.y, wmax.z, +1.0f, restitution, mu_wall);
 }
 
-/* Add F_on_body and its torque about the body centre to the register sum
- * of the body that owns boundary particle j (see RigidAccum). */
+/* Add F_on_body and its torque about the body centre to the accumulators of
+ * the body that owns boundary particle j. */
 __device__ inline void pbf_rigid_reaction(
-    RigidAccum& acc,
     const RigidBody* __restrict__ d_rigid_bodies,
     float* __restrict__ d_rigid_forces,
     float* __restrict__ d_rigid_torques,
@@ -101,7 +100,8 @@ __device__ inline void pbf_rigid_reaction(
         r_b.z * F_on_body.x - r_b.x * F_on_body.z,
         r_b.x * F_on_body.y - r_b.y * F_on_body.x
     );
-    rigid_accum_add(acc, d_rigid_forces, d_rigid_torques, body_id, F_on_body, tau);
+    atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
+    atomic_accumulate3(d_rigid_torques, tau, body_id);
 }
 
 /* Move a predicted position to BOUNDARY_MARGIN outside every SDF object it
@@ -609,8 +609,6 @@ void K_PBF_ComputeDelta(
     float lambda_i = lambda_in[i];
 
     float3 delta = make_float3(0.0f, 0.0f, 0.0f);
-    // Rigid body reaction, summed in registers and flushed after the loop.
-    RigidAccum rb_acc = rigid_accum_init();
 
     int3 cell_i = get_cell(pos_i);
 
@@ -704,7 +702,7 @@ void K_PBF_ComputeDelta(
                     if (bj_delta == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = -rigid_scale * coeff;
-                        pbf_rigid_reaction(rb_acc, d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                        pbf_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
                                            pi_j, pos4_j,
                                            make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }
@@ -712,8 +710,6 @@ void K_PBF_ComputeDelta(
             }
         }
     }
-
-    rigid_accum_flush(rb_acc, d_rigid_forces, d_rigid_torques);
 
     // Clamp delta magnitude to fraction of smoothing length to prevent
     // grid invalidation during iterative solve (grid isn't re-sorted).
@@ -998,8 +994,6 @@ void K_PBF_Finalize(
         // MAT_RIGID mass is RIGID_PSI_RHO0 * V_b. Scaled to rho0_i as in the
         // density sum, so m_j / rho_i is the Akinci volume weight V_b*rho0_i/rho_i.
         float rigid_vol_scale = c_materials[mat_id].rest_density / RIGID_PSI_RHO0;
-        // Drag reaction, summed in registers and flushed after the loop.
-        RigidAccum rb_acc = rigid_accum_init();
 
         int3 cell_i = get_cell(pred);
         for (int dz = -1; dz <= 1; dz++) {
@@ -1075,7 +1069,7 @@ void K_PBF_Finalize(
                             xsph.x += dvf.x;
                             xsph.y += dvf.y;
                             xsph.z += dvf.z;
-                            pbf_rigid_reaction(rb_acc, d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                            pbf_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
                                                pi_j, pred4_j,
                                                make_float3(drag_scale * dvf.x,
                                                            drag_scale * dvf.y,
@@ -1099,8 +1093,6 @@ void K_PBF_Finalize(
                 }
             }
         }
-
-        rigid_accum_flush(rb_acc, d_rigid_forces, d_rigid_torques);
 
         if (do_xsph) {
             vel_new.x += c_xsph * xsph.x;

@@ -188,9 +188,10 @@ void K_Step2(
     int    rb_pend = -1;
     float3 rb_fv   = make_float3(0.0f, 0.0f, 0.0f);
     float3 rb_tv   = make_float3(0.0f, 0.0f, 0.0f);
-    // Pressure and explicit viscous reaction on the rigid bodies, summed in
-    // registers and flushed on body change and after the loop.
-    RigidAccum rb_acc = rigid_accum_init();
+    // Sum of the Akinci pressure terms F_on_fluid from that first body. Each
+    // term is radial (along r = x_i - x_j), so the body's torque from it is
+    // (x_i - COM) x F exactly and needs no separate sum (bd-r5-review-n28.182).
+    float3 rb_fp   = make_float3(0.0f, 0.0f, 0.0f);
 
     float h    = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
@@ -409,10 +410,23 @@ void K_Step2(
                                 F_visc_now = F_visc;
                             }
 
-                            // Two-way coupling: accumulate reaction FORCE on rigid body.
+                            // Two-way coupling: reaction FORCE on the rigid body.
                             // step2 outputs acceleration (force/mass) for fluid particles,
                             // but K_IntegrateRigidBodies expects actual force (F = m * a).
                             // Must multiply by fluid particle mass to convert accel -> force.
+                            // The first body's pressure reaction is summed in rb_fp and
+                            // emitted after the loop with its viscous reaction, six
+                            // atomics per particle instead of six per pair.
+                            // STEP2_RIGID_PER_PAIR_REFERENCE keeps the per-pair
+                            // atomics; test_rigid_warp.py compiles it as the reference.
+#ifndef STEP2_RIGID_PER_PAIR_REFERENCE
+                            if (rb_pend == body_id) {
+                                rb_fp.x += F_on_fluid.x;
+                                rb_fp.y += F_on_fluid.y;
+                                rb_fp.z += F_on_fluid.z;
+                                continue;
+                            }
+#endif
                             float pp = c_precalc.pressure_precalc;
                             float fs = is_granular_i ? 1.0f : c_granular.force_scale;
                             float3 a_on_fluid = make_float3(
@@ -428,8 +442,8 @@ void K_Step2(
                                 r_b.z * F_on_body.x - r_b.x * F_on_body.z,
                                 r_b.x * F_on_body.y - r_b.y * F_on_body.x
                             );
-                            rigid_accum_add(rb_acc, d_rigid_forces, d_rigid_torques,
-                                            body_id, F_on_body, tau);
+                            atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
+                            atomic_accumulate3(d_rigid_torques, tau, body_id);
                         } else {
                             // --- Regular STATIC boundary: Akinci pressure mirroring + friction ---
                             float press_sym_b = 2.0f * pr2_i;
@@ -598,13 +612,23 @@ void K_Step2(
     f_viscosity.y = f_viscosity.y * visc_s + f_visc_explicit.y;
     f_viscosity.z = f_viscosity.z * visc_s + f_visc_explicit.z;
     if (rb_pend >= 0) {
-        // Deferred viscous reaction on the first rigid body, same scale.
+        // Deferred reaction on the first rigid body: the viscous part with the
+        // same implicit scale as the fluid side, plus the pressure part
+        // -m_i * fs_i * pressure_precalc * rb_fp. Its torque is
+        // (x_i - COM) x F_p, since every summed term is parallel to x_i - x_j.
         float k_rb = -m_i * fs_i * visc_s;
-        rigid_accum_add(rb_acc, d_rigid_forces, d_rigid_torques, rb_pend,
-            make_float3(k_rb * rb_fv.x, k_rb * rb_fv.y, k_rb * rb_fv.z),
-            make_float3(k_rb * rb_tv.x, k_rb * rb_tv.y, k_rb * rb_tv.z));
+        float k_p  = -m_i * fs_i * c_precalc.pressure_precalc;
+        float3 F_p = make_float3(k_p * rb_fp.x, k_p * rb_fp.y, k_p * rb_fp.z);
+        float4 com = __ldg(&d_rigid_bodies[rb_pend].position);
+        float3 d_i = make_float3(pos_i.x - com.x, pos_i.y - com.y, pos_i.z - com.z);
+        atomic_accumulate3(d_rigid_forces,
+            make_float3(k_rb * rb_fv.x + F_p.x, k_rb * rb_fv.y + F_p.y,
+                        k_rb * rb_fv.z + F_p.z), rb_pend);
+        atomic_accumulate3(d_rigid_torques,
+            make_float3(k_rb * rb_tv.x + (d_i.y * F_p.z - d_i.z * F_p.y),
+                        k_rb * rb_tv.y + (d_i.z * F_p.x - d_i.x * F_p.z),
+                        k_rb * rb_tv.z + (d_i.x * F_p.y - d_i.y * F_p.x)), rb_pend);
     }
-    rigid_accum_flush(rb_acc, d_rigid_forces, d_rigid_torques);
 
     // --- PostCalc: apply precalc coefficients and write output ---
     float3 total_force;

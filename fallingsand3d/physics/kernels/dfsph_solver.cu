@@ -31,10 +31,9 @@ __device__ __forceinline__ float dfsph_vol_rho(float rho_j, uint pi_j, float rho
     return (GET_BEHAVIOR(pi_j) == STATIC && GET_MATERIAL_ID(pi_j) != MAT_RIGID) ? rho0_i : rho_j;
 }
 
-/* Add F_on_body and its torque about the body centre to the register sum
- * of the body that owns boundary particle j (see RigidAccum). */
+/* Add F_on_body and its torque about the body centre to the accumulators of
+ * the body that owns boundary particle j. */
 __device__ inline void dfsph_rigid_reaction(
-    RigidAccum& acc,
     const RigidBody* __restrict__ d_rigid_bodies,
     float* __restrict__ d_rigid_forces,
     float* __restrict__ d_rigid_torques,
@@ -48,7 +47,8 @@ __device__ inline void dfsph_rigid_reaction(
         r_b.z * F_on_body.x - r_b.x * F_on_body.z,
         r_b.x * F_on_body.y - r_b.y * F_on_body.x
     );
-    rigid_accum_add(acc, d_rigid_forces, d_rigid_torques, body_id, F_on_body, tau);
+    atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
+    atomic_accumulate3(d_rigid_torques, tau, body_id);
 }
 
 /* ======================================================================
@@ -511,9 +511,6 @@ void K_DFSPH_NonPressureForces(
         do_vort_eta = (omega_mag_i > 1e-6f);
     }
 
-    // Rigid body reaction, summed in registers and flushed after the loop.
-    RigidAccum rb_acc = rigid_accum_init();
-
     // Compute viscosity + vorticity eta via neighbor loop
     int3 cell_i = get_cell(pos_i);
     for (int dz = -1; dz <= 1; dz++) {
@@ -611,8 +608,8 @@ void K_DFSPH_NonPressureForces(
                                 r_b.z * F_on_body.x - r_b.x * F_on_body.z,
                                 r_b.x * F_on_body.y - r_b.y * F_on_body.x
                             );
-                            rigid_accum_add(rb_acc, d_rigid_forces, d_rigid_torques,
-                                            body_id, F_on_body, tau);
+                            atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
+                            atomic_accumulate3(d_rigid_torques, tau, body_id);
                         } else {
                             // Regular STATIC: friction drag toward zero
                             float visc_factor = mu_b * m_j * lap_v / fmaxf(rho_i, RHO_EPSILON);
@@ -699,8 +696,6 @@ void K_DFSPH_NonPressureForces(
         a_visc.y + c_sim.gravity.y,
         a_visc.z + c_sim.gravity.z
     );
-
-    rigid_accum_flush(rb_acc, d_rigid_forces, d_rigid_torques);
 
     // GAS pressure + buoyancy + drag. The pressure term carries force_scale
     // (0.02) so it has the same size as the WCSPH step2 gas pressure.
@@ -940,7 +935,6 @@ void K_DFSPH_CorrectVelocityDiv(
     // body gets the impulse +m_i * dt * V_j * kv_i * gW, a force
     // m_i * V_j * kv_i * gW over the substep (kv_j = 0 for STATIC).
     float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
-    RigidAccum rb_acc = rigid_accum_init();
 
     float4 pos4_i = __ldg(&position[i]);
     float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
@@ -998,7 +992,7 @@ void K_DFSPH_CorrectVelocityDiv(
                     if (bj == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = m_i_rigid * coeff;
-                        dfsph_rigid_reaction(rb_acc, d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
                                              pi_j, pos4_j,
                                              make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }
@@ -1006,8 +1000,6 @@ void K_DFSPH_CorrectVelocityDiv(
             }
         }
     }
-
-    rigid_accum_flush(rb_acc, d_rigid_forces, d_rigid_torques);
 
     // Apply velocity correction: delta_v = -dt * dv
     // Clamp |delta_v| to h/dt (one cell per step) to prevent grid-skipping
@@ -1069,7 +1061,6 @@ void K_DFSPH_ComputePressureAccel(
     // adds -V_j * p_i * gW to a_i (p_j = 0 for STATIC), so the body gets
     // +m_i * V_j * p_i * gW.
     float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
-    RigidAccum rb_acc = rigid_accum_init();
 
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
@@ -1121,7 +1112,7 @@ void K_DFSPH_ComputePressureAccel(
                     if (bj == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = -m_i_rigid * coeff;
-                        dfsph_rigid_reaction(rb_acc, d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
                                              pi_j, pos4_j,
                                              make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }
@@ -1130,7 +1121,6 @@ void K_DFSPH_ComputePressureAccel(
         }
     }
 
-    rigid_accum_flush(rb_acc, d_rigid_forces, d_rigid_torques);
     accel_out[i] = make_float4(a.x, a.y, a.z, 0.0f);
 }
 
