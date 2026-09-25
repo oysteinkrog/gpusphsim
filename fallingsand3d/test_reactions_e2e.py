@@ -19,7 +19,9 @@ pytestmark = pytest.mark.gpu
 MAX_PARTICLES = 30_000  # room for the 15 000 parked DEAD reserve
 SIM_SECONDS = 1.0
 FIRE_LIFETIME = 0.5
-SPAWN_LIFETIME = {SMOKE: 3.0, STEAM: 5.0}  # reactions.cu fire-to-smoke, spawn.cu
+# Lifetime a gas gets when it appears: FIRE-to-SMOKE in reactions.cu,
+# SPAWN_LIFETIME for boiled steam in spawn.cu.
+SPAWN_LIFETIME = {SMOKE: 3.0, STEAM: 12.0}
 
 
 def _spawn_scene(w):
@@ -60,7 +62,8 @@ def test_fire_steam_acid_through_sim_step(solver):
     assert np.count_nonzero(mat == STEAM) > 0, "no WATER boiled into STEAM"
     assert np.all(mass[mat == DEAD] == 0.0), "a DEAD slot kept its mass"
     alive_mass = float(mass[mat != DEAD].astype(np.float64).sum())
-    assert alive_mass == pytest.approx(mass0, rel=1e-3)
+    counts = {int(m): int((mat == m).sum()) for m in np.unique(mat)}
+    assert alive_mass == pytest.approx(mass0, rel=1e-3), counts
     metal_mat = mat[metal]
     assert np.all(metal_mat == METAL)
     assert health[metal].mean() < 1.0, "ACID did not corrode METAL"
