@@ -1007,7 +1007,7 @@ def test_gas_rest_density_reachable(mat_id):
 def test_pbf_gas_density_survives_iterations():
     """bd-r5-review-n28.62: PBF computes GAS density once per substep (first
     ComputeLambda call). Later iterations used to overwrite it with
-    rest_density, so heat and dye terms next substep saw vol_j = m_j / rho0
+    rest_density, so heat terms next substep saw vol_j = m_j / rho0
     instead of m_j / rho. An isolated STEAM particle of mass 0.02 has
     rho = m * W(0), about 490, well below its rest density 1200, so the
     surviving density must match the self term."""

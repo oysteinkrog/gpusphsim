@@ -246,11 +246,6 @@ class World:
         self.sorted_vorticity = cp.zeros((n, 4), dtype=cp.float32)
         # Surface normal (float4: n_x, n_y, n_z, neighbor_count_as_float) -- computed in step1
         self.sorted_normal = cp.zeros((n, 4), dtype=cp.float32)
-        # Particle dye color (float4: r, g, b, unused) -- persistent, scattered through sort
-        self.particle_dye = cp.zeros((n, 4), dtype=cp.float32)
-        self.sorted_particle_dye = cp.zeros((n, 4), dtype=cp.float32)
-        # Dye diffusion rate (float4: dr, dg, db, unused) -- computed in step1, applied in integrate
-        self.sorted_dye_rate = cp.zeros((n, 4), dtype=cp.float32)
         # The micropolar angular velocity had no reader and was removed
         # (bd-r5-review-n28.140). These empty placeholders exist only because
         # simulation.py still passes them to kernel wrappers that ignore them.
@@ -261,9 +256,8 @@ class World:
         # Written during sort (counting_sort), read by step1/step2 neighbor loops.
         # 8 bytes per particle (half4) vs 16 bytes (float4) = 50% bandwidth savings on velocity reads.
         self.sorted_velocity_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
-        # Fixed-point temperature + FP16 dye copies for neighbor loop bandwidth (PERF-011)
+        # Fixed-point temperature copy for neighbor loop bandwidth (PERF-011)
         self.sorted_temperature_h = cp.zeros(n, dtype=cp.uint16)  # round(T * 8): 0.125 K fixed point, 2 bytes
-        self.sorted_dye_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
         # Sort index arrays (hash + sorted versions)
         self.hashes = cp.zeros(n, dtype=cp.uint32)
         self.sorted_hashes = cp.zeros(n, dtype=cp.uint32)
@@ -474,9 +468,8 @@ class World:
         self.sorted_packed_info[:num_alive] = self.packed_info[:n][alive_idx]
         # uint8 arrays
         self.sorted_sleep_counter[:num_alive] = self.sleep_counter[:n][alive_idx]
-        # Persistent per-particle state (kappa, dye, kappa_v)
+        # Persistent per-particle state (kappa, kappa_v)
         self.sorted_kappa[:num_alive] = self.kappa[:n][alive_idx]
-        self.sorted_particle_dye[:num_alive] = self.particle_dye[:n][alive_idx]
         self.sorted_kappa_v[:num_alive] = self.kappa_v[:n][alive_idx]
 
         # Copy back from scratch to primary arrays
@@ -496,7 +489,6 @@ class World:
         self.packed_info[:num_alive] = self.sorted_packed_info[:num_alive]
         self.sleep_counter[:num_alive] = self.sorted_sleep_counter[:num_alive]
         self.kappa[:num_alive] = self.sorted_kappa[:num_alive]
-        self.particle_dye[:num_alive] = self.sorted_particle_dye[:num_alive]
         self.kappa_v[:num_alive] = self.sorted_kappa_v[:num_alive]
 
         # Zero out the dead tail to prevent stale data. The DFSPH warm-start
@@ -591,8 +583,7 @@ class World:
         sl = slice(start, start + count)
         self.position[sl] = self.park_positions(
             cp.arange(start, start + count), spacing, grid_min)
-        for arr in (self.velocity, self.veleval, self.sph_force, self.color,
-                    self.particle_dye):
+        for arr in (self.velocity, self.veleval, self.sph_force, self.color):
             arr[sl] = 0.0
         self.temperature[sl] = T_AMBIENT
         for arr in (self.density, self.mass, self.health, self.lifetime, self.shear_rate, self.exposure_heat,
@@ -655,12 +646,6 @@ class World:
         self.color[sl, 1] = mat.color_g
         self.color[sl, 2] = mat.color_b
         self.color[sl, 3] = mat.behavior_class * 0.25
-
-        # Particle dye starts at the material color
-        self.particle_dye[sl, 0] = mat.color_r
-        self.particle_dye[sl, 1] = mat.color_g
-        self.particle_dye[sl, 2] = mat.color_b
-        self.particle_dye[sl, 3] = 0.0
 
         self.density[sl] = mat.rest_density
         self.sleep_counter[sl] = 0

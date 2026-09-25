@@ -44,10 +44,10 @@ SPAWN_FLAG = 1 << 11  # packed_info bit 11: spawn flag (common.cuh)
 
 # Arrays save_scene writes, in the order of save_load._SCENE_ARRAYS.
 SAVED = ("position", "velocity", "packed_info", "temperature", "health",
-         "lifetime", "mass", "particle_dye", "density")
+         "lifetime", "mass", "density")
 # Arrays a SnapshotRing slot holds.
 SNAPPED = ("position", "velocity", "packed_info", "temperature", "health",
-           "lifetime", "mass", "particle_dye")
+           "lifetime", "mass")
 # Slot fields stored as float16 (bd-r5-review-n28.113). A restore gives the
 # float16 rounding of the captured value, still compared bit for bit.
 SNAPPED_FP16 = ("health", "lifetime", "mass")
@@ -135,9 +135,6 @@ def _mixed_world():
     world.temperature[:n] = cp.asarray(world.temperature[:n].get() + ramp * np.float32(0.001))
     world.lifetime[:n] = cp.asarray(ramp * np.float32(0.01))
     world.density[:n] = cp.asarray(np.float32(2500.0) + ramp)
-    dye = world.particle_dye[:n].get()
-    dye[:, 0] = 0.25
-    world.particle_dye[:n] = cp.asarray(dye)
     vel = world.velocity[:n].get()
     vel[:, 1] = -0.5
     world.velocity[:n] = cp.asarray(vel)
@@ -148,7 +145,7 @@ def _scramble(world, sim, camera) -> None:
     """Change everything load or restore is supposed to put back."""
     world.spawn_cube((-0.2, 0.2, -0.2), (0.2, 0.4, 0.2), WATER, 0.03)
     n = world._high_water
-    for k in ("position", "velocity", "particle_dye"):
+    for k in ("position", "velocity"):
         getattr(world, k)[:n] += cp.float32(1.5)
     for k in ("temperature", "health", "lifetime", "mass", "density"):
         getattr(world, k)[:n] = cp.float32(-7.0)
@@ -220,6 +217,34 @@ def test_save_load_roundtrip_live_world(tmp_path, monkeypatch):
     assert camera.elevation == 12.5
     _assert_fresh_warm_start(world)
     _assert_color_matches_material(world)
+
+
+def test_load_ignores_removed_dye_array(tmp_path, monkeypatch):
+    """bd-r5-review-n28.144: saves made before dye was removed carry a
+    particle_dye array. load_scene reads only the arrays it knows, so such a
+    file still loads and restores the same state."""
+    import save_load as sl
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    world, sim = _mixed_world()
+    camera = OrbitCamera()
+    n = world._high_water
+    expected = _host_state(world, SAVED)
+
+    path = sl.save_scene(world, sim, camera, "legacy")
+    with np.load(path) as data:
+        arrays = {k: data[k] for k in data.files}
+    assert "particle_dye" not in arrays
+    arrays["particle_dye"] = np.full((n, 4), 0.5, np.float32)
+    with open(path, "wb") as fh:
+        np.savez_compressed(fh, **arrays)
+
+    _scramble(world, sim, camera)
+    assert sl.load_scene(world, sim, camera, "legacy") == n
+    cp.cuda.Device().synchronize()
+    assert world._high_water == n
+    _assert_state_equal(world, expected, SAVED)
+    assert not hasattr(world, "particle_dye")
 
 
 def test_snapshot_capture_restore_live_world():

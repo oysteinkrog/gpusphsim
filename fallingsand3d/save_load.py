@@ -140,7 +140,6 @@ def save_scene(world, sim, camera, filename: str) -> str:
         "health": _host(world.health),
         "lifetime": _host(world.lifetime),
         "mass": _host(world.mass),
-        "particle_dye": _host(world.particle_dye),
         "density": _host(world.density),
     }
     # Write through a file object: given a path, NumPy appends ".npz", so the
@@ -278,6 +277,9 @@ def _restore_rigid_body_manager(rbm, rb_data: dict, modules: list) -> None:
 
 
 # Expected per-particle arrays in a .fs3d file: name -> (dtype, trailing shape).
+# Only these keys are read, so an older save that carries an extra array
+# (for example the float4 colour state removed in bd-r5-review-n28.144)
+# still loads.
 _SCENE_ARRAYS = {
     "position":     (np.float32, (4,)),
     "velocity":     (np.float32, (4,)),
@@ -286,7 +288,6 @@ _SCENE_ARRAYS = {
     "health":       (np.float32, ()),
     "lifetime":     (np.float32, ()),
     "mass":         (np.float32, ()),
-    "particle_dye": (np.float32, (4,)),
     "density":      (np.float32, ()),
 }
 
@@ -466,7 +467,6 @@ def load_scene(world, sim, camera, filename: str, report: dict | None = None) ->
     world.health[:n] = cp.asarray(arrays["health"])
     world.lifetime[:n] = cp.asarray(arrays["lifetime"])
     world.mass[:n] = cp.asarray(arrays["mass"])
-    world.particle_dye[:n] = cp.asarray(arrays["particle_dye"])
     world.density[:n] = cp.asarray(arrays["density"])
     world.veleval[:n] = world.velocity[:n]
 

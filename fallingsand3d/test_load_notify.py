@@ -154,7 +154,6 @@ def test_bad_header_value_fails_before_world_write(tmp_path, monkeypatch) -> Non
         "health": np.ones(n, np.float32),
         "lifetime": np.zeros(n, np.float32),
         "mass": np.ones(n, np.float32),
-        "particle_dye": np.zeros((n, 4), np.float32),
         "density": np.ones(n, np.float32),
     }
     for bad in ("big", -1.0, float("nan"), None):

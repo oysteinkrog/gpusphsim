@@ -18,12 +18,12 @@ import cupy as cp
 import numpy as np
 
 
-# Bytes per particle held in one slot. position, velocity and particle_dye are
-# float4 (16 B each), packed_info and temperature are 4 B, and health,
+# Bytes per particle held in one slot. position and velocity are float4
+# (16 B each), packed_info and temperature are 4 B, and health,
 # lifetime and mass are stored as float16 (2 B each). Temperature stays
 # float32: fp16 has a 1 K step above 1024 K and 4 K near T_MAX = 5000 K, which
 # would break the 0.5 K round trip for lava and fire (bd-r5-review-n28.113).
-SLOT_BYTES_PER_PARTICLE = 16 + 16 + 16 + 4 + 4 + 2 + 2 + 2  # = 62
+SLOT_BYTES_PER_PARTICLE = 16 + 16 + 4 + 4 + 2 + 2 + 2  # = 46
 
 # Per-slot allowance for state that does not scale with particle count: the
 # rigid body array (MAX_RIGID_BODIES = 8 bodies, well under 1 KB) and the CPU
@@ -40,7 +40,7 @@ def slots_for_budget(max_snapshots: int, max_particles: int,
 
     Clamped to [2, max_snapshots] (or to max_snapshots when that is below 2),
     so undo always has at least two slots even when one slot alone is over
-    budget. At 1M particles and 256 MB this gives 4 slots; at 250K, 12.
+    budget. At 1M particles and 256 MB this gives 5 slots; at 500K, 11.
     """
     per_slot = SLOT_BYTES_PER_PARTICLE * max(int(max_particles), 0) + SLOT_FIXED_BYTES
     fit = int(budget_bytes) // per_slot
@@ -90,7 +90,6 @@ class SnapshotRing:
             "health": cp.empty(n, dtype=cp.float16),
             "lifetime": cp.empty(n, dtype=cp.float16),
             "mass": cp.empty(n, dtype=cp.float16),
-            "particle_dye": cp.empty((n, 4), dtype=cp.float32),
             "high_water": 0,
             # Rigid body state, filled when capture() gets a Simulation.
             # num_bodies < 0 means the slot holds no rigid state.
@@ -131,7 +130,6 @@ class SnapshotRing:
         cp.copyto(slot["health"][:n], world.health[:n])
         cp.copyto(slot["lifetime"][:n], world.lifetime[:n])
         cp.copyto(slot["mass"][:n], world.mass[:n])
-        cp.copyto(slot["particle_dye"][:n], world.particle_dye[:n])
         slot["high_water"] = n
         _capture_rigid(slot, sim)
         sdf = getattr(sim, "sdf_manager", None)
@@ -203,7 +201,6 @@ class SnapshotRing:
         cp.copyto(world.health[:n], slot["health"][:n])
         cp.copyto(world.lifetime[:n], slot["lifetime"][:n])
         cp.copyto(world.mass[:n], slot["mass"][:n])
-        cp.copyto(world.particle_dye[:n], slot["particle_dye"][:n])
         cp.copyto(world.veleval[:n], world.velocity[:n])
         world._high_water = n
 

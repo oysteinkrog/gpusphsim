@@ -512,7 +512,6 @@ def _valid_arrays(n: int) -> dict:
         "health": np.ones(n, np.float32),
         "lifetime": np.zeros(n, np.float32),
         "mass": np.ones(n, np.float32),
-        "particle_dye": np.zeros((n, 4), np.float32),
         "density": np.ones(n, np.float32),
     }
 
@@ -520,7 +519,7 @@ def _valid_arrays(n: int) -> dict:
 _CORRUPTIONS = {
     "short_position": lambda a: a.__setitem__("position", a["position"][:-1]),
     "wrong_dtype": lambda a: a.__setitem__("mass", a["mass"].astype(np.float64)),
-    "wrong_ndim": lambda a: a.__setitem__("particle_dye", a["particle_dye"][:, :3]),
+    "wrong_ndim": lambda a: a.__setitem__("velocity", a["velocity"][:, :3]),
     "bad_material": lambda a: a["packed_info"].__setitem__(3, np.uint32(40)),
 }
 

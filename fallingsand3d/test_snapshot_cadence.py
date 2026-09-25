@@ -27,7 +27,6 @@ class _World:
         self.health = cp.zeros(N, dtype=cp.float32)
         self.lifetime = cp.zeros(N, dtype=cp.float32)
         self.mass = cp.zeros(N, dtype=cp.float32)
-        self.particle_dye = cp.zeros((N, 4), dtype=cp.float32)
         self.foam_count = cp.ones(1, dtype=cp.uint32)
         self._high_water = N
         self._spawned_material_ids = set()

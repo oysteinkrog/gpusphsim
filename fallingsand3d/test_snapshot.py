@@ -93,7 +93,6 @@ class _World:
         self.health = np.ones(n, dtype=np.float32)
         self.lifetime = np.zeros(n, dtype=np.float32)
         self.mass = np.ones(n, dtype=np.float32)
-        self.particle_dye = np.zeros((n, 4), dtype=np.float32)
         self._spawned_material_ids: set = set()
         self.refresh_color_calls: list[int] = []
 
@@ -338,10 +337,10 @@ class TestSnapshotSDFUndo(unittest.TestCase):
 
 def test_slot_count_from_budget():
     mb = 1 << 20
-    # 62 B per particle plus a 64 KB fixed part per slot.
-    assert snapshot.SLOT_BYTES_PER_PARTICLE == 62
-    assert slots_for_budget(12, 1_000_000, 256 * mb) == 4
-    assert slots_for_budget(12, 500_000, 256 * mb) == 8
+    # 46 B per particle plus a 64 KB fixed part per slot.
+    assert snapshot.SLOT_BYTES_PER_PARTICLE == 46
+    assert slots_for_budget(12, 1_000_000, 256 * mb) == 5
+    assert slots_for_budget(12, 500_000, 256 * mb) == 11
     assert slots_for_budget(12, 250_000, 256 * mb) == 12
     assert slots_for_budget(12, 16, 256 * mb) == 12
     # Never below 2, even when one slot is over budget.
@@ -366,7 +365,7 @@ def test_ring_uses_budget_slot_count_and_preallocates():
         slot = ring._slots[0]
         for key in ("health", "lifetime", "mass"):
             assert slot[key].dtype == np.float16
-        for key in ("position", "velocity", "temperature", "particle_dye"):
+        for key in ("position", "velocity", "temperature"):
             assert slot[key].dtype == np.float32
     finally:
         snapshot.cp = real
@@ -389,7 +388,7 @@ def test_ring_memory_at_1m_within_budget_on_gpu():
     before = pool.used_bytes()
     ring = SnapshotRing(max_snapshots=12, max_particles=1_000_000)
     used = pool.used_bytes() - before
-    assert ring.max_snapshots == 4
+    assert ring.max_snapshots == 5
     assert used <= 256 << 20, f"ring uses {used >> 20} MB"
     del ring
 
