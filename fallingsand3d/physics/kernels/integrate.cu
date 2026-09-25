@@ -1,7 +1,8 @@
 /*
  * integrate.cu -- K_Integrate kernel: symplectic Euler integration,
  * impulse-style SDF box boundaries, GAS buoyancy/drag, velocity clamping,
- * color computation, and writeback to UNSORTED arrays via sort_indexes.
+ * and writeback to UNSORTED arrays via sort_indexes. K_ComputeColor: the
+ * per-frame render color.
  *
  * Per-particle computation:
  *   1. Compute acceleration: accel = sph_force + gravity + gas_buoyancy
@@ -14,14 +15,16 @@
  *   6. Impulse SDF boundary: 6 planes of box, project out, reflect normal vel
  *      with restitution, apply Coulomb friction to tangential vel
  *   7. Temperature integration: T += dTdt*dt - cool_rate*(T-T_ambient)*dt, clamp [0,5000]
- *   8. Compute color from material base color, temperature tint, health fade
- *   9. Write pos, vel, color, temperature to UNSORTED arrays via sort_indexes[i]
+ *   8. Write pos, vel, temperature to UNSORTED arrays via sort_indexes[i]
+ *
+ * Render color is not stored here: K_ComputeColor (below) computes it once
+ * per frame from the unsorted arrays (bd-r5-review-n28.145).
  *
  * Skips STATIC particles (behavior_class == 3): early return, position unchanged.
  *
  * Constant memory used:
  *   c_sim       -- SimParams from common.cuh (gravity, dt, restitution, etc.)
- *   c_materials -- MaterialProps[32] from common.cuh (for color lookup)
+ *   c_materials -- MaterialProps[32] from common.cuh (per-material physics and color)
  */
 
 #include "sph_shared.cuh"
@@ -78,7 +81,6 @@ void K_Integrate(
     // --- Unsorted outputs (write via sort_indexes) ---
     float4*         __restrict__ position_out,          // unsorted position
     float4*         __restrict__ velocity_out,          // unsorted velocity
-    float4*         __restrict__ color_out,             // unsorted color
     uint*           __restrict__ packed_info_out,       // unsorted packed_info (sleep flag updates)
     unsigned char*  __restrict__ sleep_counter_out,     // unsorted sleep counter
     float*          __restrict__ temperature_out,       // unsorted temperature (updated)
@@ -111,7 +113,7 @@ void K_Integrate(
 
     // --- Skip STATIC particles ---
     if (behavior == STATIC) {
-        // Write position unchanged, zero velocity, compute color.
+        // Write position unchanged, zero velocity.
         // MAT_RIGID boundary particles keep the body surface velocity that
         // K_UpdateBoundaryParticles wrote, so the unsorted array matches the
         // body for later readers such as wake (bd-r5-review-n28.87).
@@ -126,8 +128,6 @@ void K_Integrate(
         temp += dTdt * c_sim.dt;
         temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
         temp = fmaxf(T_MIN, fminf(temp, T_MAX));
-        float hlth = sorted_health[i];
-        color_out[orig_idx] = compute_color(mat_id, temp, hlth, STATIC);
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
         temperature_out[orig_idx] = temp;
@@ -146,7 +146,6 @@ void K_Integrate(
     float3 vel = make_float3(vel4.x, vel4.y, vel4.z);
 
     float temp = sorted_temperature[i];
-    float hlth = sorted_health[i];
 
     // --- Sleeping particle: check wake condition with hysteresis ---
     if (was_sleeping) {
@@ -180,7 +179,6 @@ void K_Integrate(
             temp = fmaxf(T_MIN, fminf(temp, T_MAX));
             position_out[orig_idx] = pos4;
             velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            color_out[orig_idx] = compute_color(mat_id, temp, hlth, behavior);
             packed_info_out[orig_idx] = pi;  // keep SLEEPING flag set
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
@@ -437,16 +435,6 @@ void K_Integrate(
     temp -= COOL_RATE * (temp - T_AMBIENT) * dt;
     temp = fmaxf(T_MIN, fminf(temp, T_MAX));
 
-    // --- Compute color ---
-    // color.w encodes behavior class for SSFR shader filtering
-    float4 color;
-    if (behavior == FLUID) {
-        float rho_i = sorted_density[i];
-        color = compute_fluid_color(mat_id, temp, hlth, pos_new.y, vel_sq_sleep, rho_i);
-    } else {
-        color = compute_color(mat_id, temp, hlth, behavior);
-    }
-
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
@@ -472,9 +460,9 @@ void K_Integrate(
     // .w carries this substep's density to the next substep: the reorder gathers it
     // into sorted_position.w, which simulation.py copies into sorted_density_prev as
     // step1's density_in.  Writing 1.0 here made every awake neighbour read rho_j = 1.
+    // K_ComputeColor also reads it for the FLUID render color.
     position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, sorted_density[i]);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);
-    color_out[orig_idx] = color;
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;

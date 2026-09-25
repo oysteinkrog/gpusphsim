@@ -1157,7 +1157,6 @@ class Simulation:
             sort_indexes=self._sort_perm[:n],
             position_out=w.position,
             velocity_out=w.velocity,
-            color_out=w.color,
             packed_info_out=w.packed_info,
             sleep_counter_out=w.sleep_counter,
             temperature_out=w.temperature,

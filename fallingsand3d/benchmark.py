@@ -228,7 +228,7 @@ def run_benchmark(
             sorted_angular_velocity=world.sorted_angular_velocity[:n],
             sort_indexes=sim._sort_perm[:n],
             position_out=world.position, velocity_out=world.velocity,
-            color_out=world.color, packed_info_out=world.packed_info,
+            packed_info_out=world.packed_info,
             sleep_counter_out=world.sleep_counter,
             temperature_out=world.temperature,
             angular_velocity_out=world.angular_velocity,

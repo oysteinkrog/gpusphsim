@@ -1,4 +1,4 @@
-"""Integrate kernel: symplectic Euler with SDF boundaries and color update.
+"""Integrate kernel: symplectic Euler with SDF boundaries, and render color.
 
 Compiles physics/kernels/integrate.cu via CuPy RawModule and provides
 a function to launch K_Integrate which performs:
@@ -6,8 +6,10 @@ a function to launch K_Integrate which performs:
   - Impulse-style SDF box boundary collisions (restitution + Coulomb friction)
   - GAS buoyancy and drag
   - Velocity magnitude clamping
-  - Particle color computation from material, temperature, and health
   - Writeback to UNSORTED arrays via sort_indexes permutation
+
+and K_ComputeColor, which computes the render color once per frame from the
+unsorted arrays (compute_color below).
 
 Uses shared constant memory from common.cuh:
   c_sim       -- SimParams (gravity, dt, restitution, wall_friction, world bounds)
@@ -118,7 +120,6 @@ def integrate(
     sort_indexes: "Optional[cupy.ndarray]" = None,
     position_out: "Optional[cupy.ndarray]" = None,
     velocity_out: "Optional[cupy.ndarray]" = None,
-    color_out: "Optional[cupy.ndarray]" = None,
     packed_info_out: "Optional[cupy.ndarray]" = None,
     sleep_counter_out: "Optional[cupy.ndarray]" = None,
     temperature_out: "Optional[cupy.ndarray]" = None,
@@ -164,8 +165,6 @@ def integrate(
         Pre-allocated (N, 4) float32 unsorted output.
     velocity_out : cupy.ndarray, optional
         Pre-allocated (N, 4) float32 unsorted output.
-    color_out : cupy.ndarray, optional
-        Pre-allocated (N, 4) float32 unsorted output.
     packed_info_out : cupy.ndarray, optional
         Pre-allocated (N,) uint32 unsorted output for updated packed_info.
     sleep_counter_out : cupy.ndarray, optional
@@ -180,12 +179,14 @@ def integrate(
 
     Returns
     -------
-    (position_out, velocity_out, color_out, packed_info_out,
+    (position_out, velocity_out, packed_info_out,
      sleep_counter_out, temperature_out)
+
+    Render color is not an output: compute_color() makes it once per frame.
     """
     n = sorted_position.shape[0]
     if n == 0:
-        return (position_out, velocity_out, color_out, packed_info_out,
+        return (position_out, velocity_out, packed_info_out,
                 sleep_counter_out, temperature_out)
 
     # Default density/shear_rate/dTdt/sleep_counter to zeros if not provided
@@ -208,8 +209,6 @@ def integrate(
         position_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
     if velocity_out is None:
         velocity_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
-    if color_out is None:
-        color_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
     if packed_info_out is None:
         packed_info_out = cupy.zeros(max_idx, dtype=cupy.uint32)
     if sleep_counter_out is None:
@@ -259,7 +258,6 @@ def integrate(
             cell_end_ptr,
             position_out,
             velocity_out,
-            color_out,
             packed_info_out,
             sleep_counter_out,
             temperature_out,
@@ -271,7 +269,7 @@ def integrate(
         ),
     )
 
-    return (position_out, velocity_out, color_out, packed_info_out,
+    return (position_out, velocity_out, packed_info_out,
             sleep_counter_out, temperature_out)
 
 

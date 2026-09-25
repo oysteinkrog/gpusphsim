@@ -47,6 +47,7 @@ from materials import (
 )
 from integrate import (
     BLOCK_SIZE,
+    compute_color,
     get_module,
     integrate,
     upload_materials,
@@ -129,6 +130,22 @@ def make_simple_particles(n, mat_id, behavior, pos=None, vel=None,
     }
 
 
+def integrate_and_color(**kw):
+    """One K_Integrate substep, then the per-frame K_ComputeColor on its
+    unsorted outputs, as the renderer sees it (bd-r5-review-n28.145).
+
+    Returns (position, velocity, color, packed_info, sleep_counter,
+    temperature).
+    """
+    n = kw["sorted_position"].shape[0]
+    if kw.get("health_out") is None:
+        kw["health_out"] = cupy.zeros(n, dtype=cupy.float32)
+    pos, vel, pi, sc, temp = integrate(**kw)
+    color = cupy.zeros((n, 4), dtype=cupy.float32)
+    compute_color(n, pos, vel, pi, temp, kw["health_out"], color)
+    return pos, vel, color, pi, sc, temp
+
+
 # ===========================================================================
 # Tests
 # ===========================================================================
@@ -161,7 +178,7 @@ def test_static_skip():
 
     d = make_simple_particles(n, STONE, STATIC, pos=pos, vel=vel)
 
-    pos_out, vel_out, color_out, _, _, _ = integrate(**d)
+    pos_out, vel_out, col_out, _, _, _ = integrate_and_color(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -185,7 +202,7 @@ def test_gravity_freefall():
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     pos_h = pos_out.get()
@@ -216,7 +233,7 @@ def test_bounce_floor():
     vel = np.array([[0.0, -5.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     pos_h = pos_out.get()
@@ -231,7 +248,7 @@ def test_bounce_floor():
     pos2 = np.array([[0.0, -0.995, 0.0, 1.0]], dtype=np.float32)
     vel2 = np.array([[0.0, -10.0, 0.0, 0.0]], dtype=np.float32)
     d2 = make_simple_particles(n, WATER, FLUID, pos=pos2, vel=vel2)
-    pos_out2, vel_out2, _, _, _, _ = integrate(**d2)
+    pos_out2, vel_out2, _, _, _ = integrate(**d2)
 
     vel_h2 = vel_out2.get()
     pos_h2 = pos_out2.get()
@@ -287,7 +304,6 @@ def test_bounce_multi_step():
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
-            "color_out": cupy.zeros((n, 4), dtype=cupy.float32),
             "packed_info_out": pi_gpu,
             "sleep_counter_out": sc_gpu,
         }
@@ -332,7 +348,7 @@ def test_gas_buoyancy(gravity_y):
     vel = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=temp)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -357,7 +373,7 @@ def test_gas_buoyancy_follows_sideways_gravity():
 
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
     d = make_simple_particles(1, STEAM, GAS, pos=pos, temp=373.0)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     expected_vx = DT * _gas_buoyancy_net_accel(373.0, -4.0, 0.01) * (1.0 - 2.0 * DT)
@@ -371,7 +387,7 @@ def test_gas_ambient_weightless():
 
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
     d = make_simple_particles(1, STEAM, GAS, pos=pos, temp=293.0)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     expected_vy = DT * (9.81 * 0.01) * (1.0 - 2.0 * DT)
@@ -395,7 +411,7 @@ def test_fire_terminal_rise_speed():
     # step so the particle never reaches the ceiling.
     for _ in range(3000):
         d = make_simple_particles(1, FIRE, GAS, pos=pos, vel=vel, temp=1200.0)
-        _, vel_out, _, _, _, _ = integrate(**d)
+        _, vel_out, _, _, _ = integrate(**d)
         vel = vel_out.get()
 
     a_net = _gas_buoyancy_net_accel(1200.0, -4.0, 0.02)
@@ -413,7 +429,7 @@ def test_fluid_boussinesq_follows_gravity(gravity_y):
 
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
     d = make_simple_particles(1, WATER, FLUID, pos=pos, temp=373.0)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     expected_ay = gravity_y - gravity_y * 0.0003 * (373.0 - 293.0)
@@ -431,7 +447,7 @@ def test_gas_drag():
     pos = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
 
     d = make_simple_particles(n, STEAM, GAS, pos=pos, vel=vel, temp=293.0)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -460,7 +476,7 @@ def test_velocity_clamp():
     vel = np.array([[60.0, 0.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
     speed = math.sqrt(vel_h[0, 0]**2 + vel_h[0, 1]**2 + vel_h[0, 2]**2)
@@ -497,8 +513,8 @@ def test_color_computation():
     #           b = 0.9*(0.65+0.40*0.5) = 0.765, alpha = 0.0 (FLUID)
     d = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
     d["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_out, _, _, _ = integrate(**d)
-    color_mid = color_out.get()
+    _, _, col_out, _, _, _ = integrate_and_color(**d)
+    color_mid = col_out.get()
 
     depth_t_mid = 0.5
     exp_r = BASE_R * (0.45 + 0.70 * depth_t_mid)
@@ -514,8 +530,8 @@ def test_color_computation():
     d_bot["sorted_position"] = cupy.array([[0.0, -0.9, 0.0, 1.0]], dtype=cupy.float32)
     d_top = make_simple_particles(n, WATER, FLUID, temp=293.0, health=1.0)
     d_top["sorted_position"] = cupy.array([[0.0, 0.9, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, col_bot, _, _, _ = integrate(**d_bot)
-    _, _, col_top, _, _, _ = integrate(**d_top)
+    _, _, col_bot, _, _, _ = integrate_and_color(**d_bot)
+    _, _, col_top, _, _, _ = integrate_and_color(**d_top)
     r_bot = col_bot.get()[0, 0]
     r_top = col_top.get()[0, 0]
     assert r_top > r_bot, f"Water should be brighter at top: r_top={r_top:.4f} <= r_bot={r_bot:.4f}"
@@ -523,7 +539,7 @@ def test_color_computation():
     # --- Test 3: hot particle -> red tint (T=1293K, t_excess=1.0) ---
     d_hot = make_simple_particles(n, WATER, FLUID, temp=1293.0, health=1.0)
     d_hot["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_hot, _, _, _ = integrate(**d_hot)
+    _, _, color_hot, _, _, _ = integrate_and_color(**d_hot)
     color_h_hot = color_hot.get()
     assert color_h_hot[0, 0] > color_mid[0, 0], "Hot particle should be more red than cold"
     assert color_h_hot[0, 2] < color_mid[0, 2], "Hot particle should be less blue than cold"
@@ -531,7 +547,7 @@ def test_color_computation():
     # --- Test 4: half health -> half brightness ---
     d_fade = make_simple_particles(n, WATER, FLUID, temp=293.0, health=0.5)
     d_fade["sorted_position"] = cupy.array([[0.0, 0.0, 0.0, 1.0]], dtype=cupy.float32)
-    _, _, color_fade, _, _, _ = integrate(**d_fade)
+    _, _, color_fade, _, _, _ = integrate_and_color(**d_fade)
     color_h_fade = color_fade.get()
     # Should be ~half the mid-depth color
     assert abs(color_h_fade[0, 0] - color_mid[0, 0] * 0.5) < 0.02, (
@@ -568,8 +584,8 @@ def test_dead_slot_color_alpha_is_negative():
         MAKE_PACKED(STONE, STATIC),
     ], dtype=np.uint32)
     d["sorted_packed_info"] = cupy.asarray(packed)
-    _, _, color_out, _, _, _ = integrate(**d)
-    alpha = color_out.get()[:, 3]
+    _, _, col_out, _, _, _ = integrate_and_color(**d)
+    alpha = col_out.get()[:, 3]
 
     assert alpha[1] < 0.0, f"DEAD STATIC slot alpha {alpha[1]} must be < 0"
     assert alpha[2] < 0.0, f"DEAD FLUID slot alpha {alpha[2]} must be < 0"
@@ -629,7 +645,6 @@ def test_compute_color_once_per_frame_matches_reference():
     Checked against a NumPy port of compute_color / compute_fluid_color
     fed with the substep's own outputs.
     """
-    from integrate import compute_color
     from materials import LAVA, MAT_RIGID
 
     setup_params(gravity=(0.0, -9.8, 0.0))
@@ -658,7 +673,7 @@ def test_compute_color_once_per_frame_matches_reference():
     d["sort_indexes"] = cupy.asarray(perm)
     d["sleep_counter_out"] = cupy.zeros(n, dtype=cupy.uint8)
     d["health_out"] = cupy.zeros(n, dtype=cupy.float32)
-    pos_out, vel_out, _, pi_out, _, temp_out = integrate(**d)
+    pos_out, vel_out, pi_out, _, temp_out = integrate(**d)
 
     color = cupy.full((n, 4), 7.0, dtype=cupy.float32)
     compute_color(n, pos_out, vel_out, pi_out, temp_out, d["health_out"], color)
@@ -699,11 +714,10 @@ def test_sort_indexes_writeback():
 
     out_pos = cupy.zeros((n, 4), dtype=cupy.float32)
     out_vel = cupy.zeros((n, 4), dtype=cupy.float32)
-    out_col = cupy.zeros((n, 4), dtype=cupy.float32)
 
     out_pi = cupy.zeros(n, dtype=cupy.uint32)
     out_sc = cupy.zeros(n, dtype=cupy.uint8)
-    integrate(**d, position_out=out_pos, velocity_out=out_vel, color_out=out_col,
+    integrate(**d, position_out=out_pos, velocity_out=out_vel,
               packed_info_out=out_pi, sleep_counter_out=out_sc)
 
     pos_h = out_pos.get()
@@ -745,7 +759,7 @@ def test_boundary_all_walls():
     ], dtype=np.float32)
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -784,7 +798,7 @@ def test_coulomb_friction():
     vel = np.array([[5.0, -10.0, 0.0, 0.0]], dtype=np.float32)
 
     d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -802,7 +816,7 @@ def test_coulomb_friction():
     )
     # Contrast: FLUID particles get zero friction (no sticking)
     d_fluid = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
-    _, vel_out_fluid, _, _, _, _ = integrate(**d_fluid)
+    _, vel_out_fluid, _, _, _ = integrate(**d_fluid)
     vel_h_fluid = vel_out_fluid.get()
     # FLUID: vx should be unchanged (friction=0 for FLUID)
     assert abs(vel_h_fluid[0, 0] - 5.0) < 1.0, (
@@ -824,7 +838,7 @@ def test_xsph_position_update():
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_veleval"] = cupy.asarray(veleval)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
@@ -840,7 +854,7 @@ def test_xsph_position_update():
     # Non-FLUID should NOT use XSPH
     d2 = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
     d2["sorted_veleval"] = cupy.asarray(veleval)
-    pos_out2, _, _, _, _, _ = integrate(**d2)
+    pos_out2, _, _, _, _ = integrate(**d2)
     pos_h2 = pos_out2.get()
 
     expected_px2 = DT * 1.0  # no XSPH
@@ -869,7 +883,7 @@ def test_xsph_position_update_with_gravity():
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_veleval"] = cupy.asarray(veleval)
-    pos_out, vel_out, _, _, _, _ = integrate(**d)
+    pos_out, vel_out, _, _, _ = integrate(**d)
     pos_h = pos_out.get()
     vel_h = vel_out.get()
 
@@ -903,7 +917,6 @@ def test_fluid_granular_freefall_match():
     vel_gpu = cupy.asarray(vel_np)
     pi_gpu = cupy.asarray(np.array([MAKE_PACKED(WATER, FLUID),
                                     MAKE_PACKED(SAND, GRANULAR)], dtype=np.uint32))
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
     sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
     # Zero density keeps GRANULAR anti-creep off (it needs rho > 0.95*rho0).
     density_gpu = cupy.zeros(n, dtype=cupy.float32)
@@ -931,7 +944,6 @@ def test_fluid_granular_freefall_match():
             sort_indexes=idx_gpu,
             position_out=pos_gpu,
             velocity_out=vel_gpu,
-            color_out=color_gpu,
             packed_info_out=pi_gpu,
             sleep_counter_out=sc_gpu,
         )
@@ -977,7 +989,6 @@ def test_water_pool_no_nan():
     temp_gpu = cupy.full(n, 293.0, dtype=cupy.float32)
     health_gpu = cupy.full(n, 1.0, dtype=cupy.float32)
     sort_idx = cupy.arange(n, dtype=cupy.uint32)
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
     sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
 
     for step in range(1000):
@@ -998,7 +1009,6 @@ def test_water_pool_no_nan():
             sort_indexes=sort_idx,
             position_out=pos_gpu,
             velocity_out=vel_gpu,
-            color_out=color_gpu,
             packed_info_out=pi_gpu,
             sleep_counter_out=sc_gpu,
         )
@@ -1051,7 +1061,7 @@ def test_granular_anti_creep_settled():
     # Shear rate below gamma_min (0.05)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # All velocities should be exactly zero (anti-creep triggered)
@@ -1084,7 +1094,7 @@ def test_granular_anti_creep_flowing():
     d["sorted_density"] = cupy.full(n, 1700.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (above threshold)
@@ -1119,7 +1129,7 @@ def test_granular_anti_creep_low_density():
     d["sorted_density"] = cupy.full(n, 1000.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (density too low for anti-creep)
@@ -1153,7 +1163,7 @@ def test_granular_anti_creep_high_shear():
     # Shear rate ABOVE gamma_min (0.05)
     d["sorted_shear_rate"] = cupy.full(n, 1.0, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # Velocity should NOT be zeroed (shear rate too high)
@@ -1188,7 +1198,6 @@ def test_granular_no_jitter_5000_steps():
     # Low shear rate (at rest)
     shear_rate_gpu = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
     pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
     sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
 
@@ -1209,7 +1218,6 @@ def test_granular_no_jitter_5000_steps():
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
-            "color_out": color_gpu,
             "packed_info_out": pi_gpu,
             "sleep_counter_out": sc_gpu,
         }
@@ -1254,7 +1262,7 @@ def test_fluid_unaffected_by_anti_creep():
     d["sorted_density"] = cupy.full(n, 1200.0, dtype=cupy.float32)
     d["sorted_shear_rate"] = cupy.full(n, 0.01, dtype=cupy.float32)
 
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
     vel_h = vel_out.get()
 
     # FLUID velocity should be preserved (not zeroed)
@@ -1292,7 +1300,6 @@ def test_sleep_counter_increments():
     vel_gpu = cupy.asarray(vel)
     pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
     sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
 
     # Run 15 steps -- counter should reach threshold (10) and set SLEEPING
     for step in range(15):
@@ -1311,7 +1318,6 @@ def test_sleep_counter_increments():
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
-            "color_out": color_gpu,
             "packed_info_out": pi_gpu,
             "sleep_counter_out": sc_gpu,
         }
@@ -1346,7 +1352,6 @@ def test_sleep_counter_resets():
     vel_gpu = cupy.asarray(vel)
     pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
     sc_gpu = cupy.full(n, np.uint8(5), dtype=cupy.uint8)  # start with counter=5
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
 
     d = {
         "sorted_position": pos_gpu,
@@ -1363,7 +1368,6 @@ def test_sleep_counter_resets():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
         "position_out": pos_gpu,
         "velocity_out": vel_gpu,
-        "color_out": color_gpu,
         "packed_info_out": pi_gpu,
         "sleep_counter_out": sc_gpu,
     }
@@ -1418,7 +1422,7 @@ def test_sleep_hysteresis_wake():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    _, vel_out, _, pi_out, sc_out, _ = integrate(**d)
+    _, vel_out, pi_out, sc_out, _ = integrate(**d)
     pi_h = pi_out.get()
     sc_h = sc_out.get()
     vel_h = vel_out.get()
@@ -1481,7 +1485,7 @@ def test_sleeping_skip_force_integration():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    pos_out, vel_out, _, pi_out, _, _ = integrate(**d)
+    pos_out, vel_out, pi_out, _, _ = integrate(**d)
     pos_h = pos_out.get()
     vel_h = vel_out.get()
 
@@ -1512,7 +1516,6 @@ def test_sleep_counter_saturates():
     vel_gpu = cupy.asarray(vel)
     pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
     sc_gpu = cupy.full(n, np.uint8(254), dtype=cupy.uint8)
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
 
     # Run 5 steps starting from counter=254
     for _ in range(5):
@@ -1531,7 +1534,6 @@ def test_sleep_counter_saturates():
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
-            "color_out": color_gpu,
             "packed_info_out": pi_gpu,
             "sleep_counter_out": sc_gpu,
         }
@@ -1581,7 +1583,7 @@ def test_sleeping_particles_density_contribution():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    pos_out, _, _, pi_out, sc_out, _ = integrate(**d)
+    pos_out, _, pi_out, sc_out, _ = integrate(**d)
     pi_h = pi_out.get()
     pos_h = pos_out.get()
 
@@ -1621,7 +1623,6 @@ def test_sleep_wake_cycle():
 
     pi_gpu = cupy.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=cupy.uint32)
     sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
 
     # Phase 1: let particles settle and fall asleep (15 steps)
     for _ in range(15):
@@ -1640,7 +1641,6 @@ def test_sleep_wake_cycle():
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
-            "color_out": color_gpu,
             "packed_info_out": pi_gpu,
             "sleep_counter_out": sc_gpu,
         }
@@ -1670,7 +1670,6 @@ def test_sleep_wake_cycle():
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
-            "color_out": color_gpu,
             "packed_info_out": pi_gpu,
             "sleep_counter_out": sc_gpu,
         }
@@ -1722,7 +1721,6 @@ def test_accel_clamp_overlapping_particles():
     force_gpu = cupy.asarray(sph_force)
     pi_gpu = cupy.full(n, MAKE_PACKED(WATER, FLUID), dtype=cupy.uint32)
     sc_gpu = cupy.zeros(n, dtype=cupy.uint8)
-    color_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
 
     # Run 100 steps with extreme forces
     for step in range(100):
@@ -1739,7 +1737,6 @@ def test_accel_clamp_overlapping_particles():
             "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
             "position_out": pos_gpu,
             "velocity_out": vel_gpu,
-            "color_out": color_gpu,
             "packed_info_out": pi_gpu,
             "sleep_counter_out": sc_gpu,
         }
@@ -1791,7 +1788,7 @@ def test_accel_clamp_normal_unaffected():
     sph_force2 = np.array([[1.0, 5.0, -0.5, 0.0]], dtype=np.float32)
     d2 = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d2["sorted_sph_force"] = cupy.asarray(sph_force2)
-    _, vel_out2, _, _, _, _ = integrate(**d2)
+    _, vel_out2, _, _, _ = integrate(**d2)
 
     vel_h2 = vel_out2.get()
 
@@ -1835,7 +1832,7 @@ def test_accel_clamp_exact_threshold():
 
     d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
     d["sorted_sph_force"] = cupy.asarray(sph_force)
-    _, vel_out, _, _, _, _ = integrate(**d)
+    _, vel_out, _, _, _ = integrate(**d)
 
     vel_h = vel_out.get()
 
@@ -2079,14 +2076,14 @@ def test_500k_stress():
         "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
     }
 
-    pos_out, vel_out, color_out, _, _, _ = integrate(**d)
+    pos_out, vel_out, col_out, _, _, _ = integrate_and_color(**d)
 
     # Synchronize to catch any CUDA errors
     cupy.cuda.Device().synchronize()
 
     pos_h = pos_out.get()
     vel_h = vel_out.get()
-    color_h = color_out.get()
+    color_h = col_out.get()
 
     assert not np.any(np.isnan(pos_h)), "NaN in positions (500K)"
     assert not np.any(np.isnan(vel_h)), "NaN in velocities (500K)"

@@ -226,7 +226,7 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
         cell_start, cell_end,
     )
 
-    pos_out, vel_out, color_out, pi_out, sc_out, temp_out = integrate(
+    pos_out, vel_out, pi_out, sc_out, temp_out = integrate(
         sorted_pos, sorted_vel, veleval_out, sph_force,
         sorted_mass, sorted_pi, sorted_temp, sorted_health,
         sorted_density=density, sorted_shear_rate=sorted_sr,
@@ -234,7 +234,6 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
         sort_indexes=sorted_indices,
         position_out=w["position"],
         velocity_out=w["velocity"],
-        color_out=w["color"],
         packed_info_out=w["packed_info"],
         sleep_counter_out=w["sleep_counter"],
         temperature_out=w["temperature"],
@@ -242,7 +241,6 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
 
     w["position"] = pos_out
     w["velocity"] = vel_out
-    w["color"] = color_out
     w["packed_info"] = pi_out
     w["sleep_counter"] = sc_out
     w["temperature"] = temp_out
