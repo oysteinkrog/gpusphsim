@@ -108,20 +108,25 @@ def test_timed_path_many_substeps_matches_untimed():
     assert not missing, f"timing panel stages missing: {sorted(missing)}"
 
 
-def test_timed_path_passes_cell_tables_to_integrate(monkeypatch):
-    """The timed path's integrate call gets non-null cell_start/cell_end."""
+def test_timed_path_integrate_gets_wake_table_and_no_cell_tables(monkeypatch):
+    """The timed path's integrate call gets the wake table and frame counter.
+
+    WCSPH passes no cell_start/cell_end on purpose, so the STATIC push-out
+    in K_Integrate stays off (bd-r5-review-n28.166).
+    """
     world, sim, _ = _build_scene()
     n = world._high_water
     seen = []
     real = simulation_mod.integrate.integrate
 
     def spy(*args, **kwargs):
-        seen.append((kwargs.get("cell_start"), kwargs.get("cell_end")))
+        seen.append(kwargs)
         return real(*args, **kwargs)
 
     monkeypatch.setattr(simulation_mod.integrate, "integrate", spy)
     sim._sim_step_timed(n)
     assert len(seen) == 1
-    cell_start, cell_end = seen[0]
-    assert cell_start is sim._cell_start and cell_start is not None
-    assert cell_end is sim._cell_end and cell_end is not None
+    kw = seen[0]
+    assert kw.get("cell_start") is None and kw.get("cell_end") is None
+    assert kw.get("cell_wake_flags") is sim._cell_wake_flags
+    assert kw.get("frame_counter") is sim._frame_counter_d
