@@ -109,6 +109,21 @@ __device__ __forceinline__ float cross_pair_visc(
 }
 
 /* ======================================================================
+ * akinci_cohesion_st2 -- Akinci 2013 cohesion spline C(r), times h^3.
+ *
+ *   C(r) = 32 / (pi h^9) * (h - r)^3 r^3                 for h/2 < r <= h
+ *   C(r) = 32 / (pi h^9) * (2 (h - r)^3 r^3 - h^6 / 64)  for 0 < r <= h/2
+ *
+ * Written with q = r / h, so the result is C(r) * h^3 and has no h^9.
+ * It is negative for r < ~0.18 h (repulsion) and peaks near r = h/2.
+ * ====================================================================== */
+__device__ __forceinline__ float akinci_cohesion_st2(float q) {
+    const float k = 32.0f / 3.14159265f;
+    float a = (1.0f - q) * (1.0f - q) * (1.0f - q) * q * q * q;
+    return (q > 0.5f) ? k * a : k * (2.0f * a - 1.0f / 64.0f);
+}
+
+/* ======================================================================
  * K_Step2 kernel
  * ====================================================================== */
 
@@ -237,6 +252,18 @@ void K_Step2(
         vort_i = __ldg(&vorticity_in[index_i]);
         omega_mag_i = vort_i.w;
         do_vort_eta = (omega_mag_i > 1e-6f);
+    }
+
+    // Akinci surface tension (FLUID only): per-pair sum in the main loop.
+    bool st_on = is_fluid_i && c_granular.surface_tension_gamma > 0.0f;
+    float3 f_st_pair = make_float3(0.0f, 0.0f, 0.0f);
+    float3 n_i_st = make_float3(0.0f, 0.0f, 0.0f);
+    float rho0_i_st = c_materials[mat_id_i].rest_density;
+    float inv_h_st = 1.0f / c_sim.smoothing_length;
+    float inv_h3_st = inv_h_st * inv_h_st * inv_h_st;
+    if (st_on) {
+        float4 n4_i = __ldg(&normal_in[index_i]);
+        n_i_st = make_float3(n4_i.x, n4_i.y, n4_i.z);
     }
 
     // ---------------------------------------------------------------
@@ -508,6 +535,25 @@ void K_Step2(
                         xsph_sum.y += (vel_j.y - vel_i_pair.y) * xsph_factor;
                         xsph_sum.z += (vel_j.z - vel_i_pair.z) * xsph_factor;
                     }
+
+                    // ---- Akinci 2013 surface tension, FLUID-FLUID pairs (bd-r5-review-n28.125) ----
+                    // a_i += gamma K_ij [ -m_j C(r) r/|r| + h m_ij (n_i - n_j) / m_i ]
+                    // K_ij = (rho0_i + rho0_j) / (rho_i + rho_j), m_ij = 2 m_i m_j / (m_i + m_j).
+                    // Every factor is symmetric in i, j and r and (n_i - n_j) flip sign,
+                    // so m_i a_i = -m_j a_j and the pair adds no net momentum.
+                    // n is Step1's inward colour gradient (1/m); times h it is
+                    // Akinci's dimensionless normal. Inward normals make the
+                    // curvature term +(n_i - n_j): it pulls convex regions in.
+                    if (st_on && behavior_j == FLUID) {
+                        float4 n4_j = __ldg(&normal_in[index_j]);
+                        float rho0_j = c_materials[GET_MATERIAL_ID(pi_j)].rest_density;
+                        float K_ij = (rho0_i_st + rho0_j) / fmaxf(rho_i + rho_j, RHO_EPSILON);
+                        float c_coh = -m_j * akinci_cohesion_st2(rlen * inv_h_st) * inv_h3_st / rlen;
+                        float c_curv = h * 2.0f * m_j / fmaxf(m_i + m_j, 1e-12f);
+                        f_st_pair.x += K_ij * (c_coh * r.x + c_curv * (n_i_st.x - n4_j.x));
+                        f_st_pair.y += K_ij * (c_coh * r.y + c_curv * (n_i_st.y - n4_j.y));
+                        f_st_pair.z += K_ij * (c_coh * r.z + c_curv * (n_i_st.z - n4_j.z));
+                    }
                 }  // end neighbor particle loop
             }
         }
@@ -527,27 +573,12 @@ void K_Step2(
         }
     }
 
-    // --- Akinci surface tension (FLUID only, surface particles) ---
-    float3 f_surface_tension = make_float3(0.0f, 0.0f, 0.0f);
-    if (is_fluid_i && c_granular.surface_tension_gamma > 0.0f) {
-        float4 norm_i = __ldg(&normal_in[index_i]);
-        float nc_i = norm_i.w;  // neighbor count
-
-        // Surface particles have fewer neighbors than interior particles
-        if (nc_i < 25.0f) {
-            float gamma = c_granular.surface_tension_gamma;
-            // Surface tension: +gamma * n_i (pulls surface inward).
-            // Normal n_i points INTO the bulk (toward neighbors) because
-            // spiky_grad_coeff is negative and r = pos_i - pos_j points away
-            // from neighbors. So +gamma * n pushes toward bulk = cohesion.
-            float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
-            if (n_mag > 0.01f) {
-                f_surface_tension.x = gamma * norm_i.x;
-                f_surface_tension.y = gamma * norm_i.y;
-                f_surface_tension.z = gamma * norm_i.z;
-            }
-        }
-    }
+    // --- Akinci surface tension (FLUID only, pair sum from the main loop) ---
+    // No neighbour-count gate: interior pairs cancel by symmetry, so only the
+    // surface layer feels a net force, and it grows with curvature.
+    float gamma_st = c_granular.surface_tension_gamma;
+    float3 f_surface_tension = make_float3(
+        gamma_st * f_st_pair.x, gamma_st * f_st_pair.y, gamma_st * f_st_pair.z);
 
     // --- Implicit viscous self-term (bd-r5-review-n28.52) ---
     // The viscous accel is fs_i * sum_j c_j (v_j - v_i). Explicit Euler on it
