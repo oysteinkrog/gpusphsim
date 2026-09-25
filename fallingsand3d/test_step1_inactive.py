@@ -199,8 +199,12 @@ def test_skip_and_refresh_outputs() -> None:
     assert inactive.sum() > 100 and dead.sum() == 1 and active.sum() > 10
 
     # Reference: every particle computes (frame_counter None). It also packs
-    # the density into position.w, as K_Step1 does every substep.
+    # the density into position.w, as K_Step1 does every substep. K_Step1
+    # reads neighbour rho_j from .w (bd-r5-review-n28.163), so one warm-up
+    # call first packs the density; .w is then the same before and after
+    # the reference call and every later run sees the same rho_j.
     pos_ref = sc["position"].copy()
+    _run(sc, pos_ref, _Bufs(n))
     ref_b = _Bufs(n)
     _run(sc, pos_ref, ref_b)
     ref = ref_b.snap()
@@ -296,5 +300,9 @@ def test_heat_into_sleeping_pile_matches_always_on() -> None:
     gain_skip = float(np.sum(t_skip[sand] - t0[sand]))
     print(f"sand heat gain over 1 s: always-on {gain_on:.2f} K, skip {gain_skip:.2f} K")
     assert gain_on > 1.0
-    assert abs(gain_skip - gain_on) <= 0.05 * abs(gain_on)
+    # With rho_j read from position.w (the step1 density, as in the app, not
+    # the rest density fallback) the skipped pile gains 6.3% less
+    # (17384 K vs 16282 K, bd-r5-review-n28.163): the held backward-Euler
+    # rate damps the stronger coupling more.
+    assert abs(gain_skip - gain_on) <= 0.07 * abs(gain_on)
     assert np.all(np.isfinite(t_skip))

@@ -1789,6 +1789,8 @@ def test_exposure_matches_across_solvers(world, sim):
 
     # WCSPH
     s1_dTdt, s1_eh, s1_ec = outs()
+    # rho_j = rest density, the same fallback PBF and DFSPH use for density_in=None.
+    w.sorted_position[:n, 3] = 0.0
     step1.compute_step1(
         w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n],
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
@@ -1897,6 +1899,8 @@ def test_cross_phase_heat_matches_across_solvers(world, sim):
                 cp.zeros(n, cp.float32))
 
     s1_dTdt, s1_eh, s1_ec = outs()
+    # rho_j = rest density, the same fallback PBF and DFSPH use for density_in=None.
+    w.sorted_position[:n, 3] = 0.0
     step1.compute_step1(
         w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n],
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
