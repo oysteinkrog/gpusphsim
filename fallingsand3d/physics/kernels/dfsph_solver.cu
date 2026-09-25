@@ -208,8 +208,9 @@ void K_DFSPH_ComputeDensityAlpha(
                             // Cross-phase heat conduction (bd-r5-review-n28.94): the same symmetric
                             // pair term as the same-phase branch, with the coefficient capped at a_x_max
                             // so one neighbour moves T_i by at most half the gap per substep.
-                            float rho_x = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
-                            if (rho_x <= 0.0f) rho_x = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                            float rho_x = (density_in != 0) ? __ldg(&density_in[j]) : 0.0f;
+                            // Unset or zero density_in (spawn, unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
+                            if (rho_x <= 0.0f) rho_x = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
                             float kappa_x = c_materials[mat_id_j].thermal_conductivity;
                             float k_x = 2.0f * kappa_i * kappa_x / fmaxf(kappa_i + kappa_x, 1e-6f);
                             float boost_x = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
@@ -233,8 +234,9 @@ void K_DFSPH_ComputeDensityAlpha(
                     // Skip self for non-density quantities
                     if (j != i && r_sq > 1e-12f) {
                         float rlen = sqrtf(r_sq);
-                        float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
-                        if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                        float rho_j = (density_in != 0) ? __ldg(&density_in[j]) : 0.0f;
+                        // Unset or zero density_in (spawn, unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
+                        if (rho_j <= 0.0f) rho_j = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
 
                         // Skip MAT_RIGID for heat/exposure/dye/vorticity/strain
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);

@@ -211,8 +211,9 @@ void K_Step1(
                                 // Cross-phase heat conduction (bd-r5-review-n28.94): the same symmetric
                                 // pair term as the same-phase branch, with the coefficient capped at a_x_max
                                 // so one neighbour moves T_i by at most half the gap per substep.
-                                float rho_x = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
-                                if (rho_x <= 0.0f) rho_x = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                                float rho_x = (density_in != 0) ? __ldg(&density_in[index_j]) : 0.0f;
+                                // Unset or zero density_in (spawn, unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
+                                if (rho_x <= 0.0f) rho_x = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
                                 float kappa_x = c_materials[mat_id_j].thermal_conductivity;
                                 float k_x = 2.0f * kappa_i * kappa_x / fmaxf(kappa_i + kappa_x, 1e-6f);
                                 float boost_x = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
@@ -244,8 +245,9 @@ void K_Step1(
                             // branch below still adds them to the normal and neighbour count)
                             if (mat_id_j != MAT_RIGID) {
                                 // --- Heat diffusion ---
-                                float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
-                                if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                                float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 0.0f;
+                                // Unset or zero density_in (spawn, unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
+                                if (rho_j <= 0.0f) rho_j = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
                                 float lap_var = h - rlen;
                                 float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
                                 // Pairwise harmonic-mean conductivity: the pair term is symmetric,
@@ -568,8 +570,9 @@ void K_Step1_BuildNL(
                                 // Cross-phase heat conduction (bd-r5-review-n28.94): the same symmetric
                                 // pair term as the same-phase branch, with the coefficient capped at a_x_max
                                 // so one neighbour moves T_i by at most half the gap per substep.
-                                float rho_x = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
-                                if (rho_x <= 0.0f) rho_x = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                                float rho_x = (density_in != 0) ? __ldg(&density_in[index_j]) : 0.0f;
+                                // Unset or zero density_in (spawn, unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
+                                if (rho_x <= 0.0f) rho_x = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
                                 float kappa_x = c_materials[mat_id_j].thermal_conductivity;
                                 float k_x = 2.0f * kappa_i * kappa_x / fmaxf(kappa_i + kappa_x, 1e-6f);
                                 float boost_x = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
@@ -602,8 +605,9 @@ void K_Step1_BuildNL(
                             if (mat_id_j != MAT_DEAD) sum_W += diff * diff * diff;
 
                             if (mat_id_j != MAT_RIGID) {
-                                float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
-                                if (rho_j <= 0.0f) rho_j = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                                float rho_j = (density_in != 0) ? __ldg(&density_in[index_j]) : 0.0f;
+                                // Unset or zero density_in (spawn, unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
+                                if (rho_j <= 0.0f) rho_j = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
                                 float lap_var = h - rlen;
                                 float heat_boost = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
                                 // Pairwise harmonic-mean conductivity: the pair term is symmetric,
