@@ -156,7 +156,23 @@ void K_Integrate(
     // --- Sleeping particle: check wake condition with hysteresis ---
     if (was_sleeping) {
         float vel_sq_wake = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
-        if (vel_sq_wake <= V_WAKE_SQ) {
+        // Geometry wake test (bd-r5-review-n28.119): a kinematic SDF object
+        // moving into a sleeping pile, or a world resize that leaves the
+        // particle outside the box, must wake it so the push-out and the
+        // velocity impulse below apply this substep. The test is strict
+        // penetration (dist < 0, pos outside the unshrunk box), not the
+        // BOUNDARY_MARGIN band: a particle resting on a surface sits at
+        // dist ~= BOUNDARY_MARGIN after its last push-out, and waking it on
+        // rounding noise would stop sand on static objects from sleeping.
+        // Costs nothing when c_num_sdf_objects == 0.
+        bool geom_wake =
+            pos.x < c_sim.world_min.x || pos.x > c_sim.world_max.x ||
+            pos.y < c_sim.world_min.y || pos.y > c_sim.world_max.y ||
+            pos.z < c_sim.world_min.z || pos.z > c_sim.world_max.z;
+        for (int s = 0; s < c_num_sdf_objects && !geom_wake; s++) {
+            if (eval_sdf(pos, c_sdf_objects[s]) < 0.0f) geom_wake = true;
+        }
+        if (vel_sq_wake <= V_WAKE_SQ && !geom_wake) {
             // Still sleeping: write position/velocity unchanged, keep flag and saturate counter
             // Sleeping particles still conduct heat
             float dTdt_sleep = sorted_dTdt[i];
