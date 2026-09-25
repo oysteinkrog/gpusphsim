@@ -86,7 +86,7 @@ __constant__ Interaction   c_interactions[32][32];
  * double-counts a neighbor, because spatialHash() maps the 27 cells of
  * any 3x3x3 stencil to 27 distinct buckets (see spatialHash below).
  *
- * 40 bytes total (10 fields x 4 bytes).
+ * 32 bytes total (2 float3 + 2 uint = 8 fields x 4 bytes).
  * ====================================================================== */
 
 struct GridParams {

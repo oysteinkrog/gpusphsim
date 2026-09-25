@@ -15,9 +15,10 @@ Additional constant memory local to this module:
 
 Tait EOS pressure
 -----------------
-- FLUID/GRANULAR: p_raw = k * (pow(rho/rho0, 7) - 1)
-  - FLUID:    p = max(p_raw, -0.5*k)
-  - GRANULAR: p = max(p_raw, 0)
+K_Step1 computes pressure with compute_pressure() in sph_shared.cuh and
+stores it; K_Step2 reads it from pressure_in.
+- FLUID/GRANULAR: p_raw = k * (pow(rho/rho0, gamma) - 1), with rho/rho0 capped at 10
+  - p = max(p_raw, 0) for both
 - GAS: p = k_gas * max(rho - rho0, 0) with gamma=1
 
 Force accumulation
