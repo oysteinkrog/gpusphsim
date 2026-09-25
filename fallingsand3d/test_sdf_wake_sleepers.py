@@ -118,8 +118,8 @@ def test_no_particle_left_inside_box_volume(box_sweep):
     # Allow the box's own travel in the last substep plus float slack.
     tol = box_sweep["travel"] + 1e-4
     worst = float(d.min())
-    print(f"  deepest particle: {-worst * 1000:.2f} mm inside, "
-          f"tolerance {tol * 1000:.2f} mm")
+    print(f"  closest particle signed distance: {worst * 1000:.2f} mm "
+          f"(negative is inside), tolerance {tol * 1000:.2f} mm")
     assert worst >= -tol, (
         f"a particle is {-worst * 1000:.2f} mm inside the box volume")
 
