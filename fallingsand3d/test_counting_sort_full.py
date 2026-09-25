@@ -281,7 +281,7 @@ def test_counting_sort_full_rejects_separate_cell_arrays() -> None:
     with pytest.raises(ValueError):
         counting_sort.counting_sort_full(
             num_particles=4, num_cells=num_cells,
-            histogram=scratch["histogram"], write_offset=scratch["write_offset"],
+            histogram=scratch["histogram"], block_sums=scratch["block_sums"],
             cell_start=cupy.zeros(num_cells, dtype=cupy.uint32),
             cell_end=cupy.zeros(num_cells, dtype=cupy.uint32),
             sort_perm=cupy.zeros(4, dtype=cupy.uint32),

@@ -1,7 +1,7 @@
-"""Tests for the grid hash: K_CalcHashCS in counting_sort.cu.
+"""Tests for the grid hash: K_HashHistogram in counting_sort.cu.
 
 Acceptance criteria:
-  - K_CalcHashCS computes grid cell: cell = int3((pos - grid_min) * grid_delta),
+  - K_HashHistogram computes grid cell: cell = int3((pos - grid_min) * grid_delta),
     clamped to valid range via integer wrap + table_mask
   - Spatial hash = (cx*P1 + cy*P2 + cz*P3) & table_mask (uint32 wrap)
   - The 27 cells of every 3x3x3 stencil land in 27 distinct buckets,
@@ -42,7 +42,7 @@ from grid_params import (
 
 
 def _gpu_hash(positions: cupy.ndarray) -> cupy.ndarray:
-    """Hash positions on the device with the live sort's K_CalcHashCS.
+    """Hash positions on the device with the live sort's K_HashHistogram.
 
     Uses the default GridParams (grid_min -1, cell 0.04, 2^18 table).
     """
@@ -154,7 +154,7 @@ def test_compilation() -> None:
     """Verify CuPy RawModule compiles counting_sort.cu including common.cuh."""
     module = counting_sort.get_module()
     assert module is not None
-    assert module.get_function("K_CalcHashCS") is not None
+    assert module.get_function("K_HashHistogram") is not None
     assert int(module.get_global("c_grid")) != 0
 
 

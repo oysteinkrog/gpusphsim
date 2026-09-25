@@ -1,10 +1,17 @@
 """Counting sort for spatial hash grid -- replaces cupy.argsort (Thrust).
 
-3-phase counting sort pipeline (all CUDA-graph-capturable):
-  1. K_CalcHashCS    -- compute per-particle grid cell hash
-  2. K_Histogram     -- count particles per cell (atomicAdd)
-  3. cupy.cumsum     -- prefix sum on histogram -> cell offsets table
-  4. K_ScatterReorder -- scatter particles to sorted order + build sort_perm
+Full sort, five kernel launches (all CUDA-graph-capturable, bd-r5-review-n28.189):
+  1. K_HashHistogram -- per-particle grid cell hash, counted per cell (atomicAdd)
+  2. K_ScanReduce    -- one total per SCAN_TILE histogram slots
+  3. K_ScanDownsweep -- inclusive prefix sum of the histogram -> cell_end
+  4. K_ScatterPerm   -- claim each particle's sorted slot, write sort_perm and
+                        drain the histogram back to zero
+  5. K_GatherReorder -- gather every particle array through sort_perm
+
+The scan is our own: cupy.cumsum takes a CUB workspace from the memory pool
+on every call, and inside a CUDA graph capture the instantiated graph would
+keep a raw pointer to a block the pool has already taken back. No step
+allocates from the pool and no step needs a memset.
 
 Cell table layout: one uint32 offsets array of num_cells + 1 entries with
 offsets[0] == 0 and offsets[c + 1] = sum(histogram[0..c]). Cell c holds the
@@ -14,7 +21,6 @@ offsets[1:], so kernels that take (cell_start, cell_end) read two adjacent
 words of the same array. See allocate_cell_tables.
 
 Replaces: cupy.argsort + K_FusedSortReorderBuild.
-Advantage: entire pipeline is graph-capturable (no Thrust sync).
 """
 
 from __future__ import annotations
@@ -32,6 +38,15 @@ import numpy as np
 _module: Optional[object] = None
 
 BLOCK_SIZE = 256
+
+# Must match SCAN_THREADS * SCAN_ITEMS and SCAN_THREADS in counting_sort.cu.
+SCAN_TILE = 1024
+SCAN_THREADS = 256
+
+
+def scan_block_count(num_cells: int) -> int:
+    """Number of scan tiles (and block_sums entries) for a table of num_cells."""
+    return (num_cells + SCAN_TILE - 1) // SCAN_TILE
 
 
 def _ensure_ptx_if_needed() -> None:
@@ -106,12 +121,18 @@ def allocate_cell_tables(num_cells: int):
     return offsets, offsets[:-1], offsets[1:]
 
 
+def allocate_block_sums(num_cells: int) -> cupy.ndarray:
+    """Scan scratch for counting_sort_full: one uint32 per SCAN_TILE cells."""
+    return cupy.zeros(scan_block_count(num_cells), dtype=cupy.uint32)
+
+
 def allocate_scratch(num_cells: int, max_particles: int) -> dict:
     """Allocate scratch buffers for counting sort.
 
     Returns a dict with:
-      - histogram: (num_cells,) uint32  -- particle count per cell
-      - write_offset: (num_cells,) uint32  -- scatter write position per cell
+      - histogram: (num_cells,) uint32  -- particle count per cell. Zero between
+        sorts: counting_sort_full drains it back to zero.
+      - block_sums: (scan_block_count(num_cells),) uint32  -- scan scratch
       - cell_offsets: (num_cells + 1,) uint32  -- see allocate_cell_tables
       - cell_start: view cell_offsets[:-1]  -- first sorted slot per cell
       - cell_end: view cell_offsets[1:]  -- one past the last sorted slot per cell
@@ -119,7 +140,7 @@ def allocate_scratch(num_cells: int, max_particles: int) -> dict:
     offsets, cell_start, cell_end = allocate_cell_tables(num_cells)
     return {
         "histogram": cupy.zeros(num_cells, dtype=cupy.uint32),
-        "write_offset": cupy.zeros(num_cells, dtype=cupy.uint32),
+        "block_sums": allocate_block_sums(num_cells),
         "cell_offsets": offsets,
         "cell_start": cell_start,
         "cell_end": cell_end,
@@ -142,12 +163,36 @@ def _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v) -> None:
         raise ValueError("sorted_kappa_v given without kappa_v")
 
 
+def inclusive_scan(
+    num_cells: int,
+    histogram: cupy.ndarray,
+    block_sums: cupy.ndarray,
+    out: cupy.ndarray,
+) -> None:
+    """out[i] = sum(histogram[0..i]) for i < num_cells, in two launches.
+
+    uint32 in and out (sums wrap at 2^32). block_sums is scratch from
+    allocate_block_sums(num_cells). out may be an unaligned view such as
+    cell_end. Allocates nothing, so it is safe inside a CUDA graph capture.
+    """
+    module = _get_module()
+    grid_s = (scan_block_count(num_cells),)
+    block_s = (SCAN_THREADS,)
+    cells_u32 = np.uint32(num_cells)
+    module.get_function("K_ScanReduce")(grid_s, block_s, (
+        cells_u32, histogram, block_sums,
+    ))
+    module.get_function("K_ScanDownsweep")(grid_s, block_s, (
+        cells_u32, histogram, block_sums, out,
+    ))
+
+
 def counting_sort_full(
     num_particles: int,
     num_cells: int,
     # Pre-allocated scratch
     histogram: cupy.ndarray,
-    write_offset: cupy.ndarray,
+    block_sums: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     sort_perm: cupy.ndarray,
@@ -186,15 +231,20 @@ def counting_sort_full(
     angular_velocity: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
 ) -> None:
-    """Run the full counting sort pipeline (hash + histogram + prefix sum + scatter).
+    """Run the full counting sort (hash + histogram + prefix sum + scatter + gather).
 
     cell_start and cell_end must be the two views of one offsets table from
     allocate_cell_tables (cell_end starts one uint32 after cell_start). The
     prefix sum writes cell_end only; cell_start[0] is the table's fixed zero.
 
-    sorted_anchor, when given, receives a copy of sorted_position. gather_reorder
-    never writes it, so it keeps the positions of the last full sort and the
-    finalize kernels measure drift since that sort against it.
+    histogram must be all zero on entry (it is at allocation) and is all zero
+    again on return, so it holds no counts after the sort; use
+    cell_end - cell_start for them. block_sums is scan scratch from
+    allocate_block_sums(num_cells).
+
+    sorted_anchor, when given, receives a copy of sorted_position. Grid-reuse
+    gathers never write it, so it keeps the positions of the last full sort
+    and the finalize kernels measure drift since that sort against it.
 
     sorted_kappa, sorted_kappa_v, sorted_velocity_h and sorted_temperature_h
     may be None: the kernel then skips that gather and store. kappa and
@@ -213,81 +263,45 @@ def counting_sort_full(
             "cell_start/cell_end must be the views offsets[:-1] and offsets[1:] "
             "of one table from counting_sort.allocate_cell_tables"
         )
+    num_scan_blocks = scan_block_count(num_cells)
+    if histogram.shape[0] != num_cells or block_sums.shape[0] < num_scan_blocks:
+        raise ValueError("histogram / block_sums do not match num_cells")
+
+    _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v)
 
     module = _get_module()
 
     grid_p = ((num_particles + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block_p = (BLOCK_SIZE,)
+    n_u32 = np.uint32(num_particles)
 
-    # --- Phase 1: Hash ---
-    k_hash = module.get_function("K_CalcHashCS")
-    k_hash(grid_p, block_p, (
-        np.uint32(num_particles),
-        positions,
-        hashes,
+    # 1. Hash and count. histogram is zero here (see the docstring).
+    module.get_function("K_HashHistogram")(grid_p, block_p, (
+        n_u32, positions, hashes, histogram,
     ))
 
-    # --- Phase 2: Histogram ---
-    # Zero histogram (graph-capturable memset)
-    histogram.data.memset_async(0x00, histogram.nbytes)
+    # 2 + 3. Inclusive prefix sum of histogram into offsets[1:] (= cell_end).
+    # offsets[0] is fixed at 0, so offsets[:-1] (= cell_start) is then the
+    # exclusive sum: cell_start[c] = sum(histogram[0..c-1]).
+    inclusive_scan(num_cells, histogram, block_sums, cell_end)
 
-    k_histogram = module.get_function("K_Histogram")
-    k_histogram(grid_p, block_p, (
-        np.uint32(num_particles),
-        hashes,
-        histogram,
+    # 4. Sorted slot per particle -> sort_perm; histogram ends at zero.
+    module.get_function("K_ScatterPerm")(grid_p, block_p, (
+        n_u32, hashes, cell_end, histogram, sort_perm,
     ))
 
-    # --- Phase 3: Prefix sum -> cell offsets ---
-    # The inclusive sum goes into offsets[1:] (= cell_end). Because offsets[0]
-    # is fixed at 0, offsets[:-1] (= cell_start) is then the exclusive sum:
-    # cell_start[c] = sum(histogram[0..c-1]), cell_end[c] = cell_start[c+1].
-    # cupy.cumsum is graph-capturable (uses CUB internally)
-    cupy.cumsum(histogram, out=cell_end)
-
-    # --- Phase 4: Scatter + Reorder ---
-    # Zero write_offset (graph-capturable memset)
-    write_offset.data.memset_async(0x00, write_offset.nbytes)
-
-    _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v)
-    _null = cupy.ndarray(0, dtype=cupy.uint32)
-
-    k_scatter = module.get_function("K_ScatterReorder")
-    k_scatter(grid_p, block_p, (
-        np.uint32(num_particles),
-        hashes,
-        cell_start,
-        write_offset,
-        sort_perm,
-        # Unsorted inputs
-        position,
-        velocity,
-        mass,
-        packed_info,
-        temperature,
-        health,
-        lifetime,
-        sleep_counter,
-        kappa if sorted_kappa is not None else _null,
-        kappa_v if sorted_kappa_v is not None else _null,
-        # Sorted outputs
-        sorted_position,
-        sorted_velocity,
-        sorted_mass,
-        sorted_packed_info,
-        sorted_temperature,
-        sorted_health,
-        sorted_lifetime,
-        sorted_sleep_counter,
-        sorted_kappa if sorted_kappa is not None else _null,
-        sorted_kappa_v if sorted_kappa_v is not None else _null,
-        # FP16 velocity output (OPT-4.3)
-        sorted_velocity_h if sorted_velocity_h is not None else _null,
-        # Fixed-point temperature (PERF-011)
-        sorted_temperature_h if sorted_temperature_h is not None else _null,
-        # Drift anchor (NULL = skip)
-        sorted_anchor if sorted_anchor is not None else _null,
-    ))
+    # 5. Gather the particle data through sort_perm, drift anchor included.
+    gather_reorder(
+        num_particles, sort_perm,
+        position, velocity, mass, packed_info, temperature, health,
+        lifetime, sleep_counter, kappa, kappa_v,
+        sorted_position, sorted_velocity, sorted_mass, sorted_packed_info,
+        sorted_temperature, sorted_health, sorted_lifetime,
+        sorted_sleep_counter, sorted_kappa, sorted_kappa_v,
+        sorted_velocity_h=sorted_velocity_h,
+        sorted_temperature_h=sorted_temperature_h,
+        sorted_anchor=sorted_anchor,
+    )
 
 
 def gather_reorder(
@@ -319,17 +333,20 @@ def gather_reorder(
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
     # Fixed-point temperature output (uint16, T*8) (PERF-011)
     sorted_temperature_h: "Optional[cupy.ndarray]" = None,
+    # Drift anchor: counting_sort_full only (bd-r5-review-n28.54)
+    sorted_anchor: "Optional[cupy.ndarray]" = None,
     # Ignored: the micropolar angular velocity was removed (n28.140)
     angular_velocity: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
 ) -> None:
-    """Re-scatter unsorted data to sorted order using existing sort_perm.
+    """Gather unsorted data into sorted order through sort_perm.
 
-    Used for grid reuse: when particles moved less than 0.25*h since last sort,
-    cell_start/cell_end are still valid. Only the particle data needs re-gathering.
-    Cheaper than full counting sort (no hash, no histogram, no prefix sum, no atomics).
-    It leaves the drift anchor from the last full sort untouched.
-    None outputs and inputs work as in counting_sort_full.
+    The last stage of counting_sort_full, and on its own the grid-reuse path:
+    when particles moved less than 0.25*h since the last sort,
+    cell_start/cell_end are still valid and only the particle data needs
+    re-gathering. Grid-reuse callers leave sorted_anchor as None so the drift
+    anchor from the last full sort stays untouched; counting_sort_full passes
+    it. None outputs and inputs work as in counting_sort_full.
     """
     if num_particles == 0:
         return
@@ -372,4 +389,6 @@ def gather_reorder(
         sorted_velocity_h if sorted_velocity_h is not None else _null,
         # Fixed-point temperature (PERF-011)
         sorted_temperature_h if sorted_temperature_h is not None else _null,
+        # Drift anchor (NULL = skip)
+        sorted_anchor if sorted_anchor is not None else _null,
     ))

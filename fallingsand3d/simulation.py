@@ -242,7 +242,7 @@ class Simulation:
 
         # --- Counting sort scratch buffers (allocated in _upload_constants) ---
         self._cs_histogram = None
-        self._cs_write_offset = None
+        self._cs_block_sums = None
 
         # --- World size ---
         self._world_half_size = world_half_size
@@ -554,8 +554,9 @@ class Simulation:
             # the monotonic device counter _frame_counter_d, so old marks never match.
             self._cell_wake_flags = wake.allocate_cell_wake_flags(table_size)
             # Counting sort scratch buffers
+            # (histogram is zero between sorts: counting_sort_full drains it)
             self._cs_histogram = cupy.zeros(table_size, dtype=cupy.uint32)
-            self._cs_write_offset = cupy.zeros(table_size, dtype=cupy.uint32)
+            self._cs_block_sums = counting_sort.allocate_block_sums(table_size)
 
         # CFL velocity limit: v_max = factor * h / dt
         vlf = getattr(self._profile, 'velocity_limit_factor', 0.9)
@@ -988,7 +989,7 @@ class Simulation:
             num_cells=self._table_size,
             # Scratch buffers
             histogram=self._cs_histogram,
-            write_offset=self._cs_write_offset,
+            block_sums=self._cs_block_sums,
             cell_start=self._cell_start,
             cell_end=self._cell_end,
             sort_perm=self._sort_perm[:n],

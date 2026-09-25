@@ -181,7 +181,7 @@ def test_zero_particles() -> None:
 def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
     """bd-r5-review-n28.155: sorted_velocity_h and sorted_temperature_h
     may be None. The wrappers pass a NULL pointer and
-    K_ScatterReorder / K_GatherReorder skip those stores, so neither the
+    K_GatherReorder skips those stores, so neither the
     full sort nor the gather reorder faults, and the float32 outputs are
     still the unsorted arrays gathered through sort_perm."""
     import counting_sort
@@ -234,7 +234,7 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
     sort_perm = cupy.zeros(n, dtype=cupy.uint32)
     counting_sort.counting_sort_full(
         num_particles=n, num_cells=num_cells,
-        histogram=scratch["histogram"], write_offset=scratch["write_offset"],
+        histogram=scratch["histogram"], block_sums=scratch["block_sums"],
         cell_start=scratch["cell_start"], cell_end=scratch["cell_end"],
         sort_perm=sort_perm, positions=src["position"],
         hashes=cupy.zeros(n, dtype=cupy.uint32),
@@ -325,7 +325,7 @@ def test_reorder_skips_each_null_output_alone() -> None:
         sort_perm = cupy.zeros(n, dtype=cupy.uint32)
         counting_sort.counting_sort_full(
             num_particles=n, num_cells=num_cells,
-            histogram=scratch["histogram"], write_offset=scratch["write_offset"],
+            histogram=scratch["histogram"], block_sums=scratch["block_sums"],
             cell_start=scratch["cell_start"], cell_end=scratch["cell_end"],
             sort_perm=sort_perm, positions=src["position"],
             hashes=cupy.zeros(n, dtype=cupy.uint32), **src, **out,
@@ -410,11 +410,13 @@ def test_legacy_sort_modules_removed() -> None:
             found += [f"{src_path.name}: {n}" for n in names if n in legacy]
     assert not found, f"legacy sort modules imported: {found}"
 
-    # K_ScatterReorder takes no cell_end_out: cell_end is a view of the same
-    # offsets table as cell_start (bd-r5-review-n28.160).
+    # No sort kernel takes cell_start: the scan writes cell_end only, and
+    # cell_start is a view of the same offsets table (bd-r5-review-n28.160).
     cu = (base / "physics" / "kernels" / "counting_sort.cu").read_text(encoding="utf-8")
-    scatter = cu[cu.index("void K_ScatterReorder("):cu.index(") {", cu.index("void K_ScatterReorder("))]
-    assert "cell_end" not in scatter
+    for name in ("K_HashHistogram", "K_ScanReduce", "K_ScanDownsweep",
+                 "K_ScatterPerm", "K_GatherReorder"):
+        head = cu.index(f"void {name}(")
+        assert "cell_start" not in cu[head:cu.index(") {", head)], name
 
 
 def main() -> None:

@@ -143,8 +143,9 @@ def counting_sort_scene(
     (``velocity_h``, ``temperature_h``), the cell tables
     (``cell_start``, ``cell_end``), ``sort_perm`` (sorted index -> original
     index, uint32), ``hashes`` (unsorted), ``sorted_hashes`` (hashes gathered
-    through sort_perm), ``histogram``
-    and ``num_cells``.
+    through sort_perm), ``histogram`` (particle count per cell, taken as
+    cell_end - cell_start because the sort drains the scratch histogram back
+    to zero) and ``num_cells``.
     """
     import cupy
     import counting_sort
@@ -199,7 +200,6 @@ def counting_sort_scene(
         "cell_offsets": scratch["cell_offsets"],
         "cell_start": scratch["cell_start"],
         "cell_end": scratch["cell_end"],
-        "histogram": scratch["histogram"],
         "num_cells": num_cells,
     }
 
@@ -207,7 +207,7 @@ def counting_sort_scene(
         num_particles=n,
         num_cells=num_cells,
         histogram=scratch["histogram"],
-        write_offset=scratch["write_offset"],
+        block_sums=scratch["block_sums"],
         cell_start=scratch["cell_start"],
         cell_end=scratch["cell_end"],
         sort_perm=out["sort_perm"],
@@ -239,6 +239,7 @@ def counting_sort_scene(
     # The sort kernel writes no sorted hash array (bd-r5-review-n28.152);
     # derive it here for tests that check the bucket order.
     out["sorted_hashes"] = out["hashes"][out["sort_perm"].astype(cupy.int64)]
+    out["histogram"] = scratch["cell_end"] - scratch["cell_start"]
     out["scratch"] = scratch
     return out
 

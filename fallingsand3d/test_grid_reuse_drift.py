@@ -1,6 +1,6 @@
 """Grid-reuse drift is measured from the last full sort (bd-r5-review-n28.54).
 
-K_ScatterReorder writes sorted_anchor on each full sort. The finalize
+The full sort writes sorted_anchor (in its K_GatherReorder pass). The finalize
 kernels compare the new position against it, so max_displacement is the
 drift since the last full sort, not the largest single-substep move. The
 host scales that drift to the end of the next frame before it allows a
