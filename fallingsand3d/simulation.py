@@ -165,13 +165,23 @@ class Simulation:
         # Pinned host buffers for async D2H copy
         self._pinned_displacement = cupy.cuda.alloc_pinned_memory(4)
         self._pinned_foam_count = cupy.cuda.alloc_pinned_memory(4)
+        self._pinned_dead_count = cupy.cuda.alloc_pinned_memory(4)
         # Zero-init pinned buffers
         _ctypes.memset(self._pinned_displacement.ptr, 0, 4)
         _ctypes.memset(self._pinned_foam_count.ptr, 0, 4)
+        _ctypes.memset(self._pinned_dead_count.ptr, 0, 4)
         # Previous frame values (used for decisions while async copy is in-flight).
         # The displacement starts at the "unknown" sentinel, which never skips.
         self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
         self._last_foam_count = 0
+        # Freelist size (_dead_count) at the end of the last substep of the
+        # previous frame: the DEAD count in [0, _high_water), since
+        # K_Reactions pushes every DEAD slot and K_SpawnGas pops the ones it
+        # claims. None until a copy from the current scene epoch lands.
+        # _maybe_compact uses it to skip the num_active sync when no
+        # compaction or reserve refill can be due (bd-r5-review-n28.135).
+        self._last_dead_count: Optional[int] = None
+        self._num_active_syncs = 0  # num_active calls made by _maybe_compact
         # Sim time since the last foam generation launch (host float).
         self._foam_emit_dt = 0.0
 
@@ -722,6 +732,7 @@ class Simulation:
         # Copies in flight describe the old particle set: drop them and treat
         # the displacement as unknown until a copy from after this change lands.
         self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
+        self._last_dead_count = None
         self._readback_epoch += 1
         # Check the parked DEAD reserve on the next frame (bd-r5-review-n28.27).
         self._dead_reserve_check_pending = True
@@ -1845,6 +1856,8 @@ class Simulation:
                 self._last_max_disp_uint = _ctypes.c_uint32.from_address(
                     self._pinned_displacement.ptr).value
                 self._last_disp_substeps = landed_substeps
+                self._last_dead_count = _ctypes.c_uint32.from_address(
+                    self._pinned_dead_count.ptr).value
         elif self._readback_pending:
             self._readback_not_ready += 1
 
@@ -1901,6 +1914,12 @@ class Simulation:
         cupy.cuda.runtime.memcpyAsync(
             self._pinned_foam_count.ptr,
             self.world.foam_count.data.ptr,
+            4, cupy.cuda.runtime.memcpyDeviceToHost,
+            self._readback_stream.ptr,
+        )
+        cupy.cuda.runtime.memcpyAsync(
+            self._pinned_dead_count.ptr,
+            self._dead_count.data.ptr,
             4, cupy.cuda.runtime.memcpyDeviceToHost,
             self._readback_stream.ptr,
         )
@@ -2006,10 +2025,26 @@ class Simulation:
         if not interval_due and reserve == 0:
             return n
 
+        # The lagged freelist size is the DEAD count one frame ago (host int
+        # from the async readback, no sync). If it shows no compaction and no
+        # reserve refill is due, skip the exact count. Deaths since that copy
+        # (brush kills, the last frame's substeps) show up in the next copy.
+        # After a scene change it is None, and the exact count below runs.
+        lagged_dead = self._last_dead_count
+        if lagged_dead is not None:
+            if reserve > 0:
+                exact_needed = (lagged_dead > reserve + self.compact_threshold
+                                or lagged_dead < reserve)
+            else:
+                exact_needed = lagged_dead >= self.compact_threshold
+            if not exact_needed:
+                return n
+
         # Count dead particles = _high_water - num_active. This is the only
-        # per-frame caller of num_active, and it runs only once every
-        # compact_interval frames (gated above) or once after a scene change,
-        # so the ~1 Hz sync is fine.
+        # per-frame caller of num_active. It runs on an interval frame only
+        # when the lagged count says compaction or a refill is due, or once
+        # after a scene change.
+        self._num_active_syncs += 1
         num_alive = w.num_active
         num_dead = n - num_alive
         changed = False
@@ -2176,6 +2211,7 @@ class Simulation:
         try:
             self._pinned_displacement = None
             self._pinned_foam_count = None
+            self._pinned_dead_count = None
         except Exception:
             pass
 

@@ -367,8 +367,9 @@ class World:
 
         Performs one GPU reduction + D2H sync, so it must NOT be called on the
         per-frame / per-substep hot path. Its only per-frame caller is
-        ``Simulation._maybe_compact``, which is gated to run once every
-        ``compact_interval`` frames (default 60) — a negligible ~1 Hz sync.
+        ``Simulation._maybe_compact``, which calls it on a ``compact_interval``
+        frame only when the lagged freelist size from the async readback says
+        a compaction or reserve refill is due, or once after a scene change.
         Also used by UI and tests.
         """
         n = self._high_water
