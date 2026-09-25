@@ -6,7 +6,7 @@ every spawned material starts at T_AMBIENT and no pair of them has a non-zero
 interaction entry, where those sums are exactly 0 anyway.
 
 Kernel checks: with the flag off, dTdt and both exposures are 0 and density
-and pressure are bitwise the same as with the flag on. Host checks: the rule
+and pressure match the flag-on run. Host checks: the rule
 for water only, water and stone, water and lava, sand and water, an empty
 world and a replaced material set, and the flip to on when lava is spawned
 into a running water scene.
@@ -55,7 +55,7 @@ def _read_flag(module) -> int:
 
 
 def _hot_acid_scene():
-    """7x7x7 METAL block with a 1000 K centre and one ACID layer on top."""
+    """7x7x7 METAL block, one ACID layer on top, a 1000 K METAL particle under it."""
     coords = np.arange(-0.06, 0.06 + SPACING * 0.5, SPACING, dtype=np.float32)
     xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
     n = xx.size
@@ -64,7 +64,7 @@ def _hot_acid_scene():
     packed = np.full(n, METAL | (FLUID << 8), dtype=np.uint32)
     packed[pos[:, 1] > 0.05] = ACID | (FLUID << 8)
     temp = np.full(n, 293.0, dtype=np.float32)
-    temp[np.argmin((pos[:, :3] ** 2).sum(axis=1))] = 1000.0
+    temp[np.argmin(((pos[:, :3] - np.array([0.0, 0.04, 0.0])) ** 2).sum(axis=1))] = 1000.0
     return pos, packed, temp
 
 
@@ -81,9 +81,15 @@ def _step1_outputs(pos, packed, temp, thermal: bool) -> dict:
         scene["packed_info"], scene["temperature"],
         scene["cell_start"], scene["cell_end"], velocity_h=scene["velocity_h"])
     cp.cuda.Device().synchronize()
-    return {"density": density.get(), "pressure": pressure.get(),
-            "dTdt": dTdt.get(), "exposure_heat": exp_heat.get(),
-            "exposure_corrode": exp_corrode.get()}
+    # The sort order inside a cell can change run to run: return original order.
+    perm = scene["sort_perm"].get().astype(np.int64)
+    out = {}
+    for key, arr in (("density", density), ("pressure", pressure), ("dTdt", dTdt),
+                     ("exposure_heat", exp_heat), ("exposure_corrode", exp_corrode)):
+        vals = np.empty(n, dtype=np.float32)
+        vals[perm] = arr.get()[:n]
+        out[key] = vals
+    return out
 
 
 def test_flag_off_zeroes_heat_and_exposure():
@@ -96,9 +102,10 @@ def test_flag_off_zeroes_heat_and_exposure():
     assert on["exposure_corrode"].max() > 0.0
     for key in ("dTdt", "exposure_heat", "exposure_corrode"):
         assert np.all(off[key] == 0.0), key
-    # Density does not read position.w, so it is bitwise the same.
+    # Density does not depend on the gate. It is not bitwise equal because the
+    # sort order inside a cell, and so the summation order, changes run to run.
     for key in ("density", "pressure"):
-        assert np.array_equal(on[key].view(np.uint32), off[key].view(np.uint32)), key
+        np.testing.assert_allclose(on[key], off[key], rtol=1e-5, err_msg=key)
 
 
 def test_flag_off_matches_on_for_cold_water():
@@ -111,7 +118,7 @@ def test_flag_off_matches_on_for_cold_water():
     for key in ("dTdt", "exposure_heat", "exposure_corrode"):
         assert np.all(on[key] == 0.0) and np.all(off[key] == 0.0), key
     for key in ("density", "pressure"):
-        assert np.array_equal(on[key].view(np.uint32), off[key].view(np.uint32)), key
+        np.testing.assert_allclose(on[key], off[key], rtol=1e-5, err_msg=key)
 
 
 def _sim_with(materials):
@@ -158,7 +165,7 @@ def test_spawning_lava_turns_gate_on():
     assert float(cp.abs(world.sorted_dTdt).max()) == 0.0
 
     # Lava right next to the water block.
-    world.spawn_cube((-0.26, -0.5, -0.1), (-0.14, -0.38, 0.1), LAVA, SPACING)
+    world.spawn_cube((-0.275, -0.5, -0.1), (-0.155, -0.38, 0.1), LAVA, SPACING)
     sim.notify_scene_changed()
     for _ in range(3):
         sim._sim_step(world._high_water)
