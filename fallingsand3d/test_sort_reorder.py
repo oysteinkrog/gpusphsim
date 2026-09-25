@@ -298,7 +298,8 @@ def test_legacy_sort_modules_removed() -> None:
             found += [f"{src_path.name}: {n}" for n in names if n in legacy]
     assert not found, f"legacy sort modules imported: {found}"
 
-    # K_ScatterReorder takes no cell_end_out: K_BuildCellEnd writes cell_end.
+    # K_ScatterReorder takes no cell_end_out: cell_end is a view of the same
+    # offsets table as cell_start (bd-r5-review-n28.160).
     cu = (base / "physics" / "kernels" / "counting_sort.cu").read_text(encoding="utf-8")
     scatter = cu[cu.index("void K_ScatterReorder("):cu.index(") {", cu.index("void K_ScatterReorder("))]
     assert "cell_end" not in scatter

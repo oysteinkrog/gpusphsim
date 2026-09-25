@@ -7,8 +7,11 @@ The app builds its neighbour grid only with counting_sort_full
   - every sorted array equals the unsorted array gathered through sort_perm
   - the FP16 velocity mirror decodes to the sorted velocity
   - cell_end[c] - cell_start[c] == histogram[c] for occupied cells
-  - cell_end[c] == 0 for empty cells (the live empty-cell marker; the retired
-    argsort pipeline used a 0xFFFFFFFF cell_start sentinel instead)
+  - cell_start and cell_end are the views [:-1] and [1:] of one offsets table
+    of table_size + 1 entries, so cell_start[c] == cell_end[c] for empty cells
+  - step1 density is bitwise the same with that table and with a separate-array
+    table that marks empty cells with a 0xFFFFFFFF start and a zero end
+  - no kernel keeps a 0xFFFFFFFF empty-cell test and K_BuildCellEnd is gone
   - two grid cells that collide in the 2^18 hash table share one bucket
   - a 27-cell grid walk finds every neighbour within h that an O(N^2)
     brute force finds, on ~2K particles
@@ -131,9 +134,18 @@ def test_counting_sort_full_cell_tables() -> None:
     np.testing.assert_array_equal(hist, np.bincount(hashes, minlength=num_cells))
     occupied = hist > 0
     np.testing.assert_array_equal(ce[occupied] - cs[occupied], hist[occupied])
-    assert np.all(ce[~occupied] == 0), "empty cells must have cell_end == 0"
+    assert np.all(ce[~occupied] == cs[~occupied]), "empty cells must have start == end"
     excl = np.concatenate([[0], np.cumsum(hist)[:-1]])
-    np.testing.assert_array_equal(cs[occupied], excl[occupied])
+    np.testing.assert_array_equal(cs, excl)
+    np.testing.assert_array_equal(ce, np.cumsum(hist))
+
+    # One offsets table: cell_start = offsets[:-1], cell_end = offsets[1:].
+    offsets = scene["cell_offsets"]
+    assert offsets.shape[0] == num_cells + 1
+    assert scene["cell_start"].data.ptr == offsets.data.ptr
+    assert scene["cell_end"].data.ptr == offsets.data.ptr + 4
+    off = cupy.asnumpy(offsets).astype(np.int64)
+    assert off[0] == 0 and off[-1] == n
     for c in np.nonzero(occupied)[0][:50]:
         assert np.all(sorted_hashes[cs[c]:ce[c]] == c)
 
@@ -202,3 +214,97 @@ def test_step1_density_on_counting_sort_matches_brute_force() -> None:
     rho_ref = np.maximum(1.0, poly6 * (w * mass[perm][None, :]).sum(axis=1))
 
     np.testing.assert_allclose(rho, rho_ref, rtol=2e-3)
+
+
+def test_step1_density_same_with_offsets_table_and_legacy_table() -> None:
+    """Neighbour sets do not depend on the empty-cell encoding (bd-r5-review-n28.160).
+
+    The same sorted scene is walked once with the live offsets-table views and
+    once with two separate arrays that mark empty cells the old way
+    (cell_start = 0xFFFFFFFF, cell_end = 0). Density must be bitwise equal.
+    """
+    import step1
+    from materials import build_interaction_matrix, build_material_array
+
+    pos, vel, _a, _b, _counts = _make_scene_inputs(seed=5)
+    n = pos.shape[0]
+    mass = np.full(n, 0.008, dtype=np.float32)
+
+    step1.upload_sim_params(step1.build_sim_params(
+        smoothing_length=H, particle_mass=0.008, particle_spacing=0.02,
+    ))
+    step1.upload_precalc_params(step1.build_precalc_params(smoothing_length=H))
+    step1.upload_materials(build_material_array())
+    step1.upload_interactions(build_interaction_matrix())
+
+    scene = counting_sort_scene(
+        pos, velocity=vel, mass=mass,
+        packed_info=np.full(n, PACKED_WATER, dtype=np.uint32),
+        grid_params=default_grid_params(),
+    )
+    hist = cupy.asnumpy(scene["histogram"])
+    cs = cupy.asnumpy(scene["cell_start"]).copy()
+    ce = cupy.asnumpy(scene["cell_end"]).copy()
+    empty = hist == 0
+    assert empty.any() and (~empty).any()
+    cs[empty] = 0xFFFFFFFF
+    ce[empty] = 0
+    legacy_start = cupy.asarray(cs)
+    legacy_end = cupy.asarray(ce)
+
+    def density(cell_start, cell_end):
+        rho, *_rest = step1.compute_step1(
+            scene["position"], scene["velocity"], scene["mass"], None,
+            scene["packed_info"], scene["temperature"],
+            cell_start, cell_end,
+            velocity_h=scene["velocity_h"],
+        )
+        return cupy.asnumpy(rho)
+
+    rho_new = density(scene["cell_start"], scene["cell_end"])
+    rho_old = density(legacy_start, legacy_end)
+    cupy.cuda.Device().synchronize()
+    np.testing.assert_array_equal(rho_new.view(np.uint32), rho_old.view(np.uint32))
+
+
+def test_counting_sort_full_rejects_separate_cell_arrays() -> None:
+    """counting_sort_full writes only cell_end, so both views must share one table."""
+    import pytest
+
+    import counting_sort
+
+    num_cells = MASK + 1
+    scratch = counting_sort.allocate_scratch(num_cells, 4)
+    pos = cupy.zeros((4, 4), dtype=cupy.float32)
+    with pytest.raises(ValueError):
+        counting_sort.counting_sort_full(
+            num_particles=4, num_cells=num_cells,
+            histogram=scratch["histogram"], write_offset=scratch["write_offset"],
+            cell_start=cupy.zeros(num_cells, dtype=cupy.uint32),
+            cell_end=cupy.zeros(num_cells, dtype=cupy.uint32),
+            sort_perm=cupy.zeros(4, dtype=cupy.uint32),
+            positions=pos, hashes=cupy.zeros(4, dtype=cupy.uint32),
+            position=pos, velocity=pos, mass=pos[:, 0], packed_info=None,
+            temperature=None, health=None, lifetime=None, sleep_counter=None,
+            kappa=None, kappa_v=None,
+            sorted_position=None, sorted_velocity=None, sorted_mass=None,
+            sorted_packed_info=None, sorted_temperature=None, sorted_health=None,
+            sorted_lifetime=None, sorted_sleep_counter=None,
+            sorted_kappa=None, sorted_kappa_v=None,
+        )
+
+
+def test_kernels_have_no_empty_cell_sentinel() -> None:
+    """The dead 0xFFFFFFFF start test and K_BuildCellEnd stay removed."""
+    import glob
+    import re
+
+    kdir = os.path.join(os.path.dirname(__file__), "physics", "kernels")
+    hits = []
+    for path in sorted(glob.glob(os.path.join(kdir, "*.cu*"))):
+        with open(path, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                code = line.split("//")[0]
+                if re.search(r"0xFFFFFFFF", code) or "K_BuildCellEnd" in code:
+                    hits.append(f"{os.path.basename(path)}:{lineno}: {line.strip()}")
+    assert not hits, "sentinel or K_BuildCellEnd found:\n" + "\n".join(hits)

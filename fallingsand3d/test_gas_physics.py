@@ -204,7 +204,7 @@ def run_full_pipeline_step(w, grid_params, scratch, frame=0):
     if n == 0:
         return w
 
-    # Same grid build as the app: counting_sort_full (cell_end == 0 marks an
+    # Same grid build as the app: counting_sort_full (cell_start == cell_end marks an
     # empty cell) plus the FP16 velocity mirror the neighbour loops read.
     scene = counting_sort_scene(
         w["position"],

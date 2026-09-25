@@ -148,7 +148,7 @@ def _run_full_pipeline(
     if temperature_np is None:
         temperature_np = np.full(n, 293.0, dtype=np.float32)
 
-    # Same grid build as the app: counting_sort_full (cell_end == 0 marks an
+    # Same grid build as the app: counting_sort_full (cell_start == cell_end marks an
     # empty cell), with the FP16 velocity mirror the neighbour loop reads.
     scene = counting_sort_scene(
         positions_np,

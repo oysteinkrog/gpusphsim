@@ -108,9 +108,8 @@ def _free_cupy_pools():
 # The app builds its neighbour grid with counting_sort.counting_sort_full
 # (Simulation._run_grid_setup). Kernel unit tests use this helper so they run
 # on the same cell-table layout as the live path: cell_start comes from the
-# exclusive prefix sum of the histogram and an empty cell has cell_end == 0.
-# The retired argsort/K_BuildDataStruct path used a 0xFFFFFFFF cell_start
-# sentinel instead, which the app never produces.
+# exclusive prefix sum of the histogram, cell_end is the same table shifted by
+# one slot, and an empty cell has cell_start == cell_end.
 
 
 def counting_sort_scene(
@@ -197,6 +196,7 @@ def counting_sort_scene(
         "temperature_h": cupy.zeros(n, dtype=cupy.uint16),
         "hashes": cupy.zeros(n, dtype=cupy.uint32),
         "sort_perm": cupy.zeros(n, dtype=cupy.uint32),
+        "cell_offsets": scratch["cell_offsets"],
         "cell_start": scratch["cell_start"],
         "cell_end": scratch["cell_end"],
         "histogram": scratch["histogram"],
