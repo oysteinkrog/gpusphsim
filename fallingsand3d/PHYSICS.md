@@ -1182,17 +1182,17 @@ occupant:
 |-------|---------------|
 | position.xyz | spawn point |
 | position.w | material `rest_density` (read as the previous-substep density by step1) |
-| density | material `rest_density` |
-| velocity, veleval | spawn velocity, w = 0 |
-| sph_force | 0 |
+| velocity | spawn velocity, w = 0 |
 | kappa, kappa_v (DFSPH warm start) | 0 |
 | mass | `spawn_mass(material)` (§7.4) |
 | temperature | §9.3 default |
 | health | 1 |
 | lifetime | GAS default below, else 0 |
-| shear_rate, exposure_heat, exposure_corrode | 0 |
 
-There is no color field to set: `K_ComputeColor` computes the render color
+World holds no unsorted veleval, sph_force, density, shear_rate or exposure
+arrays (bd-r5-review-n28.152). Kernels only read the `sorted_*` versions,
+which step1 and step2 write for every particle each substep, so a spawn has
+nothing to reset there. There is no color field to set: `K_ComputeColor` computes the render color
 from the state every frame (see 10.11).
 
 `presets._clear_world` also zeroes `kappa`, `kappa_v` and `sorted_lambda_pbf`
@@ -1203,7 +1203,11 @@ Two other paths reuse slots, and both clear the DFSPH warm start too
 (bd-r5-review-n28.121):
 
 - `World.compact()` zeroes `kappa` and `kappa_v` in the freed tail
-  `[num_alive, old _high_water)`, along with `packed_info`.
+  `[num_alive, old _high_water)`, along with `packed_info`. It also zeroes
+  all of `sorted_density`: compaction moves every slot, so the PBF and DFSPH
+  previous-density read (see 10.17b, density buffer lifecycle) would otherwise
+  get other particles' values. A zero falls back to rest density, as on a
+  fresh scene.
 - `RigidBodyManager.inject_boundary_particles` zeroes `kappa` and `kappa_v`
   in the boundary block.
 
