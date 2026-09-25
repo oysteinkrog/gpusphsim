@@ -698,7 +698,20 @@ This uses the **dynamic viscosity form** dividing by `rho_i * rho_j` (both densi
 consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units and
 `force_scale=1.0` for GRANULAR (no global scaling), so the full dynamic form is correct.
 
-**Source**: `step2.cu:122-130` (mu(I)), `step2.cu:326-345` (force)
+`eta` depends only on the particle, so K_Step1 PostCalc computes it once per GRANULAR
+particle from its own `gamma_dot`, pressure, density and material (5.2 to 5.4), and
+writes it to `eta_out` (`world.sorted_eta`, 0 for non-GRANULAR). K_Step2 reads
+`eta_i` and each `eta_j` from `eta_in` (4 B per GRANULAR pair) and does only the
+harmonic mean per pair. The inputs are the ones Step2 used, so the forces match the
+per-pair path exactly. When `eta_in` is NULL, K_Step2 recomputes eta per pair from
+`shear_rate_in`. `step2.upload_granular_params` also uploads `c_granular` to the step1
+module for this (bd-r5-review-n28.169). A particle whose material turns GRANULAR in
+the reactions pass between Step1 and Step2 has eta 0 for that one substep.
+Measured on a resting sand block, WCSPH: K_Step2 1.23 to 1.16 ms at 381K particles
+and 9.92 to 8.83 ms at 921K; K_Step1 time unchanged.
+DFSPH NonPressureForces still computes eta per pair.
+
+**Source**: `step1.cu` (PostCalc eta), `step2.cu` (mu(I) eta_i, GRANULAR pair force)
 
 ---
 
