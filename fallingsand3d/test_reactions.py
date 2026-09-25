@@ -1357,3 +1357,105 @@ def test_boiled_steam_cools_to_condense_before_expiry():
     k = _cu_define("sph_shared.cuh", "COOL_RATE")
     t_hit = -np.log((t_cond - t_amb) / (t_spawn - t_amb)) / k
     assert t_hit < life - 1.0, f"steam reaches {t_cond} K at {t_hit:.1f} s, lifetime {life} s"
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.134: the blast wave pushes rigid bodies, not STATIC walls
+# ---------------------------------------------------------------------------
+
+def _hash_grid(pos, table_size, cell=H, gmin=-1.0):
+    """Sort particles by spatial hash (common.cuh spatialHash) and build
+    cell_start / cell_end for a table of table_size buckets."""
+    c = np.floor((pos - gmin) / cell).astype(np.int64)
+    hsh = ((c[:, 0].astype(np.uint32) * np.uint32(73856093)
+            + c[:, 1].astype(np.uint32) * np.uint32(19349669)
+            + c[:, 2].astype(np.uint32) * np.uint32(83492791))
+           & np.uint32(table_size - 1))
+    order = np.argsort(hsh, kind="stable")
+    hs = hsh[order]
+    start = np.full(table_size, 0xFFFFFFFF, dtype=np.uint32)
+    end = np.zeros(table_size, dtype=np.uint32)
+    for k, b in enumerate(hs):
+        if start[b] == 0xFFFFFFFF:
+            start[b] = k
+        end[b] = k + 1
+    return order, start, end
+
+
+def test_blast_wave_pushes_rigid_body_not_static_wall():
+    """Rigid boundary particles 0.5 h from a fresh blast add a force away
+    from the blast to their body; a STONE wall particle keeps zero velocity."""
+    from grid_params import GRID_PARAMS_DTYPE
+    from materials import MAT_RIGID
+    from reactions import compute_blast_wave, upload_grid_params
+    from rigid_bodies import RIGID_BODY_DTYPE
+
+    setup_params()
+    table_size = 1024
+    gp = np.zeros(1, dtype=GRID_PARAMS_DTYPE)
+    gp[0]["grid_min"] = (-1.0, -1.0, -1.0)
+    gp[0]["grid_delta"] = (1.0 / H, 1.0 / H, 1.0 / H)
+    gp[0]["table_size"] = table_size
+    gp[0]["table_mask"] = table_size - 1
+    upload_grid_params(gp)
+
+    blast = np.array([0.011, 0.013, 0.017], dtype=np.float32)
+    body_id = 1
+    rigid_pk = MAKE_PACKED(MAT_RIGID, STATIC) | (body_id << 13)
+    # (offset from blast, packed_info, mass)
+    parts = [
+        ((0.0, 0.0, 0.0), MAKE_PACKED(FIRE, GAS), 0.008),       # blast source
+        ((0.5 * H, 0.0, 0.0), rigid_pk, 0.02),                  # rigid, +x
+        ((0.5 * H, 0.004, 0.0), rigid_pk, 0.02),
+        ((0.5 * H, -0.004, 0.0), rigid_pk, 0.02),
+        ((-0.5 * H, 0.0, 0.0), MAKE_PACKED(STONE, STATIC), 0.02),  # wall, -x
+        ((0.0, 0.5 * H, 0.0), MAKE_PACKED(WATER, FLUID), 0.008),   # fluid, +y
+    ]
+    pos = np.array([blast + np.array(p[0], dtype=np.float32) for p in parts],
+                   dtype=np.float32)
+    order, start, end = _hash_grid(pos, table_size)
+    n = len(parts)
+    pos4 = np.zeros((n, 4), dtype=np.float32)
+    pos4[:, :3] = pos[order]
+    packed = np.array([parts[k][1] for k in order], dtype=np.uint32)
+    mass = np.array([parts[k][2] for k in order], dtype=np.float32)
+    life = np.zeros(n, dtype=np.float32)
+    life[packed & 0xFF == FIRE] = _cu_define("reactions.cu", "GUNPOWDER_FIRE_LIFETIME")
+    inv = np.argsort(order)  # original index -> sorted index
+
+    bodies = np.zeros(8, dtype=RIGID_BODY_DTYPE)
+    com = blast + np.array([0.5 * H + 0.1, 0.0, 0.0], dtype=np.float32)
+    bodies_raw = bodies.view(np.float32).reshape(8, 24)
+    bodies_raw[body_id, 0:3] = com
+    d_bodies = cupy.asarray(bodies_raw)
+    forces = cupy.zeros(8 * 4, dtype=cupy.float32)
+    torques = cupy.zeros(8 * 4, dtype=cupy.float32)
+    vel = cupy.zeros((n, 4), dtype=cupy.float32)
+
+    compute_blast_wave(
+        cupy.asarray(pos4), vel, cupy.asarray(packed), cupy.asarray(life),
+        cupy.asarray(start), cupy.asarray(end), smoothing_length=H,
+        sorted_mass=cupy.asarray(mass), d_rigid_bodies=d_bodies,
+        d_rigid_forces=forces, d_rigid_torques=torques,
+    )
+    f = forces.get().reshape(8, 4)
+    tq = torques.get().reshape(8, 4)
+    v = vel.get()
+    print(f"\n  blast force on body {body_id}: {f[body_id, :3]}, torque {tq[body_id, :3]}")
+
+    dt = DT
+    # Expected: 3 particles * m * 15 m/s * (1 - ~0.5) / dt, about 450 N along +x.
+    assert f[body_id, 0] > 100.0, f"no blast force on the body: {f[body_id, :3]}"
+    assert abs(f[body_id, 1]) < 0.05 * f[body_id, 0]
+    assert abs(f[body_id, 2]) < 1e-3 * f[body_id, 0]
+    assert np.all(f[np.arange(8) != body_id] == 0.0)
+    # Symmetric about the COM axis: torque about z cancels to ~0.
+    assert abs(tq[body_id, 2]) < 1e-3 * f[body_id, 0] * 0.1
+    # Upper bound: m * 15 / dt per particle.
+    assert f[body_id, 0] < 3 * 0.02 * 15.0 / dt
+
+    # No velocity write on any STATIC target (STONE wall and rigid particles).
+    static_rows = ((packed >> 8) & 0x3) == STATIC
+    assert np.all(v[static_rows] == 0.0), v[static_rows]
+    # The fluid neighbour is still kicked outward (+y).
+    assert v[inv[5], 1] > 1.0
