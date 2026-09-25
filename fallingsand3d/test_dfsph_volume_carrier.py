@@ -61,8 +61,8 @@ def _scene(w, sim):
     profile = PROFILES["DFSPH"]
     w.packed_info[:] = 0
     w._high_water = 0
-    n_stone = w.spawn_cube((-0.09, 0.19, -0.09), (0.09, 0.2, 0.09), STONE, spacing=0.02)
-    n = n_stone + w.spawn_cube((-0.07, 0.21, -0.07), (0.07, 0.35, 0.07), WATER, spacing=0.02)
+    n_stone = w.spawn_cube((-0.09, 0.18, -0.09), (0.09, 0.2, 0.09), STONE, spacing=0.02)
+    n = n_stone + w.spawn_cube((-0.07, 0.2, -0.07), (0.07, 0.34, 0.07), WATER, spacing=0.02)
     sim.set_solver_profile(profile)
     w._density_initialized = True
     sim._run_grid_setup(n, force_sort=True)
