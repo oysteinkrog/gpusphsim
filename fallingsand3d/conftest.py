@@ -67,7 +67,6 @@ import sys
 import pytest
 
 STRESS_TESTS = frozenset({
-    "test_build_grid.py::test_500k_no_errors",
     "test_compact.py::test_compact_stress_500k",
     "test_hash_sort.py::test_500k_no_errors",
     "test_reactions.py::test_500k_stress",
@@ -110,8 +109,8 @@ def _free_cupy_pools():
 # (Simulation._run_grid_setup). Kernel unit tests use this helper so they run
 # on the same cell-table layout as the live path: cell_start comes from the
 # exclusive prefix sum of the histogram and an empty cell has cell_end == 0.
-# The retired hash_sort/build_grid path used a 0xFFFFFFFF cell_start sentinel
-# instead, which the app never produces.
+# The retired argsort/K_BuildDataStruct path used a 0xFFFFFFFF cell_start
+# sentinel instead, which the app never produces.
 
 
 def counting_sort_scene(
@@ -133,7 +132,7 @@ def counting_sort_scene(
     arrays get neutral defaults (zero velocity, mass 0.008, WATER/FLUID,
     293 K, full health).
 
-    ``grid_params`` defaults to ``hash_sort.build_grid_params()``. The same
+    ``grid_params`` defaults to ``grid_params.build_grid_params()``. The same
     struct is uploaded to counting_sort and, when ``upload_kernels`` is true,
     to step1 and step2, so table_size/table_mask match across the hash and the
     neighbour walk (CRIT-4). ``scratch`` may be a dict from
@@ -150,7 +149,7 @@ def counting_sort_scene(
     """
     import cupy
     import counting_sort
-    import hash_sort
+    import grid_params as grid_params_mod
 
     pos = cupy.ascontiguousarray(cupy.asarray(position, dtype=cupy.float32))
     n = int(pos.shape[0])
@@ -171,7 +170,7 @@ def counting_sort_scene(
     kappa_v = cupy.zeros(n, dtype=cupy.float32)
 
     if grid_params is None:
-        grid_params = hash_sort.build_grid_params()
+        grid_params = grid_params_mod.build_grid_params()
     num_cells = int(grid_params[0]["table_size"])
     counting_sort.upload_grid_params(grid_params)
     if upload_kernels:
@@ -261,5 +260,5 @@ def sorted_scene():
 
 def default_grid_params():
     """GridParams the kernel tests share: grid_min -1, h=0.04 cells, 2^18 table."""
-    import hash_sort
-    return hash_sort.build_grid_params()
+    import grid_params
+    return grid_params.build_grid_params()

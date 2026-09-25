@@ -1,14 +1,9 @@
-"""Integration tests for US-009: CuPy radix sort and data reorder.
+"""Tests for the counting sort and data reorder (counting_sort.counting_sort_full).
 
-Acceptance criteria:
-  - Sort produces sorted_hash and sorted_index arrays (sorted by hash key)
-    using cupy.argsort
-  - All SoA arrays gathered into sorted-order temporary buffers using sorted_index
-  - sorted_index (sorted->original mapping) preserved for Integrate writeback
-  - Test: after sort, consecutive particles have same or increasing hash values
-  - Test: data integrity preserved -- sum of all masses before sort equals sum after sort
-  - Pre-allocated temporary buffers for sorted copies (no per-frame allocations)
-  - Sort + reorder completes without errors for 500K particles
+The app builds its neighbour grid with counting_sort_full. These tests check
+that it orders particles by grid hash, that every sorted array is the
+unsorted array gathered through sort_perm, and that it copes with 0 and
+500K particles.
 
 Requirements: cupy, numpy, an NVIDIA GPU with CUDA 12.x.
 """
@@ -24,250 +19,70 @@ sys.path.insert(0, os.path.dirname(__file__))
 import cupy
 import numpy as np
 
-from hash_sort import (
-    NUM_CELLS,
-    calc_hash,
-    sort_by_hash,
-    upload_grid_params,
-)
-from fused_reorder import fused_reorder, get_module as get_reorder_module
+from conftest import counting_sort_scene
+from grid_params import NUM_CELLS
 from world import World
 
 
-def test_sort_produces_sorted_hashes() -> None:
-    """After sort, consecutive particles have same or increasing hash values."""
-    print("--- Sort produces sorted hashes ---")
+def _random_positions(n: int, half: float, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, :3] = rng.uniform(-half, half, size=(n, 3)).astype(np.float32)
+    return pos
 
-    upload_grid_params()
 
-    rng = np.random.default_rng(42)
-    n = 10_000
-    pos_np = np.zeros((n, 4), dtype=np.float32)
-    pos_np[:, :3] = rng.uniform(-0.9, 0.9, size=(n, 3)).astype(np.float32)
-    pos_gpu = cupy.asarray(pos_np)
+def _check_order(scene: dict, n: int) -> np.ndarray:
+    """Assert sorted hashes are non-decreasing and sort_perm is a permutation.
 
-    hashes = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-    cupy.cuda.Device().synchronize()
-
-    h_sorted = cupy.asnumpy(sorted_hashes)
-
-    # Verify non-decreasing order
-    diffs = np.diff(h_sorted.astype(np.int64))
-    assert np.all(diffs >= 0), (
-        f"Sort failed: {np.sum(diffs < 0)} inversions found"
+    Returns sort_perm as int64 numpy.
+    """
+    perm = cupy.asnumpy(scene["sort_perm"]).astype(np.int64)
+    hashes = cupy.asnumpy(scene["hashes"]).astype(np.int64)
+    sorted_hashes = hashes[perm]
+    assert np.all(np.diff(sorted_hashes) >= 0), (
+        f"{int(np.sum(np.diff(sorted_hashes) < 0))} hash inversions"
     )
-    print(f"[OK] {n} particles sorted: hashes non-decreasing, "
-          f"min={h_sorted[0]}, max={h_sorted[-1]}")
-
-    # All hashes still valid
-    assert h_sorted.min() >= 0
-    assert h_sorted.max() < NUM_CELLS
-    print("[OK] All sorted hashes in valid range [0, NUM_CELLS)")
+    assert sorted_hashes.min() >= 0 and sorted_hashes.max() < NUM_CELLS
+    assert np.array_equal(np.sort(perm), np.arange(n)), "sort_perm is not a permutation"
+    return perm
 
 
-def test_sorted_index_maps_correctly() -> None:
-    """sorted_index[sorted_slot] = original_id, verified by reconstruction."""
-    print("\n--- sorted_index maps correctly ---")
+def test_sort_orders_by_hash() -> None:
+    """After the sort, hashes are non-decreasing and sort_perm is a permutation."""
+    n = 10_000
+    scene = counting_sort_scene(_random_positions(n, 0.9, 42), upload_kernels=False)
+    cupy.cuda.Device().synchronize()
+    _check_order(scene, n)
 
-    upload_grid_params()
 
+def test_reorder_gathers_every_array() -> None:
+    """Each sorted array equals the unsorted array gathered through sort_perm."""
     n = 5_000
     rng = np.random.default_rng(99)
-    pos_np = np.zeros((n, 4), dtype=np.float32)
-    pos_np[:, :3] = rng.uniform(-0.8, 0.8, size=(n, 3)).astype(np.float32)
-    pos_gpu = cupy.asarray(pos_np)
+    pos = _random_positions(n, 0.8, 99)
+    vel = rng.uniform(-1, 1, size=(n, 4)).astype(np.float32)
+    mass = rng.uniform(0.001, 0.1, size=n).astype(np.float32)
+    pinfo = rng.integers(1, 16, size=n).astype(np.uint32)
+    temp = rng.uniform(250.0, 1500.0, size=n).astype(np.float32)
+    health = rng.uniform(0.0, 1.0, size=n).astype(np.float32)
+    life = rng.uniform(0.0, 5.0, size=n).astype(np.float32)
+    sleep = rng.integers(0, 255, size=n).astype(np.uint8)
 
-    hashes = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-    cupy.cuda.Device().synchronize()
-
-    h_hashes = cupy.asnumpy(hashes)
-    h_sorted_hashes = cupy.asnumpy(sorted_hashes)
-    h_sorted_indices = cupy.asnumpy(sorted_indices)
-
-    # Verify: sorted_hashes[i] == hashes[sorted_indices[i]]
-    reconstructed = h_hashes[h_sorted_indices]
-    np.testing.assert_array_equal(h_sorted_hashes, reconstructed)
-    print(f"[OK] sorted_hashes == hashes[sorted_indices] for all {n} particles")
-
-    # Verify sorted_indices is a permutation of [0, n)
-    assert sorted(h_sorted_indices.tolist()) == list(range(n)), (
-        "sorted_indices is not a valid permutation"
-    )
-    print(f"[OK] sorted_indices is a valid permutation of [0, {n})")
-
-
-def test_sort_with_preallocated_buffers() -> None:
-    """sort_by_hash works with pre-allocated output buffers."""
-    print("\n--- Sort with pre-allocated buffers ---")
-
-    upload_grid_params()
-
-    n = 8_000
-    rng = np.random.default_rng(7)
-    pos_np = np.zeros((n, 4), dtype=np.float32)
-    pos_np[:, :3] = rng.uniform(-0.5, 0.5, size=(n, 3)).astype(np.float32)
-    pos_gpu = cupy.asarray(pos_np)
-
-    hashes = calc_hash(pos_gpu)
-
-    # Pre-allocate
-    sorted_hashes_buf = cupy.empty(n, dtype=cupy.uint32)
-    sorted_indices_buf = cupy.empty(n, dtype=cupy.uint32)
-
-    sorted_hashes, sorted_indices = sort_by_hash(
-        hashes,
-        sorted_hashes_out=sorted_hashes_buf,
-        sorted_indices_out=sorted_indices_buf,
+    scene = counting_sort_scene(
+        pos, velocity=vel, mass=mass, packed_info=pinfo, temperature=temp,
+        health=health, lifetime=life, sleep_counter=sleep, upload_kernels=False,
     )
     cupy.cuda.Device().synchronize()
+    perm = _check_order(scene, n)
 
-    h_sorted = cupy.asnumpy(sorted_hashes)
-    diffs = np.diff(h_sorted.astype(np.int64))
-    assert np.all(diffs >= 0), "Sort with pre-allocated buffers failed"
-    print(f"[OK] sort_by_hash with pre-allocated buffers: {n} particles sorted")
+    for name, src in (
+        ("position", pos), ("velocity", vel), ("mass", mass),
+        ("packed_info", pinfo), ("temperature", temp), ("health", health),
+        ("lifetime", life), ("sleep_counter", sleep),
+    ):
+        np.testing.assert_array_equal(cupy.asnumpy(scene[name]), src[perm], err_msg=name)
 
-
-def test_reorder_kernel_compilation() -> None:
-    """fused_reorder.cu compiles via CuPy RawModule."""
-    print("\n--- Reorder kernel compilation ---")
-
-    module = get_reorder_module()
-    assert module is not None
-    print("[OK] fused_reorder.cu compiled (includes common.cuh)")
-
-    kernel = module.get_function("K_FusedReorder")
-    assert kernel is not None
-    print("[OK] K_FusedReorder kernel function found")
-
-
-def test_data_integrity_mass_sum() -> None:
-    """Data integrity: sum of all masses before sort equals sum after sort."""
-    print("\n--- Data integrity: mass sum preserved ---")
-
-    upload_grid_params()
-
-    n = 20_000
-    rng = np.random.default_rng(55)
-
-    # Create unsorted arrays
-    pos_np = np.zeros((n, 4), dtype=np.float32)
-    pos_np[:, :3] = rng.uniform(-0.8, 0.8, size=(n, 3)).astype(np.float32)
-    pos_gpu = cupy.asarray(pos_np)
-
-    mass_np = rng.uniform(0.001, 0.01, size=n).astype(np.float32)
-    mass_gpu = cupy.asarray(mass_np)
-
-    vel_gpu = cupy.asarray(rng.uniform(-1.0, 1.0, (n, 4)).astype(np.float32))
-    packed_gpu = cupy.asarray(rng.integers(1, 256, size=n, dtype=np.uint32).astype(np.uint32))
-    temp_gpu = cupy.asarray(rng.uniform(200, 1500, size=n).astype(np.float32))
-    health_gpu = cupy.asarray(rng.uniform(0.0, 1.0, size=n).astype(np.float32))
-    lifetime_gpu = cupy.asarray(rng.uniform(0.0, 5.0, size=n).astype(np.float32))
-    sleep_gpu = cupy.asarray(rng.integers(0, 10, size=n, dtype=np.uint8).astype(np.uint8))
-
-    # Hash and sort
-    hashes = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-
-    # Pre-allocate sorted buffers (8 arrays: pos, vel, mass, packed, temp, health, lifetime, sleep)
-    s_pos = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_vel = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_mass = cupy.zeros(n, dtype=cupy.float32)
-    s_packed = cupy.zeros(n, dtype=cupy.uint32)
-    s_temp = cupy.zeros(n, dtype=cupy.float32)
-    s_health = cupy.zeros(n, dtype=cupy.float32)
-    s_lifetime = cupy.zeros(n, dtype=cupy.float32)
-    s_sleep = cupy.zeros(n, dtype=cupy.uint8)
-
-    # Fused reorder (8-array API: veleval/color/shear_rate intentionally excluded)
-    fused_reorder(
-        n, sorted_indices,
-        pos_gpu, vel_gpu, mass_gpu, packed_gpu,
-        temp_gpu, health_gpu, lifetime_gpu, sleep_gpu,
-        s_pos, s_vel, s_mass, s_packed,
-        s_temp, s_health, s_lifetime, s_sleep,
-    )
-    cupy.cuda.Device().synchronize()
-
-    # Check mass sum
-    mass_sum_before = float(cupy.sum(mass_gpu))
-    mass_sum_after = float(cupy.sum(s_mass))
-    assert abs(mass_sum_before - mass_sum_after) < 1e-3, (
-        f"Mass sum mismatch: before={mass_sum_before}, after={mass_sum_after}"
-    )
-    print(f"[OK] Mass sum preserved: before={mass_sum_before:.6f}, "
-          f"after={mass_sum_after:.6f}")
-
-    # Check temperature sum
-    temp_sum_before = float(cupy.sum(temp_gpu))
-    temp_sum_after = float(cupy.sum(s_temp))
-    assert abs(temp_sum_before - temp_sum_after) / temp_sum_before < 1e-5, (
-        f"Temp sum mismatch: before={temp_sum_before}, after={temp_sum_after}"
-    )
-    print(f"[OK] Temperature sum preserved: before={temp_sum_before:.1f}, "
-          f"after={temp_sum_after:.1f}")
-
-    # Check health sum
-    health_sum_before = float(cupy.sum(health_gpu))
-    health_sum_after = float(cupy.sum(s_health))
-    assert abs(health_sum_before - health_sum_after) < 1e-3, (
-        f"Health sum mismatch: before={health_sum_before}, after={health_sum_after}"
-    )
-    print("[OK] Health sum preserved")
-
-
-def test_reorder_position_correctness() -> None:
-    """Verify reorder gathers positions correctly using sorted_index."""
-    print("\n--- Reorder position correctness ---")
-
-    upload_grid_params()
-
-    n = 1_000
-    rng = np.random.default_rng(12)
-
-    pos_np = np.zeros((n, 4), dtype=np.float32)
-    pos_np[:, :3] = rng.uniform(-0.5, 0.5, size=(n, 3)).astype(np.float32)
-    pos_gpu = cupy.asarray(pos_np)
-
-    # Dummy arrays for the rest (we only check position)
-    vel_gpu = cupy.zeros((n, 4), dtype=cupy.float32)
-    mass_gpu = cupy.ones(n, dtype=cupy.float32)
-    packed_gpu = cupy.ones(n, dtype=cupy.uint32)
-    temp_gpu = cupy.zeros(n, dtype=cupy.float32)
-    health_gpu = cupy.ones(n, dtype=cupy.float32)
-    lifetime_gpu = cupy.zeros(n, dtype=cupy.float32)
-    sleep_gpu = cupy.zeros(n, dtype=cupy.uint8)
-
-    hashes = calc_hash(pos_gpu)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-
-    s_pos = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_vel = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_mass = cupy.zeros(n, dtype=cupy.float32)
-    s_packed = cupy.zeros(n, dtype=cupy.uint32)
-    s_temp = cupy.zeros(n, dtype=cupy.float32)
-    s_health = cupy.zeros(n, dtype=cupy.float32)
-    s_lifetime = cupy.zeros(n, dtype=cupy.float32)
-    s_sleep = cupy.zeros(n, dtype=cupy.uint8)
-
-    fused_reorder(
-        n, sorted_indices,
-        pos_gpu, vel_gpu, mass_gpu, packed_gpu,
-        temp_gpu, health_gpu, lifetime_gpu, sleep_gpu,
-        s_pos, s_vel, s_mass, s_packed,
-        s_temp, s_health, s_lifetime, s_sleep,
-    )
-    cupy.cuda.Device().synchronize()
-
-    # Verify: sorted_pos[i] == pos[sorted_index[i]] for all i
-    h_sorted_idx = cupy.asnumpy(sorted_indices)
-    h_pos = cupy.asnumpy(pos_gpu)
-    h_sorted_pos = cupy.asnumpy(s_pos)
-
-    expected_sorted_pos = h_pos[h_sorted_idx]
-    np.testing.assert_array_almost_equal(h_sorted_pos, expected_sorted_pos, decimal=6)
-    print(f"[OK] Sorted positions match pos[sorted_indices] for all {n} particles")
+    assert abs(float(mass.sum()) - float(cupy.asnumpy(scene["mass"]).sum())) < 1e-3
 
 
 def test_world_sorted_buffers_preallocated() -> None:
@@ -298,7 +113,7 @@ def test_world_sorted_buffers_preallocated() -> None:
     assert world.sorted_sleep_counter.dtype == cupy.uint8
     print("[OK] sorted_* buffer dtypes correct")
 
-    # Check hash/sort buffers (indices was identity, now implicit in sort_by_hash)
+    # Check the hash buffer
     assert world.hashes.shape == (1000,)
     # The counting sort writes no sorted hash copy (bd-r5-review-n28.152).
     assert not hasattr(world, "sorted_hashes")
@@ -314,228 +129,53 @@ def test_world_sorted_buffers_preallocated() -> None:
 
 
 def test_end_to_end_world_sort_reorder() -> None:
-    """Full pipeline: spawn -> hash -> sort -> reorder using World buffers."""
-    print("\n--- End-to-end World sort+reorder ---")
-
-    upload_grid_params()
-
+    """Spawn into a World, sort its arrays and check the sorted copies."""
     world = World(max_particles=5000)
     spawned = world.spawn_sphere((0.0, 0.0, 0.0), 0.5, 5, 3000)  # water
     assert spawned > 0
     n = world._high_water
-    print(f"  Spawned {n} water particles")
 
-    # Hash
-    hashes = calc_hash(world.position[:n])
-
-    # Sort -- use a dedicated sorted_indices buffer (not aliased to any reorder dst)
-    sorted_indices_buf = cupy.empty(n, dtype=cupy.uint32)
-    sorted_hashes, sorted_indices = sort_by_hash(
-        hashes,
-        sorted_hashes_out=cupy.empty(n, dtype=cupy.uint32),
-        sorted_indices_out=sorted_indices_buf,
-    )
-
-    # Fused reorder into pre-allocated sorted buffers (8-array API)
-    fused_reorder(
-        n, sorted_indices,
-        world.position[:n], world.velocity[:n],
-        world.mass[:n], world.packed_info[:n],
-        world.temperature[:n], world.health[:n], world.lifetime[:n],
-        world.sleep_counter[:n],
-        world.sorted_position[:n], world.sorted_velocity[:n],
-        world.sorted_mass[:n], world.sorted_packed_info[:n],
-        world.sorted_temperature[:n], world.sorted_health[:n],
-        world.sorted_lifetime[:n], world.sorted_sleep_counter[:n],
+    scene = counting_sort_scene(
+        world.position[:n], velocity=world.velocity[:n], mass=world.mass[:n],
+        packed_info=world.packed_info[:n], temperature=world.temperature[:n],
+        health=world.health[:n], lifetime=world.lifetime[:n],
+        sleep_counter=world.sleep_counter[:n], upload_kernels=False,
     )
     cupy.cuda.Device().synchronize()
+    perm = _check_order(scene, n)
 
-    # Verify sorted hashes are non-decreasing
-    h_sorted = cupy.asnumpy(sorted_hashes)
-    diffs = np.diff(h_sorted.astype(np.int64))
-    assert np.all(diffs >= 0), "Sorted hashes not non-decreasing"
-    print("[OK] Sorted hashes non-decreasing")
-
-    # Verify mass sum preserved
-    mass_before = float(cupy.sum(world.mass[:n]))
-    mass_after = float(cupy.sum(world.sorted_mass[:n]))
+    np.testing.assert_array_equal(
+        cupy.asnumpy(scene["position"]), cupy.asnumpy(world.position[:n])[perm]
+    )
+    mass_before = float(cupy.asnumpy(world.mass[:n]).sum())
+    mass_after = float(cupy.asnumpy(scene["mass"]).sum())
     assert abs(mass_before - mass_after) < 1e-3
-    print(f"[OK] Mass sum preserved: {mass_before:.6f} -> {mass_after:.6f}")
-
-    # Verify sorted_indices is valid permutation
-    h_idx = cupy.asnumpy(sorted_indices)
-    assert len(set(h_idx.tolist())) == n, "sorted_indices has duplicates"
-    assert h_idx.min() >= 0 and h_idx.max() < n
-    print(f"[OK] sorted_indices is valid permutation of [0, {n})")
 
 
 def test_500k_sort_reorder_no_errors() -> None:
-    """Sort + reorder completes without errors for 500K particles."""
-    print("\n--- 500K particle sort+reorder stress test ---")
-
-    upload_grid_params()
-
+    """Sort and reorder complete without errors for 500K particles."""
     n = 500_000
     rng = np.random.default_rng(77)
+    pos = _random_positions(n, 0.95, 77)
+    vel = rng.uniform(-1, 1, (n, 4)).astype(np.float32)
 
-    # Create arrays directly (faster than World.spawn for stress test)
-    pos_np = np.zeros((n, 4), dtype=np.float32)
-    pos_np[:, :3] = rng.uniform(-0.95, 0.95, size=(n, 3)).astype(np.float32)
-    pos_gpu = cupy.asarray(pos_np)
-
-    mass_gpu = cupy.full(n, 0.008, dtype=cupy.float32)
-    vel_gpu = cupy.asarray(rng.uniform(-1, 1, (n, 4)).astype(np.float32))
-    packed_gpu = cupy.full(n, 0x0005, dtype=cupy.uint32)  # water, FLUID
-    temp_gpu = cupy.full(n, 293.0, dtype=cupy.float32)
-    health_gpu = cupy.ones(n, dtype=cupy.float32)
-    lifetime_gpu = cupy.zeros(n, dtype=cupy.float32)
-    sleep_gpu = cupy.zeros(n, dtype=cupy.uint8)
-
-    # Pre-allocate sorted buffers (8-array API)
-    s_pos = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_vel = cupy.zeros((n, 4), dtype=cupy.float32)
-    s_mass = cupy.zeros(n, dtype=cupy.float32)
-    s_packed = cupy.zeros(n, dtype=cupy.uint32)
-    s_temp = cupy.zeros(n, dtype=cupy.float32)
-    s_health = cupy.zeros(n, dtype=cupy.float32)
-    s_lifetime = cupy.zeros(n, dtype=cupy.float32)
-    s_sleep = cupy.zeros(n, dtype=cupy.uint8)
-
-    # Hash
-    hashes = calc_hash(pos_gpu)
-
-    # Sort
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-
-    # Reorder
-    fused_reorder(
-        n, sorted_indices,
-        pos_gpu, vel_gpu, mass_gpu, packed_gpu,
-        temp_gpu, health_gpu, lifetime_gpu, sleep_gpu,
-        s_pos, s_vel, s_mass, s_packed,
-        s_temp, s_health, s_lifetime, s_sleep,
-    )
+    scene = counting_sort_scene(pos, velocity=vel, upload_kernels=False)
     cupy.cuda.Device().synchronize()
+    perm = _check_order(scene, n)
 
-    # Verify sorted hashes non-decreasing
-    h_sorted = cupy.asnumpy(sorted_hashes)
-    diffs = np.diff(h_sorted.astype(np.int64))
-    assert np.all(diffs >= 0), f"500K sort failed: {np.sum(diffs < 0)} inversions"
-    print(f"[OK] 500K hashes sorted: min={h_sorted[0]}, max={h_sorted[-1]}")
-
-    # Verify mass sum preserved
-    mass_sum_before = float(cupy.sum(mass_gpu))
-    mass_sum_after = float(cupy.sum(s_mass))
-    assert abs(mass_sum_before - mass_sum_after) < 0.01, (
-        f"Mass sum mismatch: {mass_sum_before} vs {mass_sum_after}"
-    )
-    print(f"[OK] Mass sum preserved for 500K: {mass_sum_before:.3f} -> {mass_sum_after:.3f}")
-
-    # Verify sorted_indices is valid
-    h_idx = cupy.asnumpy(sorted_indices)
-    assert h_idx.min() >= 0 and h_idx.max() < n
-    print("[OK] sorted_indices range valid [0, 500K)")
-
-    # Spot-check: sorted positions match gather
-    h_pos = cupy.asnumpy(pos_gpu)
-    h_spos = cupy.asnumpy(s_pos)
-    sample = [0, 100, 1000, 10000, 100000, 499999]
-    for i in sample:
-        orig = h_idx[i]
-        np.testing.assert_array_almost_equal(h_spos[i], h_pos[orig], decimal=6)
-    print("[OK] Spot-check: sorted positions match gather for sample indices")
-
-    print(f"[OK] 500K sort + reorder completed without errors")
+    h_spos = cupy.asnumpy(scene["position"])
+    h_svel = cupy.asnumpy(scene["velocity"])
+    np.testing.assert_array_equal(h_spos, pos[perm])
+    np.testing.assert_array_equal(h_svel, vel[perm])
+    assert abs(float(cupy.asnumpy(scene["mass"]).sum()) - n * 0.008) < 0.05
 
 
 def test_zero_particles() -> None:
-    """Sort and reorder handle zero particles gracefully."""
-    print("\n--- Zero particles edge case ---")
-
-    upload_grid_params()
-
-    hashes = cupy.zeros(0, dtype=cupy.uint32)
-
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-    assert sorted_hashes.shape[0] == 0
-    assert sorted_indices.shape[0] == 0
-    print("[OK] sort_by_hash handles 0 particles")
-
-    # fused_reorder with num_particles=0 should be a no-op (8-array API)
-    fused_reorder(
-        0, cupy.zeros(0, dtype=cupy.uint32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.uint32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.uint8),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros((0, 4), dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.uint32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.float32),
-        cupy.zeros(0, dtype=cupy.uint8),
-    )
-    print("[OK] fused_reorder handles 0 particles")
-
-
-def test_fused_reorder_not_on_production_path() -> None:
-    """bd-mzc.46: fused_reorder is dead on the live production code path.
-
-    The live pipeline uses counting_sort.counting_sort_full (which handles
-    all 13 particle arrays).  fused_reorder covers only 8 of 13 arrays and
-    is kept solely because legacy test files (test_gas_physics.py,
-    test_integration_15mat.py) still import it.
-
-    This test confirms that no production module (simulation.py, integrate.py,
-    step1.py, step2.py, pbf_solver.py, dfsph_solver.py) imports fused_reorder.
-    """
-    import importlib
-    import importlib.util
-    import pathlib
-    import ast
-
-    # Production modules that should NOT import fused_reorder
-    production_modules = [
-        "simulation.py",
-        "integrate.py",
-        "step1.py",
-        "step2.py",
-        "pbf_solver.py",
-        "dfsph_solver.py",
-        "world.py",
-        "main.py",
-    ]
-
-    base = pathlib.Path(os.path.dirname(__file__))
-    found_in = []
-
-    for mod_file in production_modules:
-        src_path = base / mod_file
-        if not src_path.exists():
-            continue
-        tree = ast.parse(src_path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if "fused_reorder" in alias.name:
-                        found_in.append(mod_file)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module and "fused_reorder" in node.module:
-                    found_in.append(mod_file)
-
-    assert not found_in, (
-        f"fused_reorder is imported by production module(s): {found_in}. "
-        "Either remove the import (use counting_sort.counting_sort_full instead) "
-        "or update fused_reorder to cover all 13 particle arrays (bd-mzc.46 Option B)."
-    )
-    print("[OK] fused_reorder is not imported by any production module "
-          "(dead code path — live pipeline uses counting_sort.counting_sort_full)")
+    """The sort is a no-op for zero particles."""
+    scene = counting_sort_scene(np.zeros((0, 4), dtype=np.float32), upload_kernels=False)
+    cupy.cuda.Device().synchronize()
+    assert scene["sort_perm"].shape[0] == 0
+    assert scene["position"].shape[0] == 0
 
 
 def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
@@ -545,7 +185,7 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
     full sort nor the gather reorder faults, and the float32 outputs are
     still the unsorted arrays gathered through sort_perm."""
     import counting_sort
-    import hash_sort
+    import grid_params
 
     rng = np.random.default_rng(3)
     n = 1500
@@ -554,7 +194,7 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
     pos_h[:, 3] = 1.0
     vel_h = rng.uniform(-1.0, 1.0, size=(n, 4)).astype(np.float32)
 
-    grid_params = hash_sort.build_grid_params()
+    grid_params = grid_params.build_grid_params()
     num_cells = int(grid_params[0]["table_size"])
     counting_sort.upload_grid_params(grid_params)
     scratch = counting_sort.allocate_scratch(num_cells, n)
@@ -617,20 +257,50 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
     print("[OK] reorder wrappers accept None FP16 outputs")
 
 
+def test_legacy_sort_modules_removed() -> None:
+    """bd-r5-review-n28.153: the argsort pipeline (K_CalcHash, argsort,
+    K_FusedReorder, K_BuildDataStruct, K_FusedSortReorderBuild) is gone and no
+    tracked module imports it. counting_sort is the only sort path."""
+    import ast
+    import pathlib
+
+    base = pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
+    legacy = ("hash_sort", "build_grid", "fused_reorder", "fused_sort_reorder_build")
+    for name in legacy:
+        assert not (base / f"{name}.py").exists(), f"{name}.py still exists"
+        assert not (base / "physics" / "kernels" / f"{name}.cu").exists(), (
+            f"{name}.cu still exists"
+        )
+
+    found = []
+    for src_path in base.glob("*.py"):
+        tree = ast.parse(src_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            found += [f"{src_path.name}: {n}" for n in names if n in legacy]
+    assert not found, f"legacy sort modules imported: {found}"
+
+    # K_ScatterReorder takes no cell_end_out: K_BuildCellEnd writes cell_end.
+    cu = (base / "physics" / "kernels" / "counting_sort.cu").read_text(encoding="utf-8")
+    scatter = cu[cu.index("void K_ScatterReorder("):cu.index(") {", cu.index("void K_ScatterReorder("))]
+    assert "cell_end" not in scatter
+
+
 def main() -> None:
-    test_sort_produces_sorted_hashes()
-    test_sorted_index_maps_correctly()
-    test_sort_with_preallocated_buffers()
-    test_reorder_kernel_compilation()
-    test_data_integrity_mass_sum()
-    test_reorder_position_correctness()
+    test_sort_orders_by_hash()
+    test_reorder_gathers_every_array()
     test_world_sorted_buffers_preallocated()
     test_end_to_end_world_sort_reorder()
     test_500k_sort_reorder_no_errors()
     test_zero_particles()
     test_reorder_wrappers_accept_null_fp16_outputs()
-    test_fused_reorder_not_on_production_path()
-    print("\n=== ALL US-009 CHECKS PASSED ===")
+    test_legacy_sort_modules_removed()
+    print("\n=== ALL SORT/REORDER CHECKS PASSED ===")
 
 
 if __name__ == "__main__":

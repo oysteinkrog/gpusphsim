@@ -28,7 +28,7 @@ import pytest
 import cupy
 import numpy as np
 
-from hash_sort import (
+from grid_params import (
     NUM_CELLS,
     TABLE_SIZE,
 )

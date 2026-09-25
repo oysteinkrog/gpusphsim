@@ -32,7 +32,7 @@
 #include "sph_shared.cuh"   // common.cuh + V_WAKE_SQ
 
 /* ======================================================================
- * Grid cell computation (inlined, same as hash_sort.cu)
+ * Grid cell computation (inlined, same as counting_sort.cu K_CalcHashCS)
  * ====================================================================== */
 
 // Uses calcGridCell() and spatialHash() from common.cuh.

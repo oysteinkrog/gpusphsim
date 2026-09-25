@@ -120,19 +120,12 @@ def test_pbf_detailed(world, sim):
     for step in range(3):
         print(f"\n  --- Substep {step} ---")
 
-        # Run the hash + sort part manually
-        import hash_sort
-        import fused_sort_reorder_build
         w = world
-
-        hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-        sort_perm = cp.argsort(hashes).astype(cp.uint32)
-        sim._sort_perm[:n] = sort_perm
         sim._frame_counter_d.fill(sim._frame_counter)
         w._density_initialized = True
 
-        # Grid setup
-        sim._run_grid_setup(n)
+        # Grid setup: full counting sort, as in the app
+        sim._run_grid_setup(n, force_sort=True)
 
         # Check sorted positions
         sp = w.sorted_position[:n].get()
@@ -231,16 +224,12 @@ def test_dfsph_detailed(world, sim):
     for step in range(3):
         print(f"\n  --- Substep {step} ---")
 
-        import hash_sort
         w = world
 
-        hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-        sort_perm = cp.argsort(hashes).astype(cp.uint32)
-        sim._sort_perm[:n] = sort_perm
         sim._frame_counter_d.fill(sim._frame_counter)
         w._density_initialized = True
 
-        sim._run_grid_setup(n)
+        sim._run_grid_setup(n, force_sort=True)
 
         # Density + alpha
         dfsph_solver.compute_density_alpha(
@@ -530,13 +519,9 @@ def test_surface_tension_cohesion_dfsph(world, sim):
     n = spawn_scene(world)
     sim.set_solver_profile(profile)
 
-    import hash_sort
     w = world
-    hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-    sort_perm = cp.argsort(hashes).astype(cp.uint32)
-    sim._sort_perm[:n] = sort_perm
     w._density_initialized = True
-    sim._run_grid_setup(n)
+    sim._run_grid_setup(n, force_sort=True)
 
     # Find a FLUID water particle to serve as our test subject
     pi = w.sorted_packed_info[:n].get()
@@ -595,13 +580,9 @@ def test_surface_tension_cohesion_pbf(world, sim):
     n = spawn_scene(world)
     sim.set_solver_profile(profile)
 
-    import hash_sort
     w = world
-    hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-    sort_perm = cp.argsort(hashes).astype(cp.uint32)
-    sim._sort_perm[:n] = sort_perm
     w._density_initialized = True
-    sim._run_grid_setup(n)
+    sim._run_grid_setup(n, force_sort=True)
 
     pi = w.sorted_packed_info[:n].get()
     behaviors = (pi >> 8) & 0x3
@@ -885,13 +866,9 @@ def test_pbf_wall_density(world, sim):
 
     sim.set_solver_profile(profile)
 
-    import hash_sort
     w = world
-    hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-    sort_perm = cp.argsort(hashes).astype(cp.uint32)
-    sim._sort_perm[:n] = sort_perm
     w._density_initialized = True
-    sim._run_grid_setup(n)
+    sim._run_grid_setup(n, force_sort=True)
 
     # Run compute_lambda on the FLUID+STATIC scene (after fix: no boundary_scale)
     pbf_solver.pbf_compute_lambda(
@@ -977,13 +954,9 @@ def test_dfsph_density_solver_velocity_clamp(world, sim):
     n = spawn_scene(world)
     sim.set_solver_profile(profile)
 
-    import hash_sort
     w = world
-    hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-    sort_perm = cp.argsort(hashes).astype(cp.uint32)
-    sim._sort_perm[:n] = sort_perm
     w._density_initialized = True
-    sim._run_grid_setup(n)
+    sim._run_grid_setup(n, force_sort=True)
 
     # Compute density + alpha first
     dfsph_solver.compute_density_alpha(
@@ -1073,7 +1046,6 @@ def test_dfsph_rigid_viscous_force_scaling(world, sim):
     false failures.
     """
     import dfsph_solver
-    import hash_sort
     from materials import WATER, FLUID, MAT_RIGID, STATIC, MATERIALS
     from rigid_bodies import RigidBodyManager, SDF_BOX
 
@@ -1126,11 +1098,8 @@ def test_dfsph_rigid_viscous_force_scaling(world, sim):
     sim.set_solver_profile(profile)
     w = world
 
-    hashes = hash_sort.calc_hash(w.position[:n], hashes_out=w.hashes)
-    sort_perm = cp.argsort(hashes).astype(cp.uint32)
-    sim._sort_perm[:n] = sort_perm
     w._density_initialized = True
-    sim._run_grid_setup(n)
+    sim._run_grid_setup(n, force_sort=True)
 
     # Compute density so rho_i is available for the force kernel.
     dfsph_solver.compute_density_alpha(

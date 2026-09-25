@@ -53,15 +53,6 @@ def test_build_grid_params_for_world_matches_old_output(half, h, n, table_size):
     assert int(p["table_mask"]) == table_size - 1
 
 
-def test_hash_sort_reexports_grid_params():
-    hash_sort = pytest.importorskip("hash_sort")
-    assert hash_sort.build_grid_params_for_world is grid_params.build_grid_params_for_world
-    assert hash_sort.build_grid_params is grid_params.build_grid_params
-    assert hash_sort.compute_table_size is grid_params.compute_table_size
-    assert hash_sort.GRID_PARAMS_DTYPE is grid_params.GRID_PARAMS_DTYPE
-    assert hash_sort.TABLE_SIZE == grid_params.TABLE_SIZE
-
-
 def test_simulation_does_not_import_legacy_sort_modules():
     import pathlib
 

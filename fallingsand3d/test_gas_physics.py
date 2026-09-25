@@ -50,7 +50,7 @@ from step2 import (
 )
 from integrate import integrate
 from reactions import compute_reactions
-from hash_sort import (
+from grid_params import (
     GRID_PARAMS_DTYPE,
     NUM_CELLS,
 )

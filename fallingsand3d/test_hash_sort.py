@@ -1,7 +1,7 @@
-"""Integration test for hash_sort.py -- K_CalcHash grid hashing kernel.
+"""Tests for the grid hash: K_CalcHashCS in counting_sort.cu.
 
 Acceptance criteria:
-  - K_CalcHash computes grid cell: cell = int3((pos - grid_min) * grid_delta),
+  - K_CalcHashCS computes grid cell: cell = int3((pos - grid_min) * grid_delta),
     clamped to valid range via integer wrap + table_mask
   - Spatial hash = (cx*P1 + cy*P2 + cz*P3) & table_mask (uint32 wrap)
   - The 27 cells of every 3x3x3 stencil land in 27 distinct buckets,
@@ -10,7 +10,7 @@ Acceptance criteria:
   - Grid parameters read from __constant__ GridParams c_grid
   - Grid sizing: grid_min=(-1,-1,-1), cell_size=h=0.04,
     grid_delta=(25,25,25), table_size=262144
-  - CuPy RawModule compiles hash_sort.cu including common.cuh without errors
+  - CuPy RawModule compiles counting_sort.cu including common.cuh without errors
   - Test: 100K particles uniformly distributed in unit cube -> valid hashes [0, table_size-1]
   - Test: particles at/outside grid boundaries -> valid hashes (no OOB)
   - Kernel runs without errors for 500K particles
@@ -29,17 +29,25 @@ sys.path.insert(0, os.path.dirname(__file__))
 import cupy
 import numpy as np
 
-from hash_sort import (
+import counting_sort
+from conftest import counting_sort_scene
+from grid_params import (
     CELL_SIZE,
     GRID_PARAMS_DTYPE,
     NUM_CELLS,
     TABLE_SIZE,
     TABLE_MASK,
     build_grid_params,
-    calc_hash,
-    get_module,
-    upload_grid_params,
 )
+
+
+def _gpu_hash(positions: cupy.ndarray) -> cupy.ndarray:
+    """Hash positions on the device with the live sort's K_CalcHashCS.
+
+    Uses the default GridParams (grid_min -1, cell 0.04, 2^18 table).
+    """
+    scene = counting_sort_scene(positions, upload_kernels=False)
+    return scene["hashes"]
 
 # Backward-compat: the old API exposed GRID_MIN/MAX/RES/DELTA as named constants.
 # The new API uses a spatial hash with TABLE_SIZE/TABLE_MASK instead of a dense
@@ -143,29 +151,17 @@ def test_grid_params_struct() -> None:
 
 
 def test_compilation() -> None:
-    """Verify CuPy RawModule compiles hash_sort.cu including common.cuh."""
-    print("\n--- Compilation check ---")
-
-    module = get_module()
+    """Verify CuPy RawModule compiles counting_sort.cu including common.cuh."""
+    module = counting_sort.get_module()
     assert module is not None
-    print("[OK] CuPy RawModule compiled hash_sort.cu (includes common.cuh)")
-
-    # Verify kernel function is accessible
-    kernel = module.get_function("K_CalcHash")
-    assert kernel is not None
-    print("[OK] K_CalcHash kernel function found")
-
-    # Verify constant memory symbol is accessible
-    d_ptr = module.get_global("c_grid")
-    assert int(d_ptr) != 0
-    print("[OK] c_grid constant memory symbol found")
+    assert module.get_function("K_CalcHashCS") is not None
+    assert int(module.get_global("c_grid")) != 0
 
 
 def test_known_position() -> None:
     """Verify hash for a particle with a known grid cell."""
     print("\n--- Known position test ---")
 
-    upload_grid_params()
 
     # Position (0.02, 0.02, 0.02):
     #   cell = int3(floor((0.02 - (-1)) * 25), ...) = int3(floor(25.5), ...) = (25, 25, 25)
@@ -173,7 +169,7 @@ def test_known_position() -> None:
     pos = np.array([[0.02, 0.02, 0.02, 0.0]], dtype=np.float32)
     pos_gpu = cupy.asarray(pos)
 
-    hashes = calc_hash(pos_gpu)
+    hashes = _gpu_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h = int(cupy.asnumpy(hashes)[0])
@@ -187,7 +183,6 @@ def test_100k_uniform_unit_cube() -> None:
     """100K particles uniformly distributed in unit cube -> valid hashes."""
     print("\n--- 100K uniform unit-cube test ---")
 
-    upload_grid_params()
 
     rng = np.random.default_rng(42)
     # Unit cube [0, 1]^3 is entirely inside grid [-1, 1]^3
@@ -195,7 +190,7 @@ def test_100k_uniform_unit_cube() -> None:
     pos_np[:, :3] = rng.uniform(0.0, 1.0, size=(100_000, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes = calc_hash(pos_gpu)
+    hashes = _gpu_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h_hashes = cupy.asnumpy(hashes)
@@ -218,7 +213,6 @@ def test_boundary_clamping() -> None:
     """Particles at or outside grid boundaries produce valid hashes."""
     print("\n--- Boundary (out-of-range positions) test ---")
 
-    upload_grid_params()
 
     # Test positions: inside, on boundary, and outside
     test_positions = np.array([
@@ -239,7 +233,7 @@ def test_boundary_clamping() -> None:
     ], dtype=np.float32)
 
     pos_gpu = cupy.asarray(test_positions)
-    hashes = calc_hash(pos_gpu)
+    hashes = _gpu_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h_hashes = cupy.asnumpy(hashes)
@@ -262,7 +256,6 @@ def test_500k_no_errors() -> None:
     """Kernel runs without errors for 500K particles."""
     print("\n--- 500K particle stress test ---")
 
-    upload_grid_params()
 
     rng = np.random.default_rng(123)
     # Distribute across entire grid range [-1, 1]^3
@@ -270,7 +263,7 @@ def test_500k_no_errors() -> None:
     pos_np[:, :3] = rng.uniform(-1.0, 1.0, size=(500_000, 3)).astype(np.float32)
     pos_gpu = cupy.asarray(pos_np)
 
-    hashes = calc_hash(pos_gpu)
+    hashes = _gpu_hash(pos_gpu)
     cupy.cuda.Device().synchronize()
 
     h_hashes = cupy.asnumpy(hashes)
@@ -308,13 +301,12 @@ def test_stencil_buckets_distinct_model() -> None:
 def test_stencil_buckets_distinct_gpu() -> None:
     """Device hash of the 27 stencil cell centres of each test cell matches
     the model and gives 27 distinct buckets."""
-    upload_grid_params()
     cells = _stencil_test_cells()
     nb = (cells[:, None, :] + _STENCIL[None, :, :]).reshape(-1, 3)
     pos = np.zeros((nb.shape[0], 4), dtype=np.float32)
     pos[:, :3] = (_GRID_MIN.astype(np.float64)
                   + (nb + 0.5) * float(CELL_SIZE)).astype(np.float32)
-    hashes = cupy.asnumpy(calc_hash(cupy.asarray(pos))).astype(np.int64)
+    hashes = cupy.asnumpy(_gpu_hash(cupy.asarray(pos))).astype(np.int64)
     np.testing.assert_array_equal(hashes, _model_hash(nb, TABLE_MASK))
     hs = np.sort(hashes.reshape(-1, 27), axis=1)
     clashes = int((hs[:, 1:] == hs[:, :-1]).any(axis=1).sum())

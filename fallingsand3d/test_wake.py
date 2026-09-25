@@ -27,10 +27,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 import cupy
 import numpy as np
 
-from hash_sort import (
+from grid_params import (
     NUM_CELLS,
     build_grid_params,
-    upload_grid_params as upload_hash_grid_params,
 )
 from wake import (
     BLOCK_SIZE,

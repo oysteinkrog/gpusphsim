@@ -44,7 +44,7 @@ import cupy
 import numpy as np
 import pytest
 
-from hash_sort import (
+from grid_params import (
     NUM_CELLS,
 )
 from conftest import counting_sort_scene, default_grid_params

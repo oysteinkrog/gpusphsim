@@ -247,12 +247,12 @@ def test_cooled_lava_falls_to_floor_and_sleeps():
     from test_integration_15mat import (
         setup_all_modules, run_full_pipeline_step, MATERIALS as _MATS,
     )
-    from build_grid import allocate_cell_tables
-    from hash_sort import build_grid_params
+    from counting_sort import allocate_scratch
+    from grid_params import NUM_CELLS, build_grid_params
 
     setup_all_modules()
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     n = 1
     pos = np.array([[0.0, -0.5, 0.0, 1.0]], dtype=np.float32)
@@ -274,7 +274,7 @@ def test_cooled_lava_falls_to_floor_and_sleeps():
     # substep the particle is within 2 spacings of the floor.
     landed_step = None
     for step in range(1000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
         if float(w["position"][0, 1].get()) < -1.0 + 2 * SPACING:
             landed_step = step
             break
@@ -287,7 +287,7 @@ def test_cooled_lava_falls_to_floor_and_sleeps():
     # Sleep within 1 s (1000 substeps at dt = 1 ms) after landing.
     slept = False
     for step in range(1000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end,
+        w = run_full_pipeline_step(w, grid_params, scratch,
                                    frame=landed_step + 1 + step)
         if (int(w["packed_info"].get()[0]) >> 10) & 1:
             slept = True

@@ -2,7 +2,7 @@
  * counting_sort.cu -- Counting sort for spatial hash grid.
  *
  * Replaces cupy.argsort (Thrust radix sort) with a 3-phase counting sort:
- *   Phase 1: K_CalcHash     -- compute per-particle grid cell hash (reused from hash_sort.cu)
+ *   Phase 1: K_CalcHashCS   -- compute per-particle grid cell hash
  *   Phase 2: K_Histogram    -- count particles per cell via atomicAdd
  *   Phase 3: prefix sum     -- cupy.cumsum on histogram (CUB, graph-capturable)
  *   Phase 4: K_ScatterReorder -- scatter particles to sorted order + build cell_start/cell_end
@@ -14,8 +14,7 @@
  *   - histogram[] must be zeroed before K_Histogram
  *   - write_offset[] must be zeroed before K_ScatterReorder
  *   - cell_start[] is filled by the prefix-sum (cupy.cumsum) of histogram[] and
- *     does NOT need a 0xFFFFFFFF sentinel -- that sentinel was used by the old
- *     hash_sort K_BuildDataStruct path and does not apply here.
+ *     needs no 0xFFFFFFFF sentinel: an empty cell has cell_end == 0.
  *
  * GridParams read from __constant__ c_grid declared in common.cuh.
  */
@@ -25,8 +24,7 @@
 // Uses calcGridCell() and spatialHash() from common.cuh.
 
 /* ======================================================================
- * K_CalcHashCS -- compute per-particle hash (same as hash_sort.cu K_CalcHash)
- * Duplicated here so entire pipeline is in one RawModule.
+ * K_CalcHashCS -- compute per-particle hash with calcGridCell + spatialHash
  * ====================================================================== */
 extern "C" __global__
 void K_CalcHashCS(
@@ -86,7 +84,6 @@ void K_ScatterReorder(
     const uint*   __restrict__ hashes,
     const uint*   __restrict__ cell_start,    // [num_cells] from prefix sum
     uint*         __restrict__ write_offset,   // [num_cells] zeroed, scratch
-    uint*         __restrict__ cell_end_out,   // [num_cells] output
     uint*         __restrict__ sort_perm_out,  // [N] output: maps sorted idx -> original idx
     // Unsorted inputs (read)
     const float4* __restrict__ position_in,

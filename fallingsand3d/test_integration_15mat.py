@@ -49,15 +49,13 @@ from step2 import (
 )
 from integrate import integrate
 from reactions import compute_reactions
-from hash_sort import (
+from grid_params import (
     GRID_PARAMS_DTYPE,
     NUM_CELLS,
     build_grid_params,
-    calc_hash,
-    sort_by_hash,
 )
-from build_grid import build_data_struct, allocate_cell_tables
-from fused_reorder import fused_reorder
+from counting_sort import allocate_scratch
+from conftest import counting_sort_scene
 from materials import (
     FLUID,
     GRANULAR,
@@ -160,58 +158,50 @@ def setup_all_modules(dt=DT, gravity=(0.0, -9.8, 0.0)):
     return sim_params, precalc, grid_params, materials, interactions
 
 
-def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
-    """Run one full simulation step: hash -> sort -> reorder -> build -> step1 -> reactions -> step2 -> integrate.
+def run_full_pipeline_step(w, grid_params, scratch, frame=0):
+    """Run one full simulation step: counting sort -> step1 -> reactions -> step2 -> integrate.
 
-    w is a dict of unsorted arrays. Returns updated w dict.
+    w is a dict of unsorted arrays. scratch is a counting_sort.allocate_scratch
+    dict reused across steps (holds cell_start/cell_end). Returns updated w dict.
     """
-    import hash_sort as hs_mod
-    import build_grid as bg_mod
-
     n = w["position"].shape[0]
     if n == 0:
         return w
 
-    # Hash -- calc_hash now returns only hashes (not (hashes, indices))
-    hs_mod.upload_grid_params(grid_params)
-    hashes = calc_hash(w["position"])
-
-    # Sort -- sort_by_hash now takes only hashes (indices arg removed)
-    sorted_hashes, sorted_indices = sort_by_hash(hashes)
-
-    # Reorder -- fused_reorder now handles 8 arrays (veleval/color/shear_rate dropped).
-    # Gather veleval, color, shear_rate manually via CuPy fancy indexing.
-    sorted_pos = cupy.empty_like(w["position"])
-    sorted_vel = cupy.empty_like(w["velocity"])
-    sorted_mass = cupy.empty(n, dtype=cupy.float32)
-    sorted_pi = cupy.empty(n, dtype=cupy.uint32)
-    sorted_temp = cupy.empty(n, dtype=cupy.float32)
-    sorted_health = cupy.empty(n, dtype=cupy.float32)
-    sorted_lifetime = cupy.empty(n, dtype=cupy.float32)
-    sorted_sc = cupy.empty(n, dtype=cupy.uint8)
-
-    fused_reorder(
-        n, sorted_indices,
-        w["position"], w["velocity"],
-        w["mass"], w["packed_info"], w["temperature"],
-        w["health"], w["lifetime"], w["sleep_counter"],
-        sorted_pos, sorted_vel,
-        sorted_mass, sorted_pi, sorted_temp,
-        sorted_health, sorted_lifetime, sorted_sc,
+    # Same grid build as the app: counting_sort_full (cell_end == 0 marks an
+    # empty cell) plus the FP16 velocity mirror the neighbour loops read.
+    scene = counting_sort_scene(
+        w["position"],
+        velocity=w["velocity"],
+        mass=w["mass"],
+        packed_info=w["packed_info"],
+        temperature=w["temperature"],
+        health=w["health"],
+        lifetime=w["lifetime"],
+        sleep_counter=w["sleep_counter"],
+        grid_params=grid_params,
+        scratch=scratch,
     )
-
-    # Gather arrays not handled by fused_reorder
-    sorted_veleval = w["veleval"][sorted_indices]
-    sorted_sr = w["shear_rate"][sorted_indices]
-
-    # Build grid (build_data_struct does its own memset internally)
-    bg_mod.upload_grid_params(grid_params)
-    build_data_struct(sorted_hashes, cell_start, cell_end)
+    sorted_indices = scene["sort_perm"]
+    perm = sorted_indices.astype(cupy.int64)
+    sorted_pos = scene["position"]
+    sorted_vel = scene["velocity"]
+    sorted_mass = scene["mass"]
+    sorted_pi = scene["packed_info"]
+    sorted_temp = scene["temperature"]
+    sorted_health = scene["health"]
+    sorted_lifetime = scene["lifetime"]
+    sorted_sc = scene["sleep_counter"]
+    velocity_h = scene["velocity_h"]
+    cell_start = scene["cell_start"]
+    cell_end = scene["cell_end"]
+    sorted_sr = w["shear_rate"][perm]
 
     # Step1: density, shear_rate, dTdt, exposure (now returns 6-tuple; 6th is pressure)
     density, shear_rate, dTdt, exp_heat, exp_corrode, _pressure = compute_step1(
         sorted_pos, sorted_vel, sorted_mass, None, sorted_pi,
         sorted_temp, cell_start, cell_end,
+        velocity_h=velocity_h,
     )
 
     # Reactions
@@ -224,6 +214,7 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
     sph_force, veleval_out = compute_step2(
         sorted_pos, sorted_vel, sorted_mass, sorted_pi, shear_rate,
         cell_start, cell_end,
+        velocity_h=velocity_h,
     )
 
     pos_out, vel_out, pi_out, sc_out, temp_out = integrate(
@@ -248,8 +239,8 @@ def run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=0):
     w["veleval"] = w["velocity"].copy()
 
     # Write back lifetime and health from sorted (modified by Reactions) to unsorted.
-    w["lifetime"][sorted_indices] = sorted_lifetime
-    w["health"][sorted_indices] = sorted_health
+    w["lifetime"][perm] = sorted_lifetime
+    w["health"][perm] = sorted_health
 
     return w
 
@@ -408,14 +399,14 @@ def test_10000_steps_no_nan():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     w, batch_ranges, n_total = build_15mat_scene()
 
     t0 = time.perf_counter()
 
     for step in range(10000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
         # Check every 1000 steps
         if (step + 1) % 1000 == 0:
@@ -454,7 +445,7 @@ def test_sand_forms_pile():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn sand above the ground
     n = 200
@@ -483,7 +474,7 @@ def test_sand_forms_pile():
 
     # Run 3000 steps (3.0 seconds) for sand to settle
     for step in range(3000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pos_h = w["position"].get()
     y_vals = pos_h[:, 1]
@@ -511,7 +502,7 @@ def test_water_flows_and_pools():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn water block above ground
     n = 200
@@ -540,7 +531,7 @@ def test_water_flows_and_pools():
 
     # Run 3000 steps for water to settle
     for step in range(3000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pos_h = w["position"].get()
     y_vals = pos_h[:, 1]
@@ -568,7 +559,7 @@ def test_oil_floats_on_water():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn water and oil in a mixed column -- both start interleaved.
     # Use more particles and tighter horizontal spread for better layering.
@@ -615,7 +606,7 @@ def test_oil_floats_on_water():
 
     # Run 5000 steps (5 seconds) to let them settle and separate
     for step in range(5000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pos_h = w["position"].get()
     pi_h = w["packed_info"].get()
@@ -647,7 +638,7 @@ def test_lava_cools_to_stone():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn lava particles just above melt point (1050K > temp_melt=1000K)
     # COOL_RATE=0.02: T(t) = 293 + (1050-293)*exp(-0.02*t)
@@ -677,7 +668,7 @@ def test_lava_cools_to_stone():
     w["color"][:, 3] = 1.0
 
     for step in range(8000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     temp_h = w["temperature"].get()
@@ -704,7 +695,7 @@ def test_acid_corrodes():
     setup_all_modules(gravity=(0.0, 0.0, 0.0))
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn acid next to metal particles
     n_acid = 40
@@ -750,7 +741,7 @@ def test_acid_corrodes():
 
     # Run 5000 steps -- acid-metal reaction_rate=0.3
     for step in range(5000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     health_h = w["health"].get()
     pi_h = w["packed_info"].get()
@@ -780,7 +771,7 @@ def test_wood_ignites():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn fire particles adjacent to wood particles
     n_fire = 40
@@ -830,7 +821,7 @@ def test_wood_ignites():
 
     # Run enough steps for exposure to build up
     for step in range(2000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     counts = count_materials(pi_h)
@@ -853,7 +844,7 @@ def test_ice_melts():
     setup_all_modules(gravity=(0.0, 0.0, 0.0))
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn ice at 260K near warm water at 293K
     n_ice = 50
@@ -903,7 +894,7 @@ def test_ice_melts():
     # Ice melts as it warms above 273K. Run enough steps for heat diffusion.
     # Ice thermal conductivity=2.2, water=0.6. Heat exchange should warm ice.
     for step in range(5000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pi_h = w["packed_info"].get()
     counts = count_materials(pi_h)
@@ -924,7 +915,7 @@ def test_metal_high_thermal_conductivity():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn hot metal and hot stone particles, see which cools faster
     # Each batch is isolated (far apart) so they don't interact with each other
@@ -976,7 +967,7 @@ def test_metal_high_thermal_conductivity():
     # means heat diffusion within the metal cluster redistributes faster.
     # We measure temperature spread (std) -- higher conductivity => more uniform temp.
     for step in range(2000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     temp_h = w["temperature"].get()
     metal_temps = temp_h[:n]
@@ -1007,7 +998,7 @@ def test_gas_rises_and_disappears():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn all three gas types
     n_each = 50
@@ -1058,7 +1049,7 @@ def test_gas_rises_and_disappears():
 
     # Run 1500 steps (1.5 seconds -- fire lifetime=1.0 should expire)
     for step in range(1500):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pos_h = w["position"].get()
     pi_h = w["packed_info"].get()
@@ -1100,7 +1091,7 @@ def test_gunpowder_detonates():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     # Spawn fire next to gunpowder
     n_fire = 30
@@ -1154,7 +1145,7 @@ def test_gunpowder_detonates():
     gp_detonated_at = None
 
     for step in range(500):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
         # Check every 10 steps for material change and velocity
         if (step + 1) % 10 == 0:
@@ -1194,12 +1185,12 @@ def test_no_boundary_escape():
     setup_all_modules()
 
     grid_params = build_grid_params()
-    cell_start, cell_end = allocate_cell_tables()
+    scratch = allocate_scratch(NUM_CELLS, 0)
 
     w, _, n_total = build_15mat_scene()
 
     for step in range(2000):
-        w = run_full_pipeline_step(w, grid_params, cell_start, cell_end, frame=step)
+        w = run_full_pipeline_step(w, grid_params, scratch, frame=step)
 
     pos_h = w["position"].get()
     pi_h = w["packed_info"].get()

@@ -222,7 +222,6 @@ def counting_sort_full(
         hashes,
         cell_start,
         write_offset,
-        cell_end,         # unused by scatter kernel but in signature
         sort_perm,
         # Unsorted inputs
         position,

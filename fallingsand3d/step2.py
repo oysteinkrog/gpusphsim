@@ -5,7 +5,7 @@ functions to upload GranularParams to constant memory and launch
 the K_Step2 kernel.
 
 Uses shared constant memory from common.cuh:
-  c_grid     -- GridParams (uploaded by hash_sort.py)
+  c_grid     -- GridParams (uploaded by step2.upload_grid_params)
   c_sim      -- SimParams (uploaded by step1.py)
   c_precalc  -- PrecalcParams (uploaded by step1.py)
   c_materials -- MaterialProps[32] (uploaded by materials.py)
