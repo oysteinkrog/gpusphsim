@@ -78,6 +78,16 @@ PACKED_WATER = 5 | (FLUID << 8)     # material 5, FLUID
 PACKED_SAND  = 2 | (GRANULAR << 8)  # material 2, GRANULAR
 
 
+def _mirror_mass(m: float) -> float:
+    """Mass as K_Step1 reads it for a neighbour: FP16(m / MASS_H_UNIT) * MASS_H_UNIT.
+
+    The counting sort packs mass into the FP16 velocity mirror's .w lane
+    (bd-r5-review-n28.161), so exact density checks use this rounded value.
+    """
+    unit = np.float32(0.02)
+    return float(np.float32(np.float16(np.float32(m) / unit)) * unit)
+
+
 def _upload_all_params() -> None:
     """Upload grid, sim, precalc, and materials params to all kernel modules."""
     gp = default_grid_params()
@@ -261,7 +271,8 @@ def test_single_isolated_particle() -> None:
 
     density, shear_rate, _, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
-    expected = POLY6_COEFF * MASS * H_SQ**3  # poly6_coeff * mass * h^6
+    # poly6_coeff * mass * h^6, with the mass K_Step1 reads from the FP16 mirror
+    expected = POLY6_COEFF * _mirror_mass(MASS) * H_SQ**3
     actual = density[0]
 
     rel_err = abs(actual - expected) / abs(expected)
@@ -332,7 +343,7 @@ def test_two_particles_beyond_h() -> None:
 
     density, _, _, _, _, _, _ = _run_full_pipeline(positions, mass_arr)
 
-    single_rho = POLY6_COEFF * MASS * H_SQ**3
+    single_rho = POLY6_COEFF * _mirror_mass(MASS) * H_SQ**3
 
     # Both should have same density as single particle (only self-contribution)
     for i in range(2):
@@ -1514,7 +1525,7 @@ def _fluid_rigid_pair_density(fluid_mat: int) -> tuple[float, float, float]:
     perm = cupy.asnumpy(scene["sort_perm"]).astype(np.int64)
     rho = np.zeros(2, dtype=np.float64)
     rho[perm] = cupy.asnumpy(density)
-    self_term = POLY6_COEFF * m_fluid * H_SQ**3
+    self_term = POLY6_COEFF * _mirror_mass(m_fluid) * H_SQ**3
     w_ij = POLY6_COEFF * (H_SQ - sep * sep) ** 3
     return float(rho[0]), self_term, w_ij * V_b
 
