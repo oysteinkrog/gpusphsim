@@ -815,11 +815,33 @@ on rounding noise and sand on static objects could not sleep. The SDF loop
 costs nothing when there are no SDF objects. PBF and DFSPH finalize kernels do
 not have this test yet.
 
-Wake propagation (`wake.run_wake_propagation`, a memset and 2 kernels on the
-unsorted arrays) runs at the end of every substep for all three solvers.
-`K_MarkWakeCells` flags the 3x3x3 cells around each particle that has
-JUST_WOKE set, and around each awake particle faster than 0.02 m/s. The
-velocity trigger skips STATIC and GAS particles. GAS is skipped because step1
+Wake propagation (`wake.run_wake_propagation`, 2 kernels on the unsorted
+arrays) runs at the end of every substep for all three solvers.
+`K_MarkWakeCells` writes a stamp into the own grid cell of each particle
+that has JUST_WOKE set, and of each awake particle faster than 0.02 m/s (one
+plain store per marker). `K_WakeSleepersAndClearJustWoke` wakes a sleeping
+particle when any of its 27 cells (own cell and 26 neighbours) holds the
+stamp. This is the same rule as marking the 3x3x3 block around each marker
+and probing one cell, because the neighbourhood is symmetric; it replaces 27
+scattered atomics per marker with one store (bd-r5-review-n28.141). Hash
+collisions can only add wakes, never drop one.
+
+The table holds a generation stamp, not a 0/1 flag:
+```
+stamp = frame_counter_d[0] + 1     (never 0, the value of a fresh table)
+mark:  cell_wake_flags[hash(own cell)] = stamp
+wake:  any(cell_wake_flags[hash(c)] == stamp for c in 27 cells)
+```
+`frame_counter_d` holds `_substep_counter`, which rises by one every substep
+and never resets, so a mark from an earlier substep no longer matches and the
+table is never cleared per substep (the 1 MB memset is gone). The table is
+zeroed only when it is allocated. The uint32 counter would wrap after about
+4e9 substeps. A caller that passes no frame counter gets stamp 1 and
+`run_wake_propagation` clears the table first. At 1M particles (WCSPH Dam
+Break, `bench_substep.py`) the wake stage went from 0.58 ms to 0.06 ms per
+substep.
+
+The velocity trigger skips STATIC and GAS particles. GAS is skipped because step1
 and step2 apply no forces between GAS and non-GAS, so smoke or fire over a
 sleeping pile would only wake it, let it re-sleep 10 substeps later, and wake
 it again. A GAS particle that has JUST_WOKE set still marks its cells. Until
@@ -835,10 +857,10 @@ to the floor. A body marks when the fastest point on it can exceed V_WAKE:
 ```
 r = |half_extents|                 (bounds a box of any rotation, or a sphere)
 if |v_body| + |omega_body| * r > 0.02:
-    mark every cell of the cube [c - r - cell, c + r + cell]
+    stamp every cell of the cube [c - r, c + r]
 ```
-One cell (about h) of padding lets sand within one smoothing length of the
-surface wake. A body at rest marks nothing, so a box resting on a pile lets
+The sleeper's 27-cell probe adds one cell (about h) of reach, so sand within
+one smoothing length of the cube wakes. A body at rest marks nothing, so a box resting on a pile lets
 the pile sleep; if the box then starts to sink, it wakes the pile again within
 a few substeps. For WCSPH, `K_Integrate` keeps the MAT_RIGID boundary velocity
 (written by `K_UpdateBoundaryParticles`) in the unsorted velocity array, where
@@ -1332,7 +1354,7 @@ a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
 2. `cupy.argsort + copy` — normal launch (Thrust can't be captured)
 3. Ops 3-14 as single CUDA graph launch (memsets, K_FusedSortReorderBuild,
    K_Step1, reset_freelist, K_Reactions, K_SpawnGas, K_Step2, K_Integrate,
-   cell_wake_flags memset, K_MarkWakeCells, K_WakeSleepersAndClearJustWoke)
+   K_MarkWakeCells, K_WakeSleepersAndClearJustWoke)
 
 **Design details**:
 - Pre-allocated `_sort_perm` buffer: graph bakes pointer addresses, so argsort
