@@ -151,9 +151,16 @@ def test_body_added_while_graphs_replay():
     """A body added mid-run (graphs already captured without one) couples."""
     body_g, captures, seq_g, sim_g = _run("WCSPH", graphs=True, add_body_at=16)
     body_d, _, seq_d, _ = _run("WCSPH", graphs=False, add_body_at=16)
+    body_d2, _, _, _ = _run("WCSPH", graphs=False, add_body_at=16)
     assert sim_g._graph_rigid_key == (1, True)
     assert seq_g == seq_d, (seq_g, seq_d)
-    np.testing.assert_allclose(body_g[0:3], body_d[0:3], rtol=0, atol=1e-5)
-    np.testing.assert_allclose(body_g[8:11], body_d[8:11], rtol=0, atol=1e-3)
+    # Two direct runs already differ by 1e-5 to 5e-5 m (float atomic order
+    # in the sort and the sums), so compare against that spread plus a floor.
+    dp_gd = float(np.linalg.norm(body_g[0:3] - body_d[0:3]))
+    dv_gd = float(np.linalg.norm(body_g[8:11] - body_d[8:11]))
+    dp_dd = float(np.linalg.norm(body_d2[0:3] - body_d[0:3]))
+    dv_dd = float(np.linalg.norm(body_d2[8:11] - body_d[8:11]))
+    assert dp_gd <= 4.0 * dp_dd + 1e-4, (dp_gd, dp_dd)
+    assert dv_gd <= 4.0 * dv_dd + 1e-3, (dv_gd, dv_dd)
     # The fluid slowed the box: free fall from -1 m/s would reach -1.26 m/s.
     assert body_d[9] > -1.2, body_d[8:11]
