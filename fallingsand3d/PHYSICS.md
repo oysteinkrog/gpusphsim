@@ -156,9 +156,9 @@ the kernel-sum density of a mass-0.02 cubic lattice at the target gas spacing, a
   `rho/rho_0` 0.58); with a real-world `rho_0` of 0.6 all particles ended isolated and the
   radius reached 0.225 m. The steam from 500 boiling water particles behaves the same way
   (radius 0.120 m, median `rho/rho_0` 0.53, no isolated particles).
-- `simulation._compute_c_sound` reads `sqrt(k * gamma / rho_0)`, which for gas is now
-  about 0.06, so SAND (2.96) sets the acoustic bound. The gas EOS sound speed is
-  `sqrt(k)`, 1.6-2.0, which stays below it. DT_MAX (1 ms) binds either way.
+- `simulation._compute_c_sound` reads `sqrt(k * gamma / rho_0)` over FLUID and GRANULAR
+  materials only (GAS is left out), so SAND (2.96 m/s) sets the CFL sound speed. The gas
+  EOS sound speed is `sqrt(k)`, 1.6-2.0, which stays below it.
 
 **Source**: `sph_shared.cuh:compute_pressure`, `materials.py` (GAS rest_density)
 
@@ -481,18 +481,64 @@ Clamped: `|v| <= velocity_limit = velocity_limit_factor * h / dt`, recomputed in
 | DFSPH | 0.4 | 1/300 s | 4.8 m/s |
 | DFSPH (Fast) | 0.4 | 1/200 s | 3.2 m/s |
 
+The PBF and DFSPH rows are for one substep per fixed dt; the substep split below raises
+the limit n times.
+
+**Lagged max velocity** (`Simulation._latch_v_max`, no GPU sync). The host already
+latches `max_displacement` (the largest drift since the last full sort) from the async
+readback each frame. It also records the sim time since that sort, so
+
+```
+v_max = sqrt(max_displacement) / sim_time_since_sort
+```
+
+While the scene moves every substep sorts, so this is the largest one-substep move
+divided by dt. While sorts are skipped it is the fastest average speed over the skip
+window. The value is 1-2 frames old. The +inf sentinel (K_SpawnGas teleport, or no copy
+since a scene change) keeps the previous value; a drift of exactly 0 gives 0.
+
 **WCSPH timestep** (`Simulation._compute_adaptive_dt`, adaptive mode only):
 
 ```
-dt_accuracy = DT_MAX * accuracy / 0.4
-dt_acoustic = 0.25 * h / c_sound
-dt = clamp(min(dt_accuracy, dt_acoustic), DT_MIN = 1e-5, DT_MAX = 1e-3)
+dt_accuracy = dt_max * accuracy / 0.4
+dt_cfl      = 0.25 * h / (c_sound + v_max)
+dt_target   = clamp(min(dt_accuracy, dt_cfl), DT_MIN = 1e-5, dt_max)
 ```
 
-dt_acoustic is about 2.2 ms (FIRE sets c_sound = 4.47 m/s), so dt_accuracy is the
-bound that acts: the Accuracy slider and the `[` `]` keys give 0.25 ms at 0.1, 0.5 ms
-at 0.2 and 1 ms at 0.4. Values above 0.4 are capped by DT_MAX. There is no viscous CFL:
-step2 treats the viscous self-term implicitly (see 3.3 and 10.4).
+`dt_max` is the solver profile's `dt_max` when it has one, else `DT_MAX` = 1 ms (no
+shipped profile sets it yet). At v_max = 0, dt_cfl is the acoustic bound, about 3.4 ms
+(c_sound = 2.96 m/s), so dt_accuracy acts in a calm scene: the Accuracy slider and the
+`[` `]` keys give 0.25 ms at 0.1, 0.5 ms at 0.2 and 1 ms at 0.4. With a 1 ms cap the
+velocity CFL binds above about 7 m/s (10 m/s gives 0.77 ms); with the 0.5 ms cap of the
+WCSPH profile, above about 17 m/s. There is no viscous CFL: step2 treats the viscous
+self-term implicitly (see 3.3 and 10.4).
+
+`step_frame` lowers dt to dt_target at once and raises it by at most 10% per frame. It
+uploads c_sim only when dt changes by more than 5% or reaches dt_accuracy. A smaller dt
+means more substeps per frame, up to `max_substeps`; past that the sim runs slower than
+real time instead of taking larger steps. Grid-reuse limits and the 30-substep spawn
+damping ramp count substeps, so they cover less sim time when dt is small.
+
+Measured (WCSPH (Fast), Water Drop, 75K, `dt_max` = 2 ms set by hand): dt holds 2 ms in
+free fall, falls to 0.81 ms at impact (v_max 13 m/s) and climbs back to 1.3-1.5 ms as
+the splash calms. Sand Castle (364K, frames 200-300, `dt_max` = 2 ms against 1 ms): 594
+against 1000 substeps per sim second, 3.3 against 5.5 wall seconds per sim second on a
+shared GPU. The scene keeps v_max near 3 m/s, so dt sits at 1.6-1.7 ms. WCSPH B.2 eval
+scenes at fixed dt 1.0, 1.5, 2.0 and 2.2 ms: Dam Break COM_y -0.601 to -0.602, granular
+spread 1.88x to 1.91x, settled top 5% y -0.707 to -0.726, no NaN.
+
+**PBF/DFSPH substep split** (`Simulation._next_fixed_subdiv`, fixed dt mode). With
+`v_cap = factor * h / fixed_dt` (4.32 m/s for PBF at 1/120 s):
+
+```
+n  = clamp(ceil(v_max / (0.5 * v_cap)), 1, 8)
+dt = fixed_dt / n        -> velocity_limit = n * v_cap
+```
+
+n rises at once and falls by one per frame; c_sim is uploaded only when n changes. A
+PBF Water Drop (g = 9.81) reaches 8.6 m/s at impact with n = 2 to 5, where one 1/120 s
+substep held it at 4.32 m/s. With PBF `max_substeps` = 4, frames with n > 2 run slower
+than real time. WCSPH in fixed mode is not split.
 
 GRANULAR anti-creep: if `|v| < 0.01` AND `rho > 0.95*rho_0` AND `gamma_dot < 0.05`:
 set `v_new = 0`
@@ -658,7 +704,7 @@ consistent with §3.3 which states the same. `eta_i` from mu(I) has Pa*s units a
 | mu_0 (viscosity) | 1.0 | 3.5 | GRANULAR base viscosity. FLUID/GAS use per-material base_viscosity as dynamic mu, nu = mu / rho0 (3.3) |
 | epsilon (XSPH) | 0.8 (WCSPH profile `xsph_epsilon`) | 0.5 | Higher for smoother FLUID advection |
 | gravity | -4.0 | -9.8 | Reduced for miniature-world aesthetic |
-| dt | adaptive | 0.001 (fixed) | DT_MAX * accuracy / 0.4, capped by acoustic CFL, in [1e-5, 0.001] (see 4.2) |
+| dt | adaptive | 0.001 (fixed) | min(dt_max * accuracy / 0.4, 0.25 h / (c_sound + v_max)), in [1e-5, dt_max], dt_max = 1 ms (see 4.2) |
 | force_scale | 0.02 | N/A | Matches parent's `output * m_j` convention. FLUID and GAS pairs; GRANULAR pairs use 1.0 |
 | FLUID-GRANULAR pair scale | pressure: force_scale; viscosity: harmonic mean of base_viscosity and mu | N/A | Same value on both sides, so pair forces are antisymmetric (3.2, 3.3) |
 | step2 output | accel * force_scale | accel * m_j | Both effectively multiply by 0.02 |
@@ -1337,10 +1383,9 @@ The per-substep pipeline was restructured for performance (no physics changes):
 ### 10.9 FIXED: GPU→CPU sync every frame in adaptive timestep
 `_compute_adaptive_dt()` used `float(cp.max(...))` on GPU velocity arrays to
 compute advection CFL, forcing a GPU→CPU sync (device→host transfer) every frame.
-The velocity-based advection CFL was never binding (velocity_limit and accel_max
-prevent supersonic particles), so it was removed. Adaptive dt now uses the accuracy
-bound plus the acoustic CFL, both computed on the CPU from the materials
-table and `accuracy` (see 4.2). There is no GPU sync in the hot path.
+Adaptive dt now takes v_max from the drift value the per-frame async readback already
+copies (one frame late), and computes the accuracy bound and the velocity CFL on the
+CPU (see 4.2). There is no GPU sync in the hot path.
 **Source**: `simulation.py:151-175`
 
 ### 10.10 OPTIMIZATION: CUDA graph capture for SPH pipeline
@@ -1946,7 +1991,7 @@ effect, not the wall convention.
 - PBF vorticity epsilon is 50x lower (0.001 vs 0.05) to prevent energy injection at fixed dt
 - PBF surface tension is disabled (gamma=0) — relies on weak attractive constraint instead
 - PBF Drucker-Prager uses velocity-space friction in Finalize (once, iteration-independent)
-- WCSPH uses adaptive dt set by `accuracy` (0.5 ms for WCSPH, 1 ms for WCSPH (Fast), see 4.2); PBF/DFSPH use fixed dt
+- WCSPH uses adaptive dt set by `accuracy` and the velocity CFL (0.5 ms cap for WCSPH, 1 ms for WCSPH (Fast), see 4.2); PBF/DFSPH use fixed dt, split into more substeps when v_max nears the velocity clamp (4.2)
 
 ---
 
