@@ -4038,6 +4038,14 @@ v_world = v_body + omega × r_world   // velocity
 
 Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
 
+**Record layout**: `rbm.boundary_data` is `(N_b, 8)` float32, 32 B per
+boundary particle, read as two float4s: `(x_local, y_local, z_local, psi_b)`
+and `(body_id, 0, 0, 0)`. The kernel loads the first float4 and the body id,
+then reads only `position`, `rotation`, `lin_vel` and `ang_vel` of the body
+(64 of its 96 B). Columns 5-7 are zero padding. Surface normals are not
+stored, because no kernel uses them. Records are grouped by body, in body
+order.
+
 **Slot layout**: all boundary particles of all bodies form one contiguous block
 `[boundary_offset, boundary_offset + N_b)` in the unsorted arrays, inside
 `world._high_water`. The kernel writes position, velocity and mass (psi_b) at
