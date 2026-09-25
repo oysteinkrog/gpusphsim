@@ -799,11 +799,24 @@ if sleep_counter >= 10:
 
 ### 8.2 Wake trigger
 ```
-if |v| > 0.02:
+if |v| > 0.02 or sdf_k(x) < 0 for any SDF object k or x outside [world_min, world_max]:
     clear SLEEPING, set JUST_WOKE
 ```
 
 Hysteresis: 4x ratio between sleep (0.005) and wake (0.02) velocity thresholds.
+
+Geometry wake (WCSPH, `K_Integrate` sleeping branch): a sleeping particle
+inside an SDF object or outside the world box wakes and takes the normal path
+in the same substep, so the SDF push-out, the object velocity impulse and the
+world box clamp apply to it. This covers a kinematic SDF box or cylinder
+(`SDFManager.update_kinematics`) moving into a settled pile, as in the Water
+Mill and Wrecking Ball presets, and a world resize onto a sleeping pile. The
+test is strict penetration (dist < 0, the unshrunk box), not the
+BOUNDARY_MARGIN band: a particle resting on a surface sits at
+dist = BOUNDARY_MARGIN after its last push-out, so a band test would wake it
+on rounding noise and sand on static objects could not sleep. The SDF loop
+costs nothing when there are no SDF objects. PBF and DFSPH finalize kernels do
+not have this test yet.
 
 Wake propagation (`wake.run_wake_propagation`, a memset and 2 kernels on the
 unsorted arrays) runs at the end of every substep for all three solvers.
