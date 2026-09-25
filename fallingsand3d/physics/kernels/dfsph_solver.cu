@@ -442,16 +442,6 @@ void K_DFSPH_ComputeDensityAlpha(
 }
 
 /* ======================================================================
- * akinci_cohesion_df -- Akinci 2013 cohesion spline C(r) times h^3, with
- * q = r / h. Same function as akinci_cohesion_st2 in step2.cu.
- * ====================================================================== */
-__device__ __forceinline__ float akinci_cohesion_df(float q) {
-    const float k = 32.0f / 3.14159265f;
-    float a = (1.0f - q) * (1.0f - q) * (1.0f - q) * q * q * q;
-    return (q > 0.5f) ? k * a : k * (2.0f * a - 1.0f / 64.0f);
-}
-
-/* ======================================================================
  * K_DFSPH_NonPressureForces -- Viscosity + gravity -> velocity update
  * v*_i = v_i + dt * (gravity + viscosity)
  * ====================================================================== */
@@ -538,20 +528,6 @@ void K_DFSPH_NonPressureForces(
         vort_i = __ldg(&vorticity_in[i]);
         omega_mag_i = vort_i.w;
         do_vort_eta = (omega_mag_i > 1e-6f);
-    }
-
-    // Akinci surface tension (FLUID only): per-pair sum in the viscosity loop
-    // (bd-r5-review-n28.125). Same pair term as WCSPH step2.
-    bool st_on = (behavior_i == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f);
-    float3 f_st_pair = make_float3(0.0f, 0.0f, 0.0f);
-    float3 n_i_st = make_float3(0.0f, 0.0f, 0.0f);
-    float rho0_i_st = c_materials[mat_id_i].rest_density;
-    float m_i_st = __ldg(&mass[i]);
-    float inv_h_st = 1.0f / h;
-    float inv_h3_st = inv_h_st * inv_h_st * inv_h_st;
-    if (st_on) {
-        float4 n4_i = __ldg(&normal_in[i]);
-        n_i_st = make_float3(n4_i.x, n4_i.y, n4_i.z);
     }
 
     // Compute viscosity + vorticity eta via neighbor loop
@@ -718,19 +694,6 @@ void K_DFSPH_NonPressureForces(
                         f_visc.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_visc.z += (vel_j.z - vel_i.z) * visc_factor;
                     }
-
-                    // Akinci pair term, FLUID-FLUID only. See step2.cu for the
-                    // formula; the pair adds no net momentum.
-                    if (st_on && behavior_j == FLUID) {
-                        float4 n4_j = __ldg(&normal_in[j]);
-                        float rho0_j = c_materials[GET_MATERIAL_ID(pi_j)].rest_density;
-                        float K_ij = (rho0_i_st + rho0_j) / fmaxf(rho_i + rho_j, RHO_EPSILON);
-                        float c_coh = -m_j * akinci_cohesion_df(rlen * inv_h_st) * inv_h3_st / rlen;
-                        float c_curv = h * 2.0f * m_j / fmaxf(m_i_st + m_j, 1e-12f);
-                        f_st_pair.x += K_ij * (c_coh * r.x + c_curv * (n_i_st.x - n4_j.x));
-                        f_st_pair.y += K_ij * (c_coh * r.y + c_curv * (n_i_st.y - n4_j.y));
-                        f_st_pair.z += K_ij * (c_coh * r.z + c_curv * (n_i_st.z - n4_j.z));
-                    }
                 }
             }
         }
@@ -789,13 +752,20 @@ void K_DFSPH_NonPressureForces(
         }
     }
 
-    // Akinci surface tension (FLUID only, pair sum from the loop above).
-    // Carries force_scale so the same gamma gives the same accel as WCSPH.
-    if (st_on) {
-        float g_fs = c_granular.surface_tension_gamma * c_granular.force_scale;
-        accel.x += g_fs * f_st_pair.x;
-        accel.y += g_fs * f_st_pair.y;
-        accel.z += g_fs * f_st_pair.z;
+    // Akinci surface tension (FLUID only, surface particles)
+    // +gamma * norm_i coheres fluid (inward force toward interior, §10.16)
+    if (behavior_i == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f) {
+        float4 norm_i = __ldg(&normal_in[i]);
+        float nc_i = norm_i.w;  // neighbor count
+        if (nc_i < 25.0f) {
+            float gamma = c_granular.surface_tension_gamma;
+            float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
+            if (n_mag > 0.01f) {
+                accel.x += +gamma * norm_i.x;
+                accel.y += +gamma * norm_i.y;
+                accel.z += +gamma * norm_i.z;
+            }
+        }
     }
 
     // Accel clamp
