@@ -745,10 +745,9 @@ __device__ inline void rigid_body_boundary(
  * Requires: cell_start, cell_end, packed_info, position arrays in sorted
  * order (same grid as the current step).
  *
- * K_PBF_Finalize and K_DFSPH_Finalize feed the same StaticPush
- * accumulator from their XSPH neighbour loop and call this function only
- * for particles that skip that loop (GAS) or, in DFSPH, move more than
- * 0.5h in one step.
+ * K_PBF_Finalize and K_DFSPH_Finalize use the same StaticPush helpers
+ * inside their XSPH neighbour loop and call this function only for GAS
+ * (no XSPH loop) and, in DFSPH, for fast particles and FLUID near a wall.
  * ====================================================================== */
 
 /* Accumulator for the STATIC push. static_particle_boundary uses it, and
