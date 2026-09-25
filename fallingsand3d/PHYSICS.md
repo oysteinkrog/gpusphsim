@@ -68,7 +68,19 @@ rho_i = max(rho_i, 1.0)
 
 - Self-interaction included (j == i contributes, with r=0)
 - **STATIC neighbors included** in density (Akinci boundary model, Phase 13)
-- Per-particle mass `m_j` from sorted mass array (supports multi-material)
+- Per-particle mass `m_j` (supports multi-material). When the FP16 velocity
+  mirror is present, K_Step1 reads `m_j` from its `.w` lane: the counting sort
+  stores `fp16(m / MASS_H_UNIT)` there, with `MASS_H_UNIT = 0.02` (= `PARTICLE_MASS`),
+  and step1 multiplies back. One 8 B load then gives both neighbour velocity and
+  mass (bd-r5-review-n28.161). A 0.02 kg particle stores exactly 1.0, so uniform
+  water density is bit-identical to the float path. Other masses round with
+  relative error up to 2^-11 (4.9e-4); on a mixed-mass Dam Break block density
+  differs from the float path by at most 2.9e-4 (mean 1e-4). The self term uses
+  the same mirror mass. Nothing changes `sorted_mass` between the sort and step1.
+  Step2 still reads the float mass array, because reactions and spawn change
+  `sorted_mass` between step1 and step2 without refreshing the mirror. Measured
+  at 1M WCSPH (shared GPU): step1 2.69/2.64 ms to 2.57/2.58 ms avg over two runs
+  (min 2.32 to 2.23 ms); step2 unchanged. Test: `test_step1_mass_mirror.py`.
 - Density clamped to minimum 1.0
 - Heat diffusion and exposure skip MAT_RIGID neighbors (exposure still counts
   them in its normalising weight, see §9.4). This holds in the cross-phase
