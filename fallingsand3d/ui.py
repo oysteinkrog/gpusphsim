@@ -630,6 +630,7 @@ class UI:
                 killed = world.kill_in_sphere(
                     center=(float(hit[0]), float(hit[1]), float(hit[2])),
                     radius=self._brush_radius,
+                    count=True,
                 )
                 delta -= killed
 

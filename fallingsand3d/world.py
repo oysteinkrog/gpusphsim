@@ -42,7 +42,8 @@ def _material_rgb_table():
     return _rgb_table
 
 # Kill every live, non-rigid particle inside a sphere (bd-r5-review-n28.34).
-# One launch and no host sync. A killed slot becomes DEAD_PACKED with zero
+# One launch. The optional killed_count counter is only read back when the
+# caller asks for the count (the UI brush); otherwise there is no host sync. A killed slot becomes DEAD_PACKED with zero
 # mass, health and velocity, so no solver sees it as fluid, it adds nothing
 # to neighbour density and it cannot move. Its color is (0, 0, 0, -1): the
 # negative w makes every particle vertex shader cull it.
@@ -55,7 +56,8 @@ void K_KillSphere(const float4* __restrict__ position,
                   float4* __restrict__ velocity,
                   float4* __restrict__ color,
                   float cx, float cy, float cz, float r2,
-                  unsigned int mat_rigid, unsigned int dead_packed, int n)
+                  unsigned int mat_rigid, unsigned int dead_packed, int n,
+                  unsigned int* __restrict__ killed_count)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -71,6 +73,8 @@ void K_KillSphere(const float4* __restrict__ position,
     // color.w = -1 marks the slot DEAD for the vertex shaders, which cull it
     // (matches DEAD_COLOR_ALPHA in sph_shared.cuh).
     color[i] = make_float4(0.0f, 0.0f, 0.0f, -1.0f);
+    // NULL = the caller does not want the count (no host readback).
+    if (killed_count) atomicAdd(killed_count, 1u);
 }
 """
 _kill_sphere_kernel = None
@@ -983,6 +987,7 @@ class World:
         self,
         center: Tuple[float, float, float],
         radius: float,
+        count: bool = False,
     ) -> int:
         """Mark live particles within a sphere as DEAD.
 
@@ -992,8 +997,12 @@ class World:
         color. The vertex shaders cull any slot with color.w < 0. Rigid boundary particles are never killed:
         the rigid body manager owns that block (bd-r5-review-n28.22).
 
-        Runs as one kernel with no GPU to host sync. Returns 0 because the
-        count would need a sync and no caller uses it.
+        Runs as one kernel. With count=False (the default) there is no GPU
+        to host sync and the return value is 0. With count=True the kernel
+        also counts the killed slots and this reads back that one uint32,
+        which is a sync. Only the UI kill brush passes count=True, once per
+        click and never per frame or substep, so main.py sees a nonzero
+        delta and calls notify_scene_changed (bd-r5-review-n28.155).
         """
         if self._high_water == 0:
             return 0
@@ -1002,12 +1011,18 @@ class World:
         cx, cy, cz = center
         threads = 256
         blocks = (n + threads - 1) // threads
+        # A zero-size array passes a NULL pointer, so the kernel skips the count.
+        counter = cp.zeros(1 if count else 0, dtype=cp.uint32)
         _get_kill_sphere_kernel()(
             (blocks,), (threads,),
             (self.position, self.packed_info, self.mass, self.health,
              self.velocity, self.color,
              np.float32(cx), np.float32(cy), np.float32(cz),
              np.float32(radius * radius),
-             np.uint32(MAT_RIGID), np.uint32(DEAD_PACKED), np.int32(n)),
+             np.uint32(MAT_RIGID), np.uint32(DEAD_PACKED), np.int32(n),
+             counter),
         )
-        return 0
+        if not count:
+            return 0
+        # Brush path only: one 4-byte readback per click.
+        return int(counter.get()[0])
