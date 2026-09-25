@@ -3423,6 +3423,11 @@ new GAS slots between Step1 and Step2 without touching the carrier. The carrier
 is valid only between Step1 and Step2 of one substep and is not reordered.
 Passing no carrier (`pr2_omega_in=None`) makes K_Step2 use `pressure_in` and
 `vorticity_in` for every neighbour, which tests that build inputs by hand rely on.
+The `pressure_in[j]` read is issued before the distance check, together with
+the position, packed_info, velocity and mass loads, and only for neighbours
+that do not take the carrier. On frozen 1M inputs this cut K_Step2 by about
+5% (water 4.87 to 4.59 ms, water plus sand 4.88 to 4.64 ms), with bitwise-equal
+forces (bd-r5-review-n28.171).
 
 At 1M particles (Dam Break, RTX 5070 Ti, shared GPU) K_Step2 median went from
 about 5.1-5.2 ms to 4.6-4.8 ms in uncontended runs (bench_substep.py).
