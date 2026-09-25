@@ -115,6 +115,8 @@ def _set_rho_prev(sorted_pos: cupy.ndarray, rho_sorted) -> None:
 
     rho_sorted is a sorted-order array or scalar; None writes 0, which the
     kernel replaces with the neighbour's rest density (bd-r5-review-n28.163).
+    K_Step1 rewrites .w during the call, so in a scene larger than one warp a
+    neighbour can read the new density instead; see PHYSICS.md 20.1.
     """
     sorted_pos[:, 3] = 0.0 if rho_sorted is None else rho_sorted
 
