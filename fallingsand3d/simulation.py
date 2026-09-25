@@ -157,6 +157,9 @@ class Simulation:
         self._graph_gather_only = None    # cupy.cuda.Graph for gather-only path
         self._graph_full_sort_n = 0       # n when full-sort graph was captured
         self._graph_gather_only_n = 0     # n when gather-only graph was captured
+        # World.buffer_generation the graphs were captured with. compact()
+        # swaps array references, which changes the pointers a graph baked in.
+        self._graph_buffer_gen = getattr(world, "buffer_generation", 0)
 
         # --- Async readback (1-frame-deferred, avoids GPU→CPU sync stalls) ---
         import ctypes as _ctypes
@@ -1610,6 +1613,12 @@ class Simulation:
         """
         n = self._substep_prologue(n)
         self._count_substep_sort(n)
+        # compact() swapped the world's arrays: captured graphs point at the
+        # old buffers, even when n came back to the same value.
+        gen = getattr(self.world, "buffer_generation", 0)
+        if self._graph_buffer_gen != gen:
+            self._invalidate_graphs()
+            self._graph_buffer_gen = gen
         # Rigid bodies active: always run directly, no graph
         graphs_disabled = self.rigid_body_manager.num_bodies > 0
 

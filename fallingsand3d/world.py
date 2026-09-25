@@ -26,6 +26,21 @@ _MAKE_PACKED = lambda mat, beh: (int(mat) & 0xFF) | ((int(beh) & 0x3) << 8)
 # MAKE_PACKED(MAT_DEAD, STATIC) in spawn.cu and reactions.cu.
 DEAD_PACKED = _MAKE_PACKED(0, STATIC)
 
+# Fields World.compact() moves, in K_Compact argument order. packed_info must
+# stay first. Each name X has a scratch twin sorted_X of the same shape.
+_COMPACT_FIELDS = (
+    "packed_info", "position", "velocity", "veleval", "sph_force",
+    "density", "mass", "temperature", "health", "lifetime", "shear_rate",
+    "exposure_heat", "exposure_corrode", "sleep_counter", "kappa", "kappa_v",
+)
+
+
+def _compact_kernel():
+    """K_Compact from physics/kernels/compact.cu (compiled once, cached)."""
+    from kernel_loader import load_module
+    return load_module("compact.cu").get_function("K_Compact")
+
+
 # Kill every live, non-rigid particle inside a sphere (bd-r5-review-n28.34).
 # One launch. The optional killed_count counter is only read back when the
 # caller asks for the count (the UI brush); otherwise there is no host sync. A killed slot becomes DEAD_PACKED with zero
@@ -161,6 +176,9 @@ class World:
         # takes it off the free capacity, so fluid cannot fill the slots the
         # block needs (bd-r5-review-n28.58).
         self.reserved_tail: int = 0
+        # Bumped when compact() swaps array references, so holders of
+        # device pointers (captured CUDA graphs) know to rebuild.
+        self.buffer_generation: int = 0
         self._allocate()
 
     def _allocate(self) -> None:
@@ -359,17 +377,26 @@ class World:
     def compact(self, num_alive: int = -1) -> int:
         """Compact particle arrays by moving alive particles to the front.
 
-        Uses CuPy stream compaction (fancy indexing gather) to move all
-        non-DEAD particles to contiguous slots [0, num_alive). Dead
-        particles are effectively discarded (their slots become available
-        for future spawning).
+        Moves every non-DEAD particle to the contiguous slots [0, num_alive),
+        keeping their order. Dead particles are discarded (their slots become
+        available for future spawning).
+
+        One fused pass (bd-r5-review-n28.149): an inclusive prefix sum of the
+        alive mask (cupy.cumsum), then one K_Compact launch that writes each
+        alive particle's fields into the sorted_* scratch arrays at slot
+        scan[i] - 1. The Python references of each primary/scratch pair are
+        then swapped, so nothing is copied back. The sorted_* arrays are
+        rebuilt by the next full sort, which the caller forces with
+        Simulation.notify_scene_changed(). The swap changes device pointers,
+        so buffer_generation is bumped and Simulation drops its CUDA graphs.
 
         Parameters
         ----------
         num_alive : int, optional
             Pre-computed count of alive particles (default -1 = compute here).
-            Pass this from the async dead_count readback to avoid a GPU sync.
-            If -1, the count is derived from alive_idx.shape[0] after flatnonzero.
+            Pass the count the caller already read so compact() adds no host
+            readback. If -1, the count is read from the last scan entry (one
+            device-to-host copy).
 
         Returns
         -------
@@ -379,105 +406,87 @@ class World:
         n = self._high_water
         if n == 0:
             return 0
-
-        # Find alive particle indices: material_id != 0
-        alive_mask = (self.packed_info[:n] & cp.uint32(0xFF)) != cp.uint32(0)
-        alive_idx = cp.flatnonzero(alive_mask)
-        # Use caller-supplied count if available to avoid a GPU sync;
-        # fall back to alive_idx.shape[0] (same sync cost as len()) only when
-        # no count was provided.
-        if num_alive < 0:
-            num_alive = int(alive_idx.shape[0])
-
         if num_alive == n:
             # No dead particles, nothing to do
             return n
 
-        self._shift_rigid_boundary_block(alive_mask)
+        alive_mask = (self.packed_info[:n] & cp.uint32(0xFF)) != cp.uint32(0)
+        scan = cp.cumsum(alive_mask, dtype=cp.uint32)
 
+        num_alive = self._shift_rigid_boundary_block(scan, num_alive)
+        if num_alive == n:
+            return n
         if num_alive == 0:
             # All dead
             self._high_water = 0
             return 0
 
-        # Gather alive particles into temporary buffers, then copy back.
-        # We use the sorted_* buffers as scratch space since they're
-        # ephemeral and not needed between frames.
+        threads = 256
+        blocks = (n + threads - 1) // threads
+        _compact_kernel()(
+            (blocks,), (threads,),
+            (np.uint32(n), scan,
+             self.packed_info, *(getattr(self, f) for f in _COMPACT_FIELDS[1:]),
+             *(getattr(self, "sorted_" + f) for f in _COMPACT_FIELDS)),
+        )
+        for f in _COMPACT_FIELDS:
+            a, b = getattr(self, f), getattr(self, "sorted_" + f)
+            setattr(self, f, b)
+            setattr(self, "sorted_" + f, a)
+        self.buffer_generation += 1
 
-        # float4 arrays
-        self.sorted_position[:num_alive] = self.position[:n][alive_idx]
-        self.sorted_velocity[:num_alive] = self.velocity[:n][alive_idx]
-        self.sorted_veleval[:num_alive] = self.veleval[:n][alive_idx]
-        self.sorted_sph_force[:num_alive] = self.sph_force[:n][alive_idx]
-        # float arrays
-        self.sorted_density[:num_alive] = self.density[:n][alive_idx]
-        self.sorted_mass[:num_alive] = self.mass[:n][alive_idx]
-        self.sorted_temperature[:num_alive] = self.temperature[:n][alive_idx]
-        self.sorted_health[:num_alive] = self.health[:n][alive_idx]
-        self.sorted_lifetime[:num_alive] = self.lifetime[:n][alive_idx]
-        self.sorted_shear_rate[:num_alive] = self.shear_rate[:n][alive_idx]
-        self.sorted_exposure_heat[:num_alive] = self.exposure_heat[:n][alive_idx]
-        self.sorted_exposure_corrode[:num_alive] = self.exposure_corrode[:n][alive_idx]
-        # uint32 arrays
-        self.sorted_packed_info[:num_alive] = self.packed_info[:n][alive_idx]
-        # uint8 arrays
-        self.sorted_sleep_counter[:num_alive] = self.sleep_counter[:n][alive_idx]
-        # Persistent per-particle state (kappa, kappa_v)
-        self.sorted_kappa[:num_alive] = self.kappa[:n][alive_idx]
-        self.sorted_kappa_v[:num_alive] = self.kappa_v[:n][alive_idx]
-
-        # Copy back from scratch to primary arrays
-        self.position[:num_alive] = self.sorted_position[:num_alive]
-        self.velocity[:num_alive] = self.sorted_velocity[:num_alive]
-        self.veleval[:num_alive] = self.sorted_veleval[:num_alive]
-        self.sph_force[:num_alive] = self.sorted_sph_force[:num_alive]
-        self.density[:num_alive] = self.sorted_density[:num_alive]
-        self.mass[:num_alive] = self.sorted_mass[:num_alive]
-        self.temperature[:num_alive] = self.sorted_temperature[:num_alive]
-        self.health[:num_alive] = self.sorted_health[:num_alive]
-        self.lifetime[:num_alive] = self.sorted_lifetime[:num_alive]
-        self.shear_rate[:num_alive] = self.sorted_shear_rate[:num_alive]
-        self.exposure_heat[:num_alive] = self.sorted_exposure_heat[:num_alive]
-        self.exposure_corrode[:num_alive] = self.sorted_exposure_corrode[:num_alive]
-        self.packed_info[:num_alive] = self.sorted_packed_info[:num_alive]
-        self.sleep_counter[:num_alive] = self.sorted_sleep_counter[:num_alive]
-        self.kappa[:num_alive] = self.sorted_kappa[:num_alive]
-        self.kappa_v[:num_alive] = self.sorted_kappa_v[:num_alive]
-
-        # Zero out the dead tail to prevent stale data. The DFSPH warm-start
-        # fields are cleared too, so a slot never hands its old pressure to
-        # whatever lands there next (bd-r5-review-n28.121). PBF has no
-        # unsorted lambda array; sorted_lambda_pbf is per-iteration scratch.
-        if num_alive < n:
-            self.packed_info[num_alive:n] = cp.uint32(DEAD_PACKED)
-            self.kappa[num_alive:n] = 0.0
-            self.kappa_v[num_alive:n] = 0.0
+        # Mark the dead tail. The DFSPH warm-start fields are cleared too, so
+        # a slot never hands its old pressure to whatever lands there next
+        # (bd-r5-review-n28.121). The other tail fields hold stale scratch
+        # values; every spawn path writes all fields of a slot it takes.
+        # PBF has no unsorted lambda array; sorted_lambda_pbf is
+        # per-iteration scratch.
+        self.packed_info[num_alive:n] = cp.uint32(DEAD_PACKED)
+        self.kappa[num_alive:n] = 0.0
+        self.kappa_v[num_alive:n] = 0.0
 
         self._high_water = num_alive
         return num_alive
 
-    def _shift_rigid_boundary_block(self, alive_mask) -> None:
+    def _shift_rigid_boundary_block(self, scan, num_alive: int) -> int:
         """Move the rigid boundary offset to where compaction puts the block.
 
-        alive_idx is ascending, so the block stays contiguous and its new start
-        is the number of alive slots below the old start. If any block slot is
-        dead, the block is broken: ask the manager to rebuild it on the next
-        substep instead. compact() already syncs, so the one readback here
-        adds no new sync point. (bd-r5-review-n28.22)
+        Compaction keeps order, so the block stays contiguous and its new
+        start is the number of alive slots below the old start. If any block
+        slot is dead, the block is broken: ask the manager to rebuild it on
+        the next substep instead. (bd-r5-review-n28.22)
+
+        scan is the inclusive prefix sum of the alive mask. The scan entries
+        needed here, and the total alive count when num_alive < 0, come back
+        in one device-to-host copy. With no rigid block and a known
+        num_alive there is no copy at all. Returns num_alive.
         """
+        n = self._high_water
         rbm = getattr(self, 'rigid_body_manager', None)
-        if rbm is None or not rbm.boundary_injected or rbm.boundary_offset < 0:
-            return
-        off = rbm.boundary_offset
-        nb = rbm.num_boundary_particles
-        counts = cp.stack([
-            cp.count_nonzero(alive_mask[:off]),
-            cp.count_nonzero(alive_mask[off:off + nb]),
-        ]).get()
-        if int(counts[1]) == nb:
-            rbm.boundary_offset = int(counts[0])
-        else:
-            rbm.mark_for_reinjection()
+        has_block = (rbm is not None and rbm.boundary_injected
+                     and rbm.boundary_offset >= 0)
+        need = []
+        if num_alive < 0:
+            need.append(n - 1)
+        if has_block:
+            off = rbm.boundary_offset
+            nb = rbm.num_boundary_particles
+            need.extend((off - 1, off + nb - 1))
+        if not need:
+            return num_alive
+        idx = cp.asarray([max(i, 0) for i in need], dtype=cp.int64)
+        vals = [int(v) for v in scan[idx].get()]
+        # scan[-1] means "no slots below": the count is 0.
+        vals = [v if i >= 0 else 0 for v, i in zip(vals, need)]
+        if num_alive < 0:
+            num_alive = vals.pop(0)
+        if has_block:
+            below, upto = vals
+            if upto - below == nb:
+                rbm.boundary_offset = below
+            else:
+                rbm.mark_for_reinjection()
+        return num_alive
 
     @property
     def needs_dead_reserve(self) -> bool:
