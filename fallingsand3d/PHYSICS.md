@@ -963,6 +963,56 @@ other STATIC particles get zero.
 (finalize kernels), `wake.py`, `simulation.py`
 (`_run_wcsph_body`, `_run_pbf_body`, `_run_dfsph_body`, `_wake_rigid_kwargs`)
 
+### 8.3 Step1 skip for inactive particles (WCSPH)
+
+`K_Step1` treats a particle as inactive when it is SLEEPING or non-rigid
+STATIC. Step2 skips both as particle i and `K_Integrate` reads only their
+`dTdt`, and their density cannot change while they stay inactive
+(bd-r5-review-n28.159). An inactive particle runs the neighbour loop only on
+its refresh substep:
+```
+refresh = force_refresh or (substep + index_i / 32) % 8 == 0
+substep = frame_counter_d[0]       (the wake-stamp counter, graph-safe)
+force_refresh = 1 on every full-sort substep
+```
+On other substeps it writes `density = position.w` (STATIC: `rest_density`;
+a sleeper with `.w <= 0`: `rest_density`), recomputes `pressure` and
+`p / rho^2` from it, and leaves shear rate, eta, dTdt, both exposures,
+vorticity and normal as the last full compute wrote them. Under grid reuse
+the sorted order does not change, so those values belong to the same
+particle; a full sort reorders the buffers, so it forces a refresh. The
+phase is per warp of 32 sorted indices: a per-index phase put 4 refreshing
+lanes in every warp, and the warp then ran the loop every substep.
+
+On a refresh the inactive particle's heat rate is backward Euler over the
+8-substep hold, with the neighbour temperatures fixed:
+```
+S = C * SUM_j a_ij (T_j - T_i),  A = C * SUM_j a_ij,  C = viscosity_lap_coeff / (rho_i cp_i)
+dTdt_i = S / (1 + A * 8 * dt)
+```
+`K_Integrate` applies this rate on every substep until the next refresh, so
+the held rate cannot carry T_i past its neighbours' weighted mean. Active
+particles keep the explicit `dTdt = S`. Staleness bounds: exposure and heat
+lag by at most 8 substeps; a particle that just fell asleep holds its last
+explicit rate until its first refresh. In a 181-particle test (hot lava
+under a sleeping sand block, dt = 1/240), the sand's heat gain over 1 s was
+within 3% of the always-compute path.
+
+MAT_DEAD slots skip the loop every substep and write fixed outputs: density
+1 (the STATIC floor they had before, not 0, because K_Step2 divides by a
+neighbour's `position.w`), pressure from it, and zero for everything else.
+
+The saving is per warp. The spatial-hash sort order puts about 4 cells in a
+warp, so a warp skips only when all its particles are inactive. Measured on
+884K SAND in a lattice (`K_Step1` alone, RTX 5070 Ti, GPU shared with other
+jobs): 25/50/75/100% asleep gave 0.97/0.92/0.81/0.29 of the always-compute
+time. Fluid-only scenes are unchanged (1.00). Callers that pass no frame
+counter (tests, `benchmark.py`) compute every particle every call.
+
+**Source**: `step1.cu` (K_Step1 inactive gate and PostCalc dTdt),
+`step1.py` (`compute_step1` `frame_counter`, `force_refresh`),
+`simulation.py` (`_run_wcsph_body`)
+
 ---
 
 ## 9. Temperature Integration
@@ -1157,6 +1207,11 @@ Thresholds in `reactions.cu`:
 
 K_Step1 uses this definition. The PBF and DFSPH density kernels still
 output the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
+
+For sleeping and non-rigid STATIC particles, WCSPH recomputes both
+exposures only on their refresh substep and holds them in between, so a
+threshold or `exposure_corrode * dt` sees a value up to 8 substeps old
+(§8.3).
 
 **Source**: `step1.cu` (K_Step1 PostCalc), `reactions.cu` thresholds
 
