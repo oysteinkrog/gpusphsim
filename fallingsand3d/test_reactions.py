@@ -64,6 +64,10 @@ DT = 0.001
 def MAKE_PACKED(mat_id: int, behavior: int) -> int:
     return (mat_id & 0xFF) | ((behavior & 0x3) << 8)
 
+# packed_info bit 21 (physics/kernels/state_dirty.cuh): K_Reactions sets it on
+# every particle whose health, lifetime or mass it wrote (bd-r5-review-n28.162).
+STATE_DIRTY = 0x200000
+
 def GET_MATERIAL_ID(p: int) -> int:
     return p & 0xFF
 
@@ -457,7 +461,7 @@ def test_corrosion_kills_particle():
     pi = d["sorted_packed_info"].get()
     # health = 0.05 - 1.0 * 0.1 = -0.05 -> DEAD|STATIC, health 0
     for i in range(100):
-        assert int(pi[i]) == MAKE_PACKED(DEAD, STATIC), \
+        assert int(pi[i]) == (MAKE_PACKED(DEAD, STATIC) | STATE_DIRTY), \
             f"Particle {i}: expected DEAD, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
         assert hlth[i] == 0.0, f"Particle {i}: health={hlth[i]}, expected 0"
     print("PASS: test_corrosion_kills_particle")
@@ -573,7 +577,7 @@ def test_acid_metal_corrosion():
 
     pi = d["sorted_packed_info"].get()
     for i in range(100):
-        assert int(pi[i]) == MAKE_PACKED(DEAD, STATIC), \
+        assert int(pi[i]) == (MAKE_PACKED(DEAD, STATIC) | STATE_DIRTY), \
             f"Particle {i}: expected DEAD after corrosion, got mat_id={GET_MATERIAL_ID(int(pi[i]))}"
     print("PASS: test_acid_metal_corrosion")
 
@@ -715,10 +719,14 @@ def test_death_zeroes_mass():
     out_pi = d["sorted_packed_info"].get()
     out_m = mass.get()
     for i in (0, 1):
-        assert int(out_pi[i]) == MAKE_PACKED(DEAD, STATIC), f"slot {i}: packed {int(out_pi[i]):#x}"
+        assert int(out_pi[i]) == (MAKE_PACKED(DEAD, STATIC) | STATE_DIRTY), f"slot {i}: packed {int(out_pi[i]):#x}"
     for i in (0, 1, 2):
         assert out_m[i] == 0.0, f"slot {i}: mass {out_m[i]} after death"
     assert out_m[3] == np.float32(0.02), "live WATER mass changed"
+    # The dead slot's nonzero mass was cleared, so K_Integrate must carry it
+    # back; the untouched WATER needs no carry-back.
+    assert int(out_pi[2]) & STATE_DIRTY, "cleared dead-slot mass not marked dirty"
+    assert int(out_pi[3]) == MAKE_PACKED(WATER, FLUID), f"packed {int(out_pi[3]):#x}"
 
 
 def test_death_without_mass_buffer_still_works():
@@ -728,7 +736,7 @@ def test_death_without_mass_buffer_still_works():
     d = make_particles(8, SMOKE, GAS, lifetime=0.0005)
     compute_reactions(**d)
     pi = d["sorted_packed_info"].get()
-    assert all(int(p) == MAKE_PACKED(DEAD, STATIC) for p in pi)
+    assert all(int(p) == (MAKE_PACKED(DEAD, STATIC) | STATE_DIRTY) for p in pi)
 
 
 def _boundary_push(neighbor_packed: int) -> tuple:
@@ -862,7 +870,7 @@ def test_corroded_stone_becomes_dead_not_fire():
                       dead_count=dead_count)
     pi = d["sorted_packed_info"].get()
     for p in pi:
-        assert int(p) == MAKE_PACKED(DEAD, STATIC), f"packed {int(p):#x}, expected DEAD|STATIC"
+        assert int(p) == (MAKE_PACKED(DEAD, STATIC) | STATE_DIRTY), f"packed {int(p):#x}, expected DEAD|STATIC"
     assert np.all(mass.get() == 0.0), "corroded slot kept its mass"
     assert np.all(d["sorted_health"].get() == 0.0)
     assert int(dead_count.get()[0]) == n
@@ -1222,7 +1230,7 @@ def test_fire_wet_becomes_smoke():
     compute_reactions(**d, sorted_mass=mass)
     pi = d["sorted_packed_info"].get()
     for p in pi:
-        assert int(p) == MAKE_PACKED(SMOKE, GAS), f"packed {int(p):#x}, expected SMOKE|GAS"
+        assert int(p) == (MAKE_PACKED(SMOKE, GAS) | STATE_DIRTY), f"packed {int(p):#x}, expected SMOKE|GAS"
     np.testing.assert_allclose(d["sorted_lifetime"].get(), 1.0)
     np.testing.assert_allclose(d["sorted_temperature"].get(), 373.0)
     np.testing.assert_allclose(mass.get(), 0.008)
@@ -1312,7 +1320,7 @@ def test_condensed_boiled_steam_keeps_water_mass_in_expectation():
     m = mass.get()
     mats = pi & 0xFF
     water = mats == WATER
-    dead = pi == MAKE_PACKED(DEAD, STATIC)
+    dead = pi == (MAKE_PACKED(DEAD, STATIC) | STATE_DIRTY)
     assert np.all(water | dead), "every condensed STEAM must be WATER or DEAD"
     np.testing.assert_allclose(m[water], spawn_mass(WATER), rtol=1e-6)
     assert np.all(((pi[water] >> 8) & 0x3) == FLUID)
