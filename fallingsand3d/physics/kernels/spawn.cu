@@ -82,12 +82,15 @@ __device__ inline float3 spawn_clamp(float3 p) {
  *      density), and when the pointers are non-NULL the PBF predicted
  *      position, the FP16 velocity mirror, pressure, dye, angular velocity
  *      and the kappa / kappa_v / lambda warm-start fields.
- *   4. Mark source water particle as DEAD
- *   5. Clear SPAWN_GAS flag
- *   6. Set max_displacement to +inf bits so the next frame does a full sort
+ *   4. Mark source water particle as DEAD (this also clears SPAWN_GAS)
+ *   5. Set max_displacement to +inf bits so the next frame does a full sort
  *
- * If the freelist has fewer than N entries, restore the subtracted N
- * and skip (the water particle stays liquid; retried next substep).
+ * If the freelist has fewer than N entries the particle is skipped and its
+ * flag stays set, so it retries next substep. A plain (volatile) read of
+ * dead_count skips the atomics when the freelist is visibly short, so a hot
+ * pool waiting for slots issues no atomics and no stores. The atomic claim
+ * is still the authoritative check. K_Reactions clears the flag if the
+ * water cools below boiling before it finds slots (bd-r5-review-n28.142).
  * ====================================================================== */
 
 extern "C" __global__
@@ -129,8 +132,12 @@ void K_SpawnGas(
     // Only process particles with SPAWN_GAS flag set
     if (!HAS_SPAWN_FLAG(pi)) return;
 
-    // Clear the flag regardless of whether spawn succeeds
-    pi = CLEAR_SPAWN_FLAG(pi);
+    // Cheap early out while the freelist is visibly short: no atomics and no
+    // stores, and the flag stays set so the particle retries next substep.
+    // dead_count can read as a huge uint while racing spawners wrap it; the
+    // int cast makes that negative, which also skips. A stale read that
+    // passes falls through to the atomic claim below, which decides.
+    if ((int)(*((volatile uint*)dead_count)) < SPAWN_N) return;
 
     // Claim all SPAWN_N slots with a single all-or-nothing atomicSub.
     // If the returned old value is >= SPAWN_N, this thread exclusively owns
@@ -153,10 +160,9 @@ void K_SpawnGas(
     uint claimed_slots[SPAWN_N];
     int old_val = (int)atomicSub(dead_count, (uint)SPAWN_N);
     if (old_val < SPAWN_N) {
-        // Not enough free slots -- restore and skip. The flag was cleared,
-        // but Reactions re-sets it next substep while the water stays hot.
+        // Not enough free slots -- restore and skip. The flag stays set, so
+        // nothing is written and the particle retries next substep.
         atomicAdd(dead_count, (uint)SPAWN_N);
-        packed_info[i] = pi;
         return;
     }
     for (int k = 0; k < SPAWN_N; k++) {

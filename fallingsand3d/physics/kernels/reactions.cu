@@ -177,10 +177,11 @@ void K_Reactions(
     float4*         __restrict__ predicted_position
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numParticles) return;
+    bool in_range = (i < numParticles);
 
-    uint pi = packed_info[i];
+    uint pi = in_range ? packed_info[i] : 0u;
     uint mat_id = GET_MATERIAL_ID(pi);
+    bool is_dead = in_range && (mat_id == MAT_DEAD);
 
     // DEAD particles: offer the slot to the spawn freelist, then skip.
     // The freelist holds sorted indices, which go stale after a re-sort, so it
@@ -189,12 +190,28 @@ void K_Reactions(
     // not claimed the substep they die are lost for good and boiling water
     // almost never finds a slot to spawn steam into (bd-r4fix-uup.15).
     // Capacity: dead_indices holds max_particles >= numParticles entries.
-    if (mat_id == MAT_DEAD) {
-        if (mass != 0) mass[i] = 0.0f;  // defensive: every dead slot is massless
-        if (dead_indices != 0 && dead_count != 0) {
-            uint idx = atomicAdd(dead_count, 1u);
-            dead_indices[idx] = i;
+    //
+    // The push is warp-aggregated: one atomicAdd per warp instead of one
+    // same-address atomic per dead slot (bd-r5-review-n28.142). Every lane
+    // reaches the ballot (out-of-range lanes vote false), so it is convergent.
+    // The pointer test is uniform across the launch.
+    if (dead_indices != 0 && dead_count != 0) {
+        uint dead_mask = __ballot_sync(0xffffffffu, is_dead);
+        if (dead_mask != 0u) {
+            uint lane = threadIdx.x & 31u;
+            uint leader = (uint)__ffs(dead_mask) - 1u;
+            uint base = 0u;
+            if (lane == leader) base = atomicAdd(dead_count, (uint)__popc(dead_mask));
+            base = __shfl_sync(0xffffffffu, base, leader);
+            if (is_dead) {
+                uint lanemask_lt = (1u << lane) - 1u;
+                dead_indices[base + (uint)__popc(dead_mask & lanemask_lt)] = i;
+            }
         }
+    }
+    if (!in_range) return;
+    if (is_dead) {
+        if (mass != 0) mass[i] = 0.0f;  // defensive: every dead slot is massless
         return;
     }
 
@@ -254,9 +271,16 @@ void K_Reactions(
     // WATER (mat=5, temp > 373K) -> set SPAWN_GAS flag (large density ratio, US-023)
     const float water_boil_temp = c_materials[MAT_WATER].temp_boil;
     if (mat_id == MAT_WATER && temp > water_boil_temp) {
-        pi = SET_SPAWN_FLAG(pi);
-        packed_info[i] = pi;
+        // K_SpawnGas leaves the flag set while it waits for freelist slots,
+        // so only write when the flag changes (bd-r5-review-n28.142).
+        if (!HAS_SPAWN_FLAG(pi)) packed_info[i] = SET_SPAWN_FLAG(pi);
         return;
+    }
+    // Water that cooled below boiling while waiting for slots must not
+    // spawn steam later: drop the stale flag.
+    if (mat_id == MAT_WATER && HAS_SPAWN_FLAG(pi)) {
+        pi = CLEAR_SPAWN_FLAG(pi);
+        packed_info[i] = pi;
     }
 
     // WATER (mat=5, temp < 263K, sleeping or |v| < 0.02 m/s) -> ICE (STATIC)
