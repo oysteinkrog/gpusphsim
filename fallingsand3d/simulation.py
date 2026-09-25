@@ -1018,7 +1018,6 @@ class Simulation:
             predicted_position=predicted_position,
             velocity_h=w.sorted_velocity_h if is_wcsph else None,
             pressure=w.sorted_pressure if is_wcsph else None,
-            particle_dye=w.sorted_particle_dye,
             angular_velocity=w.sorted_angular_velocity,
             kappa=None if is_pbf else w.sorted_kappa,
             kappa_v=None if is_pbf else w.sorted_kappa_v,

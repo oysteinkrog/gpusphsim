@@ -1352,7 +1352,6 @@ def test_spawn_children_ring_and_slot_state():
     predicted = cupy.full((n, 4), 7.0, dtype=cupy.float32)
     velocity_h = cupy.full((n, 2), 0x47004700, dtype=cupy.uint32)  # half(7.0) pairs
     pressure = cupy.full(n, 7.0, dtype=cupy.float32)
-    dye = cupy.full((n, 4), 7.0, dtype=cupy.float32)
     kappa = cupy.full(n, 7.0, dtype=cupy.float32)
     kappa_v = cupy.full(n, 7.0, dtype=cupy.float32)
     lam = cupy.full(n, 7.0, dtype=cupy.float32)
@@ -1364,7 +1363,6 @@ def test_spawn_children_ring_and_slot_state():
         arrays["sleep_counter"], arrays["density"], arrays["shear_rate"],
         dead_indices, dead_count,
         predicted_position=predicted, velocity_h=velocity_h, pressure=pressure,
-        particle_dye=dye,
         kappa=kappa, kappa_v=kappa_v, lambda_pbf=lam,
     )
     cupy.cuda.Device().synchronize()
@@ -1397,7 +1395,7 @@ def test_spawn_children_ring_and_slot_state():
     vh = _half4_to_float(velocity_h.get()[slots])
     np.testing.assert_allclose(vh, vel.astype(np.float16).astype(np.float32), atol=0)
 
-    for name, arr in [("pressure", pressure), ("dye", dye),
+    for name, arr in [("pressure", pressure),
                       ("kappa", kappa), ("kappa_v", kappa_v), ("lambda", lam)]:
         assert np.all(arr.get()[slots] == 0.0), name
         # Slots that were not claimed keep their values.

@@ -152,7 +152,6 @@ def compute_spawn(
     predicted_position: cupy.ndarray | None = None,
     velocity_h: cupy.ndarray | None = None,
     pressure: cupy.ndarray | None = None,
-    particle_dye: cupy.ndarray | None = None,
     angular_velocity: cupy.ndarray | None = None,
     kappa: cupy.ndarray | None = None,
     kappa_v: cupy.ndarray | None = None,
@@ -195,7 +194,6 @@ def compute_spawn(
         FP16 velocity mirror that WCSPH step2 reads for neighbours.
     pressure : cupy.ndarray, (N,) float32, optional
         WCSPH pre-computed pressure; children get 0 (gas at rest density).
-    particle_dye : cupy.ndarray, (N, 4) float32, optional
     kappa, kappa_v, lambda_pbf : cupy.ndarray, (N,) float32, optional
         Per-slot state the child must not inherit from the dead occupant.
         Each is zeroed for the claimed slots.
@@ -240,7 +238,6 @@ def compute_spawn(
             _ptr(predicted_position),
             _ptr(velocity_h),
             _ptr(pressure),
-            _ptr(particle_dye),
             _ptr(kappa),
             _ptr(kappa_v),
             _ptr(lambda_pbf),
