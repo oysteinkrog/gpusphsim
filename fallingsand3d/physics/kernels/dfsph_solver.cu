@@ -1456,14 +1456,20 @@ void K_DFSPH_Finalize(
     float sp_reach_sq = (sp_band + sp_margin) * (sp_band + sp_margin);
     float3 pos_adv = make_float3(pos.x + dt * vel.x, pos.y + dt * vel.y, pos.z + dt * vel.z);
 
-    // XSPH velocity smoothing
+    // XSPH velocity smoothing. GRANULAR gets no XSPH, so for GRANULAR the
+    // loop only gathers the STATIC push: it reads packed_info for every
+    // neighbour and position for STATIC ones, and skips the loop when the
+    // push falls back to the separate scan (bd-r5-review-n28.188).
     float3 vel_advect = vel;
+    bool xsph_self = (behavior == FLUID);
     if (behavior == FLUID || behavior == GRANULAR) {
         float h = c_sim.smoothing_length;
-        float h_sq = c_sim.smoothing_length_sq;
         float step_sq = dt * dt * (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
         float step_max = h - sp_band - sp_margin;
         spush_in_loop = (step_sq < step_max * step_max);
+    }
+    if (xsph_self || (behavior == GRANULAR && spush_in_loop)) {
+        float h_sq = c_sim.smoothing_length_sq;
         float rho_i = sorted_density[i];
         // Akinci wall volume divisor (dfsph_vol_rho); floor at 1 for DEAD
         float rho0_vol_i = fmaxf(c_materials[mat_id].rest_density, 1.0f);
@@ -1482,6 +1488,7 @@ void K_DFSPH_Finalize(
                         uint pi_j = __ldg(&sorted_packed_info[j]);
                         int bj = GET_BEHAVIOR(pi_j);
                         if (bj == GAS) continue;
+                        if (!xsph_self && bj != STATIC) continue;
 
                         float4 p4j = __ldg(&sorted_position[j]);
 
@@ -1495,6 +1502,7 @@ void K_DFSPH_Finalize(
                                 fluid_near_wall = true;
                             }
                         }
+                        if (!xsph_self) continue;
 
                         float3 r = make_float3(pos.x - p4j.x, pos.y - p4j.y, pos.z - p4j.z);
                         float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
@@ -1523,10 +1531,9 @@ void K_DFSPH_Finalize(
                 }
             }
         }
-        // Apply XSPH to FLUID only (not GRANULAR) — aligns with step2.cu bd-mzc.34 fix.
-        // GRANULAR uses mu(I) rheology for velocity smoothing; XSPH is redundant there
-        // and step2 was already updated to skip it. DFSPH Finalize now matches.
-        if (behavior == FLUID) {
+        // Apply XSPH to FLUID only (not GRANULAR), matching step2.cu (bd-mzc.34).
+        // GRANULAR uses mu(I) rheology for velocity smoothing; XSPH is redundant there.
+        if (xsph_self) {
             float c_xsph = c_granular.xsph_epsilon;
             vel_advect.x += c_xsph * xsph.x;
             vel_advect.y += c_xsph * xsph.y;
