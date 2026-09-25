@@ -11,6 +11,9 @@
  *            * sum_j k_ij (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|) * heat_boost_ij
  *   where k_ij = 2 kappa_i kappa_j / (kappa_i + kappa_j) (harmonic mean of
  *   c_materials[].thermal_conductivity), so each pair exchanges heat symmetrically.
+ *   GAS/non-GAS pairs use the same term with the pair coefficient capped so
+ *   one neighbour moves T_i by at most half the gap per substep
+ *   (bd-r5-review-n28.94); MAT_RIGID neighbours never exchange heat.
  *
  * Exposure accumulation (all particles, via c_interactions table lookup),
  * normalised by the kernel support weight of the neighbourhood:
@@ -122,6 +125,13 @@ void K_Step1(
     // Read temperature for heat diffusion
     float T_i = __ldg(&temperature_in[index_i]);
     float kappa_i = c_materials[mat_id_i].thermal_conductivity;
+    // Cross-phase heat cap (bd-r5-review-n28.94). The self term bounds rho_i from
+    // below, so capping a cross-phase pair coefficient at a_x_max keeps
+    // viscosity_lap_coeff * a / (rho_i * cp_i) * dt <= 0.5 for that pair.
+    float rho_i_lb = fmaxf(c_precalc.poly6_coeff * __ldg(&mass[index_i]) * h_sq * h_sq * h_sq,
+                           is_gas_i ? RHO_EPSILON : 1.0f);
+    float a_x_max = 0.5f * rho_i_lb * c_materials[mat_id_i].heat_capacity
+                  / fmaxf(c_precalc.viscosity_lap_coeff * c_sim.dt, 1e-30f);
 
     // Density accumulator (variable part of Poly6 kernel)
     float sum_density = 0.0f;
@@ -198,6 +208,16 @@ void K_Step1(
                             if (mat_id_j != MAT_RIGID) {
                                 sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                                 sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                                // Cross-phase heat conduction (bd-r5-review-n28.94): the same symmetric
+                                // pair term as the same-phase branch, with the coefficient capped at a_x_max
+                                // so one neighbour moves T_i by at most half the gap per substep.
+                                float rho_x = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
+                                if (rho_x <= 0.0f) rho_x = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                                float kappa_x = c_materials[mat_id_j].thermal_conductivity;
+                                float k_x = 2.0f * kappa_i * kappa_x / fmaxf(kappa_i + kappa_x, 1e-6f);
+                                float boost_x = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
+                                float a_x = k_x * m_j / fmaxf(rho_x, RHO_EPSILON) * (h - sqrtf(r_sq)) * boost_x;
+                                sum_dTdt += fminf(a_x, a_x_max) * (T_j - T_i);
                             }
                             continue;
                         }
@@ -484,6 +504,13 @@ void K_Step1_BuildNL(
 
     float T_i = __ldg(&temperature_in[index_i]);
     float kappa_i = c_materials[mat_id_i].thermal_conductivity;
+    // Cross-phase heat cap (bd-r5-review-n28.94). The self term bounds rho_i from
+    // below, so capping a cross-phase pair coefficient at a_x_max keeps
+    // viscosity_lap_coeff * a / (rho_i * cp_i) * dt <= 0.5 for that pair.
+    float rho_i_lb = fmaxf(c_precalc.poly6_coeff * __ldg(&mass[index_i]) * h_sq * h_sq * h_sq,
+                           is_gas_i ? RHO_EPSILON : 1.0f);
+    float a_x_max = 0.5f * rho_i_lb * c_materials[mat_id_i].heat_capacity
+                  / fmaxf(c_precalc.viscosity_lap_coeff * c_sim.dt, 1e-30f);
 
     float sum_density = 0.0f;
     float sum_dTdt = 0.0f;
@@ -538,6 +565,16 @@ void K_Step1_BuildNL(
                             if (mat_id_j != MAT_RIGID) {
                                 sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                                 sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                                // Cross-phase heat conduction (bd-r5-review-n28.94): the same symmetric
+                                // pair term as the same-phase branch, with the coefficient capped at a_x_max
+                                // so one neighbour moves T_i by at most half the gap per substep.
+                                float rho_x = (density_in != 0) ? __ldg(&density_in[index_j]) : 1000.0f;
+                                if (rho_x <= 0.0f) rho_x = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                                float kappa_x = c_materials[mat_id_j].thermal_conductivity;
+                                float k_x = 2.0f * kappa_i * kappa_x / fmaxf(kappa_i + kappa_x, 1e-6f);
+                                float boost_x = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
+                                float a_x = k_x * m_j / fmaxf(rho_x, RHO_EPSILON) * (h - sqrtf(r_sq)) * boost_x;
+                                sum_dTdt += fminf(a_x, a_x_max) * (T_j - T_i);
                             }
                             // Still record as neighbor for step2
                             if (nl_count < max_nb && index_j != index_i) {

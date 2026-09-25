@@ -296,6 +296,13 @@ void K_PBF_ComputeLambda(
         kappa_i = c_materials[mat_id_i].thermal_conductivity;
         if (dye_on) dye_i = __ldg(&particle_dye_in[i]);
     }
+    // Cross-phase heat cap (bd-r5-review-n28.94). The self term bounds rho_i from
+    // below, so capping a cross-phase pair coefficient at a_x_max keeps
+    // viscosity_lap_coeff * a / (rho_i * cp_i) * dt <= 0.5 for that pair.
+    float rho_i_lb = fmaxf(c_precalc.poly6_coeff * __ldg(&mass[i]) * h_sq * h_sq * h_sq,
+                           is_gas_i ? RHO_EPSILON : 1.0f);
+    float a_x_max = 0.5f * rho_i_lb * c_materials[mat_id_i].heat_capacity
+                  / fmaxf(c_precalc.viscosity_lap_coeff * c_sim.dt, 1e-30f);
 
     // Vorticity accumulator (FLUID only)
     float3 omega = make_float3(0.0f, 0.0f, 0.0f);
@@ -349,6 +356,19 @@ void K_PBF_ComputeLambda(
                             if (mat_id_j != MAT_DEAD) sum_W += w_poly6_var;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
+                            // A rigid wall never exchanges heat (same rule as the same-phase branch)
+                            if (mat_id_j != MAT_RIGID) {
+                                // Cross-phase heat conduction (bd-r5-review-n28.94): the same symmetric
+                                // pair term as the same-phase branch, with the coefficient capped at a_x_max
+                                // so one neighbour moves T_i by at most half the gap per substep.
+                                float rho_x = (density_in != 0) ? __ldg(&density_in[j]) : 1000.0f;
+                                if (rho_x <= 0.0f) rho_x = 1000.0f;  // guard uninitialised/spawned density_in (bd-r4fix-uup.14)
+                                float kappa_x = c_materials[mat_id_j].thermal_conductivity;
+                                float k_x = 2.0f * kappa_i * kappa_x / fmaxf(kappa_i + kappa_x, 1e-6f);
+                                float boost_x = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
+                                float a_x = k_x * m_j / fmaxf(rho_x, RHO_EPSILON) * (h - sqrtf(r_sq)) * boost_x;
+                                sum_dTdt += fminf(a_x, a_x_max) * (T_j - T_i);
+                            }
                         }
                         continue;
                     }
