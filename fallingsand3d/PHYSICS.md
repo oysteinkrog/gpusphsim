@@ -1547,6 +1547,14 @@ reorder (grid reuse, see `_capture_graph`).
   back to the same count (bd-r5-review-n28.149).
 - Capture uses a non-default stream (`cupy.cuda.Stream(non_blocking=True)`);
   replay launches on the default stream.
+- Constant memory is not part of a graph: kernel nodes read `__constant__`
+  data when they run. Per-substep and per-frame constant writes (kinematic
+  SDF poses, the spawn damping ramp, dt and gravity changes) go through
+  `rigid_bodies.PinnedUploadRing`: the bytes are copied into a pinned slot
+  and pushed with `cudaMemcpyAsync` on the current stream, so the copy is
+  ordered before the next graph launch and the host never waits for the GPU
+  (a pageable `cudaMemcpy` drains the queue first). These writes do not
+  invalidate the graphs (bd-r5-review-n28.168).
 
 **Source**: `simulation.py:256-426`, `reactions.cu:80-81`, `reactions.py:106-186`,
 `spawn.py:118-120`
@@ -1662,8 +1670,12 @@ all three finalize/integrate kernels (K_Integrate, K_PBF_Finalize, K_DFSPH_Final
 Ramp schedule (Python-side, in simulation.py):
 - Duration: 30 substeps after preset load or solver switch
 - Linear ramp: `damping = 0.8 * (1 - t/30)` → 0.8 at step 0, 0.0 at step 30
-- CUDA graph invalidated during ramp (constant memory changes each step)
-- Graph captures normally at step 31 onward
+- Each ramp substep writes `c_sim` to every module that reads it with an
+  async pinned copy (`Simulation._upload_sim_params_async`), queued before
+  that substep's kernels on the same stream
+- CUDA graphs stay valid during the ramp: the kernels read
+  `c_sim.velocity_damping` when they run, so a graph captured on ramp step 1
+  replays with each later step's value (bd-r5-review-n28.168)
 
 **Source**: `common.cuh` (SimParams), `integrate.cu`, `pbf_solver.cu`,
 `dfsph_solver.cu`, `simulation.py`
@@ -3761,6 +3773,13 @@ At 1M particles (dam break, no reactions) the K_Integrate median went from
 The rigid body system provides solid-fluid interaction via two mechanisms:
 - **SDF collision** (Phase A): Analytical signed distance fields for particle-object collision
 - **Akinci boundary coupling** (Phase B): Boundary particles for two-way hydrodynamic forces
+
+SDF objects live in `__constant__ c_sdf_objects[16]` and `c_num_sdf_objects`
+in the integrate, PBF and DFSPH modules. With a kinematic motion,
+`SDFManager.update_kinematics` sets the pose for the current `sim_time`
+before each substep and `upload_if_dirty` writes the table with async pinned
+copies (`PinnedUploadRing`), so the particles see the pose of the substep
+they run in. The count is written only when it changes (bd-r5-review-n28.168).
 
 ### 22.1 SDF Primitive Distance Functions
 
