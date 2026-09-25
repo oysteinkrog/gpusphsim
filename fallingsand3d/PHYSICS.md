@@ -898,19 +898,27 @@ on rounding noise and sand on static objects could not sleep. The SDF loop
 costs nothing when there are no SDF objects. PBF and DFSPH finalize kernels do
 not have this test yet.
 
-Wake propagation (`wake.run_wake_propagation`, 2 kernels on the unsorted
-arrays) runs at the end of every substep for all three solvers. A marker
-is a particle that has JUST_WOKE set, or an awake particle faster than
-0.02 m/s; it writes a stamp into its own grid cell (one plain store). For
-WCSPH `K_MarkWakeCells` does this after `K_Integrate`. For PBF and DFSPH
-`K_PBF_Finalize` and `K_DFSPH_Finalize` write the stamp themselves from the
-final position, velocity and packed_info they already hold, through
-`wake_mark_own_cell` in `sph_shared.cuh`, and `run_wake_propagation` runs with
-`mark=False`, so `K_MarkWakeCells` is not launched and the 36 B per particle
-reread is gone (bd-r5-review-n28.167). Both paths use the same test, so the
-marks are the same: on Sand Castle with all sand starting asleep, DFSPH
-sleeping counts matched the `K_MarkWakeCells` path exactly at every checked
-substep. `K_WakeSleepersAndClearJustWoke` wakes a sleeping
+Wake propagation runs at the end of every substep for all three solvers, on
+the unsorted arrays. A marker is a particle that has JUST_WOKE set, or an
+awake particle faster than 0.02 m/s that is not STATIC or GAS; it writes a
+stamp into its own grid cell (one plain store). The solver's last kernel
+writes the mark from the final position, velocity and packed_info it already
+holds, through `wake_mark_own_cell` in `sph_shared.cuh`: `K_Integrate` for
+WCSPH (bd-r5-review-n28.166), `K_PBF_Finalize` and `K_DFSPH_Finalize` for PBF
+and DFSPH (bd-r5-review-n28.167). `run_wake_propagation` then runs with
+`mark=False`, so the only wake launches are the rigid body marks (when the
+scene has bodies) and the sleeper probe; `K_MarkWakeCells` is not launched and
+its 36 B per particle reread is gone. `K_MarkWakeCells` stays as the reference
+path (`mark=True`) for direct callers and the unit tests, and uses the same
+test, so the marks are the same: `test_integrate_wake_mark.py` checks the
+`K_Integrate` table equals the `K_MarkWakeCells` table for the same state, and
+on Sand Castle with all sand starting asleep DFSPH sleeping counts matched the
+`K_MarkWakeCells` path exactly at every checked substep. The integrate module
+gets `c_grid` from `Simulation._upload_constants` for this; before, it had
+none and every particle mapped to hash 0. At 1M particles (WCSPH Dam Break,
+`bench_substep.py`, shared GPU, 2 interleaved runs) the wake stage went from
+0.045 ms to 0.008 ms and integrate from 0.483 ms to 0.488 ms per substep.
+`K_WakeSleepersAndClearJustWoke` wakes a sleeping
 particle when any of its 27 cells (own cell and 26 neighbours) holds the
 stamp. This is the same rule as marking the 3x3x3 block around each marker
 and probing one cell, because the neighbourhood is symmetric; it replaces 27
@@ -1417,8 +1425,9 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
    penetration, not a sum over neighbours, so a particle over a flat floor
    moves at most `min_dist - y`. Velocity is reflected with restitution along
    `n` only, and only when moving into the wall. A particle resting one
-   spacing from the wall is not touched. Called from WCSPH `K_Integrate`, PBF
-   Finalize and DFSPH Finalize. (bd-r5-review-n28.43)
+   spacing from the wall is not touched. Called from PBF Finalize and DFSPH
+   Finalize, and from WCSPH `K_Integrate` when it is given the cell arrays
+   (see the known gap below). (bd-r5-review-n28.43)
    MAT_RIGID particles push only GAS: FLUID and GRANULAR get their rigid
    response from the solver's Akinci coupling, but gas density ignores the
    body, so without the push gas would cross the body surface
@@ -1454,10 +1463,13 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
    Finalize of a water, sand and smoke drop on STONE with the fold switched
    off: max difference 6e-8 m, 8e-7 m/s.
 
-   Known gap: the integrate module never receives `c_grid` (simulation.py
-   uploads only `c_sim` and `c_materials` to it), so in WCSPH `calcGridCell`
-   and `spatialHash` see zeros and this push scans one wrong bucket. It has
-   no effect in WCSPH until that upload is added.
+   Known gap: the push does not run in WCSPH. The integrate module has
+   `c_grid` (added for the wake mark, bd-r5-review-n28.166), but the WCSPH
+   body passes no `cell_start`/`cell_end` to `K_Integrate`, which skips the
+   scan. Before the `c_grid` upload the scan hit hash bucket 0 only, so this
+   keeps WCSPH physics as it was. Passing the cell arrays turns the push on
+   and costs about 0.16 ms per substep at 1M (Dam Break, integrate 0.48 to
+   0.65 ms).
 
 Additional FLUID boundary improvements (unchanged):
 - **XSPH position advection for FLUID**: Smooths compression artifacts.
