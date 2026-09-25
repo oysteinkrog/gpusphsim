@@ -84,6 +84,8 @@ class Simulation:
         If True, use fixed timestep (no CFL computation). Default False.
     max_substeps : int
         Maximum substeps per render frame to prevent spiral-of-death.
+    clock : callable, optional
+        Wall clock for step_frame, in seconds. Defaults to time.perf_counter.
     """
 
     # _last_max_disp_uint value meaning "no trustworthy readback yet". Any
@@ -101,8 +103,12 @@ class Simulation:
         compact_interval: int = 60,
         compact_threshold: int = 100,
         world_half_size: float = 1.0,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self.world = world
+        # Wall clock read by step_frame (seconds). Tests pass a fake clock to
+        # drive step_frame at a fixed frame time.
+        self._clock: Callable[[], float] = clock if clock is not None else time.perf_counter
         self.dt = dt
         self.speed = speed
         self.accuracy = accuracy
@@ -1899,7 +1905,7 @@ class Simulation:
 
     def step_frame(self) -> int:
         """Advance simulation for one render frame. Returns number of substeps run."""
-        now = time.perf_counter()
+        now = self._clock()
         if self._last_frame_time is None:
             self._last_frame_time = now
             self._time_accumulator = 0.0
