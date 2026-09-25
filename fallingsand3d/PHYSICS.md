@@ -1624,7 +1624,7 @@ up `+curl(v)`, see §16.1.
 
 ### 10.18 Rigid Body System Limitations
 
-- **Bounding sphere collisions only**: Body-body and body-SDF collision uses bounding sphere (max of half_extents), not true shape. Elongated bodies leave gaps at corners.
+- **Bounding sphere body-body collisions**: Body-body collision uses the bounding sphere `|half_extents|`, not the true shape, so elongated bodies leave gaps at corners. Body-SDF contact and the world wall clamp use the box support distance (22.7, 22.8).
 - **No rigid-rigid stacking**: Single push-apart pass per substep; deep piles of bodies may interpenetrate.
 - **Max 8 dynamic bodies, 16 SDF objects**: Hardcoded limits in constant memory (`MAX_RIGID_BODIES`, `MAX_SDF_OBJECTS`).
 - **CUDA graph disabled**: Rigid body forces vary per substep, so the CUDA graph pipeline is disabled when any rigid body is present.
@@ -3629,6 +3629,8 @@ is isotropic and the update reduces to `omega = (omega + I_inv * tau * dt) * ang
 
 Velocity damping: linear 1-0.01*dt, angular 1-0.05*dt (applied to L). Angular velocity clamped to 20 rad/s (L is scaled by the same factor). Force clamped to 1000*mass.
 
+**World wall clamp (bd-r5-review-n28.98)**: per axis, the COM stays `s(axis) + BOUNDARY_MARGIN` (1e-4) inside `world_min/max`, where `s` is the support distance from 22.8 at the updated rotation. So the body surface, not the COM, stops at the wall. Velocity into the wall is reflected with factor -0.3.
+
 **Kinematic bodies (bd-r5-review-n28.105)**: a body with `is_kinematic` (or
 `inv_mass <= 0`) skips gravity, fluid force and torque, damping, the clamps and
 the world-wall bounce, but its pose still advances every substep with the same
@@ -3658,9 +3660,9 @@ inertia by 4x, making boxes spin unrealistically fast under torques.
 
 After integration, `K_RigidBodyCollisions` performs simple push-apart:
 
-**Body vs SDF objects**: Uses bounding sphere radius = |half_extents|. If SDF distance < radius, push out along SDF normal and reflect velocity with restitution/friction.
+**Body vs SDF objects** (bd-r5-review-n28.98): contact depth = `s(n) - sdf(COM)`, where `n` is the SDF normal at the COM and `s(n) = sum_k he_k * |dot(n, R e_k)|` for a box (radius `he.x` for a sphere), from the device helper `rigid_support_distance`. Bodies with `sdf(COM) >= |half_extents|` are rejected early. The body is pushed out along `n`, then its velocity is reflected with restitution/friction. A box therefore rests on its face, not on its bounding sphere, and a sphere rests at its radius `he.x`.
 
-**Body vs body**: Bounding sphere overlap test. Push apart weighted by inverse mass. Velocity reflection along contact normal.
+**Body vs body**: Bounding sphere (`|half_extents|`) overlap test. Push apart weighted by inverse mass. Velocity reflection along contact normal.
 
 **Source**: `integrate.cu:K_RigidBodyCollisions`
 
