@@ -285,7 +285,8 @@ def test_spawn_flag_cleared():
 
 
 def test_freelist_exhausted():
-    """When freelist is empty, spawn is skipped but flag is still cleared."""
+    """When freelist is empty, spawn is skipped and the flag stays set so the
+    particle retries next substep (bd-r5-review-n28.142)."""
     setup_params()
 
     n = 10
@@ -323,8 +324,9 @@ def test_freelist_exhausted():
     # Particle should still be WATER (not killed since no spawn slots)
     assert GET_MATERIAL_ID(int(pi[0])) == WATER, \
         f"Should still be WATER when freelist empty, got {GET_MATERIAL_ID(int(pi[0]))}"
-    # Flag should be cleared
-    assert HAS_SPAWN_FLAG(int(pi[0])) == 0, "SPAWN flag should be cleared even on failure"
+    # Flag stays set and packed_info is not rewritten
+    assert int(pi[0]) == SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID)), \
+        "packed_info should be unchanged (flag kept) when spawn fails"
     # Mass should be unchanged
     assert abs(mass[0] - 0.008) < 1e-6, "Mass should be unchanged when spawn fails"
 
@@ -374,7 +376,9 @@ def test_freelist_partial_exhaustion():
     # Should still be WATER (not enough freelist slots)
     assert GET_MATERIAL_ID(int(pi[0])) == WATER, \
         f"Should still be WATER with only 2 slots, got {GET_MATERIAL_ID(int(pi[0]))}"
-    assert HAS_SPAWN_FLAG(int(pi[0])) == 0, "Flag should still be cleared"
+    assert HAS_SPAWN_FLAG(int(pi[0])) == 1, "Flag should stay set for the retry"
+    # The failed atomic claim restores the count and consumes no entries
+    assert int(dead_count.get()[0]) == 2, "dead_count should be restored to 2"
 
     print("PASS: test_freelist_partial_exhaustion")
 
@@ -1004,16 +1008,100 @@ def test_freelist_underflow_safety():
         f"atomicSub wrap-around corrupts live particles."
     )
 
-    # All particles should still be WATER (with flag cleared)
+    # All particles should still be WATER (flag kept for the retry)
     pi_out = arrays["packed_info"].get()
     for i in range(n):
         mat = GET_MATERIAL_ID(int(pi_out[i]))
         assert mat == WATER, (
             f"Particle {i}: expected WATER (no spawn slots), got mat_id={mat}"
         )
-        assert HAS_SPAWN_FLAG(int(pi_out[i])) == 0, f"Particle {i}: spawn flag not cleared"
+        assert HAS_SPAWN_FLAG(int(pi_out[i])) == 1, f"Particle {i}: spawn flag dropped"
 
     print("PASS: test_freelist_underflow_safety")
+
+
+def _run_reactions_on(packed_info, temperature, dead_capacity):
+    n = packed_info.shape[0]
+    dead_indices, dead_count = allocate_freelist(dead_capacity)
+    pi_d = cupy.asarray(packed_info)
+    compute_reactions(
+        pi_d,
+        cupy.asarray(temperature),
+        cupy.full(n, 1.0, dtype=cupy.float32),
+        cupy.zeros(n, dtype=cupy.float32),
+        cupy.zeros((n, 4), dtype=cupy.float32),
+        cupy.zeros(n, dtype=cupy.float32),
+        cupy.zeros(n, dtype=cupy.float32),
+        frame=0,
+        dead_indices=dead_indices,
+        dead_count=dead_count,
+    )
+    return pi_d, dead_indices, dead_count
+
+
+def test_reactions_freelist_rebuild_random_dead_40k():
+    """bd-r5-review-n28.142: the warp-aggregated freelist push lists every
+    DEAD index exactly once. 40K DEAD slots at random positions among 200K,
+    with n not a multiple of the block size so the last warp is partial."""
+    setup_params()
+    n = 200_003
+    rng = np.random.default_rng(142)
+    dead_idx = np.sort(rng.choice(n, size=40_000, replace=False))
+    packed_info = np.full(n, MAKE_PACKED(SAND, GRANULAR), dtype=np.uint32)
+    packed_info[dead_idx] = MAKE_PACKED(DEAD, STATIC)
+    temperature = np.full(n, 293.0, dtype=np.float32)
+
+    _, dead_indices, dead_count = _run_reactions_on(packed_info, temperature, n)
+    dc = int(dead_count.get()[0])
+    assert dc == dead_idx.size, f"dead_count={dc}, expected {dead_idx.size}"
+    got = np.sort(dead_indices.get()[:dc])
+    assert np.array_equal(got, dead_idx), "freelist is not the DEAD index set"
+
+
+def test_reactions_boil_flag_written_once_and_cleared_on_cool():
+    """bd-r5-review-n28.142: hot water keeps its spawn flag (set once), and
+    water that cooled below boiling while waiting for slots loses it."""
+    setup_params()
+    water = MAKE_PACKED(WATER, FLUID)
+    packed_info = np.array([water, SET_SPAWN_FLAG(water), SET_SPAWN_FLAG(water), water],
+                           dtype=np.uint32)
+    temperature = np.array([400.0, 400.0, 300.0, 300.0], dtype=np.float32)
+    pi_d, _, _ = _run_reactions_on(packed_info, temperature, 4)
+    pi = pi_d.get()
+    assert HAS_SPAWN_FLAG(int(pi[0])) == 1, "hot water did not get the flag"
+    assert HAS_SPAWN_FLAG(int(pi[1])) == 1, "hot water lost its flag"
+    assert HAS_SPAWN_FLAG(int(pi[2])) == 0, "cooled water kept a stale flag"
+    assert int(pi[3]) == water, "cool water changed"
+    for k in range(4):
+        assert GET_MATERIAL_ID(int(pi[k])) == WATER
+
+
+def test_spawn_retries_after_slots_appear():
+    """bd-r5-review-n28.142: a spawn that fails on an empty freelist keeps the
+    flag, so a later call with free slots spawns without Reactions running."""
+    setup_params()
+    n = 10
+    arrays = make_sorted_arrays(n)
+    arrays["packed_info"][0] = SET_SPAWN_FLAG(MAKE_PACKED(WATER, FLUID))
+    arrays["mass"][0] = 0.009
+    dead_indices, dead_count = allocate_freelist(n)
+    names = ["packed_info", "position", "velocity", "veleval", "mass", "temperature",
+             "health", "lifetime", "color", "sleep_counter", "density", "shear_rate"]
+    args = [arrays[k][:n] for k in names]
+
+    dead_count[0] = 0
+    compute_spawn(*args, dead_indices, dead_count)
+    assert GET_MATERIAL_ID(int(arrays["packed_info"][0].get())) == WATER
+
+    for k, slot in enumerate((7, 8, 9)):
+        arrays["packed_info"][slot] = MAKE_PACKED(DEAD, STATIC)
+        dead_indices[k] = slot
+    dead_count[0] = 3
+    compute_spawn(*args, dead_indices, dead_count)
+    pi = arrays["packed_info"].get()
+    assert GET_MATERIAL_ID(int(pi[0])) == DEAD, "source did not spawn on retry"
+    assert all(GET_MATERIAL_ID(int(pi[s])) == STEAM for s in (7, 8, 9))
+    assert int(dead_count.get()[0]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1410,6 +1498,9 @@ if __name__ == "__main__":
         test_500k_stress,
         test_dead_particle_phase_is_static,
         test_freelist_underflow_safety,
+        test_reactions_freelist_rebuild_random_dead_40k,
+        test_reactions_boil_flag_written_once_and_cleared_on_cool,
+        test_spawn_retries_after_slots_appear,
     ]
 
     passed = 0
