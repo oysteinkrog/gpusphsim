@@ -1366,15 +1366,18 @@ Changes:
 
 **Source**: simulation.py, integrate.cu, step2.py, materials.py
 
-### 10.8 OPTIMIZATION: Fused sort-reorder-build pipeline
-The per-substep pipeline was restructured for performance (no physics changes):
-1. **Removed redundant indices array**: K_CalcHash no longer writes `indices[idx]=idx`
-   (always identity). sort_perm from argsort is used directly as sorted_indices.
-2. **Reduced reorder from 11→8 arrays**: veleval, color, shear_rate removed from
-   reorder since they're overwritten by K_Step2, K_Integrate, K_Step1 respectively.
-3. **Fused kernel**: K_FusedSortReorderBuild combines hash gather, cell boundary
-   detection, and 8-array reorder into a single kernel launch, replacing
-   K_FusedReorder + K_BuildDataStruct + 2 CuPy fancy-index gathers.
+### 10.8 OPTIMIZATION: Counting sort pipeline
+The per-substep grid build is `counting_sort.counting_sort_full` (no physics changes):
+1. **One sort path**: K_CalcHashCS, K_Histogram, an exclusive prefix sum
+   (`cupy.cumsum`), K_ScatterReorder and K_BuildCellEnd. `sort_perm` maps a
+   sorted slot to its original index. The argsort pipeline (hash_sort,
+   build_grid, fused_reorder, fused_sort_reorder_build) was removed
+   (bd-r5-review-n28.153).
+2. **Reorder only what is read**: veleval, shear_rate and similar per-substep
+   outputs are not reordered, since K_Step1, K_Step2 and K_Integrate overwrite them.
+3. **One scatter kernel**: K_ScatterReorder claims each particle's sorted slot
+   with an atomic per cell and gathers every particle array in the same pass.
+   K_BuildCellEnd then writes `cell_end = cell_start + count`.
 4. **Reactions/spawn always run**: Previously conditionally skipped for non-reactive
    materials; now always included for CUDA graph fixed topology (§10.9).
    Non-reactive threads early-exit with negligible GPU cost.
@@ -1382,7 +1385,7 @@ The per-substep pipeline was restructured for performance (no physics changes):
    K_WakeSleepersAndClearJustWoke (3→2 kernel launches).
 6. **Block size 128→256** for Step1/Step2 kernels.
 
-**Source**: simulation.py, fused_sort_reorder_build.py/.cu, wake.py/.cu
+**Source**: simulation.py, counting_sort.py/.cu, wake.py/.cu
 
 ### 10.9 FIXED: GPU→CPU sync every frame in adaptive timestep
 `_compute_adaptive_dt()` used `float(cp.max(...))` on GPU velocity arrays to
@@ -1397,17 +1400,14 @@ The per-substep pipeline launches ~14 GPU operations (memsets + kernel calls) wi
 Python→CUDA round-trip overhead for each. CUDA graph capture records ops 3-14 into
 a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
 
-**Split point**: `cupy.argsort()` uses Thrust internally which calls
-`cudaStreamSynchronize` — incompatible with graph capture. The pipeline splits:
-1. `K_CalcHash` — normal launch
-2. `cupy.argsort + copy` — normal launch (Thrust can't be captured)
-3. Ops 3-14 as single CUDA graph launch (memsets, K_FusedSortReorderBuild,
-   K_Step1, reset_freelist, K_Reactions, K_SpawnGas, K_Step2, K_Integrate,
-   K_MarkWakeCells, K_WakeSleepersAndClearJustWoke)
+**No split point**: the counting sort uses only kernels, memsets and
+`cupy.cumsum` (CUB), so the whole substep, sort included, is captured. There
+are two graphs: one with the full counting sort and one with the gather-only
+reorder (grid reuse, see `_capture_graph`).
 
 **Design details**:
-- Pre-allocated `_sort_perm` buffer: graph bakes pointer addresses, so argsort
-  result is copied into a stable buffer before graph launch.
+- Pre-allocated `_sort_perm` buffer: graph bakes pointer addresses, so the
+  sort writes the permutation into one stable buffer.
 - Device-side frame counter: `K_Reactions` reads `frame` from a `const uint*`
   device buffer (pointer stable, value updated via `fill()` before each launch).
 - Reactions/spawn always included: graph requires fixed topology. For non-reactive
@@ -1467,7 +1467,7 @@ color and velocity are mapped with one `cudaGraphicsMapResources` call
 ### 10.12 OPTIMIZATION: Spatial hash grid (replaces dense linear grid)
 
 Replaced the dense cell_start/cell_end arrays (sized `grid_res^3`) with a
-spatial hash using a fixed-size table (2^18 = 262144 entries). This enables
+spatial hash table whose size is a power of 2 from 2^18 to 2^20. This enables
 arbitrarily large world sizes without memory blowup.
 
 **Old approach** (dense linear hash):
@@ -1479,8 +1479,9 @@ arbitrarily large world sizes without memory blowup.
 ```
 hash = ((uint)cx * 73856093u + (uint)cy * 19349669u + (uint)cz * 83492791u) & TABLE_MASK
 ```
-- TABLE_SIZE = 262144 (2^18) by default; `compute_table_size` picks 2^18 to 2^20
-  from the particle count
+- `grid_params.compute_table_size(N)` rounds `max(N/2, 2^18)` up to a power
+  of 2 and caps it at 2^20: 2^18 up to about 524K particles, 2^19 up to about 1M,
+  2^20 above. `TABLE_SIZE = 2^18` is the default for tests.
 - cell_start/cell_end always 262K entries (~2MB total) at 2^18
 - The products and the sum wrap in 32-bit unsigned arithmetic, so negative
   cell coordinates are well defined
@@ -1489,7 +1490,7 @@ hash = ((uint)cx * 73856093u + (uint)cy * 19349669u + (uint)cz * 83492791u) & TA
   depend on the cell `c`. No difference `d1 - d2` in {-2..2}^3 is 0 mod 2^18,
   2^19 or 2^20, so the 27 cells of every 3x3x3 neighbour stencil land in 27
   distinct buckets and no particle is counted twice. `test_hash_sort.py`
-  checks this for world edges, faces, interior and negative cells.
+  checks this on K_CalcHashCS for world edges, faces, interior and negative cells.
 - Why not XOR: `P ^ (-P)` has the same low 18 bits (0x3FFFE) for all three
   primes, so for a cell with two coordinates at 0 (the first in-world layer,
   since `grid_min = world_min`) offsets (a,-1,-1) and (a,+1,+1) shared a
@@ -1521,7 +1522,7 @@ Neighbor loops no longer need bounds checking (`cx < 0 || cx >= rx`).
 Any integer cell coordinates produce a valid hash in [0, table_size).
 
 **Source**: `common.cuh`, `counting_sort.cu`, `step1.cu`, `step2.cu`,
-`pbf_solver.cu`, `dfsph_solver.cu`, `wake.cu`, `hash_sort.py`, `simulation.py`
+`pbf_solver.cu`, `dfsph_solver.cu`, `wake.cu`, `grid_params.py`, `simulation.py`
 
 ### 10.13 Spawn velocity damping (PBF/DFSPH stabilization)
 
