@@ -218,7 +218,6 @@ def _pbf_conf_kick(third: str | None) -> np.ndarray:
             scene["cell_end"],
             cupy.zeros((n, 4), dtype=cupy.float32),
             vel_out,
-            cupy.zeros((n, 4), dtype=cupy.float32),
             cupy.zeros(n, dtype=cupy.uint32),
             cupy.zeros(n, dtype=cupy.uint32),
             f32(),

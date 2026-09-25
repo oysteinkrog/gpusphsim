@@ -200,7 +200,7 @@ def test_pbf_detailed(world, sim):
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_health[:n], w.sorted_dTdt[:n], w.sorted_sleep_counter[:n],
             sim._sort_perm[:n], sim._cell_start, sim._cell_end,
-            w.position, w.velocity, w.color, w.packed_info,
+            w.position, w.velocity, w.packed_info,
             w.sleep_counter, w.temperature,
         )
         cp.cuda.Device().synchronize()
@@ -347,7 +347,7 @@ def test_dfsph_detailed(world, sim):
             w.sorted_sleep_counter[:n],
             w.sorted_kappa[:n],  # API drift: sorted_kappa inserted here
             sim._sort_perm[:n], sim._cell_start, sim._cell_end,
-            w.position, w.velocity, w.color, w.packed_info,
+            w.position, w.velocity, w.packed_info,
             w.sleep_counter, w.temperature,
             w.kappa,  # API drift: kappa_out appended here
         )
@@ -622,7 +622,6 @@ def test_surface_tension_cohesion_pbf(world, sim):
         pbf_solver.upload_granular_params(gp)
         pos_out = cp.zeros_like(w.position)
         vel_out = cp.zeros_like(w.velocity)
-        color_out = cp.zeros(len(w.color), dtype=cp.uint32)
         pi_out = cp.zeros_like(w.packed_info)
         sleep_out = cp.zeros_like(w.sleep_counter)
         temp_out = cp.zeros_like(w.temperature)
@@ -633,7 +632,7 @@ def test_surface_tension_cohesion_pbf(world, sim):
             w.sorted_temperature[:n], w.sorted_health[:n],
             w.sorted_dTdt[:n], w.sorted_sleep_counter[:n],
             sort_perm, sim._cell_start, sim._cell_end,
-            pos_out, vel_out, color_out, pi_out,
+            pos_out, vel_out, pi_out,
             sleep_out, temp_out,
             normal_in=normal_arr,
         )
@@ -1511,6 +1510,14 @@ def test_dfsph_density_solver_dead_fluid_slot_is_finite(world, sim):
 # bd-r5-review-n28.60: DEAD slots get color.w < 0 so the shaders cull them
 # ---------------------------------------------------------------------------
 
+def _render_alpha(sim, n):
+    """color.w of the first n slots as the renderer gets it: one
+    K_ComputeColor launch over the unsorted state (bd-r5-review-n28.145)."""
+    out = cp.zeros((n, 4), dtype=cp.float32)
+    sim.compute_render_color(out, n)
+    return cp.asnumpy(out[:, 3])
+
+
 @pytest.mark.parametrize("profile_name", ["WCSPH", "PBF", "DFSPH"])
 def test_dead_slot_color_is_culled(world, sim, profile_name):
     """A slot set to MAKE_PACKED(DEAD, STATIC) gets color.w < 0 after one
@@ -1528,16 +1535,15 @@ def test_dead_slot_color_is_culled(world, sim, profile_name):
     world.packed_info[dead_slot] = cp.uint32((STATIC & 0x3) << 8)  # DEAD, STATIC
     world.mass[dead_slot] = cp.float32(0.0)
     world.health[dead_slot] = cp.float32(0.0)
-    world.color[dead_slot] = cp.asarray([0.3, 0.3, 0.3, 0.0], dtype=cp.float32)
     sim._sim_step(n)
 
-    color = cp.asnumpy(world.color[:n])
-    assert color[dead_slot, 3] < 0.0, (
-        f"{profile_name}: DEAD slot alpha {color[dead_slot, 3]} must be < 0")
+    alpha = _render_alpha(sim, n)
+    assert alpha[dead_slot] < 0.0, (
+        f"{profile_name}: DEAD slot alpha {alpha[dead_slot]} must be < 0")
     live = np.ones(n, dtype=bool)
     live[dead_slot] = False
-    assert (color[live, 3] >= 0.0).all(), f"{profile_name}: a live slot has alpha < 0"
-    assert np.allclose(color[live, 3], 0.0), f"{profile_name}: WATER alpha must stay 0.0"
+    assert (alpha[live] >= 0.0).all(), f"{profile_name}: a live slot has alpha < 0"
+    assert np.allclose(alpha[live], 0.0), f"{profile_name}: WATER alpha must stay 0.0"
 
     # Brush kill: culled right away, before any substep, and after one.
     before = world.packed_info[:n].copy()
@@ -1545,9 +1551,9 @@ def test_dead_slot_color_is_culled(world, sim, profile_name):
     killed = cp.asnumpy(((before & cp.uint32(0xFF)) != 0)
                         & ((world.packed_info[:n] & cp.uint32(0xFF)) == 0))
     assert killed.sum() > 5, f"only {killed.sum()} particles killed"
-    assert (cp.asnumpy(world.color[:n, 3])[killed] < 0.0).all(), "kill must set alpha < 0"
+    assert (_render_alpha(sim, n)[killed] < 0.0).all(), "kill must set alpha < 0"
     sim._sim_step(n)
-    alpha = cp.asnumpy(world.color[:n, 3])
+    alpha = _render_alpha(sim, n)
     assert (alpha[killed] < 0.0).all(), f"{profile_name}: killed slot not culled after a substep"
     alive = cp.asnumpy((world.packed_info[:n] & cp.uint32(0xFF)) != 0)
     assert (alpha[alive] >= 0.0).all(), f"{profile_name}: a live slot has alpha < 0"
@@ -1560,7 +1566,8 @@ def test_add_dead_reserve_color_is_culled():
     start = w._high_water
     added = w.add_dead_reserve(64)
     assert added == 64
-    assert (cp.asnumpy(w.color[start:start + added, 3]) < 0.0).all()
+    sim = Simulation(w, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=False, max_substeps=20)
+    assert (_render_alpha(sim, w._high_water)[start:start + added] < 0.0).all()
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@
  *   K_DFSPH_ComputePressureAccel  -- a_press from p/rho^2 (Jacobi density solver)
  *   K_DFSPH_DensitySolverUpdate   -- Predict density, Jacobi update of p/rho^2
  *   K_DFSPH_ApplyPressureVelocity -- v += dt * a_press after the density loop
- *   K_DFSPH_Finalize              -- Final position, boundary, color, writeback
+ *   K_DFSPH_Finalize              -- Final position, boundary, writeback
  *
  * The divergence and density iteration loops run on the host
  * (simulation.py); the iteration counts are not in constant memory.
@@ -1330,8 +1330,11 @@ void K_DFSPH_ApplyPressureVelocity(
 }
 
 /* ======================================================================
- * K_DFSPH_Finalize -- Final position, boundary, color, sleep, writeback
+ * K_DFSPH_Finalize -- Final position, boundary, sleep, writeback
  * x_final = x + dt * v*_final
+ *
+ * Render color is not stored here: K_ComputeColor (integrate.cu) computes
+ * it once per frame from the unsorted arrays (bd-r5-review-n28.145).
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -1353,7 +1356,6 @@ void K_DFSPH_Finalize(
     // Unsorted outputs
     float4*         __restrict__ position_out,
     float4*         __restrict__ velocity_out,
-    float4*         __restrict__ color_out,
     uint*           __restrict__ packed_info_out,
     unsigned char*  __restrict__ sleep_counter_out,
     float*          __restrict__ temperature_out,
@@ -1389,7 +1391,6 @@ void K_DFSPH_Finalize(
     if (mass_out)                        mass_out[orig_idx]     = sorted_mass[i];
 
     float temp = sorted_temperature[i];
-    float hlth = sorted_health[i];
 
     // STATIC: write through
     if (behavior == STATIC) {
@@ -1400,7 +1401,6 @@ void K_DFSPH_Finalize(
         temp = fmaxf(T_MIN, fminf(temp, T_MAX));
         position_out[orig_idx] = pos4;
         velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        color_out[orig_idx] = compute_color(mat_id, temp, hlth, STATIC);
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
         temperature_out[orig_idx] = temp;
@@ -1429,7 +1429,6 @@ void K_DFSPH_Finalize(
             temp = fmaxf(T_MIN, fminf(temp, T_MAX));
             position_out[orig_idx] = pos4;
             velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            color_out[orig_idx] = compute_color(mat_id, temp, hlth, behavior);
             packed_info_out[orig_idx] = pi;
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
@@ -1630,14 +1629,6 @@ void K_DFSPH_Finalize(
     temp -= COOL_RATE * (temp - T_AMBIENT) * dt;
     temp = fmaxf(T_MIN, fminf(temp, T_MAX));
 
-    // Color (color.w encodes behavior class for SSFR shader filtering)
-    float4 color;
-    if (behavior == FLUID) {
-        color = compute_fluid_color(mat_id, temp, hlth, pos_new.y, vel_sq, sorted_density[i]);
-    } else {
-        color = compute_color(mat_id, temp, hlth, behavior);
-    }
-
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
@@ -1664,7 +1655,6 @@ void K_DFSPH_Finalize(
     // (bd-r5-review-n28.145). No DFSPH kernel reads position.w.
     position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, sorted_density[i]);
     velocity_out[orig_idx] = make_float4(vel.x, vel.y, vel.z, 0.0f);
-    color_out[orig_idx] = color;
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;

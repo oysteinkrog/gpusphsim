@@ -6,7 +6,7 @@
  *   K_PBF_ComputeLambda -- Density + Lagrange multiplier
  *   K_PBF_ComputeDelta  -- Position correction + artificial pressure
  *   K_PBF_ApplyDelta    -- Apply correction + boundary clamp
- *   K_PBF_Finalize      -- Velocity update, XSPH, friction, color, sleep, writeback
+ *   K_PBF_Finalize      -- Velocity update, XSPH, friction, sleep, writeback
  *
  * All particles participate in density constraints (FLUID + GRANULAR + GAS).
  * GRANULAR gets velocity-space Drucker-Prager friction in Finalize (iteration-independent).
@@ -761,7 +761,10 @@ void K_PBF_ApplyDelta(
 }
 
 /* ======================================================================
- * K_PBF_Finalize -- Velocity update, XSPH, color, sleep, writeback
+ * K_PBF_Finalize -- Velocity update, XSPH, sleep, writeback
+ *
+ * Render color is not stored here: K_ComputeColor (integrate.cu) computes
+ * it once per frame from the unsorted arrays (bd-r5-review-n28.145).
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -783,7 +786,6 @@ void K_PBF_Finalize(
     // Unsorted outputs
     float4*         __restrict__ position_out,
     float4*         __restrict__ velocity_out,
-    float4*         __restrict__ color_out,
     uint*           __restrict__ packed_info_out,
     unsigned char*  __restrict__ sleep_counter_out,
     float*          __restrict__ temperature_out,
@@ -819,7 +821,6 @@ void K_PBF_Finalize(
     if (mass_out)                        mass_out[orig_idx]     = mass[i];
 
     float temp = temperature_in[i];
-    float hlth = health_in[i];
 
     // STATIC: just write through
     if (behavior == STATIC) {
@@ -830,7 +831,6 @@ void K_PBF_Finalize(
         temp = fmaxf(T_MIN, fminf(temp, T_MAX));
         position_out[orig_idx] = pos4;
         velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        color_out[orig_idx] = compute_color(mat_id, temp, hlth, STATIC);
         packed_info_out[orig_idx] = pi;
         sleep_counter_out[orig_idx] = sleep_counter_in[i];
         temperature_out[orig_idx] = temp;
@@ -862,7 +862,6 @@ void K_PBF_Finalize(
             temp = fmaxf(T_MIN, fminf(temp, T_MAX));
             position_out[orig_idx] = orig4;
             velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            color_out[orig_idx] = compute_color(mat_id, temp, hlth, behavior);
             packed_info_out[orig_idx] = pi;
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
@@ -1257,14 +1256,6 @@ void K_PBF_Finalize(
     temp -= COOL_RATE * (temp - T_AMBIENT) * dt;
     temp = fmaxf(T_MIN, fminf(temp, T_MAX));
 
-    // Color (color.w encodes behavior class for SSFR shader filtering)
-    float4 color;
-    if (behavior == FLUID) {
-        color = compute_fluid_color(mat_id, temp, hlth, final_pos.y, vel_sq, density[i]);
-    } else {
-        color = compute_color(mat_id, temp, hlth, behavior);
-    }
-
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
@@ -1291,7 +1282,6 @@ void K_PBF_Finalize(
     // (bd-r5-review-n28.145). No PBF kernel reads position.w.
     position_out[orig_idx] = make_float4(final_pos.x, final_pos.y, final_pos.z, density[i]);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);
-    color_out[orig_idx] = color;
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;

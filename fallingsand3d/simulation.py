@@ -1286,14 +1286,14 @@ class Simulation:
             )
         mark("iterations")
 
-        # 5. Finalize: velocity update, XSPH, friction, color, sleep, writeback
+        # 5. Finalize: velocity update, XSPH, friction, sleep, writeback
         pbf_solver.pbf_finalize(
             w.sorted_predicted_position[:n], w.sorted_position[:n],
             w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_health[:n], w.sorted_dTdt[:n], w.sorted_sleep_counter[:n],
             self._sort_perm[:n], self._cell_start, self._cell_end,
-            w.position, w.velocity, w.color, w.packed_info,
+            w.position, w.velocity, w.packed_info,
             w.sleep_counter, w.temperature,
             sorted_angular_velocity=w.sorted_angular_velocity[:n],
             angular_velocity_out=w.angular_velocity,
@@ -1498,7 +1498,7 @@ class Simulation:
             w.sorted_sleep_counter[:n],
             p_rho2[:n],  # sorted_kappa with current pressure values
             self._sort_perm[:n], self._cell_start, self._cell_end,
-            w.position, w.velocity, w.color, w.packed_info,
+            w.position, w.velocity, w.packed_info,
             w.sleep_counter, w.temperature,
             w.kappa,  # unsorted kappa out for warm-start
             sorted_angular_velocity=w.sorted_angular_velocity[:n],
