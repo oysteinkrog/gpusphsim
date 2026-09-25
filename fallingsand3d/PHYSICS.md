@@ -3487,7 +3487,7 @@ neighbour lists. A neighbour-list variant (`K_Step1_BuildNL`, `K_Step1_NL`,
 (`perf_benchmark.md`), so it was retired (bd-r5-review-n28.154). Its copy of the
 step1 loop had to be kept in sync with `K_Step1` by hand.
 
-### 20.4 Warm-start kappa_v (PERF-008) and PBF reorder skips
+### 20.4 Warm-start kappa_v (PERF-008) and per-solver reorder skips
 
 The DFSPH divergence solver's kappa_v is carried through the counting sort
 pipeline (K_ScatterReorder, K_GatherReorder), persisted via K_DFSPH_Finalize
@@ -3496,14 +3496,25 @@ the sum of the scaled warm start and every divergence iteration's increment
 (13.3). It is scaled by `dfsph_div_warm_start` (default 0.5), then applied as an
 initial velocity correction before the divergence solver iterations.
 
-PBF has no warm-start state (see 12.4). PBF also never reads kappa, kappa_v or
-the reduced-precision mirrors (sorted_velocity_h, sorted_temperature_h), so
-`_run_grid_setup` passes None for all four when the active solver is PBF, and
-both reorder kernels skip the gather and the store for a NULL output. The
-pointer set depends only on the solver, and a solver switch recaptures the
-CUDA graph. Measured at 992K particles (PBF Dam Break, full sort each
-substep, shared GPU): the sort stage median went from about 4.0 ms to about
-2.4 ms.
+The reorder fills only the sorted buffers the active solver reads.
+`_run_grid_setup` passes None for the rest, and both reorder kernels skip the
+gather and the store for a NULL output:
+
+| Buffer | WCSPH | PBF | DFSPH | Reader |
+|---|---|---|---|---|
+| `sorted_kappa`, `sorted_kappa_v` | skipped | skipped | reordered | DFSPH pressure solvers |
+| `sorted_velocity_h`, `sorted_temperature_h` | reordered | skipped | skipped | WCSPH step1, step2, spawn |
+
+PBF has no warm-start state (see 12.4). Spawn zeroes the child's kappa and
+kappa_v under DFSPH only. A skipped buffer keeps its unsorted values: only
+K_DFSPH_Finalize writes the unsorted kappa and kappa_v, so a switch
+DFSPH -> WCSPH -> DFSPH gathers the same warm start again. The pointer set
+depends only on the solver, and a solver switch invalidates the CUDA graphs.
+
+Measured sort stage medians (1M-particle Dam Break, full sort each substep,
+shared GPU, same kernels with the old and new pointer sets): WCSPH about
+1.33 ms to 1.11 ms, DFSPH about 1.51 ms to 1.25 ms. PBF at 992K went from about
+4.0 ms to about 2.4 ms when it first skipped these buffers.
 
 **Source**: `counting_sort.cu` (kappa_v_in/out, NULL-guarded outputs),
 `dfsph_solver.cu:K_DFSPH_Finalize`, `simulation.py:_run_grid_setup`,
