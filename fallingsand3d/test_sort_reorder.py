@@ -208,8 +208,9 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
             health=cupy.ones(n, dtype=cupy.float32),
             lifetime=cupy.zeros(n, dtype=cupy.float32),
             sleep_counter=cupy.zeros(n, dtype=cupy.uint8),
-            kappa=cupy.zeros(n, dtype=cupy.float32),
-            kappa_v=cupy.zeros(n, dtype=cupy.float32),
+            # No sorted kappa output, so no input either (bd-r5-review-n28.165).
+            kappa=None,
+            kappa_v=None,
         )
 
     def sorted_out() -> dict:
@@ -255,6 +256,117 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
     np.testing.assert_array_equal(cupy.asnumpy(out2["sorted_velocity"]), vel_h[perm])
     np.testing.assert_array_equal(cupy.asnumpy(out2["sorted_position"]), pos_h[perm])
     print("[OK] reorder wrappers accept None FP16 outputs")
+
+    # A sorted output without its input is rejected on the host
+    # (the kernel would read a NULL pointer).
+    import pytest
+    bad = sorted_out()
+    bad["sorted_kappa"] = cupy.empty(n, dtype=cupy.float32)
+    with pytest.raises(ValueError):
+        counting_sort.gather_reorder(
+            num_particles=n, sort_perm=sort_perm, **unsorted(), **bad,
+        )
+
+
+def test_reorder_skips_each_null_output_alone() -> None:
+    """bd-r5-review-n28.165: each optional output (kappa, kappa_v,
+    velocity_h, temperature_h) can be None on its own. The None one is not
+    written, and every array still given is the unsorted
+    array gathered through sort_perm, on the full sort and the gather path."""
+    import counting_sort
+    import grid_params
+
+    rng = np.random.default_rng(11)
+    n = 2000
+    pos_h = np.zeros((n, 4), dtype=np.float32)
+    pos_h[:, :3] = rng.uniform(-0.3, 0.3, size=(n, 3))
+    vel_h = rng.uniform(-1.0, 1.0, size=(n, 4)).astype(np.float32)
+    kappa_h = rng.uniform(0.0, 5.0, size=n).astype(np.float32)
+    kappa_v_h = rng.uniform(0.0, 5.0, size=n).astype(np.float32)
+    temp_h = rng.uniform(250.0, 900.0, size=n).astype(np.float32)
+
+    gp = grid_params.build_grid_params()
+    num_cells = int(gp[0]["table_size"])
+    counting_sort.upload_grid_params(gp)
+    scratch = counting_sort.allocate_scratch(num_cells, n)
+
+    optional = ("kappa", "kappa_v", "velocity_h", "temperature_h")
+    for skip in optional:
+        src = dict(
+            position=cupy.asarray(pos_h), velocity=cupy.asarray(vel_h),
+            mass=cupy.full(n, 0.02, dtype=cupy.float32),
+            packed_info=cupy.full(n, 5, dtype=cupy.uint32),
+            temperature=cupy.asarray(temp_h),
+            health=cupy.ones(n, dtype=cupy.float32),
+            lifetime=cupy.zeros(n, dtype=cupy.float32),
+            sleep_counter=cupy.zeros(n, dtype=cupy.uint8),
+            kappa=None if skip == "kappa" else cupy.asarray(kappa_h),
+            kappa_v=None if skip == "kappa_v" else cupy.asarray(kappa_v_h),
+        )
+        opt_out = {
+            "kappa": cupy.full(n, -1.0, dtype=cupy.float32),
+            "kappa_v": cupy.full(n, -1.0, dtype=cupy.float32),
+            "velocity_h": cupy.full((n, 2), 0xDEADBEEF, dtype=cupy.uint32),
+            "temperature_h": cupy.full(n, 0xBEEF, dtype=cupy.uint16),
+        }
+        out = dict(
+            sorted_position=cupy.empty((n, 4), dtype=cupy.float32),
+            sorted_velocity=cupy.empty((n, 4), dtype=cupy.float32),
+            sorted_mass=cupy.empty(n, dtype=cupy.float32),
+            sorted_packed_info=cupy.empty(n, dtype=cupy.uint32),
+            sorted_temperature=cupy.empty(n, dtype=cupy.float32),
+            sorted_health=cupy.empty(n, dtype=cupy.float32),
+            sorted_lifetime=cupy.empty(n, dtype=cupy.float32),
+            sorted_sleep_counter=cupy.empty(n, dtype=cupy.uint8),
+        )
+        for name in optional:
+            out[f"sorted_{name}"] = None if name == skip else opt_out[name]
+
+        sort_perm = cupy.zeros(n, dtype=cupy.uint32)
+        counting_sort.counting_sort_full(
+            num_particles=n, num_cells=num_cells,
+            histogram=scratch["histogram"], write_offset=scratch["write_offset"],
+            cell_start=scratch["cell_start"], cell_end=scratch["cell_end"],
+            sort_perm=sort_perm, positions=src["position"],
+            hashes=cupy.zeros(n, dtype=cupy.uint32), **src, **out,
+        )
+        cupy.cuda.Device().synchronize()
+        perm = cupy.asnumpy(sort_perm).astype(np.int64)
+
+        def check(tag: str) -> None:
+            np.testing.assert_array_equal(
+                cupy.asnumpy(out["sorted_velocity"]), vel_h[perm], err_msg=tag)
+            if skip != "kappa":
+                np.testing.assert_array_equal(
+                    cupy.asnumpy(opt_out["kappa"]), kappa_h[perm], err_msg=tag)
+            if skip != "kappa_v":
+                np.testing.assert_array_equal(
+                    cupy.asnumpy(opt_out["kappa_v"]), kappa_v_h[perm], err_msg=tag)
+            if skip != "velocity_h":
+                assert not (cupy.asnumpy(opt_out["velocity_h"]) == 0xDEADBEEF).any(), tag
+            if skip != "temperature_h":
+                assert not (cupy.asnumpy(opt_out["temperature_h"]) == 0xBEEF).any(), tag
+            # The skipped buffer is untouched.
+            untouched = cupy.asnumpy(opt_out[skip])
+            first = untouched.reshape(-1)[0]
+            assert (untouched == first).all(), f"{tag}: {skip} was written"
+
+        check(f"full sort, {skip}=None")
+
+        # Gather path with new values: kept outputs follow, skipped stays put.
+        vel_h = vel_h * 2.0
+        kappa_h = kappa_h + 1.0
+        kappa_v_h = kappa_v_h + 1.0
+        src["velocity"] = cupy.asarray(vel_h)
+        if src["kappa"] is not None:
+            src["kappa"] = cupy.asarray(kappa_h)
+        if src["kappa_v"] is not None:
+            src["kappa_v"] = cupy.asarray(kappa_v_h)
+        counting_sort.gather_reorder(
+            num_particles=n, sort_perm=sort_perm, **src, **out,
+        )
+        cupy.cuda.Device().synchronize()
+        check(f"gather, {skip}=None")
 
 
 def test_legacy_sort_modules_removed() -> None:
@@ -313,6 +425,7 @@ def main() -> None:
     test_500k_sort_reorder_no_errors()
     test_zero_particles()
     test_reorder_wrappers_accept_null_fp16_outputs()
+    test_reorder_skips_each_null_output_alone()
     test_legacy_sort_modules_removed()
     print("\n=== ALL SORT/REORDER CHECKS PASSED ===")
 
