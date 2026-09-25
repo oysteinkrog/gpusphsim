@@ -16,7 +16,7 @@
  *  -1.0 = DEAD   (foam.vert culls it; set on death and on the stale tail)
  */
 
-#include "common.cuh"
+#include "sph_shared.cuh"  // common.cuh + eval_sdf / sdf_normal
 
 /* Foam generation parameters (uploaded via constant memory) */
 struct FoamParams {
@@ -266,6 +266,49 @@ void K_FoamPhysics(
     if (pos.y > wmax.y) { pos.y = wmax.y; vel.y = 0.0f; }
     if (pos.z < wmin.z) { pos.z = wmin.z; vel.z = 0.0f; }
     if (pos.z > wmax.z) { pos.z = wmax.z; vel.z = 0.0f; }
+
+    // SDF object collision (bd-r5-review-n28.194). A particle inside or
+    // within BOUNDARY_MARGIN of an object moves to BOUNDARY_MARGIN outside
+    // along the analytic normal, and the part of its velocity (relative to
+    // the object) that points into the surface is removed. SPRAY that hits
+    // an object becomes FOAM, so it rests on the surface instead of
+    // bouncing. At most MAX_SDF_OBJECTS analytic evaluations, no memory
+    // traffic; the loop is empty when no object is placed.
+    if (lifetime > 0.0f) {
+        for (int s = 0; s < c_num_sdf_objects; s++) {
+            SDFObject obj = c_sdf_objects[s];
+            float3 p = make_float3(pos.x, pos.y, pos.z);
+            float dist = eval_sdf(p, obj);
+            if (dist >= BOUNDARY_MARGIN) continue;
+            float3 n = sdf_normal(p, obj);
+            float push = BOUNDARY_MARGIN - dist;
+            pos.x += push * n.x;
+            pos.y += push * n.y;
+            pos.z += push * n.z;
+
+            // Object surface velocity at the contact: linear + omega x r.
+            float3 ov = make_float3(obj.velocity.x, obj.velocity.y, obj.velocity.z);
+            float w = obj.velocity.w;
+            if (fabsf(w) > 1e-8f) {
+                float3 om = make_float3(obj.angular_axis.x * w,
+                                        obj.angular_axis.y * w,
+                                        obj.angular_axis.z * w);
+                float3 r = make_float3(pos.x - obj.pos_and_type.x,
+                                       pos.y - obj.pos_and_type.y,
+                                       pos.z - obj.pos_and_type.z);
+                ov.x += om.y * r.z - om.z * r.y;
+                ov.y += om.z * r.x - om.x * r.z;
+                ov.z += om.x * r.y - om.y * r.x;
+            }
+            float vn = (vel.x - ov.x) * n.x + (vel.y - ov.y) * n.y + (vel.z - ov.z) * n.z;
+            if (vn < 0.0f) {
+                vel.x -= vn * n.x;
+                vel.y -= vn * n.y;
+                vel.z -= vn * n.z;
+            }
+            if (foam_type < 0.5f) foam_type = 1.0f;  // SPRAY -> FOAM
+        }
+    }
 
     // Write back (foam_type in pos.w, lifetime in vel.w). A floor kill
     // writes -1 in both, like the lifetime death above.

@@ -431,3 +431,71 @@ def test_generate_seed_differs_between_substeps(world):
     assert runs[0].size > 0 and runs[1].size > 0
     assert not (runs[0].size == runs[1].size
                 and np.array_equal(np.sort(runs[0]), np.sort(runs[1])))
+
+
+# ---------------------------------------------------------------------------
+# Foam collides with SDF objects (bd-r5-review-n28.194)
+# ---------------------------------------------------------------------------
+
+def test_spray_lands_on_sdf_box(world, sim):
+    """A SPRAY particle falling onto an SDF box ends on its top, not inside."""
+    import rigid_bodies as rb
+
+    mid = _mid(sim)
+    wmin = np.array(sim._sim_params[0]["world_min"], dtype=np.float32)
+    half = np.array([0.1, 0.05, 0.1], dtype=np.float32)
+    center = mid.copy()
+    center[1] = wmin[1] + 0.2  # box well above the floor kill plane
+    box = rb.make_sdf_object(rb.SDF_BOX, position=tuple(center.tolist()),
+                             size=tuple(half.tolist()))
+    top = float(center[1] + half[1])
+
+    pos = np.zeros((1, 4), dtype=np.float32)
+    pos[0, :3] = center
+    pos[0, 1] = top + 0.1
+    pos[0, 3] = 0.0  # SPRAY
+    vel = np.zeros((1, 4), dtype=np.float32)
+    vel[0, 1] = -3.0
+    vel[0, 3] = 100.0
+    rb.upload_sdf_objects(box, 1)
+    try:
+        _seed_foam(world, pos, vel)
+        for _ in range(200):
+            foam.foam_physics(world.foam_position, world.foam_velocity,
+                              world.foam_count, world._max_foam)
+        p = cp.asnumpy(world.foam_position[0])
+        v = cp.asnumpy(world.foam_velocity[0])
+    finally:
+        rb.upload_sdf_objects(None, 0)
+        world.foam_count[:] = 0
+
+    local = np.abs(p[:3] - center) - half
+    sdf = float(np.linalg.norm(np.maximum(local, 0.0))
+                + min(float(local.max()), 0.0))
+    assert v[3] > 0, "particle must still be alive"
+    assert sdf >= 0.0
+    assert p[1] >= top
+    assert abs(p[1] - top) < 1e-2  # resting on the top face
+    assert p[3] == 1.0  # SPRAY became FOAM on contact
+
+
+def test_sdf_replay_reaches_late_foam_module(world, sim):
+    """A foam module compiled after the SDF upload gets the objects too."""
+    import rigid_bodies as rb
+
+    box = rb.make_sdf_object(rb.SDF_BOX, position=(0.0, 0.0, 0.0))
+    rb.upload_sdf_objects(box, 1)
+    try:
+        saved = foam._module
+        foam._module = None
+        try:
+            mod = foam._get_module()
+            n = np.zeros(1, dtype=np.int32)
+            cp.cuda.runtime.memcpy(n.ctypes.data,
+                                   int(mod.get_global("c_num_sdf_objects")),
+                                   4, 2)
+        finally:
+            foam._module = saved
+    finally:
+        rb.upload_sdf_objects(None, 0)
+    assert n[0] == 1

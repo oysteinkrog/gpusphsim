@@ -169,16 +169,42 @@ def upload_sdf_objects(objects: np.ndarray | None, count: int) -> None:
     import integrate
     import pbf_solver
     import dfsph_solver
+    import foam
 
     modules = [
         integrate.get_module(),
         pbf_solver.get_module(),
         dfsph_solver.get_module(),
     ]
+    # K_FoamPhysics collides foam with the SDF objects (bd-r5-review-n28.194).
+    # A foam module compiled later gets the last upload from replay below.
+    if foam._module is not None:
+        modules.append(foam._module)
 
     count = min(count, MAX_SDF_OBJECTS)
+    global _last_sdf_upload
+    _last_sdf_upload = (
+        None if objects is None or count == 0 else np.array(objects[:count]),
+        count,
+    )
     for module in modules:
         _upload_sdf_to_module(module, objects, count)
+
+
+# (objects copy, count) from the last upload_sdf_objects call, or None.
+_last_sdf_upload: tuple | None = None
+
+
+def replay_sdf_upload(module: object) -> None:
+    """Upload the last SDF object set to a module compiled after it was sent.
+
+    upload_sdf_objects runs only when the object set changes, so a module
+    compiled afterwards (foam.cu) would otherwise keep c_num_sdf_objects = 0.
+    """
+    if _last_sdf_upload is None:
+        return
+    objects, count = _last_sdf_upload
+    _upload_sdf_to_module(module, objects, count)
 
 
 def _upload_sdf_to_module(

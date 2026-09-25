@@ -6,6 +6,11 @@ functions to launch foam generation, physics, and compaction kernels.
 Foam particles are separate from SPH particles -- they have no neighbor
 loops and use simple ballistic/advection physics. Generated from FLUID
 particles based on velocity, surface proximity, and kinetic energy.
+
+Constant memory: c_foam and c_sim are uploaded here. c_sdf_objects and
+c_num_sdf_objects (used by K_FoamPhysics for SDF object collision) are
+uploaded by rigid_bodies.upload_sdf_objects, with the same data as the
+integrate and solver modules.
 """
 
 from __future__ import annotations
@@ -125,6 +130,12 @@ def _get_module() -> "object":
         code=source,
         options=("--std=c++11", "--use_fast_math", f"-I{kernel_dir}"),
     )
+    # K_FoamPhysics reads c_sdf_objects / c_num_sdf_objects. They are sent
+    # by rigid_bodies.upload_sdf_objects (SDFManager.upload_if_dirty), which
+    # includes this module once it exists; replay the last upload in case
+    # the objects were placed before this compile.
+    import rigid_bodies
+    rigid_bodies.replay_sdf_upload(_module)
     return _module
 
 
