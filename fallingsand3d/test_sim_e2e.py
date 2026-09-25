@@ -20,7 +20,7 @@ import cupy as cp
 from world import World
 from simulation import Simulation
 from solver_profiles import PROFILES
-from materials import WATER
+from materials import FLUID, WATER
 
 pytestmark = pytest.mark.gpu
 
@@ -57,13 +57,14 @@ class SimCase:
         return int(math.ceil(seconds / self.sim.dt))
 
 
-def make_sim(n_max, solver, spawn_fn, spawn_damping=False):
+def make_sim(n_max, solver, spawn_fn, spawn_damping=False, world_half_size=1.0):
     """Build a Simulation on a clean World and spawn a scene into it.
 
     solver: a PROFILES key ("WCSPH", "PBF", "DFSPH").
     spawn_fn(world) spawns the scene and returns the particle count.
     spawn_damping=False skips the 30-substep spawn damping ramp, so the
     first substeps run the plain solver.
+    world_half_size sets the box walls at +-world_half_size on every axis.
     """
     world = _get_world(n_max)
     world.packed_info[:] = 0
@@ -75,7 +76,8 @@ def make_sim(n_max, solver, spawn_fn, spawn_damping=False):
     n = spawn_fn(world)
     assert 0 < n <= n_max
     sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
-                     fixed_dt=False, max_substeps=20)
+                     fixed_dt=False, max_substeps=20,
+                     world_half_size=world_half_size)
     sim.set_solver_profile(PROFILES[solver])
     if not spawn_damping:
         sim._spawn_substep = sim._damping_duration
@@ -88,44 +90,75 @@ def make_sim(n_max, solver, spawn_fn, spawn_damping=False):
 # DFSPH still-water pool never sleeps (bd-r5-review-n28.130, guards n28.30)
 # ---------------------------------------------------------------------------
 
-_POOL_V0 = 0.1  # m/s sideways, so the pool has KE to lose
+# Slow uniform drift, below V_SLEEP (0.005 m/s in sph_shared.cuh). Water this
+# slow is what a FLUID sleep counter puts to sleep, and sleeping zeroes
+# velocity, so a frozen block reads KE exactly 0.
+_POOL_V0 = 0.002
 
 
-def _spawn_pool(world):
-    # Floor is at y = -1 (world_half_size = 1). 30 x 10 x 30 = 9000 WATER.
-    return world.spawn_cube((-0.3, -1.0, -0.3), (0.3, -0.8, 0.3), WATER,
-                            spacing=0.02, velocity=(_POOL_V0, 0.0, 0.0))
+def _spawn_still_block(world):
+    # 30 x 10 x 30 = 9000 WATER. At spacing 0.0202 the interior sits at 0.98
+    # rho0 (bd-r5-review-n28.100), so the density solver does not push it
+    # apart at the start.
+    return world.spawn_cube((-0.3, -0.1, -0.3), (0.306, 0.102, 0.306), WATER,
+                            spacing=0.0202, velocity=(_POOL_V0, 0.0, 0.0))
 
 
-def test_dfsph_pool_never_sleeps():
-    """A DFSPH water pool run for 2 s of sim time has no sleeping FLUID and
-    has not frozen (KE ratio above 0).
+def _pool_state(world, n):
+    """Host copies of packed_info and xyz velocity (float64)."""
+    pi = cp.asnumpy(world.packed_info[:n])
+    vel = cp.asnumpy(world.velocity[:n])[:, :3].astype(np.float64)
+    return pi, vel
+
+
+def test_dfsph_still_water_never_sleeps():
+    """A still DFSPH water block, run for 2 s of sim time with zero gravity,
+    has no sleeping FLUID and has not frozen (KE ratio above 0).
 
     Before bd-r5-review-n28.30, K_DFSPH_Finalize counted sleep for every
-    behaviour, and a resting pool went fully asleep (19200/19200) in 2 s.
-    The KE ratio catches a pool frozen some other way: eval_solvers.py only
-    checks that KE decays, which a frozen pool passes with ratio 0.
+    behaviour, and a resting pool went fully asleep. The block is checked at
+    three times: 0.05 s (15 substeps, past SLEEP_THRESHOLD = 10), 0.5 s and
+    2 s. The KE ratio also catches a block frozen some other way:
+    eval_solvers.py only checks that KE decays, which a frozen pool passes
+    with ratio 0.
+
+    Zero gravity keeps the block still without a container. A water pool
+    under gravity is not used: DFSPH keeps it moving at about 0.15 m/s rms,
+    so no particle stays below V_SLEEP long enough to test the sleep gate.
     """
-    case = make_sim(20_000, "DFSPH", _spawn_pool)
+    case = make_sim(20_000, "DFSPH", _spawn_still_block)
     n = case.n
-    case.run(case.substeps_for(2.0))
+    total = case.substeps_for(2.0)
+    checkpoints = [15, case.substeps_for(0.5), total]
+    states = []
+    case.sim.set_gravity(0.0)
+    try:
+        done = 0
+        for c in checkpoints:
+            case.run(c - done)
+            done = c
+            states.append(_pool_state(case.world, n))
+    finally:
+        case.sim.set_gravity(-4.0)
 
-    pi = cp.asnumpy(case.world.packed_info[:n])
-    vel = cp.asnumpy(case.world.velocity[:n])
-
-    mat = pi & 0xFF
-    beh = (pi >> 8) & 0x3
-    assert (mat == WATER).all(), "pool lost or changed particles"
-    fluid = beh == 0  # FLUID behavior class
-    assert fluid.all()
-    asleep = (pi & _SLEEP_BIT) != 0
-    assert not asleep[fluid].any(), f"{asleep[fluid].sum()}/{n} FLUID particles asleep"
-
-    assert np.isfinite(vel[:, :3]).all()
-    # Uniform WATER mass, so the KE ratio is the ratio of summed |v|^2.
-    ke0 = n * _POOL_V0 ** 2
-    ke = float(np.sum(vel[:, :3].astype(np.float64) ** 2))
-    ratio = ke / ke0
-    print(f"\n  DFSPH pool: n={n}, substeps={case.substeps_for(2.0)}, KE ratio={ratio:.4g}")
-    assert ratio > 0.0, "pool is frozen (KE exactly 0)"
-    assert ratio < 10.0, f"pool gained energy (KE ratio {ratio:.3g})"
+    ke0 = n * _POOL_V0 ** 2  # uniform WATER mass: KE ratio = ratio of sum |v|^2
+    for c, (pi, vel) in zip(checkpoints, states):
+        t = c * case.sim.dt
+        mat = pi & 0xFF
+        beh = (pi >> 8) & 0x3
+        assert (mat == WATER).all(), f"t={t:.2f} s: block lost or changed particles"
+        fluid = beh == FLUID
+        assert fluid.all()
+        asleep = (pi & _SLEEP_BIT) != 0
+        assert not asleep[fluid].any(), \
+            f"t={t:.2f} s: {asleep[fluid].sum()}/{n} FLUID particles asleep"
+        assert np.isfinite(vel).all()
+        ratio = float(np.sum(vel * vel)) / ke0
+        vmax = float(np.sqrt((vel * vel).sum(axis=1)).max())
+        print(f"\n  DFSPH still block t={t:.2f} s: n={n}, KE ratio={ratio:.4g}, vmax={vmax:.4f}",
+              end="")
+        assert ratio > 0.0, f"t={t:.2f} s: block is frozen (KE ratio exactly 0)"
+        # Blow-up guard only. The block does not stay still: its corners
+        # spread at up to about 1.6 m/s by 2 s (reported with
+        # bd-r5-review-n28.130).
+        assert vmax < 3.0, f"t={t:.2f} s: block blew up (vmax {vmax:.3f} m/s)"
