@@ -64,7 +64,7 @@ void K_Integrate(
     // --- Sorted inputs (read) ---
     const float4*   __restrict__ sorted_position,      // sorted positions
     const float4*   __restrict__ sorted_velocity,      // sorted velocities
-    const float4*   __restrict__ sorted_veleval,       // sorted veleval (vel + eps*xsph_sum for FLUID)
+    const float4*   __restrict__ sorted_veleval,       // sorted veleval (vel + eps*xsph_sum), read for awake FLUID only
     const float4*   __restrict__ sorted_sph_force,     // sorted SPH force from Step2
     const float*    __restrict__ sorted_mass,           // sorted per-particle mass
     const uint*     __restrict__ sorted_packed_info,    // sorted packed_info
@@ -146,6 +146,7 @@ void K_Integrate(
     // --- Read sleep counter ---
     unsigned char sc = sorted_sleep_counter[i];
     bool was_sleeping = IS_SLEEPING(pi) != 0;
+    bool woke_now = false;  // woke this substep, so step2 skipped it
 
     // --- Read particle data ---
     float4 pos4 = sorted_position[i];
@@ -205,14 +206,21 @@ void K_Integrate(
         pi = CLEAR_SLEEPING(pi);
         pi = SET_JUST_WOKE(pi);
         was_sleeping = false;
+        woke_now = true;
         sc = 0;
     }
 
-    float4 veleval4 = sorted_veleval[i];
-    float3 veleval_xsph = make_float3(veleval4.x, veleval4.y, veleval4.z);
-
-    float4 force4 = sorted_sph_force[i];
-    float3 sph_force = make_float3(force4.x, force4.y, force4.z);
+    // K_Step2 skips sleeping particles and writes neither sph_force nor
+    // veleval for them (bd-r5-review-n28.170), so a particle that woke above
+    // (reactions, the blast wave, IST or geometry) integrates with zero SPH
+    // force and no XSPH delta instead of reading stale buffer contents.
+    // No kernel between step2 and here changes the sleeping bit, so woke_now
+    // is exactly the set of awake particles step2 skipped.
+    float3 sph_force = make_float3(0.0f, 0.0f, 0.0f);
+    if (!woke_now) {
+        float4 force4 = sorted_sph_force[i];
+        sph_force = make_float3(force4.x, force4.y, force4.z);
+    }
 
     float mass_i = sorted_mass[i];
 
@@ -315,11 +323,15 @@ void K_Integrate(
     // step2 writes veleval = vel + eps * xsph_sum, so (veleval - vel) is exactly
     // the XSPH delta. Using vel_new (not veleval) means this substep's forces,
     // clamps, damping and drag reach the position in the same substep.
+    // Only FLUID reads veleval: step2 writes it for awake FLUID only
+    // (bd-r5-review-n28.170), and a FLUID particle that just woke has no
+    // XSPH delta this substep.
     float3 advect_vel = vel_new;
-    if (behavior == FLUID) {
-        advect_vel.x += veleval_xsph.x - vel.x;
-        advect_vel.y += veleval_xsph.y - vel.y;
-        advect_vel.z += veleval_xsph.z - vel.z;
+    if (behavior == FLUID && !woke_now) {
+        float4 veleval4 = sorted_veleval[i];
+        advect_vel.x += veleval4.x - vel.x;
+        advect_vel.y += veleval4.y - vel.y;
+        advect_vel.z += veleval4.z - vel.z;
     }
     float3 pos_new = make_float3(
         pos.x + dt * advect_vel.x,

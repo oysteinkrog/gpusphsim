@@ -142,8 +142,11 @@ def integrate(
     sorted_position : cupy.ndarray, (N, 4) float32
     sorted_velocity : cupy.ndarray, (N, 4) float32
     sorted_veleval : cupy.ndarray, (N, 4) float32
-        XSPH-corrected veleval for FLUID; original velocity for others.
+        XSPH-corrected veleval. Read for awake FLUID only; other rows may
+        hold stale data (step2 writes FLUID rows only).
     sorted_sph_force : cupy.ndarray, (N, 4) float32
+        Read for awake particles only. A particle that wakes in this kernel
+        uses zero force, since step2 skipped it.
     sorted_mass : cupy.ndarray, (N,) float32
     sorted_packed_info : cupy.ndarray, (N,) uint32
     sorted_temperature : cupy.ndarray, (N,) float32

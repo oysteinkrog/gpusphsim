@@ -287,9 +287,11 @@ def compute_step2(
     Returns
     -------
     sph_force : cupy.ndarray, (N, 4) float32
-        Accumulated SPH force per particle.
+        Accumulated SPH force per particle. STATIC and sleeping rows are
+        not written.
     veleval_out : cupy.ndarray, (N, 4) float32
-        XSPH-corrected evaluation velocity (FLUID only; others unchanged).
+        XSPH-corrected evaluation velocity. Only awake FLUID rows are
+        written; all other rows keep their previous contents.
     """
     n = position.shape[0]
     if vorticity_in is None:

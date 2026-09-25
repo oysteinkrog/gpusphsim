@@ -7,7 +7,7 @@
  *      recompute it from shear_rate_in when eta_in is NULL
  *   3. Neighbor loop: accumulate pressure force (spiky gradient),
  *      viscosity force (viscosity Laplacian), and XSPH correction (FLUID only)
- *   4. Write sph_force (float4) and veleval (float4, XSPH-corrected)
+ *   4. Write sph_force (float4), and veleval (float4, XSPH-corrected) for FLUID
  *
  * mu(I) rheology (GRANULAR only):
  *   - gamma_dot read from shear_rate_in (Step1's tensor-based computation)
@@ -17,7 +17,8 @@
  *   - eta_i = min(mu_max, mu0 + mu_I * p_eff / max(gamma_dot, 0.1))
  *   - Harmonic mean eta_ij for GRANULAR-GRANULAR pairs
  *
- * Skips STATIC (behavior_class == 3) and SLEEPING particles (early return).
+ * Skips STATIC (behavior_class == 3) and SLEEPING particles (early return,
+ * no outputs written).
  *
  * Constant memory used:
  *   c_grid, c_sim, c_precalc -- from common.cuh (shared with other kernels)
@@ -143,17 +144,11 @@ void K_Step2(
     int behavior_i = GET_BEHAVIOR(pi_i);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
 
-    // Skip STATIC particles (early return, zero force)
-    if (behavior_i == STATIC) {
-        sph_force_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        veleval_out[index_i] = velocity[index_i];
-        return;
-    }
-
-    // Skip SLEEPING particles (early return, zero force)
-    if (IS_SLEEPING(pi_i)) {
-        sph_force_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        veleval_out[index_i] = velocity[index_i];
+    // Skip STATIC and SLEEPING particles. Nothing is written for them:
+    // K_Integrate returns before reading sph_force/veleval for STATIC and
+    // still-sleeping particles, and uses zero force and no XSPH delta for a
+    // particle that wakes in integrate (bd-r5-review-n28.170).
+    if (behavior_i == STATIC || IS_SLEEPING(pi_i)) {
         return;
     }
 
@@ -625,9 +620,10 @@ void K_Step2(
     // FLUID-GRANULAR pair terms were pre-divided by fs_i in the loop.
     sph_force_out[index_i] = make_float4(total_force.x * fs_i, total_force.y * fs_i, total_force.z * fs_i, 0.0f);
 
-    // XSPH-corrected veleval (FLUID only; GRANULAR/GAS/STATIC keep original velocity).
-    // GRANULAR position is advected with vel_new in integrate.cu, not veleval_xsph,
-    // so XSPH correction for GRANULAR would be discarded.  bd-mzc.34.
+    // XSPH-corrected veleval, written for FLUID only. K_Integrate reads
+    // veleval only for FLUID (GRANULAR/GAS advect with vel_new), so the
+    // plain velocity copy for other behaviours was never used.
+    // bd-mzc.34, bd-r5-review-n28.170.
     if (is_fluid_i) {
         float eps = c_granular.xsph_epsilon;
         veleval_out[index_i] = make_float4(
@@ -636,7 +632,5 @@ void K_Step2(
             vel_i.z + eps * xsph_sum.z,
             0.0f
         );
-    } else {
-        veleval_out[index_i] = make_float4(vel_i.x, vel_i.y, vel_i.z, 0.0f);
     }
 }
