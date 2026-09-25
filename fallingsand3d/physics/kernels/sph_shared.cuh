@@ -744,7 +744,76 @@ __device__ inline void rigid_body_boundary(
  *
  * Requires: cell_start, cell_end, packed_info, position arrays in sorted
  * order (same grid as the current step).
+ *
+ * K_PBF_Finalize and K_DFSPH_Finalize feed the same StaticPush
+ * accumulator from their XSPH neighbour loop and call this function only
+ * for particles that skip that loop (GAS) or, in DFSPH, move more than
+ * 0.5h in one step.
  * ====================================================================== */
+
+/* Accumulator for the STATIC push. static_particle_boundary uses it, and
+ * the PBF and DFSPH Finalize neighbour loops feed it directly so they do
+ * not need a second 27-cell scan (bd-r5-review-n28.164). */
+struct StaticPush {
+    float3 dir_sum;
+    float  max_deficit;
+};
+
+__device__ inline StaticPush static_push_init() {
+    StaticPush a;
+    a.dir_sum = make_float3(0.0f, 0.0f, 0.0f);
+    a.max_deficit = 0.0f;
+    return a;
+}
+
+/* Band radius of the push: one rest spacing, 0.5h. */
+__device__ inline float static_push_band() {
+    return 0.5f * c_sim.smoothing_length;
+}
+
+/* True when neighbour pi_j is a wall the push acts on: STATIC, not a free
+ * DEAD slot, and not MAT_RIGID unless push_from_rigid (GAS only). */
+__device__ inline bool static_push_source(uint pi_j, bool push_from_rigid) {
+    if (GET_BEHAVIOR(pi_j) != STATIC) return false;
+    uint m = GET_MATERIAL_ID(pi_j);
+    if (m == MAT_RIGID && !push_from_rigid) return false;  // Akinci handled by pressure coupling
+    if (m == MAT_DEAD) return false;                        // free slot, not a wall
+    return true;
+}
+
+/* Add one wall neighbour at offset r = x_i - x_j (r_sq = |r|^2). */
+__device__ inline void static_push_add(StaticPush& a, float3 r, float r_sq,
+                                       float min_dist, float min_dist_sq) {
+    if (r_sq < min_dist_sq && r_sq > 1e-12f) {
+        float rlen = sqrtf(r_sq);
+        float deficit = min_dist - rlen;
+        float w = deficit / rlen;
+        a.dir_sum.x += w * r.x;
+        a.dir_sum.y += w * r.y;
+        a.dir_sum.z += w * r.z;
+        a.max_deficit = fmaxf(a.max_deficit, deficit);
+    }
+}
+
+/* Move pos by max_deficit along the mean normal and reflect vel along it. */
+__device__ inline void static_push_apply(const StaticPush& a, float3& pos, float3& vel,
+                                         float restitution) {
+    if (a.max_deficit > 0.0f) {
+        float dir_len = sqrtf(a.dir_sum.x*a.dir_sum.x + a.dir_sum.y*a.dir_sum.y + a.dir_sum.z*a.dir_sum.z);
+        if (dir_len > 1e-8f) {
+            float3 n = make_float3(a.dir_sum.x/dir_len, a.dir_sum.y/dir_len, a.dir_sum.z/dir_len);
+            pos.x += a.max_deficit * n.x;
+            pos.y += a.max_deficit * n.y;
+            pos.z += a.max_deficit * n.z;
+            float v_dot_n = vel.x*n.x + vel.y*n.y + vel.z*n.z;
+            if (v_dot_n < 0.0f) {
+                vel.x -= (1.0f + restitution) * v_dot_n * n.x;
+                vel.y -= (1.0f + restitution) * v_dot_n * n.y;
+                vel.z -= (1.0f + restitution) * v_dot_n * n.z;
+            }
+        }
+    }
+}
 
 __device__ inline void static_particle_boundary(
     float3& pos, float3& vel,
@@ -755,8 +824,7 @@ __device__ inline void static_particle_boundary(
     uint self_idx,                        // sorted index of current particle
     float restitution
 ) {
-    float h = c_sim.smoothing_length;
-    float min_dist = 0.5f * h;
+    float min_dist = static_push_band();
     float min_dist_sq = min_dist * min_dist;
 
     // GAS gets the push from MAT_RIGID body particles too: its density and
@@ -766,8 +834,7 @@ __device__ inline void static_particle_boundary(
     bool push_from_rigid = (GET_BEHAVIOR(__ldg(&packed_info[self_idx])) == GAS);
 
     int3 cell = calcGridCell(pos);
-    float3 dir_sum = make_float3(0.0f, 0.0f, 0.0f);
-    float max_deficit = 0.0f;
+    StaticPush acc = static_push_init();
 
     for (int dz = -1; dz <= 1; dz++) {
         for (int dy = -1; dy <= 1; dy++) {
@@ -779,9 +846,7 @@ __device__ inline void static_particle_boundary(
                 for (uint j = start; j < end; j++) {
                     if (j == self_idx) continue;
                     uint pi_j = __ldg(&packed_info[j]);
-                    if (GET_BEHAVIOR(pi_j) != STATIC) continue;
-                    if (GET_MATERIAL_ID(pi_j) == MAT_RIGID && !push_from_rigid) continue; // Akinci handled by pressure coupling
-                    if (GET_MATERIAL_ID(pi_j) == MAT_DEAD) continue;  // free slot, not a wall
+                    if (!static_push_source(pi_j, push_from_rigid)) continue;
                     float4 pos4_j = __ldg(&position[j]);
                     float3 r = make_float3(
                         pos.x - pos4_j.x,
@@ -789,35 +854,13 @@ __device__ inline void static_particle_boundary(
                         pos.z - pos4_j.z
                     );
                     float r_sq = r.x*r.x + r.y*r.y + r.z*r.z;
-                    if (r_sq < min_dist_sq && r_sq > 1e-12f) {
-                        float rlen = sqrtf(r_sq);
-                        float deficit = min_dist - rlen;
-                        float w = deficit / rlen;
-                        dir_sum.x += w * r.x;
-                        dir_sum.y += w * r.y;
-                        dir_sum.z += w * r.z;
-                        max_deficit = fmaxf(max_deficit, deficit);
-                    }
+                    static_push_add(acc, r, r_sq, min_dist, min_dist_sq);
                 }
             }
         }
     }
 
-    if (max_deficit > 0.0f) {
-        float dir_len = sqrtf(dir_sum.x*dir_sum.x + dir_sum.y*dir_sum.y + dir_sum.z*dir_sum.z);
-        if (dir_len > 1e-8f) {
-            float3 n = make_float3(dir_sum.x/dir_len, dir_sum.y/dir_len, dir_sum.z/dir_len);
-            pos.x += max_deficit * n.x;
-            pos.y += max_deficit * n.y;
-            pos.z += max_deficit * n.z;
-            float v_dot_n = vel.x*n.x + vel.y*n.y + vel.z*n.z;
-            if (v_dot_n < 0.0f) {
-                vel.x -= (1.0f + restitution) * v_dot_n * n.x;
-                vel.y -= (1.0f + restitution) * v_dot_n * n.y;
-                vel.z -= (1.0f + restitution) * v_dot_n * n.z;
-            }
-        }
-    }
+    static_push_apply(acc, pos, vel, restitution);
 }
 
 /* ======================================================================

@@ -969,10 +969,20 @@ void K_PBF_Finalize(
         do_vort_eta = (omega_mag_i > 1e-6f);
     }
 
+    // STATIC push, accumulated in the XSPH loop below so Finalize scans the
+    // neighbourhood once (bd-r5-review-n28.164). final_pos == pred, so this
+    // gives the same push as static_particle_boundary(pred). GAS skips the
+    // loop and takes the separate scan further down.
+    StaticPush spush = static_push_init();
+    bool spush_in_loop = false;
+
     if (behavior == FLUID || behavior == GRANULAR || do_vort_eta) {
         float h = c_sim.smoothing_length;
         float h_sq = c_sim.smoothing_length_sq;
         float rho_i = density[i];
+        float sp_band = static_push_band();
+        float sp_band_sq = sp_band * sp_band;
+        spush_in_loop = true;
         float3 xsph = make_float3(0.0f, 0.0f, 0.0f);
         bool do_xsph = (behavior == FLUID || behavior == GRANULAR);
 
@@ -1009,6 +1019,11 @@ void K_PBF_Finalize(
 
                         uint pi_j = __ldg(&packed_info[j]);
                         int bj = GET_BEHAVIOR(pi_j);
+
+                        // STATIC push first: the continues below must not skip it.
+                        if (bj == STATIC && static_push_source(pi_j, false)) {
+                            static_push_add(spush, r, r_sq, sp_band, sp_band_sq);
+                        }
 
                         bool vort_j = do_vort_eta && bj == FLUID;
                         bool xsph_j = do_xsph && bj != GAS;  // no XSPH across phases
@@ -1131,14 +1146,20 @@ void K_PBF_Finalize(
         }
     }
 
-    // STATIC particle boundary repulsion (shared function in sph_shared.cuh)
+    // STATIC particle boundary repulsion. FLUID/GRANULAR use the push
+    // gathered in the XSPH loop; GAS runs the shared 27-cell scan, which
+    // also pushes it off MAT_RIGID body particles.
     float3 final_pos = pred;
-    static_particle_boundary(
-        final_pos, vel_new,
-        cell_start, cell_end,
-        packed_info, predicted_pos,
-        i, c_sim.restitution
-    );
+    if (spush_in_loop) {
+        static_push_apply(spush, final_pos, vel_new, c_sim.restitution);
+    } else {
+        static_particle_boundary(
+            final_pos, vel_new,
+            cell_start, cell_end,
+            packed_info, predicted_pos,
+            i, c_sim.restitution
+        );
+    }
 
     // World box boundary collision: restitution + wall friction. Uses the
     // PBF variant because pred is already clamped to the wall margin.
