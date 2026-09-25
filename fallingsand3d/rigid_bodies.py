@@ -67,8 +67,96 @@ def make_sdf_object(
     return obj[0]
 
 
+# ---------------------------------------------------------------------------
+# Async constant uploads from pinned host memory (bd-r5-review-n28.168)
+#
+# cupy.cuda.runtime.memcpy from pageable numpy memory is a blocking
+# cudaMemcpy: the host waits for every queued kernel before the copy starts,
+# so the GPU idles while Python enqueues the next substep. Per-substep
+# constant writes (kinematic SDF poses, the spawn damping ramp, dt and
+# gravity changes) go through PinnedUploadRing instead: the bytes are copied
+# into a pinned staging slot and pushed with cudaMemcpyAsync on the current
+# stream, so the copy is ordered before the next kernel or graph launch on
+# that stream and the host does not wait.
+# ---------------------------------------------------------------------------
+
+
+class PinnedUploadRing:
+    """Stream-ordered host-to-device copies from a ring of pinned slots.
+
+    Each upload copies the source bytes into the current slot at once, so
+    the caller may change its numpy array right after the call. A slot is
+    reused only after the event recorded behind its last copy has fired; the
+    host waits there only when the GPU is a whole ring (slots) behind.
+
+    Do not call this while the current stream is capturing a CUDA graph:
+    the copy node would point at a slot that is later rewritten.
+    """
+
+    def __init__(self, slot_bytes: int = 4096, slots: int = 32) -> None:
+        self.slot_bytes = slot_bytes
+        self.slots = slots
+        self._mem = cupy.cuda.alloc_pinned_memory(slot_bytes * slots)
+        self._host = np.frombuffer(self._mem, dtype=np.uint8,
+                                   count=slot_bytes * slots)
+        self._base = self._host.ctypes.data
+        self._events: list = [None] * slots
+        self._slot = 0
+        self._offset = 0
+
+    def _next_slot(self) -> None:
+        self._slot = (self._slot + 1) % self.slots
+        self._offset = 0
+        ev = self._events[self._slot]
+        if ev is not None and not ev.done:
+            ev.synchronize()
+
+    def upload(self, dst_ptr: int, arr: np.ndarray) -> None:
+        """Queue a copy of arr's bytes to device address dst_ptr."""
+        data = np.ascontiguousarray(arr).reshape(-1).view(np.uint8)
+        nbytes = data.nbytes
+        if nbytes == 0:
+            return
+        if nbytes > self.slot_bytes:
+            raise ValueError(
+                f"upload of {nbytes} B exceeds slot size {self.slot_bytes} B")
+        if self._offset + nbytes > self.slot_bytes:
+            self._next_slot()
+        start = self._slot * self.slot_bytes + self._offset
+        self._host[start:start + nbytes] = data
+        stream = cupy.cuda.get_current_stream()
+        cupy.cuda.runtime.memcpyAsync(
+            int(dst_ptr), self._base + start, nbytes, 1, stream.ptr)
+        ev = self._events[self._slot]
+        if ev is None:
+            ev = cupy.cuda.Event(block=False, disable_timing=True)
+            self._events[self._slot] = ev
+        ev.record(stream)
+        self._offset += (nbytes + 15) & ~15
+
+
+_upload_ring: PinnedUploadRing | None = None
+
+
+def pinned_upload(dst_ptr: int, arr: np.ndarray) -> None:
+    """Async stream-ordered upload through the shared PinnedUploadRing."""
+    global _upload_ring
+    if _upload_ring is None:
+        _upload_ring = PinnedUploadRing()
+    _upload_ring.upload(dst_ptr, arr)
+
+
+# Per-module SDF symbol addresses and the last count written there:
+# id(module) -> [module, count_ptr, objects_ptr, last_count]. The module is
+# kept so a recompiled module (new object) gets fresh addresses.
+_sdf_symbols: dict[int, list] = {}
+
+
 def upload_sdf_objects(objects: np.ndarray | None, count: int) -> None:
     """Upload SDF objects to constant memory in all relevant CUDA modules.
+
+    The copies are async on the current stream (pinned staging, see
+    PinnedUploadRing), so this is safe to call every substep.
 
     Parameters
     ----------
@@ -89,35 +177,38 @@ def upload_sdf_objects(objects: np.ndarray | None, count: int) -> None:
     ]
 
     count = min(count, MAX_SDF_OBJECTS)
-    count_arr = np.array([count], dtype=np.int32)
-
     for module in modules:
-        _upload_sdf_to_module(module, objects, count, count_arr)
+        _upload_sdf_to_module(module, objects, count)
 
 
 def _upload_sdf_to_module(
-    module: object, objects: np.ndarray | None, count: int, count_arr: np.ndarray
+    module: object, objects: np.ndarray | None, count: int
 ) -> None:
     """Upload SDF data to a single CUDA module's constant memory.
 
     Silently skips if the module doesn't reference c_sdf_objects
-    (symbol optimized away by CUDA compiler when not used yet).
+    (symbol optimized away by CUDA compiler when not used yet). The count
+    copy is skipped when the module already holds this count.
     """
-    try:
-        d_count = module.get_global("c_num_sdf_objects")  # type: ignore[union-attr]
-    except Exception:
-        return  # Symbol not present in this module yet
+    entry = _sdf_symbols.get(id(module))
+    if entry is None or entry[0] is not module:
+        try:
+            d_count = module.get_global("c_num_sdf_objects")  # type: ignore[union-attr]
+        except Exception:
+            return  # Symbol not present in this module yet
+        try:
+            d_objs = module.get_global("c_sdf_objects")  # type: ignore[union-attr]
+        except Exception:
+            d_objs = None
+        entry = [module, int(d_count), None if d_objs is None else int(d_objs), None]
+        _sdf_symbols[id(module)] = entry
 
-    cupy.cuda.runtime.memcpy(
-        int(d_count), count_arr.ctypes.data, count_arr.nbytes, 1
-    )
+    if entry[3] != count:
+        pinned_upload(entry[1], np.array([count], dtype=np.int32))
+        entry[3] = count
 
-    if count > 0 and objects is not None:
-        d_objs = module.get_global("c_sdf_objects")  # type: ignore[union-attr]
-        nbytes = objects[:count].nbytes
-        cupy.cuda.runtime.memcpy(
-            int(d_objs), objects[:count].ctypes.data, nbytes, 1
-        )
+    if count > 0 and objects is not None and entry[2] is not None:
+        pinned_upload(entry[2], objects[:count])
 
 
 # ---------------------------------------------------------------------------

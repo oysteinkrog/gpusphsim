@@ -44,6 +44,7 @@ import spawn
 import wake
 import foam
 import implicit_st
+from rigid_bodies import pinned_upload
 
 # Adaptive timestep limits
 DT_MIN = 1e-5
@@ -306,6 +307,8 @@ class Simulation:
 
         # Cached sim_params for dt updates (set during _upload_constants)
         self._sim_params: Optional[np.ndarray] = None
+        # (module, symbol) -> (module, device address) for _upload_async.
+        self._const_ptrs: dict = {}
 
         # Spawn velocity damping: smooth PBF/DFSPH initial transient
         self._spawn_substep = 0
@@ -416,42 +419,54 @@ class Simulation:
         vel_limit = vlf * self._h / max(new_dt, 1e-8)
         self._sim_params[0]["velocity_limit"] = np.float32(vel_limit)
         self.dt = new_dt
-        # Upload to all WCSPH modules that read c_sim.dt
-        step1.upload_sim_params(self._sim_params)
-        step2.upload_sim_params(self._sim_params)
-        integrate.upload_sim_params(self._sim_params)
-        reactions.upload_sim_params(self._sim_params)
-        spawn.upload_sim_params(self._sim_params)
-        # Also upload to active solver module
-        if self._profile.solver_type == SolverType.PBF:
-            import pbf_solver
-            pbf_solver.upload_sim_params(self._sim_params)
-        elif self._profile.solver_type == SolverType.DFSPH:
-            import dfsph_solver
-            dfsph_solver.upload_sim_params(self._sim_params)
-        # IST module also reads c_sim
-        implicit_st.upload_sim_params(self._sim_params)
-        # Update foam dt
+        # WCSPH modules, the active solver module and IST read c_sim.dt.
+        # The foam module's c_sim is not rewritten here, only c_foam.dt.
+        self._upload_sim_params_async(include_foam=False)
         if self._foam_params is not None:
             self._foam_params[0]["dt"] = np.float32(new_dt)
-            foam.upload_foam_params(self._foam_params)
+            self._upload_async(foam._get_module(), "c_foam", self._foam_params)
+
+    def _upload_async(self, module: object, symbol: str,
+                      params: np.ndarray) -> None:
+        """Async stream-ordered write of params to a module's constant symbol.
+
+        The symbol address is cached per module object. See
+        rigid_bodies.PinnedUploadRing for why this does not block the host.
+        """
+        key = (id(module), symbol)
+        entry = self._const_ptrs.get(key)
+        if entry is None or entry[0] is not module:
+            entry = (module, int(module.get_global(symbol)))  # type: ignore[union-attr]
+            self._const_ptrs[key] = entry
+        pinned_upload(entry[1], params)
+
+    def _upload_sim_params_async(self, include_foam: bool = True) -> None:
+        """Write _sim_params to c_sim in every module that reads it, async.
+
+        Used for the per-substep damping ramp, dt changes and gravity
+        changes (bd-r5-review-n28.168): no host-device sync, and captured
+        CUDA graphs stay valid because kernels read constant memory when
+        they run, not when they are captured.
+        """
+        mods = [step1._get_module(), step2._get_module(),
+                integrate._get_module(), reactions._get_module(),
+                spawn._get_module()]
+        if self._profile.solver_type == SolverType.PBF:
+            import pbf_solver
+            mods.append(pbf_solver._get_module())
+        elif self._profile.solver_type == SolverType.DFSPH:
+            import dfsph_solver
+            mods.append(dfsph_solver._get_module())
+        mods.append(implicit_st._get_module())
+        if include_foam:
+            # Foam kernels read c_sim.gravity for spray and foam motion.
+            mods.append(foam._get_module())
+        for m in mods:
+            self._upload_async(m, "c_sim", self._sim_params)
 
     def _upload_sim_params_all(self) -> None:
         """Re-upload sim_params to all modules (without changing self.dt)."""
-        step1.upload_sim_params(self._sim_params)
-        step2.upload_sim_params(self._sim_params)
-        integrate.upload_sim_params(self._sim_params)
-        reactions.upload_sim_params(self._sim_params)
-        spawn.upload_sim_params(self._sim_params)
-        if self._profile.solver_type == SolverType.PBF:
-            import pbf_solver
-            pbf_solver.upload_sim_params(self._sim_params)
-        elif self._profile.solver_type == SolverType.DFSPH:
-            import dfsph_solver
-            dfsph_solver.upload_sim_params(self._sim_params)
-        implicit_st.upload_sim_params(self._sim_params)
-        # Foam kernels read c_sim.gravity for spray and foam motion.
-        foam.upload_sim_params(self._sim_params)
+        self._upload_sim_params_async(include_foam=True)
 
     @property
     def gravity_y(self) -> float:
@@ -465,8 +480,8 @@ class Simulation:
         if self._sim_params is None:
             return
         self._sim_params[0]["gravity"][1] = np.float32(gy)
+        # Graphs stay valid: kernels read c_sim.gravity at execution time.
         self._upload_sim_params_all()
-        self._invalidate_graphs()
 
     @property
     def world_half_size(self) -> float:
@@ -1617,16 +1632,16 @@ class Simulation:
     def _apply_damping_ramp(self) -> None:
         """Apply spawn velocity-damping ramp (shared by _sim_step and _sim_step_timed).
 
-        Increments _spawn_substep, updates velocity_damping in c_sim, and
-        invalidates CUDA graphs while the ramp is active.  Must be called once
-        per substep before any kernel launches that read c_sim.velocity_damping.
+        Increments _spawn_substep and updates velocity_damping in c_sim with
+        an async stream-ordered copy.  Must be called once per substep before
+        any kernel launches that read c_sim.velocity_damping.  CUDA graphs
+        stay valid during the ramp: their kernels read c_sim when they run,
+        and the copy is queued ahead of the graph launch on the same stream.
         """
         if self._spawn_substep < self._damping_duration:
             t = self._spawn_substep / self._damping_duration
             damping = 0.8 * (1.0 - t)  # linear ramp 0.8 -> 0.0
             self._spawn_substep += 1
-            # Invalidate CUDA graphs during damping (constant changes each step)
-            self._invalidate_graphs()
         else:
             damping = 0.0
         # Upload damping to c_sim.velocity_damping only when it actually changed.
