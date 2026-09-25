@@ -102,6 +102,11 @@ def test_spray_follows_new_gravity(world, sim, gy, expect):
 WATER_INFO = 5  # material WATER, behavior FLUID (bits 9:8 = 0)
 
 
+def _seed(v: int) -> cp.ndarray:
+    """RNG seed as the (1,) uint32 device array K_FoamGenerate reads."""
+    return cp.asarray([v], dtype=cp.uint32)
+
+
 def test_generate_rate_scales_with_dt_emit(world):
     """10K identical surface particles with phi = 4: expected k_rate*(phi-thr)*dt each."""
     k_rate, threshold, dt_emit = 5.0, 2.0, 0.01
@@ -124,14 +129,14 @@ def test_generate_rate_scales_with_dt_emit(world):
     for seed in (7, 1234, 99999):
         world.foam_count[:] = 0
         foam.foam_generate(pos, vel, nrm, info, world.foam_position,
-                           world.foam_velocity, world.foam_count, n, seed, dt_emit)
+                           world.foam_velocity, world.foam_count, n, _seed(seed), dt_emit)
         counts.append(int(world.foam_count.get()[0]))
     world.foam_count[:] = 0
     for c in counts:
         assert abs(c - expect) < 0.15 * expect, f"emitted {counts}, want about {expect:.0f}"
     # Doubling dt_emit doubles the expected count.
     foam.foam_generate(pos, vel, nrm, info, world.foam_position,
-                       world.foam_velocity, world.foam_count, n, 7, 2 * dt_emit)
+                       world.foam_velocity, world.foam_count, n, _seed(7), 2 * dt_emit)
     c2 = int(world.foam_count.get()[0])
     world.foam_count[:] = 0
     assert abs(c2 - 2 * expect) < 0.15 * 2 * expect, f"emitted {c2} at 2*dt_emit"
@@ -308,7 +313,7 @@ def test_generate_half_velocity_matches_float(world):
     for vh in (None, vel_h):
         world.foam_count[:] = 0
         foam.foam_generate(pos, vel, nrm, info, world.foam_position,
-                           world.foam_velocity, world.foam_count, n, 42, 0.01,
+                           world.foam_velocity, world.foam_count, n, _seed(42), 0.01,
                            sorted_velocity_h=vh)
         c = int(world.foam_count.get()[0])
         rows = np.concatenate([cp.asnumpy(world.foam_position[:c]),
@@ -326,12 +331,103 @@ def test_generate_skips_interior_and_respects_full_pool(world):
     pos, vel, nrm, info = _surface_inputs(n, 3.0, 30.0)
     world.foam_count[:] = 0
     foam.foam_generate(pos, vel, nrm, info, world.foam_position,
-                       world.foam_velocity, world.foam_count, n, 42, 1.0)
+                       world.foam_velocity, world.foam_count, n, _seed(42), 1.0)
     assert int(world.foam_count.get()[0]) == 0
     nrm[:, 3] = 10.0
     world.foam_count[:] = world._max_foam
     foam.foam_generate(pos, vel, nrm, info, world.foam_position,
-                       world.foam_velocity, world.foam_count, n, 42, 1.0)
+                       world.foam_velocity, world.foam_count, n, _seed(42), 1.0)
     c = int(world.foam_count.get()[0])
     world.foam_count[:] = 0
     assert c == world._max_foam
+
+
+# ---------------------------------------------------------------------------
+# Device RNG counter and foam physics in the graph (bd-r5-review-n28.180)
+# ---------------------------------------------------------------------------
+
+def test_substep_counter_advances_once_per_substep(world):
+    """5 substeps (direct run, capture, replays) advance _frame_counter_d by 5."""
+    world.foam_count[:] = 0
+    world.spawn_cube(min_corner=(-0.1, -0.1, -0.1), max_corner=(0.1, 0.1, 0.1),
+                     material_id=5, spacing=0.02)
+    sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
+                     fixed_dt=True, max_substeps=20)
+    sim._spawn_substep = sim._damping_duration  # no ramp: graphs get used
+    n = world.num_active()
+    enabled = world.foam_enabled
+    world.foam_enabled = True
+    try:
+        for _ in range(3):  # warm up until graphs are captured
+            sim._sim_step(n)
+        start = int(sim._frame_counter_d.get()[0])
+        seeds = []
+        for _ in range(5):
+            sim._sim_step(n)
+            seeds.append(int(sim._frame_counter_d.get()[0]))
+        assert sim._graph_full_sort is not None or sim._graph_gather_only is not None
+        assert seeds == [start + k for k in range(1, 6)], (start, seeds)
+    finally:
+        world.foam_enabled = enabled
+        world.foam_count[:] = 0
+        sim.close()
+
+
+def test_foam_physics_runs_on_graph_replay(world):
+    """Foam moves on every replayed substep, and survives a compaction."""
+    world.foam_count[:] = 0
+    world.spawn_cube(min_corner=(-0.1, -0.1, -0.1), max_corner=(0.1, 0.1, 0.1),
+                     material_id=5, spacing=0.02)
+    sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
+                     fixed_dt=True, max_substeps=20)
+    sim._spawn_substep = sim._damping_duration
+    n = world.num_active()
+    enabled = world.foam_enabled
+    world.foam_enabled = True
+    try:
+        for _ in range(3):
+            sim._sim_step(n, last_substep=False)
+        # One SPRAY particle mid-air with a long life.
+        k = 1
+        pos = np.zeros((k, 4), dtype=np.float32)
+        pos[:, :3] = _mid(sim)
+        pos[:, 1] += 0.3
+        vel = np.zeros((k, 4), dtype=np.float32)
+        vel[:, 3] = 100.0
+        _seed_foam(world, pos, vel)
+        ys = []
+        for _ in range(4):
+            sim._sim_step(n, last_substep=False)
+            ys.append(float(world.foam_position[0, 1].get()))
+        assert all(b < a for a, b in zip(ys, ys[1:])), ys
+        # Compaction copies back into the same arrays the graph captured.
+        ptr = world.foam_position.data.ptr
+        sim._frame_counter = 8
+        sim._maybe_compact_foam()
+        assert world.foam_position.data.ptr == ptr
+        assert int(world.foam_count.get()[0]) == 1
+        y0 = float(world.foam_position[0, 1].get())
+        sim._sim_step(n, last_substep=False)
+        assert float(world.foam_position[0, 1].get()) < y0
+    finally:
+        world.foam_enabled = enabled
+        world.foam_count[:] = 0
+        sim.close()
+
+
+def test_generate_seed_differs_between_substeps(world):
+    """Two counter values give different emission sets for the same input."""
+    n = 10_000
+    foam.upload_foam_params(foam.build_foam_params(max_foam=world._max_foam))
+    pos, vel, nrm, info = _surface_inputs(n, 3.0, 10.0)
+    runs = []
+    for v in (11, 12):
+        world.foam_count[:] = 0
+        foam.foam_generate(pos, vel, nrm, info, world.foam_position,
+                           world.foam_velocity, world.foam_count, n, _seed(v), 0.01)
+        c = int(world.foam_count.get()[0])
+        runs.append(cp.asnumpy(world.foam_velocity[:c, 3]))
+    world.foam_count[:] = 0
+    assert runs[0].size > 0 and runs[1].size > 0
+    assert not (runs[0].size == runs[1].size
+                and np.array_equal(np.sort(runs[0]), np.sort(runs[1])))

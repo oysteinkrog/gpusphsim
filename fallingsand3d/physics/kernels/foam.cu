@@ -1,12 +1,13 @@
 /*
  * foam.cu -- Secondary particle system: spray, foam, bubbles.
  *
- * Two kernels:
+ * Kernels:
  *   K_FoamGenerate: per FLUID particle, emit secondary particles based on
  *                   trapped air, wave crest, and kinetic energy criteria.
  *   K_FoamPhysics:  per foam particle, simple physics (no neighbor loops).
  *   K_FoamCompact:  remove dead foam particles (lifetime <= 0).
  *   K_FoamClearTail: mark every slot past the compacted count as dead.
+ *   K_IncrementCounter: add 1 to the per-substep RNG counter on the device.
  *
  * Foam types (stored in foam_position.w as float):
  *   0.0 = SPRAY  (ballistic: gravity + air drag)
@@ -58,6 +59,10 @@ __device__ inline float hash_rand(uint seed, uint salt) {
  *         sorted_normal, sorted_packed_info
  * Output: foam_position, foam_velocity (appended via atomicAdd on foam_count)
  *
+ * The RNG seed is read from frame_ptr[0], the per-substep counter that
+ * K_IncrementCounter advances on the device (the same one K_Reactions and
+ * the wake kernels read), so the launch has no per-substep host scalar.
+ *
  * Load order: packed_info, then the normal, whose .w (neighbor count)
  * rejects interior particles (85 to 90% of FLUID) before position and
  * velocity are read. nvcc does not sink those loads past the branch on its
@@ -77,7 +82,7 @@ void K_FoamGenerate(
     float4*       foam_velocity,
     uint*         foam_count,     // atomic counter
     int           num_particles,
-    uint          frame_seed,
+    const uint*   __restrict__ frame_ptr,  // per-substep RNG counter
     float         dt_emit         // sim time covered by this launch (s)
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -128,6 +133,7 @@ void K_FoamGenerate(
     // expected rate is k_rate * (phi - threshold) per second whatever the
     // substep count (Ihmsen et al. 2012 use n = dt * phi).
     float p_emit = fminf(1.0f, c_foam.k_rate * (phi - c_foam.threshold) * dt_emit);
+    uint frame_seed = frame_ptr[0];
     if (hash_rand((uint)i, frame_seed + 4u) >= p_emit) return;
 
     // Pool full: skip the atomicAdd/atomicSub pair. The volatile read sees
@@ -323,4 +329,18 @@ void K_FoamClearTail(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= max_foam || i < (int)alive_count[0]) return;
     foam_position[i].w = -1.0f;
+}
+
+
+/* ======================================================================
+ * K_IncrementCounter -- one thread: counter[0] += 1.
+ *
+ * Simulation launches it as the first node of the substep body, so every
+ * substep (graph replay or direct launch) advances the RNG counter by
+ * exactly one without a host-side fill.
+ * ====================================================================== */
+
+extern "C" __global__
+void K_IncrementCounter(uint* counter) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) counter[0] += 1u;
 }

@@ -79,7 +79,9 @@ PBF_STAGES = ("sort", "predict", "lambda0", "reactions", "blast", "spawn",
               "iterations", "finalize", "wake")
 DFSPH_STAGES = ("sort", "density_alpha", "reactions", "blast", "spawn",
                 "non_pressure", "divergence", "density_solve", "finalize", "wake")
-EPILOGUE_STAGES = ("rigid", "foam")
+# 'foam_physics' is the tail of the graph body (only with foam on); 'rigid'
+# and 'foam' (generation) run in the epilogue, outside the graph.
+EPILOGUE_STAGES = ("foam_physics", "rigid", "foam")
 
 
 class Simulation:
@@ -145,12 +147,17 @@ class Simulation:
         self._frame_counter = 0
         # First frame checks the parked DEAD reserve (see _maybe_compact).
         self._dead_reserve_check_pending = True
-        self._substep_counter = 0  # unique per-substep counter for GPU RNG seeding
+        # Host count of substeps run. The device RNG counter _frame_counter_d
+        # is advanced by K_IncrementCounter at the start of each substep body.
+        self._substep_counter = 0
         self.compact_interval = compact_interval
         self.compact_threshold = compact_threshold
         # --- CUDA graph capture state ---
         self._sort_perm = cupy.empty(world.max_particles, dtype=cupy.uint32)
         self._frame_counter_d = cupy.zeros(1, dtype=cupy.uint32)
+        # world.foam_enabled the graphs were captured with. The body launches
+        # K_FoamPhysics only with foam on, so a toggle drops the graphs.
+        self._graph_foam_enabled = False
         # Two-graph system: separate graphs for full-sort and gather-only paths
         # so sort-skip decisions don't invalidate the graph.
         self._graph_full_sort = None      # cupy.cuda.Graph for full-sort path
@@ -505,7 +512,7 @@ class Simulation:
             self._cell_start = cupy.empty(table_size, dtype=cupy.uint32)
             self._cell_end = cupy.empty(table_size, dtype=cupy.uint32)
             # Wake stamp table: never cleared per substep. Stamps come from
-            # the monotonic _substep_counter, so old marks never match.
+            # the monotonic device counter _frame_counter_d, so old marks never match.
             self._cell_wake_flags = wake.allocate_cell_wake_flags(table_size)
             # Counting sort scratch buffers
             self._cs_histogram = cupy.zeros(table_size, dtype=cupy.uint32)
@@ -1071,13 +1078,27 @@ class Simulation:
         no-op default during graph capture (event records cannot be captured).
         Each solver body reports its own stage labels (see PBF_STAGES,
         DFSPH_STAGES and WCSPH_STAGES).
+
+        The first node advances the device RNG counter by one, so each
+        substep gets a new seed on replay too. The last is foam physics
+        (with foam on), whose pool buffers are never swapped
+        (see _maybe_compact_foam), so the captured pointers stay valid.
         """
+        foam.increment_counter(self._frame_counter_d)
         if self._profile.solver_type == SolverType.PBF:
             self._run_pbf_body(n, mark)
         elif self._profile.solver_type == SolverType.DFSPH:
             self._run_dfsph_body(n, mark)
         else:
             self._run_wcsph_body(n, mark)
+        w = self.world
+        if w.foam_enabled:
+            # Physics for existing foam, before this frame's generation, so
+            # new particles get physics next substep. The kernel reads the
+            # live count from foam_count on the device.
+            foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count,
+                              w._max_foam)
+            mark("foam_physics")
 
     def _run_wcsph_body(self, n: int, mark: StageMark = _no_mark) -> None:
         """WCSPH pipeline: Grid -> Step1 -> Reactions -> Spawn -> Step2 -> Integrate -> Wake.
@@ -1667,6 +1688,10 @@ class Simulation:
         if self._graph_buffer_gen != gen:
             self._invalidate_graphs()
             self._graph_buffer_gen = gen
+        foam_on = bool(self.world.foam_enabled)
+        if self._graph_foam_enabled != foam_on:
+            self._invalidate_graphs()
+            self._graph_foam_enabled = foam_on
         # Rigid bodies active: always run directly, no graph
         graphs_disabled = self.rigid_body_manager.num_bodies > 0
 
@@ -1724,13 +1749,10 @@ class Simulation:
     def _substep_prologue(self, n: int) -> int:
         """Per-substep host-side setup shared by _sim_step and _sim_step_timed.
 
-        Sets the RNG substep counter, applies the spawn damping ramp, moves
+        Applies the spawn damping ramp, moves
         rigid-body boundary particles (may change n), zeroes the rigid force
         accumulators and advances kinematic SDF objects.  Returns the new n.
         """
-        # Update device substep counter for RNG seeding (unique per substep)
-        self._frame_counter_d.fill(self._substep_counter)
-
         # --- Spawn velocity damping ramp ---
         self._apply_damping_ramp()
 
@@ -1781,7 +1803,8 @@ class Simulation:
             integrate.rigid_body_collisions(rbm.d_rigid_bodies, rbm.num_bodies)
             mark("rigid")
 
-        # Foam generation + physics (outside graph -- uses atomicAdd with variable count)
+        # Foam generation, once per frame (outside the graph: dt_emit varies
+        # with the frame's substep count). Foam physics is in the graph body.
         self._foam_emit_dt += self.dt
         self._run_foam_step(n, generate=last_substep)
         mark("foam")
@@ -1790,30 +1813,25 @@ class Simulation:
         self._substep_counter += 1
 
     def _run_foam_step(self, n: int, generate: bool = True) -> None:
-        """Run foam physics, and generation when asked (outside CUDA graph).
+        """Run foam generation when asked (outside CUDA graph).
 
-        Physics runs every substep. Generation runs when generate is True
-        (once per frame from step_frame) and covers the sim time since the
-        last generation, so the emission rate does not depend on the substep
+        Foam physics runs every substep at the end of the graph body
+        (_run_graph_body). Generation runs when generate is True (once per
+        frame from step_frame) and covers the sim time since the last
+        generation, so the emission rate does not depend on the substep
         count. Compaction is in _maybe_compact_foam, once per frame.
 
-        No GPU->CPU sync: kernels read foam_count from device memory.
+        No GPU->CPU sync: the kernel reads foam_count and the RNG seed
+        (_frame_counter_d) from device memory.
         """
         w = self.world
         if not w.foam_enabled:
             self._foam_emit_dt = 0.0
             return
-
-        max_foam = w._max_foam
-
-        # 1. Physics for existing foam (before generate, so new particles
-        #    get physics next step). Kernel reads count from device pointer.
-        foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count, max_foam)
-
         if not generate:
             return
 
-        # 2. Generate new foam from FLUID particles. DFSPH keeps its substep
+        # Generate new foam from FLUID particles. DFSPH keeps its substep
         # velocity in sorted_veleval (bd-r5-review-n28.173).
         foam_vel = (w.sorted_veleval if self._profile.solver_type == SolverType.DFSPH
                     else w.sorted_velocity)
@@ -1826,7 +1844,9 @@ class Simulation:
             w.foam_velocity,
             w.foam_count,
             n,
-            self._substep_counter,  # per-substep RNG seed; _frame_counter repeats across a frame's substeps -> correlated/duplicated foam (bd-r4fix-uup.15)
+            # Per-substep RNG seed on the device; _frame_counter repeats
+            # across a frame's substeps (bd-r4fix-uup.15).
+            self._frame_counter_d,
             self._foam_emit_dt,
         )
         self._foam_emit_dt = 0.0
@@ -1837,6 +1857,12 @@ class Simulation:
         Runs every 8th frame, and every frame while the deferred foam count is
         above 80% of the pool. step_frame calls it once after the substep loop.
         No GPU->CPU sync: the new count is a device-to-device copy.
+
+        The result is copied back into foam_position/foam_velocity instead
+        of swapping the buffers: the captured graph bodies launch
+        K_FoamPhysics on those arrays, and a swap would leave the graphs
+        pointing at the scratch pair. The copy is 2 x max_foam x 16 B
+        (6.4 MB at 200K) once per 8 frames.
         """
         w = self.world
         if not w.foam_enabled:
@@ -1852,9 +1878,10 @@ class Simulation:
             w.foam_count,
             max_foam,
         )
-        # Swap buffers
-        w.foam_position, w.foam_position_b = w.foam_position_b, w.foam_position
-        w.foam_velocity, w.foam_velocity_b = w.foam_velocity_b, w.foam_velocity
+        # Copy back (device-to-device). The whole pool, so the dead tail
+        # K_FoamClearTail marked comes along.
+        cupy.copyto(w.foam_position, w.foam_position_b)
+        cupy.copyto(w.foam_velocity, w.foam_velocity_b)
         # Update count from compaction result (device-to-device copy, no sync)
         w.foam_count[:] = w.foam_alive_count
 

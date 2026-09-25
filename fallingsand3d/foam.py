@@ -163,7 +163,7 @@ def foam_generate(
     foam_velocity: cupy.ndarray,
     foam_count: cupy.ndarray,
     num_particles: int,
-    frame_seed: int,
+    frame_ptr: cupy.ndarray,
     dt_emit: float,
     sorted_velocity_h: Optional[cupy.ndarray] = None,
 ) -> None:
@@ -173,6 +173,11 @@ def foam_generate(
     emits with probability min(1, k_rate * (phi - threshold) * dt_emit).
     It is a kernel argument, not a c_foam field, so a per-frame value needs
     no constant-memory upload.
+
+    frame_ptr is a device uint32 array whose element 0 is the RNG seed
+    (Simulation passes its per-substep counter, advanced on the device by
+    increment_counter). The seed is not a host scalar, so the launch works
+    the same inside a CUDA graph.
 
     sorted_velocity_h is the half4 velocity mirror ((N, 2) uint32). When
     given, the kernel reads velocity from it (8 B per particle instead of
@@ -195,7 +200,7 @@ def foam_generate(
             foam_velocity,
             foam_count,
             np.int32(num_particles),
-            np.uint32(frame_seed),
+            frame_ptr,
             np.float32(dt_emit),
         ),
     )
@@ -275,3 +280,14 @@ def foam_compact(
     )
     clear = module.get_function("K_FoamClearTail")
     clear(grid, (_BLOCK,), (foam_position_out, alive_count, np.int32(max_foam)))
+
+
+def increment_counter(counter: cupy.ndarray) -> None:
+    """Launch K_IncrementCounter: counter[0] += 1 on the device (1 thread).
+
+    counter is a (1,) uint32 device array. The launch takes no host value,
+    so it can be a node of a captured CUDA graph.
+    """
+    module = _get_module()
+    kernel = module.get_function("K_IncrementCounter")
+    kernel((1,), (1,), (counter,))
