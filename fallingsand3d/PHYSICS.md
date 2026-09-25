@@ -2059,8 +2059,9 @@ has consumed `velocity`, and this step rebuilds velocity from positions only.
 So `K_Reactions` (25 m/s gunpowder burst) and `K_BlastWave` (up to 15 m/s
 radial push within h) add `dt * dv` to `predicted_position` wherever they add
 `dv` to `velocity`. The burst is a plain store on the exploding particle. The
-blast uses `atomicAdd` on x, y and z of each non-STATIC target, so STATIC keeps
-x\* = x. The constraint iterations then start from the kicked x\*, and
+blast uses `atomicAdd` on x, y and z of each non-STATIC target. STATIC targets
+get no velocity or x\* write, so STATIC keeps x\* = x (rigid boundary particles
+push their body instead, see 22.6.1). The constraint iterations then start from the kicked x\*, and
 `v_new = (x* - x_old) / dt` carries the kick. The Drucker-Prager `v_pred` (12.7)
 reads `velocity` after the kick, so the kick is not treated as a constraint
 correction. WCSPH and DFSPH pass NULL and are unchanged. Two limits:
@@ -3722,6 +3723,31 @@ if (lane_id == 0) atomicAdd(&d_rigid_forces[body_id*4 + k], f_k);
 ```
 
 **Source**: `sph_shared.cuh:warp_reduce_accumulate()`
+
+### 22.6.1 Blast Wave Force on Rigid Bodies
+
+`K_BlastWave` gives every neighbour j within h of a fresh gunpowder blast the
+radial kick `dv = 15 m/s * (1 - r/h) * r_hat`. It writes no velocity to STATIC
+targets: `K_Integrate` zeroes STATIC velocity and `K_UpdateBoundaryParticles`
+rewrites rigid boundary velocity from the body state, so the kick would be
+lost. A MAT_RIGID boundary particle instead adds a force and torque to its
+body:
+
+```
+F_body   += m_j * dv / dt          // m_j = RIGID_PSI_RHO0 * V_b (mass slot)
+tau_body += (x_j - x_COM) x (m_j * dv / dt)
+```
+
+This is the impulse `m_j * dv` spread over one substep, so the body gains the
+momentum a particle of that mass would have gained. The accumulators are zeroed
+in the substep prologue, step2 adds the fluid forces to them, and
+`K_IntegrateRigidBodies` applies the sum at the end of the same substep. Blasts
+are rare, so the kernel uses plain `atomicAdd` without warp reduction. All three
+solvers pass the rigid buffers when bodies exist; with no bodies they pass NULL
+and rigid particles in range are skipped.
+
+**Source**: `reactions.cu:K_BlastWave`, `reactions.py:compute_blast_wave`,
+`simulation.py:_run_reactions_spawn`
 
 ### 22.7 Rigid Body Integration
 
