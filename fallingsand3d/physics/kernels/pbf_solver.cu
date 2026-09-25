@@ -1286,8 +1286,10 @@ void K_PBF_Finalize(
         atomicMax(max_displacement_out, __float_as_uint(disp_sq));
     }
 
-    // Writeback (unsorted)
-    position_out[orig_idx] = make_float4(final_pos.x, final_pos.y, final_pos.z, 1.0f);
+    // Writeback (unsorted). .w carries this substep's density for
+    // K_ComputeColor, which runs once per frame on the unsorted arrays
+    // (bd-r5-review-n28.145). No PBF kernel reads position.w.
+    position_out[orig_idx] = make_float4(final_pos.x, final_pos.y, final_pos.z, density[i]);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);
     color_out[orig_idx] = color;
     packed_info_out[orig_idx] = pi;

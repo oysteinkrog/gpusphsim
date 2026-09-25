@@ -481,6 +481,54 @@ void K_Integrate(
 }
 
 /* ======================================================================
+ * K_ComputeColor -- render color, once per frame (bd-r5-review-n28.145).
+ *
+ * One thread per UNSORTED slot. Simulation.copy_to_vbos launches it after
+ * the frame's last substep with the mapped color VBO as color_out, so no
+ * solver stores a color per substep and nothing keeps a color buffer.
+ *
+ * Inputs are the state every finalize kernel (K_Integrate, K_PBF_Finalize,
+ * K_DFSPH_Finalize) leaves in the unsorted arrays: packed_info, the new
+ * temperature and health, the new velocity, and position with this
+ * substep's density in .w. FLUID gets compute_fluid_color (depth, density,
+ * speed, heat, health); every other behavior gets compute_color. A DEAD
+ * slot gets w = DEAD_COLOR_ALPHA from either helper, so the vertex shaders
+ * cull it. Because it reads the arrays directly, a paused spawn, load,
+ * undo or kill shows the right color on the next frame.
+ * ====================================================================== */
+
+extern "C" __global__ __launch_bounds__(256)
+void K_ComputeColor(
+    uint            numParticles,
+    const float4*   __restrict__ position,      // unsorted, .w = density
+    const float4*   __restrict__ velocity,      // unsorted
+    const uint*     __restrict__ packed_info,   // unsorted
+    const float*    __restrict__ temperature,   // unsorted
+    const float*    __restrict__ health,        // unsorted
+    float4*         __restrict__ color_out      // (numParticles) float4, e.g. the mapped VBO
+) {
+    uint i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numParticles) return;
+
+    uint pi = packed_info[i];
+    int behavior = GET_BEHAVIOR(pi);
+    uint mat_id = GET_MATERIAL_ID(pi);
+    float temp = temperature[i];
+    float hlth = health[i];
+
+    float4 color;
+    if (behavior == FLUID) {
+        float4 p = position[i];
+        float4 v = velocity[i];
+        float vel_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+        color = compute_fluid_color(mat_id, temp, hlth, p.y, vel_sq, p.w);
+    } else {
+        color = compute_color(mat_id, temp, hlth, behavior);
+    }
+    color_out[i] = color;
+}
+
+/* ======================================================================
  * rigid_support_distance -- how far a body reaches from its COM along n.
  *
  * Box:    s(n) = sum_k he_k * |dot(n, R e_k)|  (exact support of an OBB)

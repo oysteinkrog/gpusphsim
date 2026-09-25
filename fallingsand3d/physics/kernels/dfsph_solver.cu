@@ -1659,8 +1659,10 @@ void K_DFSPH_Finalize(
         atomicMax(max_displacement_out, __float_as_uint(disp_sq));
     }
 
-    // Writeback
-    position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, 1.0f);
+    // Writeback. .w carries this substep's density for K_ComputeColor,
+    // which runs once per frame on the unsorted arrays
+    // (bd-r5-review-n28.145). No DFSPH kernel reads position.w.
+    position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, sorted_density[i]);
     velocity_out[orig_idx] = make_float4(vel.x, vel.y, vel.z, 0.0f);
     color_out[orig_idx] = color;
     packed_info_out[orig_idx] = pi;

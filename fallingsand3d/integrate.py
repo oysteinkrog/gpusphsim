@@ -276,6 +276,48 @@ def integrate(
 
 
 # ---------------------------------------------------------------------------
+# Render color, once per frame (bd-r5-review-n28.145)
+# ---------------------------------------------------------------------------
+
+def compute_color(
+    n: int,
+    position: cupy.ndarray,
+    velocity: cupy.ndarray,
+    packed_info: cupy.ndarray,
+    temperature: cupy.ndarray,
+    health: cupy.ndarray,
+    color_out: cupy.ndarray,
+) -> None:
+    """Launch K_ComputeColor over the first ``n`` UNSORTED slots.
+
+    Writes the render color of slot i to ``color_out[i]``: material base
+    color with heat glow and health fade, plus the FLUID depth, density and
+    speed tint, and ``w`` = behavior * 0.25 (DEAD slots get -1). position.w
+    must hold the density, which every finalize kernel writes there.
+
+    ``color_out`` is any (>= n, 4) float32 device array, normally the mapped
+    color VBO from Simulation.copy_to_vbos. Uses the integrate module's
+    c_sim (world bounds) and c_materials. No host sync.
+    """
+    if n <= 0:
+        return
+    kernel = _get_module().get_function("K_ComputeColor")  # type: ignore[union-attr]
+    kernel(
+        ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,),
+        (BLOCK_SIZE,),
+        (
+            np.uint32(n),
+            position,
+            velocity,
+            packed_info,
+            temperature,
+            health,
+            color_out,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Rigid body integration (US-017)
 # ---------------------------------------------------------------------------
 

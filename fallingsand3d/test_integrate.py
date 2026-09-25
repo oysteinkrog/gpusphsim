@@ -579,6 +579,107 @@ def test_dead_slot_color_alpha_is_negative():
             f"live slot {slot} alpha {alpha[slot]}, expected {want}")
 
 
+def _reference_color(mat_id, behavior, temp, hlth, pos_y, vel_sq, rho,
+                     world_min_y=-1.0, world_max_y=1.0):
+    """NumPy port of compute_color / compute_fluid_color (sph_shared.cuh)."""
+    from materials import MATERIALS
+
+    f = np.float32
+    if mat_id == 0:
+        return np.array([0.0, 0.0, 0.0, -1.0], dtype=f)
+    m = MATERIALS[mat_id]
+    h = min(max(hlth, 0.0), 1.0)
+    if behavior == FLUID:
+        depth_t = (pos_y - world_min_y) / max(world_max_y - world_min_y, 0.01)
+        depth_t = min(max(depth_t, 0.0), 1.0)
+        r = m.color_r * (0.45 + 0.70 * depth_t)
+        g = m.color_g * (0.50 + 0.65 * depth_t)
+        b = m.color_b * (0.65 + 0.40 * depth_t)
+        darken = 1.0 / (1.0 + 0.5 * max(rho / max(m.rest_density, 1.0) - 1.0, 0.0))
+        r, g, b = r * darken, g * darken, b * darken
+        foam_t = min(math.sqrt(vel_sq) / 3.0, 1.0) ** 2
+        r, g, b = (c + (1.0 - c) * foam_t * 0.7 for c in (r, g, b))
+        if temp > 293.0:
+            t = min((temp - 293.0) / 1000.0, 1.0)
+            r, g, b = r + (1.0 - r) * t, g * (1.0 - 0.5 * t), b * (1.0 - 0.8 * t)
+        return np.array([min(r * h, 1.0), min(g * h, 1.0), min(b * h, 1.0), 0.0], dtype=f)
+    r, g, b = m.color_r, m.color_g, m.color_b
+    if m.temp_melt > 501.0 and temp > 500.0:
+        hf = max(min((temp - 500.0) / (m.temp_melt - 500.0), 1.0), 0.0)
+        r = r + (1.0 - r) * hf * 0.8
+        g = g * (1.0 - hf * 0.4) + 0.3 * hf
+        b = b * (1.0 - hf * 0.9)
+    elif mat_id == 11 and temp > 250.0:
+        fr = min((temp - 250.0) / 23.0, 1.0)
+        r, g, b = r + (1.0 - r) * fr * 0.3, g + (1.0 - g) * fr * 0.1, min(b + fr * 0.1, 1.0)
+    elif temp > 293.0:
+        t = min((temp - 293.0) / 1000.0, 1.0)
+        r, g, b = r + (1.0 - r) * t, g * (1.0 - 0.5 * t), b * (1.0 - 0.8 * t)
+    return np.array([r * h, g * h, b * h, behavior * 0.25], dtype=f)
+
+
+def test_compute_color_once_per_frame_matches_reference():
+    """K_ComputeColor on the unsorted state after one substep gives the same
+    color the solvers used to store every substep (bd-r5-review-n28.145).
+
+    One K_Integrate substep with a shuffled sort order, then one
+    K_ComputeColor launch over the unsorted outputs. Slots cover WATER and
+    LAVA (FLUID: depth, density, speed and heat terms), SAND awake and
+    asleep, hot STONE (STATIC glow), a DEAD slot and a rigid boundary slot.
+    Checked against a NumPy port of compute_color / compute_fluid_color
+    fed with the substep's own outputs.
+    """
+    from integrate import compute_color
+    from materials import LAVA, MAT_RIGID
+
+    setup_params(gravity=(0.0, -9.8, 0.0))
+    slots = [
+        # (mat, behavior, packed extra, pos, vel, temp, health, density)
+        (WATER, FLUID, 0, (0.1, -0.6, 0.0), (0.5, -1.0, 0.2), 293.0, 1.0, 2700.0),
+        (WATER, FLUID, 0, (-0.2, 0.7, 0.1), (2.5, 1.0, -1.0), 350.0, 0.8, 2400.0),
+        (LAVA, FLUID, 0, (0.3, -0.2, -0.3), (0.1, 0.0, 0.0), 1500.0, 1.0, 7000.0),
+        (SAND, GRANULAR, 0, (0.0, -0.8, 0.4), (0.3, 0.0, 0.0), 293.0, 1.0, 2500.0),
+        (SAND, GRANULAR, 0x400, (0.4, -0.9, 0.4), (0.0, 0.0, 0.0), 700.0, 0.6, 2500.0),
+        (STONE, STATIC, 0, (-0.5, -0.9, 0.0), (0.0, 0.0, 0.0), 1200.0, 1.0, 2500.0),
+        (0, STATIC, 0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 293.0, 0.0, 0.0),
+        (MAT_RIGID, STATIC, 0, (0.2, 0.2, 0.2), (0.4, 0.0, 0.0), 293.0, 1.0, 2500.0),
+    ]
+    n = len(slots)
+    pos = np.array([[*s[3], 1.0] for s in slots], dtype=np.float32)
+    vel = np.array([[*s[4], 0.0] for s in slots], dtype=np.float32)
+    d = make_simple_particles(n, WATER, FLUID, pos=pos, vel=vel)
+    d["sorted_packed_info"] = cupy.asarray(np.array(
+        [MAKE_PACKED(s[0], s[1]) | s[2] for s in slots], dtype=np.uint32))
+    d["sorted_temperature"] = cupy.asarray(np.array([s[5] for s in slots], dtype=np.float32))
+    d["sorted_health"] = cupy.asarray(np.array([s[6] for s in slots], dtype=np.float32))
+    d["sorted_density"] = cupy.asarray(np.array([s[7] for s in slots], dtype=np.float32))
+    # Shuffled permutation, so the check covers the scatter to unsorted slots.
+    perm = np.array([3, 7, 0, 5, 1, 6, 2, 4], dtype=np.uint32)
+    d["sort_indexes"] = cupy.asarray(perm)
+    d["sleep_counter_out"] = cupy.zeros(n, dtype=cupy.uint8)
+    d["health_out"] = cupy.zeros(n, dtype=cupy.float32)
+    pos_out, vel_out, _, pi_out, _, temp_out = integrate(**d)
+
+    color = cupy.full((n, 4), 7.0, dtype=cupy.float32)
+    compute_color(n, pos_out, vel_out, pi_out, temp_out, d["health_out"], color)
+    got = color.get()
+
+    p, v, t, hl, pi = (pos_out.get(), vel_out.get(), temp_out.get(),
+                       d["health_out"].get(), pi_out.get())
+    for u in range(n):
+        s = slots[int(np.nonzero(perm == u)[0][0])]
+        mat, beh = int(pi[u] & 0xFF), int((pi[u] >> 8) & 0x3)
+        assert mat == s[0]
+        want = _reference_color(mat, beh, float(t[u]), float(hl[u]), float(p[u, 1]),
+                                float(np.dot(v[u, :3], v[u, :3])), float(p[u, 3]))
+        np.testing.assert_allclose(got[u], want, rtol=0, atol=1e-5,
+                                   err_msg=f"slot {u} mat {mat}")
+    # FLUID density comes from position.w, which K_Integrate sets.
+    fluid = [u for u in range(n) if int((pi[u] >> 8) & 0x3) == FLUID]
+    assert fluid and all(p[u, 3] > 1000.0 for u in fluid)
+    assert got[[u for u in range(n) if (pi[u] & 0xFF) == 0][0], 3] < 0.0
+
+
 def test_sort_indexes_writeback():
     """Results are written to UNSORTED arrays using sort_indexes mapping."""
     setup_params(gravity=(0.0, -9.8, 0.0))

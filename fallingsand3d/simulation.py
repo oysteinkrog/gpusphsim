@@ -12,7 +12,8 @@ Each render frame:
      velocity clamp.
   2. Compute sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps)
   3. Run sim_steps simulation substeps
-  4. Copy UNSORTED pos/color to mapped VBOs (rendering happens once per frame)
+  4. Copy UNSORTED pos to the mapped VBO and compute color straight into the
+     color VBO (rendering happens once per frame)
 """
 
 from __future__ import annotations
@@ -2147,8 +2148,28 @@ class Simulation:
             self._dead_reserve_check_pending = False
         return w._high_water
 
+    def compute_render_color(self, out, n: int | None = None) -> None:
+        """Write the render color of the first ``n`` slots into ``out``.
+
+        ``out`` is a (>= n, 4) float32 device array: the mapped color VBO in
+        copy_to_vbos, or a plain CuPy array in tests and tools. One
+        K_ComputeColor launch over the unsorted arrays, no host sync.
+        ``n`` defaults to the high-water mark, which covers the rigid
+        boundary tail.
+        """
+        w = self.world
+        if n is None:
+            n = w._high_water
+        integrate.compute_color(
+            n, w.position, w.velocity, w.packed_info,
+            w.temperature, w.health, out,
+        )
+
     def copy_to_vbos(self, cuda_pos, cuda_col, cuda_vel=None) -> None:
-        """Copy UNSORTED pos/color/velocity arrays into mapped GL VBOs.
+        """Fill the mapped GL VBOs from the UNSORTED arrays.
+
+        Position and velocity are copied; color is computed into its VBO by
+        compute_render_color.
 
         Parameters
         ----------
@@ -2169,11 +2190,12 @@ class Simulation:
         )
         pos_arr[:n] = self.world.position[:n]
 
-        # Color: world color (float4) -> VBO color (float4)
+        # Color: computed straight into the VBO once per frame from the
+        # unsorted state (bd-r5-review-n28.145). No solver stores a color.
         col_arr = cuda_col.device_pointer_as_cupy_array(
             (cuda_col.nbytes // 16, 4), np.float32,
         )
-        col_arr[:n] = self.world.color[:n]
+        self.compute_render_color(col_arr, n)
 
         # Velocity: world velocity (float4) -> VBO vel (float4) for motion blur
         if cuda_vel is not None:
