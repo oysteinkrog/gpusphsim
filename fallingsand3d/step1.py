@@ -299,7 +299,7 @@ def compute_step1(
     frame_counter : cupy.ndarray, optional
         (1,) uint32 per-substep device counter (Simulation._frame_counter_d).
         With it, sleeping and non-rigid STATIC particles run the neighbour loop
-        only when (counter + index) % 8 == 0 and otherwise write density,
+        only when (counter + index // 32) % 8 == 0 and otherwise write density,
         pressure and pr2_omega from the carried density and leave the other
         outputs as they are (bd-r5-review-n28.159). The output buffers must
         then be the ones the last K_Step1 wrote, in the same sorted order.

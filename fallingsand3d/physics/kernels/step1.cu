@@ -46,8 +46,11 @@
  * belongs to the same particle: the grid-reuse gather keeps the sorted order,
  * and the caller passes force_refresh = 1 on every full-sort substep.
  * An inactive particle runs the full loop when
- * (substep + index_i) % INACTIVE_REFRESH_PERIOD == 0, so at most 8 substeps
- * pass between computes. On that refresh its dTdt uses a backward-Euler form
+ * (substep + index_i / 32) % INACTIVE_REFRESH_PERIOD == 0, so at most 8
+ * substeps pass between computes. The phase is per group of 32 sorted
+ * indices (one warp), so a warp of inactive particles skips or refreshes
+ * together; a per-index phase would put 4 refreshing lanes in every warp and
+ * the warp would run the loop every substep. On that refresh its dTdt uses a backward-Euler form
  * over the hold, dTdt = S / (1 + A * 8 * dt) with S the explicit rate and A
  * its coefficient sum, so the held rate cannot overshoot the neighbour
  * temperatures. MAT_DEAD slots write fixed outputs every substep.
@@ -152,7 +155,7 @@ void K_Step1(
     // (see the header). Their density cannot change while they are inactive.
     bool is_inactive = (frame_ptr != 0) && (IS_SLEEPING(pi_i) || behavior_i == STATIC);
     if (is_inactive && force_refresh == 0u
-            && ((__ldg(frame_ptr) + index_i) & (INACTIVE_REFRESH_PERIOD - 1u)) != 0u) {
+            && ((__ldg(frame_ptr) + (index_i >> 5)) & (INACTIVE_REFRESH_PERIOD - 1u)) != 0u) {
         // STATIC stores rest_density (same rule as the PostCalc below); a
         // sleeper carries its last density in .w (guard an unset 0).
         float rho_c = (behavior_i == STATIC || !(pos4_i.w > 0.0f))

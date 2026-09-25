@@ -1,7 +1,7 @@
 """K_Step1 inactive-particle skip (bd-r5-review-n28.159).
 
 Sleeping and non-rigid STATIC particles run the neighbour loop only when
-(substep + index) % 8 == 0 or when force_refresh is set. On other calls they
+(substep + index // 32) % 8 == 0 or when force_refresh is set. On other calls they
 write density from position.w, pressure and pr2_omega from it, and leave every
 other output buffer untouched. MAT_DEAD slots write fixed outputs.
 
@@ -209,7 +209,7 @@ def test_skip_and_refresh_outputs() -> None:
 
     frame_val = 3
     frame = cupy.asarray([frame_val], dtype=cupy.uint32)
-    refresh = ((frame_val + np.arange(n)) % PERIOD) == 0
+    refresh = ((frame_val + np.arange(n) // 32) % PERIOD) == 0
     skip = inactive & ~refresh
 
     # Skip call: carried buffers hold a sentinel so an untouched output shows.
