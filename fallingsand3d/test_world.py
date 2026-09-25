@@ -511,13 +511,15 @@ _REMOVED_BUFFERS = ("veleval", "sph_force", "density", "shear_rate",
 
 # Bytes per particle of every max_particles-sized World array after
 # World(n), allocate_pbf_arrays() and allocate_dfsph_arrays(). Unsorted
-# state 65 B + sorted scratch 183 B + lazy solver arrays 68 B
+# state 65 B + sorted scratch 195 B + lazy solver arrays 68 B
 # (predicted_position and its sorted twin, sorted_delta_position,
 # sorted_pressure_normal, sorted_alpha_dfsph). Before n28.152 the total
 # was 388 B: the removed buffers were 52 B always (veleval, sph_force,
 # density, shear_rate, exposure_heat, exposure_corrode, sorted_hashes)
 # plus 20 B with the solver arrays (delta_position, alpha_dfsph).
-_BYTES_PER_PARTICLE_MAX = 65 + 183 + 68
+# Sorted scratch grew from 183 B to 195 B with sorted_pr2_omega (8 B,
+# bd-r5-review-n28.158) and sorted_eta (4 B, bd-r5-review-n28.169).
+_BYTES_PER_PARTICLE_MAX = 65 + 195 + 68
 
 
 def _per_particle_bytes(w):
