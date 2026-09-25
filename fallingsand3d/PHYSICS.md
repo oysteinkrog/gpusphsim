@@ -1139,7 +1139,7 @@ occupant:
 | position.w | material `rest_density` (read as the previous-substep density by step1) |
 | density | material `rest_density` |
 | velocity, veleval | spawn velocity, w = 0 |
-| sph_force, angular_velocity | 0 |
+| sph_force | 0 |
 | kappa, kappa_v (DFSPH warm start) | 0 |
 | mass | `spawn_mass(material)` (§7.4) |
 | temperature | §9.3 default |
@@ -1157,8 +1157,8 @@ Two other paths reuse slots, and both clear the DFSPH warm start too
 
 - `World.compact()` zeroes `kappa` and `kappa_v` in the freed tail
   `[num_alive, old _high_water)`, along with `packed_info`.
-- `RigidBodyManager.inject_boundary_particles` zeroes `kappa`, `kappa_v` and
-  `angular_velocity` in the boundary block.
+- `RigidBodyManager.inject_boundary_particles` zeroes `kappa` and `kappa_v`
+  in the boundary block.
 
 The DFSPH neighbour loops also ignore whatever a STATIC neighbour holds: in
 K_DFSPH_CorrectVelocityDiv `kv_j = 0` and in K_DFSPH_ComputePressureAccel
@@ -1845,7 +1845,7 @@ dead occupant's values. (bd-r5-review-n28.42)
 - **DFSPH.** `kappa` and `kappa_v` are zeroed. DFSPH skips GAS in its pressure
   solvers, so the slot's `alpha` from the pre-spawn density pass is not used.
   `predicted_position` is not written: DFSPH reuses it as `a_press` scratch.
-- **All solvers.** Dye and angular velocity are zeroed. The spawn writes the
+- **All solvers.** Dye is zeroed. The spawn writes the
   `+inf` bits into `max_displacement`, so the next grid-reuse decision forces a
   full sort (see 20.5 on the readback lag).
 - **Blast wave.** `K_BlastWave` adds impulses to `velocity` between step1 and
@@ -1908,7 +1908,6 @@ All three solvers now support the complete material behavior set:
 | Vorticity confinement | Step2 (eps=0.05) | Finalize (eps=0.001) | NonPressure (eps=0.05) |
 | Surface normals | Step1 | ComputeLambda | DensityAlpha |
 | Surface tension | Step2 (gamma=1.0) | Finalize (gamma=0.0) | NonPressure (gamma=1.0) |
-| Micropolar angular vel | Integrate | Finalize | Finalize |
 | Drucker-Prager friction | Step2 (force-space) | Finalize (vel-space) | NonPressure (force-space) |
 | Sleep/wake system | Integrate | Finalize | Finalize |
 | Temperature/reactions | Integrate | Finalize | Finalize |
@@ -3341,44 +3340,30 @@ seeing it, so the next frame does a full sort.
 `_update_sort_skip_decision` (latch, prediction and threshold logic),
 `spawn.cu:K_SpawnGas` (+inf on spawn)
 
-## 10.13 Micropolar SPH (Phase 8, item 5.2)
+## 10.13 Micropolar SPH (removed)
 
-Per-particle angular velocity tracks local rotational flow. Coupled to vorticity
-via relaxation (no additional neighbor loop needed).
+The simulation has no micropolar model. Particles carry no angular velocity,
+and no kernel reads, relaxes or sorts one (bd-r5-review-n28.140).
 
-### Angular velocity update (integrate.cu, FLUID only)
+An earlier version relaxed a per-particle `omega` toward `0.5 * curl_v` with
+`nu_t = 0.1` in K_Integrate, K_PBF_Finalize and K_DFSPH_Finalize. No force
+term read `omega`, so it had no effect on the flow. It still cost 64 B per
+particle per substep in the counting sort and the integrate/finalize kernels,
+and 32 MB of buffers at 1M particles. Removing it cut the WCSPH substep at
+1M particles from 11.57 ms to 11.16 ms (sort 1.91 to 1.74 ms, integrate 1.68
+to 1.41 ms, `bench_substep.py`, RTX 5070 Ti shared with other jobs) with the
+same position checksum.
 
-```
-omega_new = omega + dt * nu_t * (0.5 * curl_v - omega)
-```
+A real micropolar model would need the coupling term in step2 (Bender et al.
+2017), which exchanges momentum between `omega` and the linear velocity, and
+a relaxation time under one frame.
 
-Where:
-- `omega` = per-particle angular velocity (float4: wx, wy, wz, unused), persistent
-- `curl_v` = vorticity from step1 (sorted_vorticity.xyz)
-- `nu_t` = micropolar coupling viscosity, 0.1, hardcoded in integrate.cu, pbf_solver.cu and
-  dfsph_solver.cu. `SolverProfile.micropolar_nu_t` exists but is not read yet.
-- `dt` = simulation timestep
+Until `simulation.py` and `benchmark.py` stop passing them, `World` keeps
+empty `(0, 4)` placeholders named `angular_velocity` and
+`sorted_angular_velocity`, and the Python wrappers of the sort, integrate,
+finalize and spawn kernels accept and ignore the matching keywords.
 
-The formula relaxes angular velocity toward half the fluid vorticity:
-- When `omega = 0.5 * curl_v`: equilibrium (no change)
-- When `omega < 0.5 * curl_v`: angular velocity increases (spin-up)
-- When `omega > 0.5 * curl_v`: angular velocity decreases (dissipation)
-
-### Pipeline integration
-
-- **Sorting**: `angular_velocity` scattered through counting sort (K_ScatterReorder/K_GatherReorder)
-- **Computation**: Relaxation update in K_Integrate (WCSPH), K_PBF_Finalize (PBF), and K_DFSPH_Finalize (DFSPH)
-- **Persistence**: Written back to unsorted `angular_velocity` via sort_indexes, compacted with other arrays
-- **Active**: Only for FLUID behavior class (GRANULAR/GAS/STATIC skip micropolar)
-- **Buffer**: `world.angular_velocity` (N, 4) float32, `world.sorted_angular_velocity` (N, 4) float32
-
-### Typical values (WCSPH Dam Break, 253K particles, 200 steps)
-
-- max |omega| ≈ 0.23 rad/s (at splash zone)
-- mean |omega| ≈ 0.003 rad/s (bulk average)
-- Spatially coherent (std/mean ≈ 2.8)
-
-**Source**: `integrate.cu:550-560`, `solver_profiles.py:43`, `counting_sort.cu` (K_ScatterReorder, K_GatherReorder)
+**Source**: `test_micropolar_removed.py`
 
 ## 21. Sand Wetness System (Phase 14)
 
