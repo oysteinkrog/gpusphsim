@@ -130,6 +130,18 @@ def make_simple_particles(n, mat_id, behavior, pos=None, vel=None,
     }
 
 
+def unsorted_copy(sorted_arr, sort_indexes):
+    """The unsorted array the sorted one was gathered from.
+
+    K_Integrate scatters health, lifetime and mass back only for particles
+    with the state-dirty bit set (bd-r5-review-n28.162); every other unsorted
+    slot must already hold the gathered value, as in the real pipeline.
+    """
+    out = cupy.empty_like(sorted_arr)
+    out[sort_indexes] = sorted_arr
+    return out
+
+
 def integrate_and_color(**kw):
     """One K_Integrate substep, then the per-frame K_ComputeColor on its
     unsorted outputs, as the renderer sees it (bd-r5-review-n28.145).
@@ -139,7 +151,7 @@ def integrate_and_color(**kw):
     """
     n = kw["sorted_position"].shape[0]
     if kw.get("health_out") is None:
-        kw["health_out"] = cupy.zeros(n, dtype=cupy.float32)
+        kw["health_out"] = unsorted_copy(kw["sorted_health"], kw["sort_indexes"])
     pos, vel, pi, sc, temp = integrate(**kw)
     color = cupy.zeros((n, 4), dtype=cupy.float32)
     compute_color(n, pos, vel, pi, temp, kw["health_out"], color)
@@ -672,7 +684,7 @@ def test_compute_color_once_per_frame_matches_reference():
     perm = np.array([3, 7, 0, 5, 1, 6, 2, 4], dtype=np.uint32)
     d["sort_indexes"] = cupy.asarray(perm)
     d["sleep_counter_out"] = cupy.zeros(n, dtype=cupy.uint8)
-    d["health_out"] = cupy.zeros(n, dtype=cupy.float32)
+    d["health_out"] = unsorted_copy(d["sorted_health"], d["sort_indexes"])
     pos_out, vel_out, pi_out, _, temp_out = integrate(**d)
 
     color = cupy.full((n, 4), 7.0, dtype=cupy.float32)
@@ -2002,6 +2014,70 @@ def test_rotated_body_uses_world_frame_inertia():
     expected = R @ np.diag(iinv) @ R.T @ tau * dt * (1.0 - 0.05 * dt)
     assert expected[1] > 3e-4  # the term the R / R^T order decides
     np.testing.assert_allclose(w, expected, rtol=0.0, atol=1e-7)
+
+
+STATE_DIRTY = 0x200000  # packed_info bit 21, physics/kernels/state_dirty.cuh
+
+
+def test_state_dirty_gates_reaction_state_scatter():
+    """Health, lifetime and mass reach the unsorted arrays only for particles
+    with the state-dirty bit, and K_Integrate clears the bit
+    (bd-r5-review-n28.162).
+
+    Covers the awake, STATIC and sleeping paths, on a shuffled permutation.
+    Sleeping slots also check the velocity gate: the zero velocity is stored
+    only when the gathered velocity is not all-zero bits.
+    """
+    setup_params()
+    # (mat, behavior, flags, velocity)
+    slots = [
+        (WATER, FLUID, STATE_DIRTY, (0.0, 0.0, 0.0)),
+        (WATER, FLUID, 0, (0.0, 0.0, 0.0)),
+        (STONE, STATIC, STATE_DIRTY, (0.0, 0.0, 0.0)),
+        (STONE, STATIC, 0, (0.0, 0.0, 0.0)),
+        (SAND, GRANULAR, 0x400, (0.0, 0.0, 0.0)),               # asleep, v == 0
+        (SAND, GRANULAR, 0x400, (0.005, 0.0, 0.0)),             # asleep, v < V_WAKE
+        (SAND, GRANULAR, 0x400 | STATE_DIRTY, (0.0, 0.0, 0.0)),  # asleep, dirty
+    ]
+    n = len(slots)
+    vel = np.array([[*s[3], 0.0] for s in slots], dtype=np.float32)
+    d = make_simple_particles(n, WATER, FLUID, vel=vel)
+    d["sorted_packed_info"] = cupy.asarray(np.array(
+        [MAKE_PACKED(s[0], s[1]) | s[2] for s in slots], dtype=np.uint32))
+    s_health = np.linspace(0.1, 0.7, n).astype(np.float32)
+    s_life = np.linspace(1.0, 7.0, n).astype(np.float32)
+    s_mass = np.linspace(0.01, 0.07, n).astype(np.float32)
+    d["sorted_health"] = cupy.asarray(s_health)
+    d["sorted_lifetime"] = cupy.asarray(s_life)
+    d["sorted_mass"] = cupy.asarray(s_mass)
+    perm = np.array([4, 0, 6, 2, 5, 1, 3], dtype=np.uint32)
+    d["sort_indexes"] = cupy.asarray(perm)
+    SENT = -7.0
+    d["health_out"] = cupy.full(n, SENT, dtype=cupy.float32)
+    d["lifetime_out"] = cupy.full(n, SENT, dtype=cupy.float32)
+    d["mass_out"] = cupy.full(n, SENT, dtype=cupy.float32)
+    d["velocity_out"] = cupy.full((n, 4), 9.0, dtype=cupy.float32)
+    d["sleep_counter_out"] = cupy.zeros(n, dtype=cupy.uint8)
+    _, vel_out, pi_out, _, _ = integrate(**d)
+
+    h, lt, m = d["health_out"].get(), d["lifetime_out"].get(), d["mass_out"].get()
+    v, pi = vel_out.get(), pi_out.get()
+    for i, s in enumerate(slots):
+        u = int(perm[i])
+        assert int(pi[u]) & STATE_DIRTY == 0, f"slot {i}: dirty bit not cleared"
+        assert int(pi[u]) & ~STATE_DIRTY == MAKE_PACKED(s[0], s[1]) | (s[2] & 0x400)
+        if s[2] & STATE_DIRTY:
+            assert (h[u], lt[u], m[u]) == (s_health[i], s_life[i], s_mass[i]), i
+        else:
+            assert (h[u], lt[u], m[u]) == (SENT, SENT, SENT), \
+                f"slot {i}: clean particle's reaction state was scattered"
+    # Sleeping, gathered velocity all zero: no store (unsorted is already 0).
+    assert np.all(v[perm[4]] == 9.0)
+    assert np.all(v[perm[6]] == 9.0)
+    # Sleeping with a sub-wake velocity: the zero is stored.
+    assert np.all(v[perm[5]] == 0.0)
+    # STATIC non-rigid always stores zero velocity.
+    assert np.all(v[perm[2]] == 0.0) and np.all(v[perm[3]] == 0.0)
 
 
 def test_fallback_alloc_no_gpu_cpu_sync():
