@@ -1004,18 +1004,20 @@ class UI:
 
                 imgui.separator()
 
-                # Implicit surface tension controls (WCSPH only, < 100K)
+                # Surface velocity smoothing controls (WCSPH only, < 100K).
+                # Not surface tension: it only damps relative velocity at the
+                # free surface (PHYSICS.md 12.8).
                 from solver_profiles import SolverType
                 is_wcsph = sim._profile.solver_type == SolverType.WCSPH
                 n_active = sim.world._high_water
                 if not is_wcsph:
                     imgui.begin_disabled()
                 changed, new_ist = imgui.checkbox(
-                    "Implicit ST (< 100K)", sim.ist_enabled,
+                    "Surface velocity smoothing (< 100K)", sim.ist_enabled,
                 )
                 if changed:
                     sim.ist_enabled = new_ist
-                    # IST kernels are baked into captured CUDA graphs;
+                    # Smoothing kernels are baked into captured CUDA graphs;
                     # toggling requires re-capture.
                     sim._invalidate_graphs()
                 if not is_wcsph:
@@ -1028,13 +1030,14 @@ class UI:
                             f"Disabled: {n_active:,} > {sim._IST_MAX_PARTICLES:,}",
                         )
                     changed, val = imgui.slider_float(
-                        "ST Sigma", sim.ist_sigma, 0.01, 2.0, "%.2f",
+                        "Smoothing strength", min(sim.ist_sigma, 1.0),
+                        0.01, 1.0, "%.2f",
                     )
                     if changed:
                         sim.ist_sigma = val
                         sim.update_ist_params()
                     changed, val = imgui.slider_int(
-                        "ST Iters", sim.ist_iterations, 1, 20,
+                        "Smoothing iterations", sim.ist_iterations, 1, 20,
                     )
                     if changed:
                         sim.ist_iterations = val

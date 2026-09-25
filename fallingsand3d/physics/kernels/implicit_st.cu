@@ -1,16 +1,25 @@
 /*
- * implicit_st.cu -- Implicit surface tension via iterative velocity smoothing.
+ * implicit_st.cu -- Surface velocity smoothing (XSPH-style, surface only).
  *
- * Quality mode for < 100K particles. Applies Jacobi iterations of surface
- * tension forces to FLUID surface particles, producing smoother, more
- * cohesive surfaces than the explicit Akinci approach in step2.cu.
+ * The file and struct keep the "IST" (implicit surface tension) name for
+ * history, but this is not surface tension: there is no cohesion or
+ * curvature term, so it cannot pull a surface inward or form droplets. It
+ * only damps relative velocity between FLUID surface particles. The
+ * curvature surface tension force is the explicit Akinci term in step2.cu.
  *
- * Algorithm:
- *   For each Jacobi iteration:
- *     For each FLUID particle i with neighbor_count < surface_threshold:
- *       delta_v_i = sigma * SUM_j (m_j/rho_j) * (v_j - v_i) * W(r_ij) * w_surface
- *       v_new_i = v_old_i + delta_v_i
- *     Non-surface and non-FLUID particles: v_new_i = v_old_i (pass through)
+ * Quality mode for < 100K particles, WCSPH only.
+ *
+ * Algorithm (one Jacobi iteration per launch):
+ *   For each FLUID particle i with neighbor_count < surface_threshold:
+ *     dv_i = SUM_j (m_j/rho_j) * W(r_ij) * (v_j - v_i)
+ *     S_i  = SUM_j (m_j/rho_j) * W(r_ij)
+ *     a_i  = min(sigma * w_surface, 1 / S_i)
+ *     v_new_i = v_old_i + a_i * dv_i
+ *   Non-surface and non-FLUID particles: v_new_i = v_old_i (pass through)
+ *
+ * The clamp a_i * S_i <= 1 makes v_new_i a convex combination of v_i and
+ * its neighbours' velocities, so the largest speed can never grow from one
+ * iteration to the next, whatever sigma and the iteration count are.
  *
  * The surface weight w_surface increases with neighbor deficiency:
  *   w_surface = 1.0 - neighbor_count / surface_threshold
@@ -25,7 +34,7 @@
 #include "common.cuh"
 
 struct ISTParams {
-    float sigma;              // surface tension strength
+    float sigma;              // smoothing strength (clamped per particle, see K_IST_Iterate)
     float surface_threshold;  // neighbor count below which particle is "surface"
     int   num_iterations;     // Jacobi iterations (5-20)
     float padding;
@@ -40,9 +49,10 @@ __device__ inline float W_poly6_ist(float r_sq, float h_sq) {
 }
 
 /* ======================================================================
- * K_IST_Iterate -- One Jacobi iteration of implicit surface tension.
+ * K_IST_Iterate -- One Jacobi iteration of surface velocity smoothing.
  *
- * For FLUID surface particles: smooth velocity toward neighbor average.
+ * For FLUID surface particles: smooth velocity toward neighbor average,
+ * with the weight clamped so sigma * w_surface * S_i <= 1.
  * Non-surface particles and non-FLUID: pass through unchanged.
  *
  * Uses the surface normal buffer's .w component (neighbor_count) from step1.
@@ -67,7 +77,7 @@ void K_IST_Iterate(
     uint pi = packed_info[i];
     int behavior = GET_BEHAVIOR(pi);
 
-    // Only FLUID particles participate in surface tension
+    // Only FLUID particles are smoothed
     if (behavior != FLUID || IS_SLEEPING(pi)) {
         vel_dst[i] = vel_src[i];
         return;
@@ -78,7 +88,7 @@ void K_IST_Iterate(
     float threshold = c_ist.surface_threshold;
 
     if (nc >= threshold) {
-        // Interior particle: no surface tension correction
+        // Interior particle: no smoothing
         vel_dst[i] = vel_src[i];
         return;
     }
@@ -97,8 +107,9 @@ void K_IST_Iterate(
     float h_sq = c_sim.smoothing_length_sq;
     float sigma = c_ist.sigma;
 
-    // Accumulate velocity correction from neighbors
+    // Accumulate velocity correction and total weight S from neighbors
     float3 dv = make_float3(0.0f, 0.0f, 0.0f);
+    float weight_sum = 0.0f;
 
     int3 cell_i = calcGridCell(pos_i);
 
@@ -138,13 +149,20 @@ void K_IST_Iterate(
                     dv.x += (vel4_j.x - vel_i.x) * factor;
                     dv.y += (vel4_j.y - vel_i.y) * factor;
                     dv.z += (vel4_j.z - vel_i.z) * factor;
+                    weight_sum += factor;
                 }
             }
         }
     }
 
-    // Apply correction: v_new = v_old + sigma * w_surface * dv
+    // Apply correction: v_new = v_old + scale * dv, with scale * S <= 1 so
+    // v_new stays a convex combination of v_i and the neighbour velocities
+    // (Jacobi stability). S can exceed 1 when a surface particle's own
+    // density is below its neighbours'.
     float scale = sigma * w_surface;
+    if (scale * weight_sum > 1.0f) {
+        scale = 1.0f / weight_sum;
+    }
     vel_dst[i] = make_float4(
         vel_i.x + scale * dv.x,
         vel_i.y + scale * dv.y,
