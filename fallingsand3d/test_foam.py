@@ -354,7 +354,7 @@ def test_substep_counter_advances_once_per_substep(world):
     sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
                      fixed_dt=True, max_substeps=20)
     sim._spawn_substep = sim._damping_duration  # no ramp: graphs get used
-    n = world.num_active()
+    n = world.num_active
     enabled = world.foam_enabled
     world.foam_enabled = True
     try:
@@ -381,7 +381,7 @@ def test_foam_physics_runs_on_graph_replay(world):
     sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
                      fixed_dt=True, max_substeps=20)
     sim._spawn_substep = sim._damping_duration
-    n = world.num_active()
+    n = world.num_active
     enabled = world.foam_enabled
     world.foam_enabled = True
     try:
