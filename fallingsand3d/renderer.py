@@ -601,8 +601,12 @@ void main() {
         self.cuda_vel = CudaGLBuffer(self._vbo_vel, vel_nbytes)
         self.cuda_foam = CudaGLBuffer(self._vbo_foam, foam_nbytes)
 
-        # --- SSFR FBOs (created lazily or on resize) ---
+        # --- SSFR FBOs ---
+        # Created lazily by draw() on the first SSFR frame and freed when SSFR
+        # is turned off, so the point-sprite path holds no SSFR VRAM (44 bytes
+        # per pixel) and a window drag does not rebuild them per size event.
         self._ssfr_fbos_valid = False
+        self._ssfr_fbo_size = (0, 0)
         self._fbo_depth = 0
         self._tex_depth = 0
         self._rbo_depth_hw = 0
@@ -618,14 +622,19 @@ void main() {
         self._tex_scene = 0
         self._rbo_scene_depth = 0
 
-        self._create_ssfr_fbos(width, height)
+        self._set_static_uniforms()
 
     # -----------------------------------------------------------------
     # SSFR FBO management
     # -----------------------------------------------------------------
 
     def _create_ssfr_fbos(self, w: int, h: int) -> None:
-        """Create/recreate all SSFR FBOs at the given resolution."""
+        """Create/recreate all SSFR FBOs at the given resolution.
+
+        Called from draw() before any pass runs. It unbinds the framebuffer,
+        renderbuffer, texture and program it touched, so no GL state leaks
+        into the frame.
+        """
         self._destroy_ssfr_fbos()
         self._width = w
         self._height = h
@@ -682,6 +691,7 @@ void main() {
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         glBindRenderbuffer(GL_RENDERBUFFER, 0)
         self._ssfr_fbos_valid = True
+        self._ssfr_fbo_size = (w, h)
         self._set_static_uniforms()
 
     def _set_static_uniforms(self) -> None:
@@ -689,7 +699,7 @@ void main() {
 
         Uniform values are per-program state and persist across glUseProgram,
         so sampler unit indices and the texel size are set here once instead
-        of every frame.  Called from _create_ssfr_fbos (init and resize).
+        of every frame.  Called from __init__ and _create_ssfr_fbos.
         UI-driven values (blur radius, fresnel, specular) stay per frame:
         ui.py writes them as plain attributes, and they are only a few calls.
         """
@@ -732,12 +742,22 @@ void main() {
         for rbo in (self._rbo_depth_hw, self._rbo_scene_depth):
             if rbo:
                 glDeleteRenderbuffers(1, [rbo])
+        # Zero the names so a second destroy (SSFR off, then close) never
+        # deletes a name GL has since handed to another object.
+        self._fbo_depth = self._fbo_thickness = self._fbo_blur1 = 0
+        self._fbo_blur2 = self._fbo_normal = self._fbo_scene = 0
+        self._tex_depth = self._tex_thickness = self._tex_blur1 = 0
+        self._tex_blur2 = self._tex_normal = self._tex_scene = 0
+        self._rbo_depth_hw = self._rbo_scene_depth = 0
         self._ssfr_fbos_valid = False
+        self._ssfr_fbo_size = (0, 0)
 
     def resize(self, width: int, height: int) -> None:
-        """Recreate FBOs when window size changes."""
+        """Record the new window size. SSFR FBOs are rebuilt by draw()."""
         if width > 0 and height > 0 and (width != self._width or height != self._height):
-            self._create_ssfr_fbos(width, height)
+            self._width = width
+            self._height = height
+            self._ssfr_fbos_valid = False
 
     # -----------------------------------------------------------------
     # Drawing
@@ -745,9 +765,14 @@ void main() {
 
     def draw(self, view: np.ndarray, proj: np.ndarray) -> None:
         """Render the scene. Uses SSFR if enabled, otherwise point sprites."""
-        if self.ssfr_enabled and self._ssfr_fbos_valid:
+        if self.ssfr_enabled:
+            if (not self._ssfr_fbos_valid
+                    or self._ssfr_fbo_size != (self._width, self._height)):
+                self._create_ssfr_fbos(self._width, self._height)
             self._draw_ssfr(view, proj)
         else:
+            if self._fbo_depth:
+                self._destroy_ssfr_fbos()
             self._draw_points(view, proj)
         # Draw SDF objects as semi-transparent meshes (after particles, before foam)
         self._draw_sdf_objects(view, proj)
