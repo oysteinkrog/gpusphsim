@@ -58,7 +58,6 @@ def _taylor_green_ke_ratio(vorticity_epsilon: float) -> float:
     vel[:, 0] = AMP * np.sin(kk * x) * np.cos(kk * y)
     vel[:, 1] = -AMP * np.cos(kk * x) * np.sin(kk * y)
     world.velocity[:n] = cupy.asarray(vel)
-    world.veleval[:n] = cupy.asarray(vel)
 
     mass = cupy.asnumpy(world.mass[:n]).astype(np.float64)
 

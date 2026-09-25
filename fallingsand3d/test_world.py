@@ -47,13 +47,12 @@ def test_array_shapes_dtypes():
     w = World(1000)
     n = 1000
     # float4 arrays
-    for name in ["position", "velocity", "veleval", "sph_force"]:
+    for name in ["position", "velocity"]:
         arr = getattr(w, name)
         assert arr.shape == (n, 4), f"{name} shape: {arr.shape}"
         assert arr.dtype == cp.float32, f"{name} dtype: {arr.dtype}"
     # float arrays
-    for name in ["density", "mass", "temperature", "health", "lifetime",
-                 "shear_rate", "exposure_heat", "exposure_corrode"]:
+    for name in ["mass", "temperature", "health", "lifetime"]:
         arr = getattr(w, name)
         assert arr.shape == (n,), f"{name} shape: {arr.shape}"
         assert arr.dtype == cp.float32, f"{name} dtype: {arr.dtype}"
@@ -64,10 +63,8 @@ def test_array_shapes_dtypes():
     assert w.sleep_counter.shape == (n,)
     assert w.sleep_counter.dtype == cp.uint8
     # All are CuPy arrays
-    for name in ["position", "velocity", "veleval", "sph_force", "density",
-                 "mass", "packed_info", "temperature", "health", "lifetime",
-                 "shear_rate", "exposure_heat", "exposure_corrode",
-                 "sleep_counter"]:
+    for name in ["position", "velocity", "mass", "packed_info", "temperature",
+                 "health", "lifetime", "sleep_counter"]:
         assert isinstance(getattr(w, name), cp.ndarray), f"{name} not CuPy"
     print("PASS: array shapes, dtypes, and GPU residency")
 
@@ -215,8 +212,8 @@ def test_resize():
 def test_resize_reallocates_solver_arrays():
     """resize() must re-create lazy PBF/DFSPH arrays at the new size (grow and shrink)."""
     names = ('predicted_position', 'sorted_predicted_position',
-             'delta_position', 'sorted_delta_position', 'sorted_pressure_normal',
-             'alpha_dfsph', 'sorted_alpha_dfsph')
+             'sorted_delta_position', 'sorted_pressure_normal',
+             'sorted_alpha_dfsph')
     for old_n, new_n in ((1000, 2000), (2000, 1000)):
         w = World(old_n)
         w.allocate_pbf_arrays()
@@ -233,9 +230,9 @@ def test_resize_reallocates_solver_arrays():
     w = World(1000)
     w.allocate_dfsph_arrays()
     w.resize(3000)
-    assert not hasattr(w, 'alpha_dfsph')
+    assert not hasattr(w, 'sorted_alpha_dfsph')
     w.allocate_pbf_arrays()
-    for name in names[:5]:
+    for name in names[:4]:
         assert getattr(w, name).shape[0] == 3000, name
 
     # A size mismatch reallocates even without resize().
@@ -250,10 +247,8 @@ def test_resize_reallocates_solver_arrays():
 def test_contiguous_arrays():
     """All arrays are contiguous CuPy arrays on GPU."""
     w = World(1000)
-    for name in ["position", "velocity", "veleval", "sph_force", "density",
-                 "mass", "packed_info", "temperature", "health", "lifetime",
-                 "shear_rate", "exposure_heat", "exposure_corrode",
-                 "sleep_counter"]:
+    for name in ["position", "velocity", "mass", "packed_info", "temperature",
+                 "health", "lifetime", "sleep_counter"]:
         arr = getattr(w, name)
         assert isinstance(arr, cp.ndarray)
         # Check contiguous (C-order by default)
@@ -381,9 +376,8 @@ def test_spawn_sphere_no_loop_sync():
 def _dirty_world(n=20_000):
     """World whose per-particle arrays hold 1.0, as if a previous scene used them."""
     w = World(n)
-    for arr in (w.position, w.velocity, w.veleval, w.sph_force,
-                w.kappa, w.kappa_v, w.lifetime, w.shear_rate, w.exposure_heat,
-                w.exposure_corrode, w.sorted_lambda_pbf):
+    for arr in (w.position, w.velocity, w.kappa, w.kappa_v, w.lifetime,
+                w.sorted_lambda_pbf):
         arr[:] = 1.0
     return w
 
@@ -406,14 +400,11 @@ def test_spawn_clears_stale_slot_state(shape, material_id):
     assert n > 0 and w._high_water == n
     sl = slice(0, n)
     mat = MATERIALS[material_id]
-    for name in ("kappa", "kappa_v", "sph_force", "shear_rate",
-                 "exposure_heat", "exposure_corrode"):
+    for name in ("kappa", "kappa_v"):
         vals = getattr(w, name)[sl].get()
         assert np.all(vals == 0.0), f"{shape}: {name} kept stale values"
     assert np.all(w.velocity[sl, 3].get() == 0.0)
-    assert np.all(w.veleval[sl, 3].get() == 0.0)
     np.testing.assert_array_equal(w.position[sl, 3].get(), np.float32(mat.rest_density))
-    np.testing.assert_array_equal(w.density[sl].get(), np.float32(mat.rest_density))
     expected_lt = 1.5 if material_id == FIRE else 0.0
     np.testing.assert_allclose(w.lifetime[sl].get(), expected_lt)
     # Slots past the spawn are untouched
@@ -453,8 +444,8 @@ def test_spawned_fire_turns_to_smoke_then_dies():
     args = dict(
         sorted_packed_info=w.packed_info[sl], sorted_temperature=w.temperature[sl],
         sorted_health=w.health[sl], sorted_lifetime=w.lifetime[sl],
-        sorted_velocity=w.velocity[sl], sorted_exposure_heat=w.exposure_heat[sl],
-        sorted_exposure_corrode=w.exposure_corrode[sl], sorted_mass=w.mass[sl],
+        sorted_velocity=w.velocity[sl], sorted_exposure_heat=w.sorted_exposure_heat[sl],
+        sorted_exposure_corrode=w.sorted_exposure_corrode[sl], sorted_mass=w.mass[sl],
     )
 
     def mats():
@@ -508,6 +499,64 @@ def test_source_presets_set_spawner_budget(loader):
     assert spawner is not None
     assert 0 < spawner["budget"] < w.max_particles
 
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.152: per-particle buffers that no kernel reads are gone
+# ---------------------------------------------------------------------------
+
+_REMOVED_BUFFERS = ("veleval", "sph_force", "density", "shear_rate",
+                    "exposure_heat", "exposure_corrode", "sorted_hashes",
+                    "sorted_color", "delta_position", "alpha_dfsph")
+
+# Bytes per particle of every max_particles-sized World array after
+# World(n), allocate_pbf_arrays() and allocate_dfsph_arrays(). Unsorted
+# state 65 B + sorted scratch 183 B + lazy solver arrays 52 B
+# (predicted_position and its sorted twin, sorted_delta_position,
+# sorted_pressure_normal, sorted_alpha_dfsph). Before n28.152 the total
+# was 368 B: the removed buffers were 68 B.
+_BYTES_PER_PARTICLE_MAX = 65 + 183 + 52
+
+
+def _per_particle_bytes(w):
+    n = w.max_particles
+    total = 0
+    for v in vars(w).values():
+        if isinstance(v, cp.ndarray) and v.ndim >= 1 and v.shape[0] == n:
+            total += v.nbytes
+    return total / n
+
+
+def test_removed_buffers_are_gone():
+    w = World(1000)
+    w.allocate_pbf_arrays()
+    w.allocate_dfsph_arrays()
+    for name in _REMOVED_BUFFERS:
+        assert not hasattr(w, name), f"World still has {name}"
+    # The unsorted predicted_position stays: PBF hashes the sort by x*.
+    assert w.predicted_position.shape == (1000, 4)
+
+
+def test_world_memory_per_particle():
+    """Device memory of World(n) matches the arrays it holds, and the
+    per-particle footprint is at most the post-n28.152 sum."""
+    n = 200_000
+    pool = cp.get_default_memory_pool()
+    cp.cuda.Device().synchronize()
+    before = pool.used_bytes()
+    w = World(n)
+    w.allocate_pbf_arrays()
+    w.allocate_dfsph_arrays()
+    cp.cuda.Device().synchronize()
+    used = pool.used_bytes() - before
+
+    per_particle = _per_particle_bytes(w)
+    assert per_particle <= _BYTES_PER_PARTICLE_MAX, per_particle
+    attr_bytes = sum(v.nbytes for v in vars(w).values() if isinstance(v, cp.ndarray))
+    # The pool rounds each allocation up to 512 B; nothing else is hidden.
+    n_arrays = sum(1 for v in vars(w).values() if isinstance(v, cp.ndarray))
+    assert attr_bytes <= used <= attr_bytes + 512 * n_arrays, (used, attr_bytes)
+    print(f"PASS: {per_particle:.0f} B/particle, {used / 1e6:.1f} MB at {n}")
 
 if __name__ == "__main__":
     test_constructor()

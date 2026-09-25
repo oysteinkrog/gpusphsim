@@ -939,7 +939,6 @@ class Simulation:
             # Hash I/O
             positions=hash_positions,
             hashes=w.hashes,
-            sorted_hashes=w.sorted_hashes,
             # Unsorted particle arrays
             position=w.position,
             velocity=w.velocity,

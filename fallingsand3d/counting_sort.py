@@ -121,7 +121,6 @@ def counting_sort_full(
     # Hash input/output
     positions: cupy.ndarray,
     hashes: cupy.ndarray,
-    sorted_hashes: cupy.ndarray,
     # Unsorted particle arrays (read)
     position: cupy.ndarray,
     velocity: cupy.ndarray,
@@ -237,7 +236,6 @@ def counting_sort_full(
         kappa,
         kappa_v,
         # Sorted outputs
-        sorted_hashes,
         sorted_position,
         sorted_velocity,
         sorted_mass,

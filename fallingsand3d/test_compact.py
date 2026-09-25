@@ -322,10 +322,8 @@ def test_compact_contiguous_after():
     w.kill_in_sphere((0.0, 0.0, 0.0), 0.05)
     w.compact()
 
-    for name in ["position", "velocity", "veleval", "sph_force", "density",
-                 "mass", "packed_info", "temperature", "health", "lifetime",
-                 "shear_rate", "exposure_heat", "exposure_corrode",
-                 "sleep_counter"]:
+    for name in ["position", "velocity", "mass", "packed_info", "temperature",
+                 "health", "lifetime", "sleep_counter", "kappa", "kappa_v"]:
         arr = getattr(w, name)
         assert isinstance(arr, cp.ndarray), f"{name} not CuPy"
         assert arr.flags["C_CONTIGUOUS"], f"{name} not C-contiguous"

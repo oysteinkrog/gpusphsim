@@ -598,6 +598,38 @@ def test_load_corrupt_file_leaves_world_untouched(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
+def test_save_has_no_density_and_old_density_file_loads(tmp_path, monkeypatch) -> None:
+    """bd-r5-review-n28.152: save_scene no longer writes the spawn-time
+    "density" array, and an older file that still carries it loads."""
+    import save_load as sl
+    from materials import WATER
+    from world import World
+
+    monkeypatch.setattr(sl, "SAVE_DIR", str(tmp_path))
+    sim, cam = _StubSim(), _stub_camera()
+
+    world = World(10_000)
+    assert not hasattr(world, "density")
+    n = world.spawn_cube((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1), WATER, 0.02)
+    sl.save_scene(world, sim, cam, "new")
+    with np.load(str(tmp_path / "new.fs3d"), allow_pickle=False) as z:
+        assert "density" not in z.files
+        good = {k: z[k] for k in z.files}
+    pos_before = world.position[:n].get()
+
+    # Old format: same arrays plus a density array.
+    old = dict(good)
+    old["density"] = np.full(n, 1000.0, np.float32)
+    _write_npz(str(tmp_path / "old.fs3d"), old)
+
+    world.packed_info[:] = 0
+    world._high_water = 0
+    assert sl.load_scene(world, sim, cam, "old.fs3d") == n
+    assert world._high_water == n
+    assert np.array_equal(world.position[:n].get(), pos_before)
+
+
+@pytest.mark.skipif(not _HAS_REAL_CUPY, reason="needs CuPy and a CUDA GPU")
 def test_save_load_with_rigid_body_reinjects_once(tmp_path, monkeypatch) -> None:
     """bd-r5-review-n28.22: Save then Load with a rigid body must not assert.
 

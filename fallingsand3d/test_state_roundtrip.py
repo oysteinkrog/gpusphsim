@@ -44,7 +44,7 @@ SPAWN_FLAG = 1 << 11  # packed_info bit 11: spawn flag (common.cuh)
 
 # Arrays save_scene writes, in the order of save_load._SCENE_ARRAYS.
 SAVED = ("position", "velocity", "packed_info", "temperature", "health",
-         "lifetime", "mass", "density")
+         "lifetime", "mass")
 # Arrays a SnapshotRing slot holds.
 SNAPPED = ("position", "velocity", "packed_info", "temperature", "health",
            "lifetime", "mass")
@@ -134,7 +134,6 @@ def _mixed_world():
     ramp = np.arange(n, dtype=np.float32)
     world.temperature[:n] = cp.asarray(world.temperature[:n].get() + ramp * np.float32(0.001))
     world.lifetime[:n] = cp.asarray(ramp * np.float32(0.01))
-    world.density[:n] = cp.asarray(np.float32(2500.0) + ramp)
     vel = world.velocity[:n].get()
     vel[:, 1] = -0.5
     world.velocity[:n] = cp.asarray(vel)
@@ -147,7 +146,7 @@ def _scramble(world, sim, camera) -> None:
     n = world._high_water
     for k in ("position", "velocity"):
         getattr(world, k)[:n] += cp.float32(1.5)
-    for k in ("temperature", "health", "lifetime", "mass", "density"):
+    for k in ("temperature", "health", "lifetime", "mass"):
         getattr(world, k)[:n] = cp.float32(-7.0)
     world.packed_info[:n] = cp.uint32(STONE)
     world.kappa[:n] = 5.0
@@ -166,7 +165,6 @@ def _assert_fresh_warm_start(world) -> None:
     n = world._high_water
     for k in ("kappa", "kappa_v", "sleep_counter"):
         assert not np.any(getattr(world, k)[:n].get()), k
-    assert np.array_equal(_bits(world.veleval[:n].get()), _bits(world.velocity[:n].get()))
     # Tail beyond the restored range holds no live particle.
     assert not np.any(world.packed_info[n:].get())
 

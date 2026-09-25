@@ -300,7 +300,8 @@ def test_world_sorted_buffers_preallocated() -> None:
 
     # Check hash/sort buffers (indices was identity, now implicit in sort_by_hash)
     assert world.hashes.shape == (1000,)
-    assert world.sorted_hashes.shape == (1000,)
+    # The counting sort writes no sorted hash copy (bd-r5-review-n28.152).
+    assert not hasattr(world, "sorted_hashes")
     assert world.hashes.dtype == cupy.uint32
     print("[OK] Hash buffers pre-allocated")
 
@@ -331,7 +332,7 @@ def test_end_to_end_world_sort_reorder() -> None:
     sorted_indices_buf = cupy.empty(n, dtype=cupy.uint32)
     sorted_hashes, sorted_indices = sort_by_hash(
         hashes,
-        sorted_hashes_out=world.sorted_hashes[:n],
+        sorted_hashes_out=cupy.empty(n, dtype=cupy.uint32),
         sorted_indices_out=sorted_indices_buf,
     )
 
@@ -350,7 +351,7 @@ def test_end_to_end_world_sort_reorder() -> None:
     cupy.cuda.Device().synchronize()
 
     # Verify sorted hashes are non-decreasing
-    h_sorted = cupy.asnumpy(world.sorted_hashes[:n])
+    h_sorted = cupy.asnumpy(sorted_hashes)
     diffs = np.diff(h_sorted.astype(np.int64))
     assert np.all(diffs >= 0), "Sorted hashes not non-decreasing"
     print("[OK] Sorted hashes non-decreasing")
@@ -596,7 +597,6 @@ def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
         cell_start=scratch["cell_start"], cell_end=scratch["cell_end"],
         sort_perm=sort_perm, positions=src["position"],
         hashes=cupy.zeros(n, dtype=cupy.uint32),
-        sorted_hashes=cupy.zeros(n, dtype=cupy.uint32),
         **src, **out,
     )
     cupy.cuda.Device().synchronize()

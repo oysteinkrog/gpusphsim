@@ -144,7 +144,8 @@ def counting_sort_scene(
     ``health``, ``lifetime``, ``sleep_counter``), the FP16 mirrors
     (``velocity_h``, ``temperature_h``), the cell tables
     (``cell_start``, ``cell_end``), ``sort_perm`` (sorted index -> original
-    index, uint32), ``hashes`` (unsorted), ``sorted_hashes``, ``histogram``
+    index, uint32), ``hashes`` (unsorted), ``sorted_hashes`` (hashes gathered
+    through sort_perm), ``histogram``
     and ``num_cells``.
     """
     import cupy
@@ -196,7 +197,6 @@ def counting_sort_scene(
         "velocity_h": cupy.zeros((n, 2), dtype=cupy.uint32),
         "temperature_h": cupy.zeros(n, dtype=cupy.uint16),
         "hashes": cupy.zeros(n, dtype=cupy.uint32),
-        "sorted_hashes": cupy.zeros(n, dtype=cupy.uint32),
         "sort_perm": cupy.zeros(n, dtype=cupy.uint32),
         "cell_start": scratch["cell_start"],
         "cell_end": scratch["cell_end"],
@@ -214,7 +214,6 @@ def counting_sort_scene(
         sort_perm=out["sort_perm"],
         positions=pos,
         hashes=out["hashes"],
-        sorted_hashes=out["sorted_hashes"],
         position=pos,
         velocity=vel,
         mass=m,
@@ -238,6 +237,9 @@ def counting_sort_scene(
         sorted_velocity_h=out["velocity_h"],
         sorted_temperature_h=out["temperature_h"],
     )
+    # The sort kernel writes no sorted hash array (bd-r5-review-n28.152);
+    # derive it here for tests that check the bucket order.
+    out["sorted_hashes"] = out["hashes"][out["sort_perm"].astype(cupy.int64)]
     out["scratch"] = scratch
     return out
 

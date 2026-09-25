@@ -766,8 +766,6 @@ class RigidBodyManager:
             world.position[sl, 3] = RIGID_PSI_RHO0  # K_Step1 placeholder density for MAT_RIGID
 
             world.velocity[sl] = 0.0
-            world.veleval[sl] = 0.0
-            world.sph_force[sl] = 0.0
 
             # Mass = RIGID_PSI_RHO0 * V_b (Akinci boundary volume at the
             # reference density; kernels rescale to the fluid's rest density)
@@ -778,7 +776,6 @@ class RigidBodyManager:
             packed = packed | ((int(body_idx) & 0xFF) << 13)
             world.packed_info[sl] = cupy.uint32(packed)
 
-            world.density[sl] = RIGID_PSI_RHO0
             world.temperature[sl] = 293.0
             world.health[sl] = 1.0
             world.lifetime[sl] = 0.0

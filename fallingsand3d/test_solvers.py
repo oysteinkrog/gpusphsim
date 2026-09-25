@@ -1613,7 +1613,7 @@ def test_pbf_grid_finds_every_predicted_pair(world, sim):
 
     pred = cp.asnumpy(world.sorted_predicted_position[:n])[:, :3]
     stencil_d = cp.asarray(_stencil_hashes(sim, pred))        # (n, 27)
-    shash_d = world.sorted_hashes[:n]
+    shash_d = world.hashes[:n][sim._sort_perm[:n].astype(cp.int64)]
     pred_d = cp.asarray(pred)
     pairs = 0
     missed = 0

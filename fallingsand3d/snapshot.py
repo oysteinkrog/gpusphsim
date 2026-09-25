@@ -201,7 +201,6 @@ class SnapshotRing:
         cp.copyto(world.health[:n], slot["health"][:n])
         cp.copyto(world.lifetime[:n], slot["lifetime"][:n])
         cp.copyto(world.mass[:n], slot["mass"][:n])
-        cp.copyto(world.veleval[:n], world.velocity[:n])
         world._high_water = n
         # No color to rebuild: K_ComputeColor colors the restored state on
         # the next frame, paused or not (bd-r5-review-n28.145).

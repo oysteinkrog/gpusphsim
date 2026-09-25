@@ -229,21 +229,18 @@ __constant__ PrecalcParams c_precalc;
 /* ======================================================================
  * Array type conventions (documented per acceptance criteria)
  *
- * float4 arrays (w component unused, set to 0):
- *   position, velocity, veleval, sph_force
+ * Unsorted state (World, carried between substeps and through the sort):
+ *   float4: position (w = density from the last K_Step1), velocity
+ *   float:  mass, temperature, health, lifetime, kappa, kappa_v
+ *   uint32: packed_info
+ *   uint8:  sleep_counter
+ *
+ * Sorted-only per-substep arrays (rebuilt every substep, never scattered
+ * back): sorted_veleval, sorted_sph_force (float4), sorted_density,
+ * sorted_shear_rate, sorted_exposure_heat, sorted_exposure_corrode (float).
  *
  * half4 arrays (FP16 copies for bandwidth reduction in neighbor loops):
  *   sorted_velocity_h -- populated during sort, read in step1/step2
- *
- * float arrays:
- *   density, mass, temperature, health, lifetime,
- *   shear_rate, exposure_heat, exposure_corrode
- *
- * uint32 arrays:
- *   packed_info
- *
- * uint8 arrays:
- *   sleep_counter
  * ====================================================================== */
 
 /* ======================================================================

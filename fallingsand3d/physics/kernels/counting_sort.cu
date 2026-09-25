@@ -100,7 +100,6 @@ void K_ScatterReorder(
     const float*  __restrict__ kappa_in,
     const float*  __restrict__ kappa_v_in,          // DFSPH div warm-start (PERF-008)
     // Sorted outputs (write)
-    uint*         __restrict__ sorted_hashes_out,
     float4*       __restrict__ position_out,
     float4*       __restrict__ velocity_out,
     float*        __restrict__ mass_out,
@@ -131,9 +130,6 @@ void K_ScatterReorder(
 
     // Write sort permutation (sorted -> original mapping)
     sort_perm_out[sorted_idx] = idx;
-
-    // Write sorted hash
-    sorted_hashes_out[sorted_idx] = hash;
 
     // Gather and scatter all particle arrays
     const float4 pos4 = __ldg(&position_in[idx]);

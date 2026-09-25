@@ -140,7 +140,6 @@ def save_scene(world, sim, camera, filename: str) -> str:
         "health": _host(world.health),
         "lifetime": _host(world.lifetime),
         "mass": _host(world.mass),
-        "density": _host(world.density),
     }
     # Write through a file object: given a path, NumPy appends ".npz", so the
     # file became "<name>.fs3d.npz" and list_saves/load_scene never found it.
@@ -278,8 +277,9 @@ def _restore_rigid_body_manager(rbm, rb_data: dict, modules: list) -> None:
 
 # Expected per-particle arrays in a .fs3d file: name -> (dtype, trailing shape).
 # Only these keys are read, so an older save that carries an extra array
-# (for example the float4 colour state removed in bd-r5-review-n28.144)
-# still loads.
+# (for example the float4 colour state removed in bd-r5-review-n28.144, or
+# the spawn-time "density" array removed in bd-r5-review-n28.152) still
+# loads. Density is not saved: K_Step1 recomputes it on the first substep.
 _SCENE_ARRAYS = {
     "position":     (np.float32, (4,)),
     "velocity":     (np.float32, (4,)),
@@ -288,7 +288,6 @@ _SCENE_ARRAYS = {
     "health":       (np.float32, ()),
     "lifetime":     (np.float32, ()),
     "mass":         (np.float32, ()),
-    "density":      (np.float32, ()),
 }
 
 
@@ -467,8 +466,6 @@ def load_scene(world, sim, camera, filename: str, report: dict | None = None) ->
     world.health[:n] = cp.asarray(arrays["health"])
     world.lifetime[:n] = cp.asarray(arrays["lifetime"])
     world.mass[:n] = cp.asarray(arrays["mass"])
-    world.density[:n] = cp.asarray(arrays["density"])
-    world.veleval[:n] = world.velocity[:n]
 
     # bd-unl.13: zero warm-start and sleep fields so loaded particles start
     # fresh -- stale kappa/kappa_v produce wrong first-frame forces;

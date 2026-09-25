@@ -29,9 +29,8 @@ DEAD_PACKED = _MAKE_PACKED(0, STATIC)
 # Fields World.compact() moves, in K_Compact argument order. packed_info must
 # stay first. Each name X has a scratch twin sorted_X of the same shape.
 _COMPACT_FIELDS = (
-    "packed_info", "position", "velocity", "veleval", "sph_force",
-    "density", "mass", "temperature", "health", "lifetime", "shear_rate",
-    "exposure_heat", "exposure_corrode", "sleep_counter", "kappa", "kappa_v",
+    "packed_info", "position", "velocity", "mass", "temperature", "health",
+    "lifetime", "sleep_counter", "kappa", "kappa_v",
 )
 
 
@@ -187,17 +186,15 @@ class World:
         # float4 arrays (stored as (n, 4) float32)
         self.position = cp.zeros((n, 4), dtype=cp.float32)
         self.velocity = cp.zeros((n, 4), dtype=cp.float32)
-        self.veleval = cp.zeros((n, 4), dtype=cp.float32)
-        self.sph_force = cp.zeros((n, 4), dtype=cp.float32)
-        # float arrays
-        self.density = cp.zeros(n, dtype=cp.float32)
+        # float arrays. There is no unsorted veleval, sph_force, density,
+        # shear_rate or exposure array: kernels only read the sorted_*
+        # versions, which step1/step2 rebuild every substep. The density a
+        # particle carries between substeps lives in position.w
+        # (bd-r5-review-n28.152).
         self.mass = cp.zeros(n, dtype=cp.float32)
         self.temperature = cp.zeros(n, dtype=cp.float32)
         self.health = cp.zeros(n, dtype=cp.float32)
         self.lifetime = cp.zeros(n, dtype=cp.float32)
-        self.shear_rate = cp.zeros(n, dtype=cp.float32)
-        self.exposure_heat = cp.zeros(n, dtype=cp.float32)
-        self.exposure_corrode = cp.zeros(n, dtype=cp.float32)
         # uint32 arrays
         self.packed_info = cp.zeros(n, dtype=cp.uint32)
         # uint8 arrays
@@ -255,9 +252,9 @@ class World:
         self.sorted_velocity_h = cp.zeros((n, 2), dtype=cp.uint32)  # half4 = 8 bytes = 2 x uint32
         # Fixed-point temperature copy for neighbor loop bandwidth (PERF-011)
         self.sorted_temperature_h = cp.zeros(n, dtype=cp.uint16)  # round(T * 8): 0.125 K fixed point, 2 bytes
-        # Sort index arrays (hash + sorted versions)
+        # Per-particle cell hash, written by K_CalcHashCS on a full sort.
+        # The counting sort needs no sorted copy of it.
         self.hashes = cp.zeros(n, dtype=cp.uint32)
-        self.sorted_hashes = cp.zeros(n, dtype=cp.uint32)
 
         # --- Foam (secondary particle) pool ---
         self._max_foam = MAX_FOAM_PARTICLES
@@ -282,9 +279,9 @@ class World:
     # the new max_particles.
     _LAZY_SOLVER_ARRAYS = (
         'predicted_position', 'sorted_predicted_position',
-        'delta_position', 'sorted_delta_position',
+        'sorted_delta_position',
         'sorted_pressure_normal',
-        'alpha_dfsph', 'sorted_alpha_dfsph',
+        'sorted_alpha_dfsph',
         'sorted_ist_scratch',
     )
 
@@ -305,8 +302,7 @@ class World:
             self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
         # PBF-specific arrays (the lambda scratch is allocated in _allocate)
-        if self._needs_alloc('delta_position', 'sorted_delta_position'):
-            self.delta_position = cp.zeros((n, 4), dtype=cp.float32)
+        if self._needs_alloc('sorted_delta_position'):
             self.sorted_delta_position = cp.zeros((n, 4), dtype=cp.float32)
         # Pressure normal for Drucker-Prager friction (only used within PBF iterations)
         if self._needs_alloc('sorted_pressure_normal'):
@@ -320,8 +316,7 @@ class World:
             self.predicted_position = cp.zeros((n, 4), dtype=cp.float32)
             self.sorted_predicted_position = cp.zeros((n, 4), dtype=cp.float32)
         # kappa_v now in _allocate (PERF-008); alpha still lazy
-        if self._needs_alloc('alpha_dfsph', 'sorted_alpha_dfsph'):
-            self.alpha_dfsph = cp.zeros(n, dtype=cp.float32)
+        if self._needs_alloc('sorted_alpha_dfsph'):
             self.sorted_alpha_dfsph = cp.zeros(n, dtype=cp.float32)
 
     def ensure_ist_scratch(self, size: int) -> None:
@@ -545,11 +540,9 @@ class World:
         sl = slice(start, start + count)
         self.position[sl] = self.park_positions(
             cp.arange(start, start + count), spacing, grid_min)
-        for arr in (self.velocity, self.veleval, self.sph_force):
-            arr[sl] = 0.0
+        self.velocity[sl] = 0.0
         self.temperature[sl] = T_AMBIENT
-        for arr in (self.density, self.mass, self.health, self.lifetime, self.shear_rate, self.exposure_heat,
-                    self.exposure_corrode, self.kappa, self.kappa_v):
+        for arr in (self.mass, self.health, self.lifetime, self.kappa, self.kappa_v):
             arr[sl] = 0.0
         # DEAD with behavior STATIC. Plain 0 would read as behavior FLUID
         # (FLUID = 0), and K_Integrate would drop the parked slot under gravity.
@@ -584,12 +577,10 @@ class World:
         self.position[sl, 3] = mat.rest_density
 
         vx, vy, vz = velocity
-        for arr in (self.velocity, self.veleval):
-            arr[sl, 0] = vx
-            arr[sl, 1] = vy
-            arr[sl, 2] = vz
-            arr[sl, 3] = 0.0
-        self.sph_force[sl] = 0.0
+        self.velocity[sl, 0] = vx
+        self.velocity[sl, 1] = vy
+        self.velocity[sl, 2] = vz
+        self.velocity[sl, 3] = 0.0
 
         self.mass[sl] = spawn_mass(material_id)
         self.packed_info[sl] = cp.uint32(_MAKE_PACKED(material_id, mat.behavior_class))
@@ -599,11 +590,8 @@ class World:
         if lifetime is None:
             lifetime = _DEFAULT_LIFETIMES.get(material_id, 0.0)
         self.lifetime[sl] = lifetime
-        for arr in (self.shear_rate, self.exposure_heat, self.exposure_corrode,
-                    self.kappa, self.kappa_v):
-            arr[sl] = 0.0
-
-        self.density[sl] = mat.rest_density
+        self.kappa[sl] = 0.0
+        self.kappa_v[sl] = 0.0
         self.sleep_counter[sl] = 0
 
     def spawn_sphere(

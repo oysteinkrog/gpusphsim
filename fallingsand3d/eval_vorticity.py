@@ -77,7 +77,6 @@ def seed_taylor_green(world: World, n: int, block: float = BLOCK,
     vel[:, 0] = amp * np.sin(kk * x) * np.cos(kk * y)
     vel[:, 1] = -amp * np.cos(kk * x) * np.sin(kk * y)
     world.velocity[:n] = cupy.asarray(vel)
-    world.veleval[:n] = cupy.asarray(vel)
 
 
 def advance(sim: Simulation, world: World, substeps: int) -> None:
@@ -122,7 +121,6 @@ def shear_response(vorticity_epsilon: float, substeps: int = 5 * SUBSTEPS_PER_FR
     vel = np.zeros((n, 4), dtype=np.float32)
     vel[:, 1] = 0.3 * np.sin(kk * (pos[:, 0] - CENTER))
     world.velocity[:n] = cupy.asarray(vel)
-    world.veleval[:n] = cupy.asarray(vel)
     advance(sim, world, substeps)
     n = world._high_water
     v = cupy.asnumpy(world.velocity[:n, :3])
