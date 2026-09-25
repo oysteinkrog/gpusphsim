@@ -37,10 +37,29 @@
  * Ported from SPHSimLib/K_SimpleSPH_Step1.inl + K_SPH_Kernels_poly6.inl.
  * Neighbor iteration ported from SPHSimLib/K_UniformGrid_Utils.inl.
  *
+ * Inactive particles (bd-r5-review-n28.159): sleeping particles and non-rigid
+ * STATIC particles skip the neighbour loop on most substeps. Step2 skips both
+ * as particle i and integrate reads only their dTdt, so on a skipped substep
+ * density_out = position.w (the carried density), pressure_out and
+ * pr2_omega_out are recomputed from it, and every other output keeps the
+ * value its buffer already holds from the last full compute. That value
+ * belongs to the same particle: the grid-reuse gather keeps the sorted order,
+ * and the caller passes force_refresh = 1 on every full-sort substep.
+ * An inactive particle runs the full loop when
+ * (substep + index_i) % INACTIVE_REFRESH_PERIOD == 0, so at most 8 substeps
+ * pass between computes. On that refresh its dTdt uses a backward-Euler form
+ * over the hold, dTdt = S / (1 + A * 8 * dt) with S the explicit rate and A
+ * its coefficient sum, so the held rate cannot overshoot the neighbour
+ * temperatures. MAT_DEAD slots write fixed outputs every substep.
+ * frame_ptr == NULL turns the skip off (every particle computes every substep).
+ *
  * Constant memory (c_grid, c_sim, c_precalc, c_materials, c_interactions) declared in common.cuh.
  */
 
 #include "sph_shared.cuh"
+
+// Substeps between full computes of an inactive particle (power of two).
+#define INACTIVE_REFRESH_PERIOD 8u
 
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_Step1(
@@ -64,7 +83,9 @@ void K_Step1(
     float*          __restrict__ pressure_out,         // output: pre-computed pressure per particle (PERF-007)
     const void*     __restrict__ temperature_h,        // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
     float2*         __restrict__ pr2_omega_out,        // output: (p / rho^2, |omega|) for K_Step2 neighbour reads, may be NULL
-    float*          __restrict__ eta_out               // output: mu(I) viscosity eta (0 for non-GRANULAR) for K_Step2, may be NULL
+    float*          __restrict__ eta_out,              // output: mu(I) viscosity eta (0 for non-GRANULAR) for K_Step2, may be NULL
+    const uint*     __restrict__ frame_ptr,            // per-substep counter for the inactive refresh cadence; NULL = never skip
+    uint                         force_refresh         // 1 = every inactive particle computes (full-sort substep)
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -107,6 +128,47 @@ void K_Step1(
         return;
     }
 
+    // DEAD slots (mass 0) skip the scan (bd-r5-review-n28.159). Density keeps
+    // the STATIC floor value fmaxf(rest_density, 1) = 1 it had from the full
+    // path, not 0, because K_Step2 divides by a neighbour's position.w.
+    if (mat_id_i == MAT_DEAD) {
+        float rho_dead = fmaxf(c_materials[MAT_DEAD].rest_density, 1.0f);
+        float p_dead = compute_pressure(rho_dead, behavior_i, mat_id_i);
+        density_out[index_i] = rho_dead;
+        pressure_out[index_i] = p_dead;
+        shear_rate_out[index_i] = 0.0f;
+        if (eta_out) eta_out[index_i] = 0.0f;
+        dTdt_out[index_i] = 0.0f;
+        exposure_heat_out[index_i] = 0.0f;
+        exposure_corrode_out[index_i] = 0.0f;
+        vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        position[index_i].w = rho_dead;
+        if (pr2_omega_out) pr2_omega_out[index_i] = make_float2(p_dead / (rho_dead * rho_dead), 0.0f);
+        return;
+    }
+
+    // Sleeping and non-rigid STATIC particles skip the scan between refreshes
+    // (see the header). Their density cannot change while they are inactive.
+    bool is_inactive = (frame_ptr != 0) && (IS_SLEEPING(pi_i) || behavior_i == STATIC);
+    if (is_inactive && force_refresh == 0u
+            && ((__ldg(frame_ptr) + index_i) & (INACTIVE_REFRESH_PERIOD - 1u)) != 0u) {
+        // STATIC stores rest_density (same rule as the PostCalc below); a
+        // sleeper carries its last density in .w (guard an unset 0).
+        float rho_c = (behavior_i == STATIC || !(pos4_i.w > 0.0f))
+            ? fmaxf(c_materials[mat_id_i].rest_density, 1.0f)
+            : pos4_i.w;
+        float p_c = compute_pressure(rho_c, behavior_i, mat_id_i);
+        density_out[index_i] = rho_c;
+        pressure_out[index_i] = p_c;
+        if (pr2_omega_out) {
+            // |omega| is 0 for every inactive particle (vorticity is FLUID only).
+            pr2_omega_out[index_i] = make_float2(p_c / (rho_c * rho_c), 0.0f);
+        }
+        if (pos4_i.w != rho_c) position[index_i].w = rho_c;
+        return;
+    }
+
     // Read velocity for strain-rate (GRANULAR) and vorticity (FLUID).
     // FP16 pairing rule (bd-r5-review-n28.69): vel_i is used only in pair
     // differences against neighbours read from the FP16 mirror, so it comes
@@ -137,6 +199,9 @@ void K_Step1(
 
     // Heat diffusion accumulator: dTdt
     float sum_dTdt = 0.0f;
+    // Sum of the pair heat coefficients (the A in dT/dt = S - A T_i); used
+    // only for the backward-Euler dTdt of an inactive particle.
+    float sum_heat_a = 0.0f;
 
     // Exposure accumulators (from c_interactions table lookup)
     float sum_exposure_heat = 0.0f;
@@ -221,6 +286,7 @@ void K_Step1(
                                 float boost_x = fmaxf(1.0f, c_interactions[mat_id_i][mat_id_j].heat_exchange);
                                 float a_x = k_x * m_j / fmaxf(rho_x, RHO_EPSILON) * (h - sqrtf(r_sq)) * boost_x;
                                 sum_dTdt += fminf(a_x, a_x_max) * (T_j - T_i);
+                                sum_heat_a += fminf(a_x, a_x_max);
                             }
                             continue;
                         }
@@ -257,6 +323,7 @@ void K_Step1(
                                 float kappa_j = c_materials[mat_id_j].thermal_conductivity;
                                 float k_ij = 2.0f * kappa_i * kappa_j / fmaxf(kappa_i + kappa_j, 1e-6f);
                                 sum_dTdt += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * (T_j - T_i) * lap_var * heat_boost;
+                                sum_heat_a += k_ij * m_j / fmaxf(rho_j, RHO_EPSILON) * lap_var * heat_boost;
 
                                 // --- Exposure accumulation ---
                                 float w_poly6_var = diff * diff * diff;
@@ -351,7 +418,16 @@ void K_Step1(
     // dTdt = viscosity_lap_coeff * sum_dTdt / (rho_i * cp_i); k_ij is inside sum_dTdt
     float cp_i = c_materials[mat_id_i].heat_capacity;
     float rho_i_heat = density_out[index_i];
-    dTdt_out[index_i] = c_precalc.viscosity_lap_coeff * sum_dTdt / fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
+    float heat_div = fmaxf(rho_i_heat * cp_i, RHO_EPSILON);
+    float dTdt_i = c_precalc.viscosity_lap_coeff * sum_dTdt / heat_div;
+    if (is_inactive) {
+        // Integrate applies this rate for up to INACTIVE_REFRESH_PERIOD
+        // substeps, so use backward Euler over that hold with the neighbour
+        // temperatures fixed: never past the neighbours' weighted mean.
+        float a_rate = c_precalc.viscosity_lap_coeff * sum_heat_a / heat_div;
+        dTdt_i = dTdt_i / (1.0f + a_rate * (float)INACTIVE_REFRESH_PERIOD * c_sim.dt);
+    }
+    dTdt_out[index_i] = dTdt_i;
 
     // --- PostCalc: exposure accumulation ---
     // Normalise by the neighbour support weight (poly6_coeff cancels):

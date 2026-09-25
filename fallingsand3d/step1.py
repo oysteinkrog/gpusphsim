@@ -253,6 +253,8 @@ def compute_step1(
     temperature_h: Optional[cupy.ndarray] = None,
     pr2_omega_out: Optional[cupy.ndarray] = None,
     eta_out: Optional[cupy.ndarray] = None,
+    frame_counter: Optional[cupy.ndarray] = None,
+    force_refresh: bool = True,
 ) -> tuple:
     """Launch K_Step1 and return (density, shear_rate, dTdt, exposure_heat, exposure_corrode).
 
@@ -294,6 +296,18 @@ def compute_step1(
         (0 for the rest), which K_Step2 reads as eta_in instead of
         recomputing it per pair. Needs c_granular in this module, which
         step2.upload_granular_params uploads. If None, K_Step1 skips it.
+    frame_counter : cupy.ndarray, optional
+        (1,) uint32 per-substep device counter (Simulation._frame_counter_d).
+        With it, sleeping and non-rigid STATIC particles run the neighbour loop
+        only when (counter + index) % 8 == 0 and otherwise write density,
+        pressure and pr2_omega from the carried density and leave the other
+        outputs as they are (bd-r5-review-n28.159). The output buffers must
+        then be the ones the last K_Step1 wrote, in the same sorted order.
+        If None, every particle computes every call.
+    force_refresh : bool
+        True makes every inactive particle compute this call. Pass True on
+        any substep whose sort changed the sorted order (a full sort), since
+        the carried outputs then belong to other particles.
 
     Returns
     -------
@@ -362,6 +376,8 @@ def compute_step1(
             temperature_h_ptr,
             pr2_omega_ptr,
             eta_ptr,
+            frame_counter if frame_counter is not None else _null,
+            np.uint32(1 if force_refresh else 0),
         ),
     )
 

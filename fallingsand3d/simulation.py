@@ -1143,6 +1143,11 @@ class Simulation:
             pressure_out=w.sorted_pressure,
             temperature_h=w.sorted_temperature_h,
             pr2_omega_out=w.sorted_pr2_omega,
+            # Inactive refresh cadence (bd-r5-review-n28.159). A full sort
+            # reorders the sorted buffers, so every inactive particle must
+            # compute that substep. Each CUDA graph bakes in its own branch.
+            frame_counter=self._frame_counter_d,
+            force_refresh=self._last_setup_was_full_sort,
         )
         mark("step1")
 
