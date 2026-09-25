@@ -2834,9 +2834,14 @@ kernel the divergence estimate is biased, so the solve is skipped. `N_i` counts 
 non-GAS neighbour with mass, MAT_RIGID included (bd-r5-review-n28.68), so fluid pressed
 against a rigid body keeps its solve. At spacing 0.02 and h = 0.04 an interior particle has
 about 30 neighbours and a face particle about 19, so the outer layer of a block is gated;
-in an 11^3 block 566 of 1331 particles are below 20. `normal_in = None` turns the gate off,
-and `Simulation._run_dfsph_body` does not pass `normal_in` yet, so the gate is off in the running
-simulation until that call is wired. The density solver (13.4) is not gated.
+in an 11^3 block 566 of 1331 particles are below 20. `normal_in = None` turns the gate off.
+`Simulation._run_dfsph_body` passes no `normal_in`, so the gate is off in the running
+simulation, because with it on the flow spreads too much. A free-falling WATER droplet
+(9^3 or 13^3 particles at spacing 0.02) after 0.3 s has a mean pairwise separation of
+1.23 to 1.57 times the WCSPH value with the gate, and 1.04 to 1.18 times without it
+(spawn damping on or off). The gated share of a dam-break splash grows from 8 to 67
+percent of FLUID over 1 s as the flow thins, and the splash ends with 46 percent more KE.
+The density solver (13.4) is not gated.
 
 Iterations: 3 (Stable) or 2 (Fast). Each iteration requires two neighbor passes (compute
 kappa_v, then correct velocity). On a settling 36K block at the Stable profile the
