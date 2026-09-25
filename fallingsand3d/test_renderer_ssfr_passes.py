@@ -33,6 +33,9 @@ def _make_renderer(n, behavior):
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     r.num_active = n
     r.ssfr_enabled = True
+    # draw() builds the SSFR FBOs lazily (bd-r5-review-n28.137); tests that
+    # call _draw_ssfr directly need them up front.
+    r._create_ssfr_fbos(W, H)
     return r
 
 
