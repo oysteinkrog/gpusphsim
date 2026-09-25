@@ -155,7 +155,13 @@ def test_ramp_keeps_graphs_and_damping_applies(monkeypatch):
 
 def _run_positions(monkeypatch, old_path: bool):
     """40 substeps on PBF (ramp + motion). old_path restores sync copies and
-    per-ramp-substep graph invalidation."""
+    per-ramp-substep graph invalidation.
+
+    Returns the final positions and, for every substep, the c_sim bytes the
+    PBF module held after that substep ran.
+    """
+    import pbf_solver
+
     with monkeypatch.context() as m:
         if old_path:
             def sync_upload(dst_ptr, arr):
@@ -176,18 +182,33 @@ def _run_positions(monkeypatch, old_path: bool):
                         sim._invalidate_graphs()
 
                 m.setattr(sim, "_apply_damping_ramp", ramp_and_invalidate)
+            d_sim = int(pbf_solver.get_module().get_global("c_sim"))
+            consts = []
             for _ in range(40):
                 sim._sim_step(world._high_water)
+                buf = np.zeros(sim._sim_params.nbytes, dtype=np.uint8)
+                cp.cuda.runtime.memcpy(buf.ctypes.data, d_sim, buf.nbytes, 2)
+                consts.append(buf)
             cp.cuda.Device().synchronize()
             n = world._high_water
-            return world.position[:n, :3].get().copy()
+            return world.position[:n, :3].get().copy(), consts
         finally:
             _cleanup_sdf()
 
 
 def test_positions_match_old_upload_path(monkeypatch):
-    new = _run_positions(monkeypatch, old_path=False)
-    old = _run_positions(monkeypatch, old_path=True)
+    """Same constants per substep and the same fluid motion as the old path.
+
+    Particle positions are not bitwise repeatable here (atomics in the sort
+    and the PBF sums): two runs of the same path differ by about 1 cm per
+    particle after 40 substeps, while the centre of mass agrees to about
+    2e-5 m. So the check is on the constants the kernels read and on the
+    centre of mass.
+    """
+    new, c_new = _run_positions(monkeypatch, old_path=False)
+    old, c_old = _run_positions(monkeypatch, old_path=True)
     assert new.shape == old.shape
-    err = np.abs(new - old).max()
-    assert err < 1e-4, f"max position difference {err:.3e} m"
+    for i, (a, b) in enumerate(zip(c_new, c_old)):
+        np.testing.assert_array_equal(a, b, f"c_sim differs after substep {i}")
+    com_err = np.abs(new.mean(axis=0) - old.mean(axis=0)).max()
+    assert com_err < 1e-4, f"centre of mass differs by {com_err:.3e} m"
