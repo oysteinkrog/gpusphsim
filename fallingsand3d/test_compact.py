@@ -400,6 +400,182 @@ def test_num_active_with_dead_static():
     print(f"PASS: num_active handles 0x300 dead ({n} -> {alive_after})")
 
 
+# ---------------------------------------------------------------------------
+# Fused compaction (bd-r5-review-n28.149)
+# ---------------------------------------------------------------------------
+
+from world import _COMPACT_FIELDS, DEAD_PACKED  # noqa: E402
+
+
+def _random_scene(max_particles, n, dead_frac, seed=149):
+    """World with n slots of random bits in every compacted field.
+
+    Floats get random 32-bit patterns (NaN payloads included), so the check
+    is on raw bytes. dead_frac of the slots get material 0 with random
+    upper bits; the rest get material 1..31.
+    """
+    rng = np.random.default_rng(seed)
+    w = World(max_particles)
+    for f in _COMPACT_FIELDS:
+        arr = getattr(w, f)
+        nbytes = arr[:n].nbytes
+        raw = rng.integers(0, 256, size=nbytes, dtype=np.uint8)
+        arr[:n] = cp.asarray(raw).view(arr.dtype).reshape(arr[:n].shape)
+    pk = rng.integers(0, 2**32, size=n, dtype=np.uint64).astype(np.uint32)
+    pk = (pk & np.uint32(0xFFFFFF00)) | rng.integers(1, 32, size=n).astype(np.uint32)
+    dead = rng.random(n) < dead_frac
+    pk[dead] &= np.uint32(0xFFFFFF00)
+    w.packed_info[:n] = cp.asarray(pk)
+    w._high_water = n
+    return w, dead
+
+
+def test_fused_compact_parity_bit_exact():
+    """Every field after compact() equals a masked gather, byte for byte (10% dead)."""
+    n = 50_000
+    w, dead = _random_scene(60_000, n, 0.10)
+    alive = ~dead
+    expected = {f: cp.asnumpy(getattr(w, f)[:n])[alive] for f in _COMPACT_FIELDS}
+    num_alive = int(alive.sum())
+
+    assert w.compact(num_alive=num_alive) == num_alive
+    assert w._high_water == num_alive
+    for f in _COMPACT_FIELDS:
+        got = cp.asnumpy(getattr(w, f)[:num_alive])
+        assert got.shape == expected[f].shape, f
+        assert got.tobytes() == expected[f].tobytes(), f"{f} differs"
+    # Dead tail markers
+    assert (cp.asnumpy(w.packed_info[num_alive:n]) == DEAD_PACKED).all()
+    assert (cp.asnumpy(w.kappa[num_alive:n]) == 0).all()
+    assert (cp.asnumpy(w.kappa_v[num_alive:n]) == 0).all()
+
+
+def test_fused_compact_counts_when_not_given():
+    """compact() with no count reads it from the scan and gives the same result."""
+    n = 20_000
+    w, dead = _random_scene(20_000, n, 0.25, seed=7)
+    w2, _ = _random_scene(20_000, n, 0.25, seed=7)
+    num_alive = int((~dead).sum())
+    assert w.compact() == num_alive
+    assert w2.compact(num_alive=num_alive) == num_alive
+    for f in _COMPACT_FIELDS:
+        assert (cp.asnumpy(getattr(w, f)[:num_alive]).tobytes()
+                == cp.asnumpy(getattr(w2, f)[:num_alive]).tobytes()), f
+
+
+def test_fused_compact_swaps_buffers():
+    """compact() swaps primary and scratch arrays and bumps buffer_generation."""
+    w, dead = _random_scene(10_000, 10_000, 0.1)
+    before = {f: getattr(w, f).data.ptr for f in _COMPACT_FIELDS}
+    before_sorted = {f: getattr(w, "sorted_" + f).data.ptr for f in _COMPACT_FIELDS}
+    gen = w.buffer_generation
+    w.compact(num_alive=int((~dead).sum()))
+    assert w.buffer_generation == gen + 1
+    for f in _COMPACT_FIELDS:
+        assert getattr(w, f).data.ptr == before_sorted[f], f
+        assert getattr(w, "sorted_" + f).data.ptr == before[f], f
+
+
+_SPIN_SRC = r'''
+extern "C" __global__ void spin(long long cycles) {
+    long long t0 = clock64();
+    while (clock64() - t0 < cycles) { }
+}
+'''
+
+
+def test_fused_compact_no_host_sync_with_count():
+    """compact(num_alive=k) with no rigid block does not wait for the GPU.
+
+    A spin kernel keeps the stream busy for about 0.5 s. If compact() read
+    anything back, the host call would block until the spin ends.
+    """
+    import time
+    n = 100_000
+    w, dead = _random_scene(100_000, n, 0.1)
+    num_alive = int((~dead).sum())
+    w2, _ = _random_scene(100_000, n, 0.1)
+    w2.compact(num_alive=num_alive)  # warm up: compile K_Compact and cumsum
+    cp.cuda.Device().synchronize()
+
+    spin = cp.RawKernel(_SPIN_SRC, "spin")
+    clock_khz = cp.cuda.runtime.getDeviceProperties(
+        cp.cuda.Device().id)["clockRate"]
+    spin((1,), (1,), (np.int64(clock_khz * 500),))  # ~500 ms
+    t0 = time.perf_counter()
+    w.compact(num_alive=num_alive)
+    host_ms = (time.perf_counter() - t0) * 1e3
+    t1 = time.perf_counter()
+    cp.cuda.Device().synchronize()
+    wait_ms = (time.perf_counter() - t1) * 1e3
+    assert wait_ms > 100, f"spin kernel too short to detect a sync ({wait_ms:.0f} ms)"
+    assert host_ms < 100, f"compact() blocked for {host_ms:.0f} ms"
+
+
+def test_compact_invalidates_cuda_graph_at_same_n():
+    """After compact() swaps buffers, a graph captured at the same n is not replayed."""
+    import time
+    from simulation import Simulation
+    w = World(max_particles=30_000)
+    w.spawn_cube(min_corner=(-0.2, -0.9, -0.2), max_corner=(0.2, -0.7, 0.2),
+                 material_id=SAND, spacing=0.02)
+    sim = Simulation(w, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=True,
+                     max_substeps=2)
+    try:
+        sim.fixed_dt_value = 0.001
+        sim._upload_dt(0.001)
+        sim._spawn_substep = sim._damping_duration
+        sim.compact_interval = 0  # no scheduled compaction in this test
+        sim.notify_scene_changed()
+        for _ in range(6):
+            if sim._last_frame_time is None:
+                sim.step_frame()
+            sim._last_frame_time = time.perf_counter() - 1.0
+            sim.step_frame()
+            cp.cuda.Device().synchronize()
+        old = [g for g in (sim._graph_full_sort, sim._graph_gather_only) if g is not None]
+        assert old, "no CUDA graph captured"
+        n = w._high_water
+        w.packed_info[:10] = cp.uint32(DEAD_PACKED)
+        assert w.compact(num_alive=n - 10) == n - 10
+        assert w.add_dead_reserve(10) == 10
+        assert w._high_water == n
+        sim.notify_scene_changed()
+        sim._sim_step(n)
+        cp.cuda.Device().synchronize()
+        for g in (sim._graph_full_sort, sim._graph_gather_only):
+            assert all(g is not o for o in old), "stale CUDA graph replayed"
+        assert bool(cp.isfinite(w.position[:n, :3]).all())
+    finally:
+        sim.close()
+
+
+def test_fused_compact_timing_1m():
+    """compact() at 1M with 10% dead: GPU time near 0.5 ms (CUDA events).
+
+    Timing only: the GPU may be shared, so the best of several runs is used.
+    """
+    n = 1_000_000
+    w, dead = _random_scene(n, n, 0.1)
+    num_alive = int((~dead).sum())
+    best = float("inf")
+    for i in range(5):
+        # Restore the uncompacted state for each run.
+        if i:
+            w, _ = _random_scene(n, n, 0.1)
+        cp.cuda.Device().synchronize()
+        start, stop = cp.cuda.Event(), cp.cuda.Event()
+        start.record()
+        w.compact(num_alive=num_alive)
+        stop.record()
+        stop.synchronize()
+        best = min(best, cp.cuda.get_elapsed_time(start, stop))
+    print(f"fused compact 1M, 10% dead: best {best:.3f} ms GPU")
+    # Acceptance target is 0.5 ms (about the bandwidth floor at 1M). The
+    # assert allows 2x for a GPU shared with other work.
+    assert best < 1.0, f"compact() took {best:.3f} ms"
+
+
 if __name__ == "__main__":
     test_compact_no_dead()
     test_compact_all_dead()
