@@ -60,12 +60,9 @@ void K_Step1(
     float*          __restrict__ exposure_corrode_out, // output: corrosion exposure from interactions
     float4*         __restrict__ vorticity_out,        // output: (omega_x, omega_y, omega_z, |omega|) -- FLUID only
     float4*         __restrict__ normal_out,           // output: (n_x, n_y, n_z, neighbor_count) -- FLUID only
-    const float4*   __restrict__ particle_dye_in,      // input: particle dye color (r, g, b, unused)
-    float4*         __restrict__ dye_rate_out,         // output: dye diffusion rate (dr, dg, db, unused)
     const void*     __restrict__ velocity_h,           // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
     float*          __restrict__ pressure_out,         // output: pre-computed pressure per particle (PERF-007)
-    const void*     __restrict__ temperature_h,        // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
-    const void*     __restrict__ dye_h                 // FP16 dye for neighbor reads (PERF-011), may be NULL
+    const void*     __restrict__ temperature_h         // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
 ) {
     uint index_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (index_i >= numParticles) return;
@@ -102,25 +99,18 @@ void K_Step1(
         exposure_corrode_out[index_i] = 0.0f;
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        dye_rate_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         position[index_i].w = RIGID_PSI_RHO0;  // pack the placeholder density like other particles
         return;
     }
 
     // Read velocity for strain-rate (GRANULAR) and vorticity (FLUID).
-    // FP16 pairing rule (bd-r5-review-n28.69): vel_i and dye_i are used only
-    // in pair differences against neighbours read from the FP16 mirrors, so
-    // they come from the same mirrors. Co-moving particles then give an exact
+    // FP16 pairing rule (bd-r5-review-n28.69): vel_i is used only in pair
+    // differences against neighbours read from the FP16 mirror, so it comes
+    // from the same mirror. Co-moving particles then give an exact
     // zero difference instead of fp16(v) - v.
     float4 vel4_i = velocity_h ? load_half4((const uint2*)velocity_h + index_i)
                                : velocity[index_i];
     float3 vel_i = make_float3(vel4_i.x, vel4_i.y, vel4_i.z);
-
-    // Read dye color for diffusion (skip when dye disabled -- PERF-005)
-    bool dye_on = (c_sim.dye_enabled != 0);
-    float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (dye_on) dye_i = dye_h ? load_half4((const uint2*)dye_h + index_i)
-                              : __ldg(&particle_dye_in[index_i]);
 
     // Read temperature for heat diffusion
     // Same pairing rule for temperature (bd-r5-review-n28.132): T_i appears only
@@ -162,9 +152,6 @@ void K_Step1(
     // Surface normal accumulator (FLUID only): n = grad(color field)
     float3 normal = make_float3(0.0f, 0.0f, 0.0f);
     float neighbor_count = 0.0f;
-
-    // Dye diffusion rate accumulator
-    float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
 
     // Grid cell of particle i
     int3 cell_i = calcGridCell(make_float3(pos_i.x, pos_i.y, pos_i.z));
@@ -296,15 +283,6 @@ void K_Step1(
 
                                     if (m_j > 0.0f) neighbor_count += 1.0f;  // DEAD slots have mass 0
 
-                                    if (dye_on && behavior_j != STATIC) {
-                                        float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
-                                        float4 dye_j = dye_h ? load_half4((const uint2*)dye_h + index_j)
-                                                       : __ldg(&particle_dye_in[index_j]);
-                                        dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
-                                        dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
-                                        dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
-                                    }
-
                                     if (is_granular) {
                                         float4 vel4_j = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
                                                                    : __ldg(&velocity[index_j]);
@@ -350,8 +328,8 @@ void K_Step1(
     float density = c_precalc.poly6_coeff * sum_density;
     float rho_floor = is_gas_i ? RHO_EPSILON : 1.0f;
     // STATIC walls store rest_density, as PBF and DFSPH do, so every solver
-    // gives a wall neighbour the same V_j = m_j / rho_j in heat, normal and
-    // dye sums (bd-r5-review-n28.116). Floor at 1: DEAD has rest_density 0.
+    // gives a wall neighbour the same V_j = m_j / rho_j in heat and normal
+    // sums (bd-r5-review-n28.116). Floor at 1: DEAD has rest_density 0.
     // The STATIC dTdt divisor below reads the same value, so the heat pair
     // term stays conservative. Step2 mirrors p_i, so wall forces do not change.
     density_out[index_i] = (behavior_i == STATIC)
@@ -381,11 +359,6 @@ void K_Step1(
 
     // --- PostCalc: surface normal + neighbor count ---
     normal_out[index_i] = make_float4(normal.x, normal.y, normal.z, neighbor_count);
-
-    // --- PostCalc: dye diffusion rate (skip when disabled -- PERF-005) ---
-    if (dye_on) {
-        dye_rate_out[index_i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
-    }
 
     // --- PostCalc: strain-rate magnitude (gamma_dot) ---
     if (is_granular) {

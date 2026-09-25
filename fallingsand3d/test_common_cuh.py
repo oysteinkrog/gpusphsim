@@ -133,6 +133,13 @@ def test_struct_sizes(compiled_module):
     # GridParams: float3 grid_min(12) + float3 grid_delta(12) + uint table_size(4)
     #             + uint table_mask(4) = 32 bytes (changed from 52: no grid_max/res/num_cells)
     assert sizes[2] == 32, f"GridParams size {sizes[2]} != 32"
+    # SimParams must match the host dtype that uploads c_sim byte for byte
+    # (18 floats = 72 bytes).
+    from step1 import PRECALC_PARAMS_DTYPE, SIM_PARAMS_DTYPE
+    assert sizes[3] == SIM_PARAMS_DTYPE.itemsize == 72, (
+        f"SimParams size {sizes[3]} != host {SIM_PARAMS_DTYPE.itemsize}")
+    assert sizes[4] == PRECALC_PARAMS_DTYPE.itemsize, (
+        f"PrecalcParams size {sizes[4]} != host {PRECALC_PARAMS_DTYPE.itemsize}")
     print("  [OK] all struct sizes correct")
 
 

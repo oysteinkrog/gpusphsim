@@ -195,8 +195,6 @@ def pbf_compute_lambda(
     dTdt_out: "cupy.ndarray | None" = None,
     exposure_heat_out: "cupy.ndarray | None" = None,
     exposure_corrode_out: "cupy.ndarray | None" = None,
-    particle_dye_in: "cupy.ndarray | None" = None,
-    dye_rate_out: "cupy.ndarray | None" = None,
     velocity_in: "cupy.ndarray | None" = None,
     vorticity_out: "cupy.ndarray | None" = None,
     normal_out: "cupy.ndarray | None" = None,
@@ -211,8 +209,6 @@ def pbf_compute_lambda(
     dt_out = dTdt_out if dTdt_out is not None else _null
     eh_out = exposure_heat_out if exposure_heat_out is not None else _null
     ec_out = exposure_corrode_out if exposure_corrode_out is not None else _null
-    dye_in = particle_dye_in if particle_dye_in is not None else _null
-    dye_out = dye_rate_out if dye_rate_out is not None else _null
     vel_in = velocity_in if velocity_in is not None else _null
     vort_out = vorticity_out if vorticity_out is not None else _null
     norm_out = normal_out if normal_out is not None else _null
@@ -225,7 +221,6 @@ def pbf_compute_lambda(
         cell_start, cell_end, density_out, lambda_out,
         pressure_normal_out,
         t_in, d_in, dt_out, eh_out, ec_out,
-        dye_in, dye_out,
         vel_in, vort_out, norm_out,
     ))
 

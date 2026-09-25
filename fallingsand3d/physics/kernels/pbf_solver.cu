@@ -221,14 +221,12 @@ void K_PBF_ComputeLambda(
     float*          __restrict__ density_out,
     float*          __restrict__ lambda_out,
     float4*         __restrict__ pressure_normal_out,
-    // Optional heat diffusion + exposure + dye (NULL to skip, used only on first call)
+    // Optional heat diffusion + exposure (NULL to skip, used only on first call)
     const float*    __restrict__ temperature_in,
     const float*    __restrict__ density_in,
     float*          __restrict__ dTdt_out,
     float*          __restrict__ exposure_heat_out,
     float*          __restrict__ exposure_corrode_out,
-    const float4*   __restrict__ particle_dye_in,
-    float4*         __restrict__ dye_rate_out,
     const float4*   __restrict__ velocity_in,           // for vorticity (NULL to skip)
     float4*         __restrict__ vorticity_out,          // (curl_v.x, .y, .z, |curl_v|), NULL to skip
     float4*         __restrict__ normal_out              // (n_x, n_y, n_z, neighbor_count), NULL to skip
@@ -251,7 +249,7 @@ void K_PBF_ComputeLambda(
     // GAS skips PBF constraints entirely (compressible phase).
     if ((behavior_i == STATIC || behavior_i == GAS) && !do_heat) {
         // STATIC floor at 1: DEAD has rest_density 0. GAS keeps the density the
-        // first (do_heat) call computed this substep; heat and dye read it as rho_j
+        // first (do_heat) call computed this substep; heat reads it as rho_j
         // next substep, so overwriting it with rest_density would be wrong.
         // GAS also keeps its lambda slot, which holds the p/rho^2 term the first
         // call wrote for the gas pressure delta (bd-r5-review-n28.91).
@@ -279,22 +277,18 @@ void K_PBF_ComputeLambda(
     float3 grad_ci = make_float3(0.0f, 0.0f, 0.0f);  // grad_pi C_i
     float sum_grad_sq = 0.0f;  // SUM_j |grad_pj C_i|^2 for j != i
 
-    // Heat diffusion + exposure + dye accumulators (only when do_heat)
+    // Heat diffusion + exposure accumulators (only when do_heat)
     float sum_dTdt = 0.0f;
     float sum_exposure_heat = 0.0f;
     float sum_exposure_corrode = 0.0f;
     // Kernel support weight of all non-self, non-DEAD neighbours (GAS and
     // MAT_RIGID included). Exposure sums are divided by it, as in K_Step1.
     float sum_W = 0.0f;
-    float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
     float T_i = 0.0f;
     float kappa_i = 0.0f;
-    float4 dye_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    bool dye_on = (c_sim.dye_enabled != 0);
     if (do_heat) {
         T_i = __ldg(&temperature_in[i]);
         kappa_i = c_materials[mat_id_i].thermal_conductivity;
-        if (dye_on) dye_i = __ldg(&particle_dye_in[i]);
     }
     // Cross-phase heat cap (bd-r5-review-n28.94). The self term bounds rho_i from
     // below, so capping a cross-phase pair coefficient at a_x_max keeps
@@ -423,15 +417,6 @@ void K_PBF_ComputeLambda(
                             float w_poly6_var = diff * diff * diff;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
-
-                            if (dye_on && behavior_j != STATIC) {
-                                float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
-                                float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var;
-                                float4 dye_j = __ldg(&particle_dye_in[j]);
-                                dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
-                                dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
-                                dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
-                            }
                         }
 
                         // Vorticity + surface normal (FLUID only); MAT_RIGID adds to the normal only
@@ -477,7 +462,7 @@ void K_PBF_ComputeLambda(
     rho = fmaxf(rho, is_gas_i ? RHO_EPSILON : 1.0f);
     density_out[i] = rho;
 
-    // Heat diffusion + exposure + dye output
+    // Heat diffusion + exposure output
     if (do_heat) {
         float cp_i = c_materials[mat_id_i].heat_capacity;
         // STATIC divides by its stored density (rest_density, written below):
@@ -489,7 +474,6 @@ void K_PBF_ComputeLambda(
         float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
         exposure_heat_out[i] = sum_exposure_heat * inv_sum_W;
         exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W;
-        if (dye_on) dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
     }
 
     // Vorticity output

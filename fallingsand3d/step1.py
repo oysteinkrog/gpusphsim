@@ -53,7 +53,8 @@ from kernel_loader import load_module
 #     float3 world_min;            // 12 bytes
 #     float3 world_max;            // 12 bytes
 #     float  velocity_damping;     //  4 bytes
-# };                               // Total: 68 bytes
+#     float  velocity_limit;       //  4 bytes
+# };                               // Total: 72 bytes
 SIM_PARAMS_DTYPE = np.dtype(
     [
         ("smoothing_length", np.float32),
@@ -68,7 +69,6 @@ SIM_PARAMS_DTYPE = np.dtype(
         ("world_max", np.float32, (3,)),
         ("velocity_damping", np.float32),
         ("velocity_limit", np.float32),
-        ("dye_enabled", np.int32),
     ],
     align=False,
 )
@@ -105,7 +105,6 @@ def build_sim_params(
     world_max: tuple = (1.0, 1.0, 1.0),
     velocity_damping: float = 0.0,
     velocity_limit: float = 10.0,
-    dye_enabled: int = 0,
 ) -> np.ndarray:
     """Build a single SimParams struct as a numpy structured array."""
     params = np.zeros(1, dtype=SIM_PARAMS_DTYPE)
@@ -121,7 +120,6 @@ def build_sim_params(
     params[0]["world_max"] = world_max
     params[0]["velocity_damping"] = velocity_damping
     params[0]["velocity_limit"] = velocity_limit
-    params[0]["dye_enabled"] = dye_enabled
     return params
 
 
@@ -239,12 +237,9 @@ def compute_step1(
     exposure_corrode_out: Optional[cupy.ndarray] = None,
     vorticity_out: Optional[cupy.ndarray] = None,
     normal_out: Optional[cupy.ndarray] = None,
-    particle_dye_in: Optional[cupy.ndarray] = None,
-    dye_rate_out: Optional[cupy.ndarray] = None,
     velocity_h: Optional[cupy.ndarray] = None,
     pressure_out: Optional[cupy.ndarray] = None,
     temperature_h: Optional[cupy.ndarray] = None,
-    dye_h: Optional[cupy.ndarray] = None,
 ) -> tuple:
     """Launch K_Step1 and return (density, shear_rate, dTdt, exposure_heat, exposure_corrode).
 
@@ -302,10 +297,6 @@ def compute_step1(
         vorticity_out = cupy.empty((n, 4), dtype=cupy.float32)
     if normal_out is None:
         normal_out = cupy.empty((n, 4), dtype=cupy.float32)
-    if particle_dye_in is None:
-        particle_dye_in = cupy.zeros((n, 4), dtype=cupy.float32)
-    if dye_rate_out is None:
-        dye_rate_out = cupy.empty((n, 4), dtype=cupy.float32)
     if pressure_out is None:
         pressure_out = cupy.empty(n, dtype=cupy.float32)
 
@@ -315,7 +306,6 @@ def compute_step1(
     _null = cupy.ndarray(0, dtype=cupy.uint32)
     velocity_h_ptr = velocity_h if velocity_h is not None else _null
     temperature_h_ptr = temperature_h if temperature_h is not None else _null
-    dye_h_ptr = dye_h if dye_h is not None else _null
 
     module = _get_module()
     kernel = module.get_function("K_Step1")  # type: ignore[union-attr]
@@ -343,12 +333,9 @@ def compute_step1(
             exposure_corrode_out,
             vorticity_out,
             normal_out,
-            particle_dye_in,
-            dye_rate_out,
             velocity_h_ptr,
             pressure_out,
             temperature_h_ptr,
-            dye_h_ptr,
         ),
     )
 

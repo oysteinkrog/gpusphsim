@@ -1062,7 +1062,7 @@ class Simulation:
         # value-guards any zero entry (frame 1 / fresh spawns) to 1000 (bd-r4fix-uup.14).
         cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
 
-        # Step1: density + strain-rate + heat diffusion + exposure + vorticity + normal + dye
+        # Step1: density + strain-rate + heat diffusion + exposure + vorticity + normal
         step1.compute_step1(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -1079,12 +1079,9 @@ class Simulation:
             exposure_corrode_out=w.sorted_exposure_corrode,
             vorticity_out=w.sorted_vorticity,
             normal_out=w.sorted_normal,
-            particle_dye_in=w.sorted_particle_dye[:n],
-            dye_rate_out=w.sorted_dye_rate,
             velocity_h=w.sorted_velocity_h,
             pressure_out=w.sorted_pressure,
             temperature_h=w.sorted_temperature_h,
-            dye_h=w.sorted_dye_h,
         )
         mark("step1")
 
@@ -1254,8 +1251,6 @@ class Simulation:
             dTdt_out=w.sorted_dTdt,
             exposure_heat_out=w.sorted_exposure_heat,
             exposure_corrode_out=w.sorted_exposure_corrode,
-            particle_dye_in=w.sorted_particle_dye[:n],
-            dye_rate_out=w.sorted_dye_rate,
             velocity_in=w.sorted_velocity[:n],
             vorticity_out=w.sorted_vorticity,
             normal_out=w.sorted_normal,
@@ -1375,8 +1370,6 @@ class Simulation:
             w.sorted_density, w.sorted_alpha_dfsph,
             w.sorted_shear_rate, w.sorted_dTdt,
             w.sorted_exposure_heat, w.sorted_exposure_corrode,
-            particle_dye_in=w.sorted_particle_dye[:n],
-            dye_rate_out=w.sorted_dye_rate,
             vorticity_out=w.sorted_vorticity,
             normal_out=w.sorted_normal,
         )

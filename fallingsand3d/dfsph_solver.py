@@ -155,8 +155,6 @@ def compute_density_alpha(
     dTdt_out: cupy.ndarray,
     exposure_heat_out: cupy.ndarray,
     exposure_corrode_out: cupy.ndarray,
-    particle_dye_in: "cupy.ndarray | None" = None,
-    dye_rate_out: "cupy.ndarray | None" = None,
     vorticity_out: "cupy.ndarray | None" = None,
     normal_out: "cupy.ndarray | None" = None,
 ) -> None:
@@ -168,8 +166,6 @@ def compute_density_alpha(
     # density_in can be None on first frame -- pass empty array (null pointer)
     _null = np.intp(0)
     din = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
-    dye_in = particle_dye_in if particle_dye_in is not None else _null
-    dye_out = dye_rate_out if dye_rate_out is not None else _null
     vort_out = vorticity_out if vorticity_out is not None else _null
     norm_out = normal_out if normal_out is not None else _null
     kernel(grid, block, (
@@ -177,7 +173,7 @@ def compute_density_alpha(
         packed_info, temperature, cell_start, cell_end,
         density_out, alpha_out, shear_rate_out,
         dTdt_out, exposure_heat_out, exposure_corrode_out,
-        dye_in, dye_out, vort_out, norm_out,
+        vort_out, norm_out,
     ))
 
 

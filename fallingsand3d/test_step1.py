@@ -218,10 +218,10 @@ def test_struct_sizes() -> None:
     sp = build_sim_params()
     pp = build_precalc_params()
 
-    # SimParams: 76 bytes (smoothing_length, smoothing_length_sq, particle_mass,
+    # SimParams: 72 bytes (smoothing_length, smoothing_length_sq, particle_mass,
     # particle_spacing, gravity(3), dt, restitution, wall_friction, world_min(3),
-    # world_max(3), velocity_damping, velocity_limit, dye_enabled = 19 fields)
-    assert sp.nbytes == 76, f"SimParams: {sp.nbytes} != 76 bytes"
+    # world_max(3), velocity_damping, velocity_limit = 18 floats)
+    assert sp.nbytes == 72, f"SimParams: {sp.nbytes} != 72 bytes"
     print(f"[OK] SimParams: {sp.nbytes} bytes")
 
     # PrecalcParams: 20 bytes
@@ -1335,13 +1335,13 @@ def test_rigid_wall_contact_layer_matches_stone() -> None:
 
 
 # ---------------------------------------------------------------------------
-# bd-r5-review-n28.69: FP16 pairing rule for pair velocity and dye differences
+# bd-r5-review-n28.69: FP16 pairing rule for pair velocity differences
 # ---------------------------------------------------------------------------
 
 def _translating_block_step1(packed: int) -> tuple:
-    """Step1 on a 10^3 lattice moving at (1.3, -0.7, 2.1) with uniform dye 0.3.
+    """Step1 on a 10^3 lattice moving at (1.3, -0.7, 2.1).
 
-    Returns (vorticity, shear_rate, dye_rate) as numpy arrays.
+    Returns (vorticity, shear_rate) as numpy arrays.
     """
 
     k = 10
@@ -1357,50 +1357,39 @@ def _translating_block_step1(packed: int) -> tuple:
     _upload_all_params()
     upload_sim_params(build_sim_params(
         smoothing_length=H, particle_mass=MASS, particle_spacing=SPACING,
-        dye_enabled=1,
     ))
     scene = counting_sort_scene(
         pos, velocity=vel, mass=np.full(n, MASS, dtype=np.float32),
         packed_info=np.full(n, packed, dtype=np.uint32),
         grid_params=default_grid_params(),
     )
-    # Uniform dye 0.3 (off the FP16 grid) with its FP16 mirror.
-    dye = cupy.zeros((n, 4), dtype=cupy.float32)
-    dye[:, :3] = 0.3
-    dye_h = cupy.ascontiguousarray(dye.astype(cupy.float16)).view(cupy.uint32)
 
     density_in = cupy.full(n, RHO0, dtype=cupy.float32)
     vort = cupy.zeros((n, 4), dtype=cupy.float32)
-    dye_rate = cupy.zeros((n, 4), dtype=cupy.float32)
     shear = cupy.zeros(n, dtype=cupy.float32)
     args = (scene["position"], scene["velocity"], scene["mass"], density_in,
             scene["packed_info"], scene["temperature"],
             scene["cell_start"], scene["cell_end"])
-    kw = dict(shear_rate_out=shear, vorticity_out=vort, particle_dye_in=dye,
-              dye_rate_out=dye_rate, velocity_h=scene["velocity_h"], dye_h=dye_h)
+    kw = dict(shear_rate_out=shear, vorticity_out=vort, velocity_h=scene["velocity_h"])
     compute_step1(*args, **kw)
     cupy.cuda.Device().synchronize()
-    out = (cupy.asnumpy(vort), cupy.asnumpy(shear), cupy.asnumpy(dye_rate))
-    # Leave dye off for the other tests.
+    out = (cupy.asnumpy(vort), cupy.asnumpy(shear))
     _upload_all_params()
     return out
 
 
-def test_translating_block_zero_vorticity_strain_dye() -> None:
-    """A uniformly translating block has exactly zero vorticity, strain rate
-    and dye rate. Neighbour velocity and dye come from the FP16 mirrors; the
-    particle's own value must come from the same mirror, or every pair
-    difference is fp16(x) - x instead of zero."""
-    vort, _, dye_rate = _translating_block_step1(PACKED_WATER)
-    _, shear, _ = _translating_block_step1(PACKED_SAND)
+def test_translating_block_zero_vorticity_strain() -> None:
+    """A uniformly translating block has exactly zero vorticity and strain
+    rate. Neighbour velocity comes from the FP16 mirror; the particle's own
+    value must come from the same mirror, or every pair difference is
+    fp16(v) - v instead of zero."""
+    vort, _ = _translating_block_step1(PACKED_WATER)
+    _, shear = _translating_block_step1(PACKED_SAND)
     max_vort = np.abs(vort[:, :3]).max()
     max_shear = np.abs(shear).max()
-    max_dye = np.abs(dye_rate[:, :3]).max()
-    print(f"  max |curl v| = {max_vort:.3e}, "
-          f"max gamma_dot = {max_shear:.3e}, max |dye rate| = {max_dye:.3e}")
+    print(f"  max |curl v| = {max_vort:.3e}, max gamma_dot = {max_shear:.3e}")
     assert max_vort == 0.0, f"spurious vorticity {max_vort}"
     assert max_shear == 0.0, f"spurious strain rate {max_shear}"
-    assert max_dye == 0.0, f"spurious dye rate {max_dye}"
 
 
 # ---------------------------------------------------------------------------

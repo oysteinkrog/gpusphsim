@@ -95,8 +95,6 @@ void K_DFSPH_ComputeDensityAlpha(
     float*          __restrict__ dTdt_out,
     float*          __restrict__ exposure_heat_out,
     float*          __restrict__ exposure_corrode_out,
-    const float4*   __restrict__ particle_dye_in,
-    float4*         __restrict__ dye_rate_out,
     float4*         __restrict__ vorticity_out,      // (curl_v.x, .y, .z, |curl_v|), NULL to skip
     float4*         __restrict__ normal_out          // (n_x, n_y, n_z, neighbor_count), NULL to skip
 ) {
@@ -130,7 +128,6 @@ void K_DFSPH_ComputeDensityAlpha(
         dTdt_out[i] = 0.0f;
         exposure_heat_out[i] = 0.0f;
         exposure_corrode_out[i] = 0.0f;
-        if (dye_rate_out) dye_rate_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (vorticity_out) vorticity_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (normal_out) normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
@@ -160,9 +157,6 @@ void K_DFSPH_ComputeDensityAlpha(
     // Kernel support weight of all non-self, non-DEAD neighbours (GAS and
     // MAT_RIGID included). Exposure sums are divided by it, as in K_Step1.
     float sum_W = 0.0f;
-    float3 dye_rate = make_float3(0.0f, 0.0f, 0.0f);
-    bool dye_on = (c_sim.dye_enabled != 0) && (dye_rate_out != 0);
-    float4 dye_i = dye_on ? __ldg(&particle_dye_in[i]) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 
     // Strain-rate tensor (GRANULAR only)
     float Dxx = 0.0f, Dyy = 0.0f, Dzz = 0.0f;
@@ -250,7 +244,7 @@ void K_DFSPH_ComputeDensityAlpha(
                         // Unset or zero density_in (spawn, unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
                         if (rho_j <= 0.0f) rho_j = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
 
-                        // Skip MAT_RIGID for heat/exposure/dye/vorticity/strain
+                        // Skip MAT_RIGID for heat/exposure/vorticity/strain
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         bool is_rigid_j = (mat_id_j == MAT_RIGID);
 
@@ -269,16 +263,6 @@ void K_DFSPH_ComputeDensityAlpha(
                             float w_poly6_var = diff * diff * diff;
                             sum_exposure_corrode += c_interactions[mat_id_i][mat_id_j].reaction_rate * w_poly6_var;
                             sum_exposure_heat += c_interactions[mat_id_i][mat_id_j].heat_exchange * fmaxf(T_j - T_i, 0.0f) * w_poly6_var;
-
-                            if (dye_on && behavior_j != STATIC) {
-                                float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
-                                float lap_var2 = h - rlen;
-                                float dye_factor = 0.01f * vol_j * c_precalc.viscosity_lap_coeff * lap_var2;
-                                float4 dye_j = __ldg(&particle_dye_in[j]);
-                                dye_rate.x += dye_factor * (dye_j.x - dye_i.x);
-                                dye_rate.y += dye_factor * (dye_j.y - dye_i.y);
-                                dye_rate.z += dye_factor * (dye_j.z - dye_i.z);
-                            }
                         }
 
                         // Alpha factor (using Spiky gradient). STATIC neighbours
@@ -371,9 +355,6 @@ void K_DFSPH_ComputeDensityAlpha(
         float inv_sum_W_s = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
         exposure_heat_out[i] = sum_exposure_heat * inv_sum_W_s;
         exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W_s;
-        if (dye_rate_out != 0) {
-            dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
-        }
         if (vorticity_out != 0) vorticity_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (normal_out != 0) normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, neighbor_count);
         return;
@@ -410,11 +391,6 @@ void K_DFSPH_ComputeDensityAlpha(
     float inv_sum_W = (sum_W > 0.0f) ? 1.0f / sum_W : 0.0f;
     exposure_heat_out[i] = sum_exposure_heat * inv_sum_W;
     exposure_corrode_out[i] = sum_exposure_corrode * inv_sum_W;
-
-    // Dye diffusion output
-    if (dye_rate_out != 0) {
-        dye_rate_out[i] = make_float4(dye_rate.x, dye_rate.y, dye_rate.z, 0.0f);
-    }
 
     // Shear rate
     if (is_granular) {

@@ -183,12 +183,9 @@ def run_benchmark(
             exposure_corrode_out=world.sorted_exposure_corrode,
             vorticity_out=world.sorted_vorticity,
             normal_out=world.sorted_normal,
-            particle_dye_in=world.sorted_particle_dye[:n],
-            dye_rate_out=world.sorted_dye_rate,
             velocity_h=world.sorted_velocity_h,
             pressure_out=world.sorted_pressure,
             temperature_h=world.sorted_temperature_h,
-            dye_h=world.sorted_dye_h,
         )
         timer.mark("step1")
 

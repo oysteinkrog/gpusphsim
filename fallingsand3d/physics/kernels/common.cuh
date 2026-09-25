@@ -157,7 +157,6 @@ struct SimParams {
     float3 world_max;            // simulation domain max
     float  velocity_damping;     // spawn stabilization: 0.0=none, 0.8=heavy
     float  velocity_limit;       // CFL-derived max velocity (replaces VELOCITY_LIMIT define)
-    int    dye_enabled;          // 1 when any particle has dye, 0 to skip dye diffusion (PERF-005)
 };
 
 __constant__ SimParams c_sim;
