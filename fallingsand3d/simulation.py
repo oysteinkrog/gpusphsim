@@ -5,7 +5,11 @@ Step2 -> Integrate.  Decouples simulation from rendering via a speed parameter,
 accuracy parameter (CFL number), and substep budget.
 
 Each render frame:
-  1. If adaptive mode: compute dt from CFL constraints (acoustic, viscous — CPU-only)
+  1. Pick dt on the host from the max velocity latched by the previous
+     frame's async readback (no GPU sync). Adaptive mode (WCSPH): velocity
+     CFL, accuracy cap and profile dt_max. Fixed mode (PBF/DFSPH): split
+     fixed_dt into more substeps when the fastest particle nears the
+     velocity clamp.
   2. Compute sim_steps = clamp(round(speed * wall_dt / sim_dt), 0, max_substeps)
   3. Run sim_steps simulation substeps
   4. Copy UNSORTED pos/color to mapped VBOs (rendering happens once per frame)
@@ -42,9 +46,22 @@ import implicit_st
 
 # Adaptive timestep limits
 DT_MIN = 1e-5
+# Adaptive dt cap used when the solver profile sets no dt_max.
 DT_MAX = 0.001
-# Accuracy value that maps to DT_MAX; lower accuracy scales dt down linearly.
+# Accuracy value that maps to dt_max; lower accuracy scales dt down linearly.
 ACCURACY_REF = 0.4
+# CFL number of the velocity CFL dt <= CFL_NUMBER * h / (c_sound + v_max).
+# At v_max = 0 it is the acoustic bound 0.25 * h / c_sound.
+CFL_NUMBER = 0.25
+# Adaptive dt may grow at most this factor per frame; it shrinks at once.
+DT_GROWTH_PER_FRAME = 1.10
+# _upload_dt does one constant upload per module, so skip changes under 5%
+# unless dt reaches its velocity-free cap.
+DT_UPLOAD_REL = 0.05
+# Fixed-dt solvers (PBF/DFSPH): split fixed_dt into more substeps once the
+# lagged v_max passes this fraction of the velocity clamp at fixed_dt.
+FIXED_SUBDIV_MARGIN = 0.5
+FIXED_SUBDIV_MAX = 8
 
 
 def _no_mark(label: str) -> None:
@@ -78,8 +95,10 @@ class Simulation:
         Time scale: 1.0 = realtime, <1 = slow-mo, >1 = fast-forward.
     accuracy : float
         Timestep scale for adaptive dt (0.1-1.0, default 0.4).
-        dt = DT_MAX * accuracy / 0.4, so 0.4 gives 1 ms and 0.2 gives 0.5 ms.
-        Values above 0.4 are capped at DT_MAX. Ignored when fixed_dt is True.
+        The cap is dt_max * accuracy / 0.4 (dt_max from the solver profile,
+        DT_MAX = 1 ms if it sets none), so 0.4 gives dt_max and 0.2 half of
+        it. Values above 0.4 are capped at dt_max. The velocity CFL can
+        lower dt below the cap. Ignored when fixed_dt is True.
     fixed_dt : bool
         If True, use fixed timestep (no CFL computation). Default False.
     max_substeps : int
@@ -174,6 +193,12 @@ class Simulation:
         # The displacement starts at the "unknown" sentinel, which never skips.
         self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
         self._last_foam_count = 0
+        # Max particle speed (m/s) estimated from the latched drift: drift
+        # since the last full sort / sim time since that sort. 1-2 frames
+        # old. Kept when the latch is unknown (scene change, +inf sentinel).
+        self._v_max_lagged = 0.0
+        # Substeps fixed_dt is split into (PBF/DFSPH velocity subdivision).
+        self._fixed_subdiv = 1
         # Freelist size (_dead_count) at the end of the last substep of the
         # previous frame: the DEAD count in [0, _high_water), since
         # K_Reactions pushes every DEAD slot and K_SpawnGas pops the ones it
@@ -224,6 +249,8 @@ class Simulation:
         self._substeps_since_sort = 0   # substeps since the last full sort
         self._frame_substeps = 0        # substeps since the last decision
         self._last_disp_substeps = 0    # substeps since sort when the latched copy was taken
+        self._sim_time_since_sort = 0.0  # sim seconds since the last full sort
+        self._last_disp_sim_time = 0.0   # the same, when the latched copy was taken
         # PBF/DFSPH: tighter threshold (0.15*h) and lower max skip count
         self._sort_skip_threshold_sq_tight = (0.15 * 0.04) ** 2  # 0.000036
         self._sort_skipped_count = 0  # stats for UI
@@ -291,7 +318,9 @@ class Simulation:
         """Compute acoustic speed: max over active materials of sqrt(k * gamma / rho0)."""
         c_sound = 0.0
         for mat in MATERIALS.values():
-            if mat.behavior_class == STATIC or mat.rest_density <= 0.0:
+            # GAS is left out: its soft EOS must not set the liquid CFL.
+            if (mat.behavior_class in (STATIC, GAS)
+                    or mat.rest_density <= 0.0):
                 continue
             k = mat.eos_stiffness
             gamma = mat.eos_gamma
@@ -301,37 +330,62 @@ class Simulation:
                 c_sound = max(c_sound, c)
         return max(c_sound, 0.01)  # floor to avoid zero
 
-    def _compute_adaptive_dt(self, n: int) -> float:
-        """Compute adaptive dt from accuracy and CFL limits (CPU-only, no GPU sync).
+    def _dt_max(self) -> float:
+        """Adaptive dt cap: the profile's dt_max, or DT_MAX if it sets none."""
+        dt_max = getattr(self._profile, 'dt_max', None)
+        return float(dt_max) if dt_max else DT_MAX
 
-          dt_accuracy = DT_MAX * accuracy / ACCURACY_REF
-          dt_acoustic = 0.25 * h / c_sound
-          dt = min(dt_accuracy, dt_acoustic) clamped to [DT_MIN, DT_MAX]
+    def _adaptive_dt_cap(self) -> float:
+        """Velocity-free part of the adaptive dt: dt_max * accuracy / ACCURACY_REF."""
+        dt_max = self._dt_max()
+        dt_accuracy = dt_max * self.accuracy / ACCURACY_REF
+        return max(DT_MIN, min(dt_max, dt_accuracy))
 
-        With the current materials dt_acoustic is about 2.2 ms, above DT_MAX
-        (1 ms), so dt_accuracy is the bound that acts: accuracy 0.4 gives
-        1 ms, 0.2 gives 0.5 ms, 0.1 gives 0.25 ms. Accuracy above 0.4 is
-        capped by DT_MAX.
+    def _compute_adaptive_dt(self, n: int, v_max: Optional[float] = None) -> float:
+        """Target adaptive dt (CPU-only, no GPU sync).
+
+          dt_accuracy = dt_max * accuracy / ACCURACY_REF
+          dt_cfl      = CFL_NUMBER * h / (c_sound + v_max)
+          dt = min(dt_accuracy, dt_cfl) clamped to [DT_MIN, dt_max]
+
+        v_max defaults to the lagged estimate from the async readback
+        (_v_max_lagged). At v_max = 0, dt_cfl is the acoustic bound
+        0.25 * h / c_sound, about 3.4 ms with c_sound = 2.96 m/s (SAND;
+        GAS is excluded). With dt_max = 1 ms the velocity CFL binds above
+        about 7 m/s: 10 m/s gives 0.77 ms, 20 m/s gives 0.43 ms.
 
         There is no viscous CFL. Step2 treats the viscous self-term
-        implicitly (bd-r5-review-n28.52), which is stable at any dt. The old
-        bound, accuracy * rho_min * h^2 / max_eta, assumed nu = mu / rho, but
-        the FLUID form has no 1/rho_i, so it gave about 7 ms and never bound
-        while LAVA needed 0.1 ms explicitly.
+        implicitly (bd-r5-review-n28.52), which is stable at any dt.
 
-        The advection CFL (velocity-based) is omitted because velocity_limit
-        and accel_max prevent particles from exceeding the speed of sound.
+        step_frame rate-limits this target (_next_adaptive_dt).
         """
-        h = self._h
+        if v_max is None:
+            v_max = self._v_max_lagged
+        dt_cfl = CFL_NUMBER * self._h / (self._c_sound + max(v_max, 0.0))
+        return max(DT_MIN, min(self._adaptive_dt_cap(), dt_cfl))
 
-        # Accuracy-scaled cap: the accuracy knob acts through this bound.
-        dt_accuracy = DT_MAX * self.accuracy / ACCURACY_REF
+    def _next_adaptive_dt(self, n: int) -> float:
+        """Rate-limited adaptive dt: shrinks at once, grows at most 10% per frame."""
+        target = self._compute_adaptive_dt(n)
+        if target < self.dt:
+            return target
+        return min(target, self.dt * DT_GROWTH_PER_FRAME)
 
-        # Acoustic CFL (fixed 0.25 coefficient, not scaled by accuracy)
-        dt_acoustic = 0.25 * h / self._c_sound
+    def _next_fixed_subdiv(self) -> int:
+        """Substeps to split fixed_dt into for PBF/DFSPH (fixed-dt solvers).
 
-        dt = min(dt_accuracy, dt_acoustic)
-        return max(DT_MIN, min(DT_MAX, dt))
+        The velocity clamp at fixed_dt is v_cap = factor * h / fixed_dt
+        (4.32 m/s for PBF at 1/120). Once the lagged v_max passes
+        FIXED_SUBDIV_MARGIN * v_cap, dt = fixed_dt / n raises the clamp to
+        n * v_cap. n grows at once and falls by one per frame.
+        """
+        vlf = getattr(self._profile, 'velocity_limit_factor', 0.9)
+        v_cap = vlf * self._h / max(self.fixed_dt_value, 1e-8)
+        target = math.ceil(self._v_max_lagged / (FIXED_SUBDIV_MARGIN * v_cap))
+        target = max(1, min(FIXED_SUBDIV_MAX, target))
+        if target >= self._fixed_subdiv:
+            return target
+        return self._fixed_subdiv - 1
 
     def _upload_dt(self, new_dt: float) -> None:
         """Update dt in c_sim constant memory across all modules that read it."""
@@ -559,6 +613,7 @@ class Simulation:
         self.fixed_dt = profile.fixed_dt
         self.max_substeps = profile.max_substeps
         self.accuracy = profile.accuracy
+        self._fixed_subdiv = 1
 
         # Upload new dt to all WCSPH modules
         self._upload_dt(profile.dt)
@@ -1630,6 +1685,8 @@ class Simulation:
         """
         full_sort = self._next_setup_is_full_sort(n)
         self._substeps_since_sort = 1 if full_sort else self._substeps_since_sort + 1
+        self._sim_time_since_sort = (self.dt if full_sort
+                                     else self._sim_time_since_sort + self.dt)
         self._frame_substeps += 1
 
     def _substep_prologue(self, n: int) -> int:
@@ -1824,6 +1881,26 @@ class Simulation:
             except Exception:
                 pass  # timing is advisory — never crash the sim loop
 
+    def _latch_v_max(self) -> None:
+        """Update _v_max_lagged from the just-latched drift (host only).
+
+        v_max = sqrt(max drift^2 since the last full sort) / sim time since
+        that sort. While the scene moves, every substep sorts, so this is
+        the largest one-substep displacement / dt. While sorts are skipped
+        it is the fastest average speed over the skip window. The +inf
+        sentinel (K_SpawnGas teleport, unknown) keeps the previous value.
+        """
+        import struct
+        bits = self._last_max_disp_uint
+        if bits >= 0x7F800000:
+            return
+        t = self._last_disp_sim_time
+        if bits == 0 or t <= 0.0:
+            self._v_max_lagged = 0.0
+            return
+        disp_sq = struct.unpack('f', struct.pack('I', bits))[0]
+        self._v_max_lagged = math.sqrt(max(disp_sq, 0.0)) / t
+
     def _update_sort_skip_decision(self) -> None:
         """Decide whether the next substeps may skip the full sort (grid reuse).
 
@@ -1846,8 +1923,10 @@ class Simulation:
         # --- 1. Latch the newest landed copy from the current scene ---
         landed_epoch = None
         landed_substeps = 0
+        landed_sim_time = 0.0
         while self._readback_pending and self._readback_pending[0][0].done:
-            ev, landed_epoch, landed_substeps = self._readback_pending.popleft()
+            ev, landed_epoch, landed_substeps, landed_sim_time = (
+                self._readback_pending.popleft())
             self._readback_free_events.append(ev)
         if landed_epoch is not None:
             if self._readback_pending:
@@ -1860,8 +1939,10 @@ class Simulation:
                 self._last_max_disp_uint = _ctypes.c_uint32.from_address(
                     self._pinned_displacement.ptr).value
                 self._last_disp_substeps = landed_substeps
+                self._last_disp_sim_time = landed_sim_time
                 self._last_dead_count = _ctypes.c_uint32.from_address(
                     self._pinned_dead_count.ptr).value
+                self._latch_v_max()
         elif self._readback_pending:
             self._readback_not_ready += 1
 
@@ -1931,7 +2012,8 @@ class Simulation:
               else cupy.cuda.Event(disable_timing=True))
         ev.record(self._readback_stream)
         self._readback_pending.append(
-            (ev, self._readback_epoch, self._substeps_since_sort))
+            (ev, self._readback_epoch, self._substeps_since_sort,
+             self._sim_time_since_sort))
         self._readback_done = ev
 
     def step_frame(self) -> int:
@@ -1954,11 +2036,18 @@ class Simulation:
             self._last_substeps = 0
             return 0
 
-        # Compute adaptive dt if not using fixed timestep
+        # Pick this frame's dt from the lagged v_max (host only, no sync).
         if not self.fixed_dt:
-            new_dt = self._compute_adaptive_dt(n)
-            if abs(new_dt - self.dt) > 1e-8:
+            new_dt = self._next_adaptive_dt(n)
+            delta = abs(new_dt - self.dt)
+            if (delta > DT_UPLOAD_REL * self.dt
+                    or (delta > 1e-12 and new_dt == self._adaptive_dt_cap())):
                 self._upload_dt(new_dt)
+        elif self._profile.solver_type != SolverType.WCSPH:
+            subdiv = self._next_fixed_subdiv()
+            if subdiv != self._fixed_subdiv:
+                self._fixed_subdiv = subdiv
+                self._upload_dt(self.fixed_dt_value / subdiv)
 
         # Accumulate sim time; fire substeps when accumulator >= dt.
         # This correctly handles high FPS with large fixed_dt (e.g. PBF/DFSPH at dt=1/60).
@@ -2166,6 +2255,7 @@ class Simulation:
         self.fixed_dt = not self.fixed_dt
         if self.fixed_dt:
             # Switch to fixed mode: use fixed_dt_value
+            self._fixed_subdiv = 1
             self._upload_dt(self.fixed_dt_value)
 
     @property

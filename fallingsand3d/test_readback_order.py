@@ -198,7 +198,7 @@ def test_not_landed_copy_keeps_previous_values(world):
         sim._last_max_disp_uint = 0x3F800000  # 1.0: never skips
         sim._last_foam_count = 7
         ctypes_write(sim._pinned_displacement.ptr, 0)
-        sim._readback_pending.append((_FakeEvent(False), sim._readback_epoch, 1))
+        sim._readback_pending.append((_FakeEvent(False), sim._readback_epoch, 1, 0.001))
         sim._update_sort_skip_decision()
         assert sim._sort_skip_next is False
         assert sim._last_max_disp_uint == 0x3F800000
@@ -215,7 +215,7 @@ def test_copy_from_before_scene_change_is_not_latched(world):
     sim = _make_sim(world)
     try:
         cp.cuda.Device().synchronize()
-        sim._readback_pending.append((_FakeEvent(True), sim._readback_epoch, 1))
+        sim._readback_pending.append((_FakeEvent(True), sim._readback_epoch, 1, 0.001))
         sim.notify_scene_changed()
         ctypes_write(sim._pinned_displacement.ptr, 0)
         sim._update_sort_skip_decision()
