@@ -1050,7 +1050,7 @@ STATIC wall particle (11.1).
 `k_ij` and `heat_boost` are the same seen from i and from j, so the energy rate
 `m_i cp_i dTdt_i` of a pair is equal and opposite: heat lost by i is gained by j and
 `SUM_i m_i cp_i T_i` is conserved, as long as the density a particle divides by matches
-the `density_in` its neighbours read. Same-material pairs get `k_ij = kappa_i`
+the `rho_j` its neighbours read (`position.w` in WCSPH, `density_in` in PBF and DFSPH). Same-material pairs get `k_ij = kappa_i`
 (unchanged). Mixed pairs are limited by the poorer conductor: LAVA (500) and WATER (50)
 give `k_ij = 91`, LAVA and METAL (2000) give 800. All three loop copies use this form:
 `K_Step1`, `K_PBF_ComputeLambda` and `K_DFSPH_ComputeDensityAlpha`.
@@ -1879,9 +1879,11 @@ Each item names its bead (`bd-r4fix-uup.N`).
   vorticity and normals) from the same buffer they wrote (`density_out`). That
   was a `__restrict__` read/write race, the buffer was not re-ordered by the
   sort, and the first substep read zeros, giving `m_j / 0`. Now:
-  - `density_in` is a separate buffer, `sorted_density_prev`.
-  - WCSPH fills it from `position.w`, which holds the previous density and is
-    re-ordered with the position, so the values match the current sort order.
+  - For PBF and DFSPH, `density_in` is a separate buffer, `sorted_density_prev`.
+  - WCSPH has no `density_in`: K_Step1 reads `rho_j = pos4_j.w` from the
+    neighbour position it already loads (bd-r5-review-n28.163, see 20.1).
+    `position.w` holds the previous density and is re-ordered with the
+    position, so the values match the current sort order.
     K_Step1 writes the density into sorted `.w`, and `K_Integrate` carries it to
     the unsorted `position.w` for awake particles (STATIC and sleeping particles
     pass `.w` through unchanged). Until 2026-09-24 `K_Integrate` wrote `.w = 1.0`
@@ -3381,8 +3383,29 @@ Applied to WCSPH path only. PBF and DFSPH use their own density pipelines
 (PBF computes density from predicted positions; DFSPH reads density from a
 separate buffer across multiple correction kernels).
 
-**Source**: `step1.cu:K_Step1` (end of kernel), `step2.cu:K_Step2` (reads `pos4_j.w`),
-`simulation.py:_run_wcsph_body`
+K_Step1 also reads its own neighbour density from `.w` (bd-r5-review-n28.163).
+`K_Integrate` writes this substep's density into the unsorted `position.w` and the
+reorder gathers it, so at the start of K_Step1 `pos4_j.w` is the previous substep's
+density of neighbour j. The heat, vorticity, normal and strain-rate weights
+`m_j / rho_j` use it; `.w <= 0` falls back to the neighbour's `rest_density`. There is
+no `density_in` buffer and no per-substep copy into `sorted_density_prev` for WCSPH.
+
+K_Step1 writes `.w` for particle i in the same launch, so a neighbour whose thread has
+already finished gives this substep's density instead of the previous one. Both are the
+same particle's density one substep apart, and only `.w` changes, so `.xyz` is never
+torn. The sort order within a cell already varies between runs, so WCSPH was not bitwise
+reproducible before this either. A test that needs an exact `rho_j` must put the
+density that K_Step1 will write into `.w` first (one warm-up call), because any other
+starting `.w` is read as either value.
+
+Measured at 992K particles (dam break, full sort every substep, shared GPU, two runs
+each): step1 2.62 ms before, 2.32 ms after; whole substep 8.88 ms before, 8.58 ms
+after. In a 250K dam break after 400 substeps, KE and mean density error of three
+1e-6 m jittered starts overlap before and after (KE 6516 to 6517 vs 6514 to 6517,
+error 0.4119 to 0.4122 vs 0.4113 to 0.4120).
+
+**Source**: `step1.cu:K_Step1` (end of kernel, `rho_j = pos4_j.w` in the loop),
+`step2.cu:K_Step2` (reads `pos4_j.w`), `simulation.py:_run_wcsph_body`
 
 ### 20.2 Speculative ILP (OPT-4.2)
 
