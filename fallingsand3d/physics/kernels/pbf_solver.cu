@@ -1213,6 +1213,13 @@ void K_PBF_Finalize(
         }
     }
 
+    // Rigid body collision (bd-r5-review-n28.123): push out of each body's
+    // box or sphere SDF at its end-of-substep pose, so a fast body cannot
+    // overtake fluid and trap it inside. Same helper as K_Integrate.
+    if (d_rigid_bodies != 0 && c_num_rigid_bodies > 0) {
+        rigid_body_boundary(final_pos, vel_new, d_rigid_bodies, c_num_rigid_bodies, dt);
+    }
+
     // Velocity clamp
     float vel_sq = vel_new.x * vel_new.x + vel_new.y * vel_new.y + vel_new.z * vel_new.z;
     if (vel_sq > VELOCITY_LIMIT_SQ) {

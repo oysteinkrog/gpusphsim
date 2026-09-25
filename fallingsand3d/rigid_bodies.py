@@ -405,6 +405,16 @@ class RigidBodyManager:
         # wires it; None leaves reservation off (standalone manager in tests).
         self.world = None
 
+        # K_Integrate reads the bodies through c_rigid_bodies, not a kernel
+        # argument (bd-r5-review-n28.123). Point it at this manager's array
+        # with a zero count now, so a count left over from an earlier manager
+        # never makes K_Integrate read that manager's freed array.
+        try:
+            import integrate
+            self.upload([integrate.get_module()])
+        except Exception:
+            pass  # no GPU module (CPU-only use); upload() sets it later
+
     def _set_reserved_tail(self, n: int) -> None:
         """Tell the world how many slots to keep free for the boundary block."""
         if self.world is not None:
@@ -614,6 +624,10 @@ class RigidBodyManager:
 
         # Upload count to constant memory in all modules
         h_count = np.array([self._num_bodies], dtype=np.int32)
+        # Body array address for K_Integrate's fluid push-out
+        # (c_rigid_bodies, bd-r5-review-n28.123). d_rigid_bodies is allocated
+        # once in __init__, so the address stays valid for this manager.
+        h_addr = np.array([self.d_rigid_bodies.data.ptr], dtype=np.uint64)
         for module in modules:
             try:
                 d_ptr = module.get_global("c_num_rigid_bodies")
@@ -622,6 +636,13 @@ class RigidBodyManager:
                 )
             except Exception:
                 pass  # Module may not have this symbol yet
+            try:
+                d_ptr = module.get_global("c_rigid_bodies")
+                cupy.cuda.runtime.memcpy(
+                    int(d_ptr), h_addr.ctypes.data, 8, 1
+                )
+            except Exception:
+                pass  # Only the integrate module has this symbol
 
     def zero_accumulators(self) -> None:
         """Zero force and torque accumulators (call at start of each substep)."""

@@ -47,6 +47,12 @@
 /* Sleep system: integrate-specific addition */
 #define GAMMA_SLEEP      0.01f
 
+/* Rigid body array for the fluid push-out (bd-r5-review-n28.123).
+ * RigidBodyManager.upload() writes the d_rigid_bodies address here next to
+ * c_num_rigid_bodies. A constant keeps K_Integrate's argument list stable,
+ * and the CUDA graph reads it at launch time, not at capture time. */
+__constant__ const RigidBody* c_rigid_bodies;
+
 /* ======================================================================
  * K_Integrate kernel
  * ====================================================================== */
@@ -171,6 +177,10 @@ void K_Integrate(
             pos.z < c_sim.world_min.z || pos.z > c_sim.world_max.z;
         for (int s = 0; s < c_num_sdf_objects && !geom_wake; s++) {
             if (eval_sdf(pos, c_sdf_objects[s]) < 0.0f) geom_wake = true;
+        }
+        // Same test for rigid bodies at their end-of-substep pose.
+        if (!geom_wake && c_num_rigid_bodies > 0 && c_rigid_bodies != 0) {
+            geom_wake = rigid_body_penetrates(pos, c_rigid_bodies, c_num_rigid_bodies, c_sim.dt);
         }
         if (vel_sq_wake <= V_WAKE_SQ && !geom_wake) {
             // Still sleeping: write position/velocity unchanged, keep flag and saturate counter
@@ -393,6 +403,13 @@ void K_Integrate(
         }
     }
 
+    // --- Rigid body collision (bd-r5-review-n28.123) ---
+    // Push out of each body's box or sphere SDF at its end-of-substep pose,
+    // so a fast body cannot overtake fluid and trap it inside.
+    if (c_num_rigid_bodies > 0 && c_rigid_bodies != 0) {
+        rigid_body_boundary(pos_new, vel_new, c_rigid_bodies, c_num_rigid_bodies, dt);
+    }
+
     // --- Sleep counter update ---
     // Only GRANULAR particles can accumulate the sleep counter.
     // FLUID and GAS particles must remain awake to respond to pressure
@@ -518,45 +535,6 @@ __device__ inline float rigid_support_distance(const RigidBody& body, float3 n) 
     return body.half_extents.x * fabsf(n.x * ax.x + n.y * ax.y + n.z * ax.z)
          + body.half_extents.y * fabsf(n.x * ay.x + n.y * ay.y + n.z * ay.z)
          + body.half_extents.z * fabsf(n.x * az.x + n.y * az.y + n.z * az.z);
-}
-
-/* ======================================================================
- * rigid_integrate_pose -- advance a rigid body pose by one step.
- *
- * pos += v * dt; q += 0.5 * dt * (omega, 0) * q, then renormalize q.
- * Shared by dynamic bodies (after the velocity update) and kinematic
- * bodies (prescribed velocity). (bd-r5-review-n28.105)
- * ====================================================================== */
-__device__ __forceinline__
-void rigid_integrate_pose(float3& pos, float4& q, float3 lin_vel, float3 ang_vel, float dt) {
-    pos.x += lin_vel.x * dt;
-    pos.y += lin_vel.y * dt;
-    pos.z += lin_vel.z * dt;
-
-    // quat_mult(omega_q, q) = (s1*v2 + s2*v1 + cross(v1,v2), s1*s2 - dot(v1,v2))
-    // where omega_q has s1=0, v1=omega; q has s2=q.w, v2=(q.x,q.y,q.z)
-    float3 qv = make_float3(q.x, q.y, q.z);
-    float qs = q.w;
-    float3 cr = make_float3(
-        ang_vel.y * qv.z - ang_vel.z * qv.y,
-        ang_vel.z * qv.x - ang_vel.x * qv.z,
-        ang_vel.x * qv.y - ang_vel.y * qv.x
-    );
-    float dot_ov = ang_vel.x * qv.x + ang_vel.y * qv.y + ang_vel.z * qv.z;
-    float4 dq = make_float4(
-        qs * ang_vel.x + cr.x,
-        qs * ang_vel.y + cr.y,
-        qs * ang_vel.z + cr.z,
-        -dot_ov
-    );
-    q.x += 0.5f * dt * dq.x;
-    q.y += 0.5f * dt * dq.y;
-    q.z += 0.5f * dt * dq.z;
-    q.w += 0.5f * dt * dq.w;
-
-    float q_len = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    float q_inv = 1.0f / fmaxf(q_len, 1e-8f);
-    q.x *= q_inv; q.y *= q_inv; q.z *= q_inv; q.w *= q_inv;
 }
 
 /* ======================================================================

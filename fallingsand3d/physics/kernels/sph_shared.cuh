@@ -560,6 +560,170 @@ __device__ inline void sdf_box_boundary(
 }
 
 /* ======================================================================
+ * rigid_integrate_pose -- advance a rigid body pose by one step.
+ *
+ * pos += v * dt; q += 0.5 * dt * (omega, 0) * q, then renormalize q.
+ * Shared by dynamic bodies (after the velocity update), kinematic bodies
+ * (prescribed velocity) and rigid_body_boundary (end-of-substep pose).
+ * (bd-r5-review-n28.105)
+ * ====================================================================== */
+__device__ __forceinline__
+void rigid_integrate_pose(float3& pos, float4& q, float3 lin_vel, float3 ang_vel, float dt) {
+    pos.x += lin_vel.x * dt;
+    pos.y += lin_vel.y * dt;
+    pos.z += lin_vel.z * dt;
+
+    // quat_mult(omega_q, q) = (s1*v2 + s2*v1 + cross(v1,v2), s1*s2 - dot(v1,v2))
+    // where omega_q has s1=0, v1=omega; q has s2=q.w, v2=(q.x,q.y,q.z)
+    float3 qv = make_float3(q.x, q.y, q.z);
+    float qs = q.w;
+    float3 cr = make_float3(
+        ang_vel.y * qv.z - ang_vel.z * qv.y,
+        ang_vel.z * qv.x - ang_vel.x * qv.z,
+        ang_vel.x * qv.y - ang_vel.y * qv.x
+    );
+    float dot_ov = ang_vel.x * qv.x + ang_vel.y * qv.y + ang_vel.z * qv.z;
+    float4 dq = make_float4(
+        qs * ang_vel.x + cr.x,
+        qs * ang_vel.y + cr.y,
+        qs * ang_vel.z + cr.z,
+        -dot_ov
+    );
+    q.x += 0.5f * dt * dq.x;
+    q.y += 0.5f * dt * dq.y;
+    q.z += 0.5f * dt * dq.z;
+    q.w += 0.5f * dt * dq.w;
+
+    float q_len = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    float q_inv = 1.0f / fmaxf(q_len, 1e-8f);
+    q.x *= q_inv; q.y *= q_inv; q.z *= q_inv; q.w *= q_inv;
+}
+
+/* ======================================================================
+ * Positional fluid collision against rigid bodies (bd-r5-review-n28.123).
+ *
+ * The Akinci force from the body's one-spacing boundary layer cannot stop
+ * a body that moves more than about a spacing per substep (PBF at
+ * dt = 1/120 and 3 m/s moves 2.5 cm), so the body overtook fluid and
+ * trapped it inside. This is the same push-out and impulse as the SDF
+ * object loop, run on each body's box or sphere SDF.
+ *
+ * The SDF is evaluated at the body's end-of-substep pose: the stored pose
+ * advanced by one dt with the stored lin_vel / ang_vel. The fluid kernels
+ * run before K_IntegrateRigidBodies, so testing the current pose would
+ * leave every particle in front of a moving face up to v*dt inside once
+ * the body moves. For a kinematic body this is exactly the pose
+ * K_IntegrateRigidBodies writes; for a dynamic body it misses only this
+ * substep's velocity change.
+ *
+ * rigid_body_sdf returns the signed distance to body b at that pose and
+ * the outward world normal, contact centre com and surface velocity terms.
+ * A bounding-sphere test skips far bodies before the rotation.
+ * ====================================================================== */
+__device__ inline bool rigid_body_sdf(
+    float3 pos, const RigidBody* __restrict__ bodies, int b, float dt,
+    float& dist, float3& n, float3& com, float3& v_b, float3& w_b,
+    float& restitution, float& friction
+) {
+    float4 p4 = __ldg(&bodies[b].position);
+    float4 q  = __ldg(&bodies[b].rotation);
+    float4 lv = __ldg(&bodies[b].lin_vel);
+    float4 av = __ldg(&bodies[b].ang_vel);
+    float4 he = __ldg(&bodies[b].half_extents);
+    com = make_float3(p4.x, p4.y, p4.z);
+    v_b = make_float3(lv.x, lv.y, lv.z);
+    w_b = make_float3(av.x, av.y, av.z);
+    restitution = lv.w;
+    friction = av.w;
+    rigid_integrate_pose(com, q, v_b, w_b, dt);
+
+    float3 rel = make_float3(pos.x - com.x, pos.y - com.y, pos.z - com.z);
+    float r_sq = rel.x * rel.x + rel.y * rel.y + rel.z * rel.z;
+    int shape = __float_as_int(he.w);
+    float r_bound = (shape == SDF_SPHERE)
+        ? he.x : sqrtf(he.x * he.x + he.y * he.y + he.z * he.z);
+    r_bound += BOUNDARY_MARGIN;
+    if (r_sq >= r_bound * r_bound) return false;
+
+    if (shape == SDF_SPHERE) {
+        dist = sdf_sphere(rel, he.x);
+        n = sdf_sphere_normal(rel);
+    } else {
+        float3 half_ext = make_float3(he.x, he.y, he.z);
+        float3 local = quat_rotate_inv(q, rel);
+        dist = sdf_box(local, half_ext);
+        n = quat_rotate(q, sdf_box_normal(local, half_ext));
+    }
+    return true;
+}
+
+/* True when pos is strictly inside any body at its end-of-substep pose.
+ * Used by the sleeping-particle geometry wake test. */
+__device__ inline bool rigid_body_penetrates(
+    float3 pos, const RigidBody* __restrict__ bodies, int num_bodies, float dt
+) {
+    for (int b = 0; b < num_bodies; b++) {
+        float dist, rest, fric;
+        float3 n, com, v_b, w_b;
+        if (rigid_body_sdf(pos, bodies, b, dt, dist, n, com, v_b, w_b, rest, fric)
+            && dist < 0.0f) return true;
+    }
+    return false;
+}
+
+/* Push pos out of every body it is within BOUNDARY_MARGIN of, to
+ * BOUNDARY_MARGIN outside the surface along the SDF normal. When the
+ * particle moves into the surface relative to the surface velocity
+ * v_body + omega x r, the normal part of that relative velocity is
+ * reflected with the body's restitution and the tangential part is cut by
+ * Coulomb friction with the body's friction, as in the SDF object loop.
+ * The body gets no reaction here; the Akinci pressure coupling carries the
+ * fluid force on it. */
+__device__ inline void rigid_body_boundary(
+    float3& pos, float3& vel,
+    const RigidBody* __restrict__ bodies, int num_bodies, float dt
+) {
+    for (int b = 0; b < num_bodies; b++) {
+        float dist, rest, fric;
+        float3 n, com, v_b, w_b;
+        if (!rigid_body_sdf(pos, bodies, b, dt, dist, n, com, v_b, w_b, rest, fric))
+            continue;
+        if (dist >= BOUNDARY_MARGIN) continue;
+
+        float push = BOUNDARY_MARGIN - dist;
+        pos.x += push * n.x;
+        pos.y += push * n.y;
+        pos.z += push * n.z;
+
+        float3 r = make_float3(pos.x - com.x, pos.y - com.y, pos.z - com.z);
+        float3 v_s = make_float3(
+            v_b.x + w_b.y * r.z - w_b.z * r.y,
+            v_b.y + w_b.z * r.x - w_b.x * r.z,
+            v_b.z + w_b.x * r.y - w_b.y * r.x
+        );
+        float3 v_rel = make_float3(vel.x - v_s.x, vel.y - v_s.y, vel.z - v_s.z);
+        float v_dot_n = v_rel.x * n.x + v_rel.y * n.y + v_rel.z * n.z;
+        if (v_dot_n < 0.0f) {
+            vel.x -= (1.0f + rest) * v_dot_n * n.x;
+            vel.y -= (1.0f + rest) * v_dot_n * n.y;
+            vel.z -= (1.0f + rest) * v_dot_n * n.z;
+            float3 v_tan = make_float3(
+                v_rel.x - v_dot_n * n.x,
+                v_rel.y - v_dot_n * n.y,
+                v_rel.z - v_dot_n * n.z
+            );
+            float v_tan_len = sqrtf(v_tan.x * v_tan.x + v_tan.y * v_tan.y + v_tan.z * v_tan.z);
+            if (v_tan_len > 1e-8f) {
+                float red = fminf(fric * fabsf(v_dot_n) / v_tan_len, 1.0f);
+                vel.x -= red * v_tan.x;
+                vel.y -= red * v_tan.y;
+                vel.z -= red * v_tan.z;
+            }
+        }
+    }
+}
+
+/* ======================================================================
  * STATIC particle boundary repulsion.
  *
  * After position integration, scan for nearby STATIC particles and push

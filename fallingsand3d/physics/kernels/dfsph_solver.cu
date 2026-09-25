@@ -1390,7 +1390,7 @@ void K_DFSPH_Finalize(
     const float4*   __restrict__ vorticity_in,          // (omega_x,y,z, |omega|) for micropolar, or NULL
     const float*    __restrict__ sorted_kappa_v,        // divergence kappa for warm-start writeback
     float*          __restrict__ kappa_v_out,           // unsorted kappa_v output (warm-start next frame)
-    const RigidBody* __restrict__ d_rigid_bodies,       // rigid body state (NULL if no bodies); only gates the XSPH skip
+    const RigidBody* __restrict__ d_rigid_bodies,       // rigid body state (NULL if no bodies); gates the XSPH skip and the body push-out
     float*          __restrict__ d_rigid_forces,        // unused: reaction is accumulated in the solver kernels
     float*          __restrict__ d_rigid_torques,       // unused: see d_rigid_forces
     const float*    __restrict__ sorted_lifetime,       // reaction-mutated lifetime (sorted), or NULL
@@ -1601,6 +1601,13 @@ void K_DFSPH_Finalize(
                 }
             }
         }
+    }
+
+    // Rigid body collision (bd-r5-review-n28.123): push out of each body's
+    // box or sphere SDF at its end-of-substep pose, so a fast body cannot
+    // overtake fluid and trap it inside. Same helper as K_Integrate.
+    if (d_rigid_bodies != 0 && c_num_rigid_bodies > 0) {
+        rigid_body_boundary(pos_new, vel, d_rigid_bodies, c_num_rigid_bodies, dt);
     }
 
     // Velocity clamp
