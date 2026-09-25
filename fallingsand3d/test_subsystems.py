@@ -238,6 +238,21 @@ def _run_substeps(sim, n, gather):
         sim._sim_step(n)
 
 
+def _run_direct(world, solver, gather, n):
+    """Run the scene with every graph capture replaced by a direct launch."""
+    sim, n_b = _make_sim(world, solver, _spawn_dam)
+    assert n_b == n
+
+    def direct(n_, gather_only):
+        sim._run_graph_body(n_)
+        return None
+
+    sim._capture_graph = direct
+    _run_substeps(sim, n, gather)
+    assert sim._graph_full_sort is None and sim._graph_gather_only is None
+    return cp.asnumpy(world.position[:n])[:, :3]
+
+
 @pytest.mark.parametrize("gather", [False, True], ids=["full_sort", "gather_only"])
 @pytest.mark.parametrize("solver", ["WCSPH", "PBF", "DFSPH"])
 def test_graph_matches_direct_launch(solver, gather):
@@ -252,28 +267,27 @@ def test_graph_matches_direct_launch(solver, gather):
     assert graph_a is not None, "graph path never captured a graph"
     pos_a = cp.asnumpy(world_a.position[:n])[:, :3]
 
-    world_b = _get_world("b")
-    sim_b, n_b = _make_sim(world_b, solver, _spawn_dam)
-    assert n_b == n
-
-    def direct(n_, gather_only):
-        sim_b._run_graph_body(n_)
-        return None
-
-    sim_b._capture_graph = direct
-    _run_substeps(sim_b, n, gather)
-    assert sim_b._graph_full_sort is None and sim_b._graph_gather_only is None
-    pos_b = cp.asnumpy(world_b.position[:n])[:, :3]
-
+    pos_b = _run_direct(_get_world("b"), solver, gather, n)
     assert np.isfinite(pos_a).all() and np.isfinite(pos_b).all()
     scale = float(np.abs(pos_b).max())
     err = float(np.abs(pos_a - pos_b).max())
+    tol = 1e-5 * scale
+    label = f"{solver} {'gather' if gather else 'full'}"
+    if solver == "DFSPH" and not gather:
+        # After a full sort, K_DFSPH_DensityAlpha reads last substep's
+        # sorted_density in the new sort order (known open issue, bead
+        # 1-pbf-dfsph-density-prev). The within-cell order is atomic-driven,
+        # so two direct runs already differ by about 1e-4 m after 2 substeps.
+        # Compare against that run-to-run noise instead of 1e-5.
+        pos_c = _run_direct(_get_world("c"), solver, gather, n)
+        noise = float(np.abs(pos_b - pos_c).max())
+        print(f"\n  {label}: direct run-to-run noise {noise:.3g} m")
+        tol = max(tol, 5.0 * noise)
     print(
-        f"\n  {solver} {'gather' if gather else 'full'}: max |graph - direct| "
-        f"{err:.3g} m (scale {scale:.3g} m)"
+        f"\n  {label}: max |graph - direct| {err:.3g} m (scale {scale:.3g} m, tol {tol:.3g} m)"
     )
-    assert err <= 1e-5 * scale, (
-        f"{solver}: graph replay differs from direct launches by {err:.3g} m"
+    assert err <= tol, (
+        f"{label}: graph replay differs from direct launches by {err:.3g} m"
     )
 
 
@@ -327,7 +341,7 @@ def _cell(p, grid_params):
 @pytest.mark.parametrize("solver", ["PBF", "DFSPH"])
 def test_solver_wakes_sleeping_sand(solver):
     """After 3 substeps the sleepers in the mover's 27-cell stencil are awake
-    with sleep_counter 0; the rest still sleep with their counter kept."""
+    with a reset sleep_counter; the rest still sleep with their counter kept."""
     world = _get_world("a")
     sim, n = _make_sim(world, solver, _spawn_sleepers_and_mover)
     sim.set_gravity(0.0)
@@ -354,7 +368,9 @@ def test_solver_wakes_sleeping_sand(solver):
         f"awake elsewhere {(~asleep[~in_stencil]).sum()}"
     )
     assert not asleep[in_stencil].any(), f"{solver}: impact-cell sand still asleep"
-    assert (sc[:k][in_stencil] == 0).all(), (
+    # Woken on substep 1 (counter 0), then counted up by at most one per
+    # later substep while at rest.
+    assert (sc[:k][in_stencil] <= 3).all(), (
         f"{solver}: sleep_counter not reset in the impact cells: {sc[:k][in_stencil]}"
     )
     assert asleep[~in_stencil].all(), f"{solver}: far sand woke"
