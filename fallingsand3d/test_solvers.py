@@ -1934,3 +1934,38 @@ def test_cross_phase_heat_matches_across_solvers(world, sim):
         print(f"  {name}: max |dTdt - WCSPH| = {diff:.3g} (scale {scale:.3g})")
         assert diff < 1e-4 * scale, (
             f"{name} dTdt differs from WCSPH by {diff:.3g} (max {scale:.3g})")
+
+
+def _read_pbf_params():
+    import pbf_solver
+    module = pbf_solver._get_module()
+    d_ptr = module.get_global("c_pbf")
+    out = np.zeros(1, dtype=pbf_solver.PBF_PARAMS_DTYPE)
+    cp.cuda.runtime.memcpy(out.ctypes.data, int(d_ptr), out.nbytes, 2)
+    return out[0]
+
+
+def test_pbf_s_corr_w_dq_zero_when_k_zero():
+    """bd-r5-review-n28.174: with s_corr_k = 0, W_dq uploads as 0 so
+    K_PBF_ComputeDelta skips the s_corr branch. With k > 0, W_dq is the
+    analytic poly6 value at dq*h."""
+    import dataclasses
+    import math
+    import pbf_solver
+    h = 0.04
+    base = PROFILES["PBF"]
+
+    pbf_solver.upload_pbf_params(dataclasses.replace(base, pbf_s_corr_k=0.0), h=h)
+    p = _read_pbf_params()
+    assert float(p["s_corr_W_dq"]) == 0.0
+
+    prof = dataclasses.replace(base, pbf_s_corr_k=0.1)
+    pbf_solver.upload_pbf_params(prof, h=h)
+    p = _read_pbf_params()
+    dq = prof.pbf_s_corr_dq * h
+    expected = 315.0 / (64.0 * math.pi * h ** 9) * (h * h - dq * dq) ** 3
+    assert float(p["s_corr_k"]) == pytest.approx(0.1, rel=1e-6)
+    assert float(p["s_corr_W_dq"]) == pytest.approx(expected, rel=1e-6)
+
+    # Leave the default profile in constant memory for later tests.
+    pbf_solver.upload_pbf_params(base, h=h)
