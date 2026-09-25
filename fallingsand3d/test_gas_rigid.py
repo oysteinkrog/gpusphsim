@@ -11,16 +11,12 @@ gravity, and a dynamic 12 cm box that starts just above it moving down at
 1 m/s. Over 0.2 s the box sweeps 0.2 m into the block. Checked every 5
 substeps: no SMOKE particle inside the box.
 
-WCSPH is expected to fail until bd-r5-review-n28.214 lands: the integrate
-module never gets c_grid, so its static_particle_boundary call finds no
-neighbours in WCSPH (for STONE walls too). With c_grid uploaded by hand the
-WCSPH case keeps the smoke out (0 inside) and the box slows from 1.0 to
-0.86 m/s, the reaction from the step2 Akinci term.
-
-PBF is expected to fail too: at dt 1/120 the box moves 8 mm per substep,
-the PBF gas density solve does not see the body, and the single push per
-substep in K_PBF_Finalize lags, so up to about 90 particles slip in. That
-needs gas in the PBF rigid coupling (pbf_solver.cu), a separate change.
+All three solvers also run rigid_body_boundary (bd-r5-review-n28.123):
+each particle is pushed out of the body's box SDF at its end-of-substep
+pose. That push keeps the smoke out in WCSPH, where the integrate module
+has no c_grid so its static_particle_boundary finds no neighbours
+(bd-r5-review-n28.214), and in PBF, where the box moves 8 mm per substep
+and the gas density solve does not see the body.
 """
 
 from __future__ import annotations
@@ -97,26 +93,7 @@ def _gas_inside_box(world, rbm) -> tuple[int, float]:
 
 @pytest.mark.parametrize(
     "profile_name",
-    [
-        pytest.param(
-            "WCSPH",
-            marks=pytest.mark.xfail(
-                reason="bd-r5-review-n28.214: integrate module has no c_grid, "
-                "so the WCSPH STATIC push finds no neighbours",
-                strict=False,
-            ),
-        ),
-        pytest.param(
-            "PBF",
-            marks=pytest.mark.xfail(
-                reason="PBF dt 1/120: the box moves 8 mm per substep and the "
-                "gas density solve ignores the body, so the one push per "
-                "substep lags and about 90 particles slip in",
-                strict=False,
-            ),
-        ),
-        "DFSPH",
-    ],
+    ["WCSPH", "PBF", "DFSPH"],
 )
 def test_falling_box_keeps_smoke_out(profile_name):
     world, sim, rbm = _make_sim(profile_name)
