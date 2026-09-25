@@ -439,6 +439,13 @@ class World:
         self.packed_info[num_alive:n] = cp.uint32(DEAD_PACKED)
         self.kappa[num_alive:n] = 0.0
         self.kappa_v[num_alive:n] = 0.0
+        # The DFSPH density pass reads last substep's sorted_density as its
+        # previous density. Compaction moved every slot, so those values
+        # belong to other particles now. Zero them: the kernel then uses each
+        # neighbour's rest density, as on a fresh scene. (Before
+        # bd-r5-review-n28.152 the swap with the unsorted density array did
+        # this by accident.)
+        self.sorted_density.fill(0.0)
 
         self._high_water = num_alive
         return num_alive
