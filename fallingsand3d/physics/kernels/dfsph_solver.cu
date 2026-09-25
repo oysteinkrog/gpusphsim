@@ -1385,9 +1385,6 @@ void K_DFSPH_Finalize(
     const float4*   __restrict__ sorted_particle_dye,
     const float4*   __restrict__ sorted_dye_rate,
     float4*         __restrict__ particle_dye_out,
-    const float4*   __restrict__ sorted_angular_velocity,
-    float4*         __restrict__ angular_velocity_out,
-    const float4*   __restrict__ vorticity_in,          // (omega_x,y,z, |omega|) for micropolar, or NULL
     const float*    __restrict__ sorted_kappa_v,        // divergence kappa for warm-start writeback
     float*          __restrict__ kappa_v_out,           // unsorted kappa_v output (warm-start next frame)
     const RigidBody* __restrict__ d_rigid_bodies,       // rigid body state (NULL if no bodies); gates the XSPH skip and the body push-out
@@ -1437,7 +1434,6 @@ void K_DFSPH_Finalize(
         kappa_out[orig_idx] = 0.0f;
         if (kappa_v_out) kappa_v_out[orig_idx] = 0.0f;
         particle_dye_out[orig_idx] = sorted_particle_dye[i];
-        angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
         return;
     }
 
@@ -1468,8 +1464,7 @@ void K_DFSPH_Finalize(
             kappa_out[orig_idx] = 0.0f;
             if (kappa_v_out) kappa_v_out[orig_idx] = 0.0f;
             particle_dye_out[orig_idx] = sorted_particle_dye[i];
-            angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
-            return;
+                return;
         }
         pi = CLEAR_SLEEPING(pi);
         pi = SET_JUST_WOKE(pi);
@@ -1712,14 +1707,4 @@ void K_DFSPH_Finalize(
     kappa_out[orig_idx] = sorted_kappa[i];
     if (kappa_v_out) kappa_v_out[orig_idx] = sorted_kappa_v[i];
     particle_dye_out[orig_idx] = dye;
-    // Micropolar angular velocity: relax toward 0.5 * curl_v (FLUID only)
-    float4 ang_vel = sorted_angular_velocity[i];
-    if (behavior == FLUID && vorticity_in != 0) {
-        float4 vort = __ldg(&vorticity_in[i]);
-        const float nu_t = 0.1f;
-        ang_vel.x += dt * nu_t * (0.5f * vort.x - ang_vel.x);
-        ang_vel.y += dt * nu_t * (0.5f * vort.y - ang_vel.y);
-        ang_vel.z += dt * nu_t * (0.5f * vort.z - ang_vel.z);
-    }
-    angular_velocity_out[orig_idx] = ang_vel;
 }

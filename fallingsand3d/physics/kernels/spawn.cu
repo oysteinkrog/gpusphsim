@@ -80,7 +80,7 @@ __device__ inline float3 spawn_clamp(float3 p) {
  *      direction (the spreads sum to zero, so momentum is conserved).
  *      Every per-slot field the solvers read is reset: position.w (steam rest
  *      density), and when the pointers are non-NULL the PBF predicted
- *      position, the FP16 velocity mirror, pressure, dye, angular velocity
+ *      position, the FP16 velocity mirror, pressure, dye
  *      and the kappa / kappa_v / lambda warm-start fields.
  *   4. Mark source water particle as DEAD (this also clears SPAWN_GAS)
  *   5. Set max_displacement to +inf bits so the next frame does a full sort
@@ -119,7 +119,6 @@ void K_SpawnGas(
     uint2*          __restrict__ velocity_h,       // FP16 velocity mirror read by step2
     float*          __restrict__ pressure,         // WCSPH pre-computed pressure read by step2
     float4*         __restrict__ particle_dye,
-    float4*         __restrict__ angular_velocity,
     float*          __restrict__ kappa,            // DFSPH density warm start
     float*          __restrict__ kappa_v,          // DFSPH divergence warm start
     float*          __restrict__ lambda_pbf        // PBF lambda
@@ -232,9 +231,8 @@ void K_SpawnGas(
         if (velocity_h != NULL) store_half4(&velocity_h[slot], child_vel);
         // Gas EOS p = k * max(rho - rho0, 0) is 0 at rest density.
         if (pressure != NULL) pressure[slot] = 0.0f;
-        // Do not inherit the dead occupant's dye, spin or warm starts.
+        // Do not inherit the dead occupant's dye or warm starts.
         if (particle_dye != NULL) particle_dye[slot] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        if (angular_velocity != NULL) angular_velocity[slot] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (kappa != NULL) kappa[slot] = 0.0f;
         if (kappa_v != NULL) kappa_v[slot] = 0.0f;
         if (lambda_pbf != NULL) lambda_pbf[slot] = 0.0f;

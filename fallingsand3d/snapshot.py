@@ -221,8 +221,6 @@ class SnapshotRing:
             world.kappa_v[:n] = 0
         if hasattr(world, 'sleep_counter'):
             world.sleep_counter[:n] = 0
-        if hasattr(world, 'angular_velocity'):
-            world.angular_velocity[:n] = 0
 
         # Rebuild _spawned_material_ids from restored packed_info
         # NOTE: .get() is acceptable here — undo is user-initiated, not hot path

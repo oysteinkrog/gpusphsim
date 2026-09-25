@@ -411,6 +411,12 @@ def finalize(
     max_displacement: "cupy.ndarray | None" = None,
     displacement_anchor: "cupy.ndarray | None" = None,
 ) -> None:
+    """Run K_DFSPH_Finalize.
+
+    sorted_angular_velocity, angular_velocity_out and vorticity_in are
+    ignored: the micropolar angular velocity had no reader and was removed
+    (bd-r5-review-n28.140). They stay so callers that still pass them work.
+    """
     n = sorted_position.shape[0]
     _null = np.intp(0)
     _null_f = cupy.ndarray(0, dtype=cupy.float32)
@@ -419,11 +425,6 @@ def finalize(
     if particle_dye_out is None:
         particle_dye_out = cupy.zeros((n, 4), dtype=cupy.float32)
     s_dye_rate = sorted_dye_rate if sorted_dye_rate is not None else _null
-    if sorted_angular_velocity is None:
-        sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
-    if angular_velocity_out is None:
-        angular_velocity_out = cupy.zeros((n, 4), dtype=cupy.float32)
-    vort_in = vorticity_in if vorticity_in is not None else _null
     skv_ptr = sorted_kappa_v if sorted_kappa_v is not None else _null
     kv_out_ptr = kappa_v_out if kappa_v_out is not None else np.intp(0)
     rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
@@ -449,8 +450,6 @@ def finalize(
         position_out, velocity_out, color_out, packed_info_out,
         sleep_counter_out, temperature_out, kappa_out,
         sorted_particle_dye, s_dye_rate, particle_dye_out,
-        sorted_angular_velocity, angular_velocity_out,
-        vort_in,
         skv_ptr, kv_out_ptr,
         rb_ptr, rf_ptr, rt_ptr,
         s_lifetime_ptr, health_out_ptr, lifetime_out_ptr, mass_out_ptr,

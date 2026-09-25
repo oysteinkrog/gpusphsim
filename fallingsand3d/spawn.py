@@ -195,10 +195,14 @@ def compute_spawn(
         FP16 velocity mirror that WCSPH step2 reads for neighbours.
     pressure : cupy.ndarray, (N,) float32, optional
         WCSPH pre-computed pressure; children get 0 (gas at rest density).
-    particle_dye, angular_velocity : cupy.ndarray, (N, 4) float32, optional
+    particle_dye : cupy.ndarray, (N, 4) float32, optional
     kappa, kappa_v, lambda_pbf : cupy.ndarray, (N,) float32, optional
         Per-slot state the child must not inherit from the dead occupant.
         Each is zeroed for the claimed slots.
+
+    angular_velocity : ignored. The micropolar angular velocity had no
+        reader and was removed (bd-r5-review-n28.140); the keyword stays so
+        callers that still pass it work.
 
     Any optional array left as None passes NULL. Keep the pointer set fixed
     per solver so a captured CUDA graph stays valid.
@@ -237,7 +241,6 @@ def compute_spawn(
             _ptr(velocity_h),
             _ptr(pressure),
             _ptr(particle_dye),
-            _ptr(angular_velocity),
             _ptr(kappa),
             _ptr(kappa_v),
             _ptr(lambda_pbf),

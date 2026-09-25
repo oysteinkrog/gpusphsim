@@ -788,7 +788,6 @@ class RigidBodyManager:
             # substep (bd-r5-review-n28.121).
             world.kappa[sl] = 0.0
             world.kappa_v[sl] = 0.0
-            world.angular_velocity[sl] = 0.0
 
             # Color for rigid body particles
             world.color[sl, 0] = 0.6

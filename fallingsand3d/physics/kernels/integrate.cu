@@ -33,9 +33,6 @@
 #define ACCEL_MAX_FLUID    200.0f
 #define ACCEL_MAX_GRANULAR 200.0f
 
-/* Micropolar SPH coupling parameter */
-#define MICROPOLAR_NU_T    0.1f
-
 /* Anti-creep thresholds for GRANULAR particles */
 #define GRANULAR_V_THRESHOLD     0.01f
 #define GRANULAR_V_THRESHOLD_SQ  (GRANULAR_V_THRESHOLD * GRANULAR_V_THRESHOLD)
@@ -76,8 +73,6 @@ void K_Integrate(
     const unsigned char* __restrict__ sorted_sleep_counter, // sorted sleep counter (uint8)
     const float4*   __restrict__ sorted_dye_rate,       // sorted dye diffusion rate from Step1
     const float4*   __restrict__ sorted_particle_dye,   // sorted current particle dye color
-    const float4*   __restrict__ sorted_vorticity,      // sorted vorticity (curl_v) from Step1
-    const float4*   __restrict__ sorted_angular_velocity, // sorted micropolar angular velocity
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
     // --- Grid arrays for STATIC boundary repulsion ---
     const uint*     __restrict__ cell_start,            // grid cell start indices
@@ -90,7 +85,6 @@ void K_Integrate(
     unsigned char*  __restrict__ sleep_counter_out,     // unsorted sleep counter
     float*          __restrict__ temperature_out,       // unsorted temperature (updated)
     float4*         __restrict__ particle_dye_out,       // unsorted particle dye (updated)
-    float4*         __restrict__ angular_velocity_out,   // unsorted angular velocity (micropolar update)
     float*          __restrict__ health_out,             // unsorted health (reaction state carry-back)
     float*          __restrict__ lifetime_out,           // unsorted lifetime (reaction state carry-back)
     float*          __restrict__ mass_out,               // unsorted mass (spawn/reaction state carry-back)
@@ -141,7 +135,6 @@ void K_Integrate(
         sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
         temperature_out[orig_idx] = temp;
         particle_dye_out[orig_idx] = sorted_particle_dye[i];
-        angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
         return;
     }
 
@@ -196,8 +189,7 @@ void K_Integrate(
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
             particle_dye_out[orig_idx] = sorted_particle_dye[i];
-            angular_velocity_out[orig_idx] = sorted_angular_velocity[i];
-            return;
+                return;
         }
         // Wake up: clear sleeping flag, set just_woke flag, reset counter
         pi = CLEAR_SLEEPING(pi);
@@ -468,19 +460,6 @@ void K_Integrate(
     dye.y = fmaxf(0.0f, fminf(1.0f, dye.y + drate.y * dt_dye));
     dye.z = fmaxf(0.0f, fminf(1.0f, dye.z + drate.z * dt_dye));
 
-    // --- Micropolar angular velocity update ---
-    // Relaxation: omega_new = omega + dt * nu_t * (0.5 * curl_v - omega)
-    // curl_v (vorticity) computed in step1, stored in sorted_vorticity.xyz
-    // Only for FLUID particles (GRANULAR/GAS don't benefit from micropolar)
-    float4 ang_vel = sorted_angular_velocity[i];
-    if (behavior == FLUID) {
-        float4 vort = sorted_vorticity[i];
-        float nu_t = MICROPOLAR_NU_T;
-        ang_vel.x += dt * nu_t * (0.5f * vort.x - ang_vel.x);
-        ang_vel.y += dt * nu_t * (0.5f * vort.y - ang_vel.y);
-        ang_vel.z += dt * nu_t * (0.5f * vort.z - ang_vel.z);
-    }
-
     // Track drift since the last full sort for grid reuse (bd-r5-review-n28.54).
     // The anchor is the sorted position written by K_ScatterReorder at the last
     // full sort; the permutation is frozen between full sorts, so slot i is the
@@ -513,7 +492,6 @@ void K_Integrate(
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
     particle_dye_out[orig_idx] = dye;
-    angular_velocity_out[orig_idx] = ang_vel;
 }
 
 /* ======================================================================

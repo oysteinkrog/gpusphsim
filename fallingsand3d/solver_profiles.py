@@ -51,8 +51,6 @@ class SolverProfile:
     # Velocity limit: v_limit = factor * h / dt (CFL-based velocity clamp).
     # None picks the solver default in __post_init__: 0.4 for DFSPH, 0.9 otherwise.
     velocity_limit_factor: float | None = None
-    # Micropolar params
-    micropolar_nu_t: float = 0.1   # not read yet: kernels hardcode nu_t = 0.1f
 
     def __post_init__(self) -> None:
         if self.velocity_limit_factor is None:

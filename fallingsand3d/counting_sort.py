@@ -133,7 +133,6 @@ def counting_sort_full(
     sleep_counter: cupy.ndarray,
     kappa: cupy.ndarray,
     particle_dye: cupy.ndarray,
-    angular_velocity: cupy.ndarray,
     kappa_v: cupy.ndarray,
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
@@ -146,7 +145,6 @@ def counting_sort_full(
     sorted_sleep_counter: cupy.ndarray,
     sorted_kappa: "Optional[cupy.ndarray]",
     sorted_particle_dye: cupy.ndarray,
-    sorted_angular_velocity: cupy.ndarray,
     sorted_kappa_v: "Optional[cupy.ndarray]",
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
@@ -155,6 +153,9 @@ def counting_sort_full(
     sorted_dye_h: "Optional[cupy.ndarray]" = None,
     # Grid-reuse drift anchor (bd-r5-review-n28.54)
     sorted_anchor: "Optional[cupy.ndarray]" = None,
+    # Ignored: the micropolar angular velocity was removed (n28.140)
+    angular_velocity: "Optional[cupy.ndarray]" = None,
+    sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Run the full counting sort pipeline (hash + histogram + prefix_sum + scatter + cell_end).
 
@@ -238,7 +239,6 @@ def counting_sort_full(
         sleep_counter,
         kappa,
         particle_dye,
-        angular_velocity,
         kappa_v,
         # Sorted outputs
         sorted_hashes,
@@ -252,7 +252,6 @@ def counting_sort_full(
         sorted_sleep_counter,
         sorted_kappa if sorted_kappa is not None else _null,
         sorted_particle_dye,
-        sorted_angular_velocity,
         sorted_kappa_v if sorted_kappa_v is not None else _null,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,
@@ -287,7 +286,6 @@ def gather_reorder(
     sleep_counter: cupy.ndarray,
     kappa: cupy.ndarray,
     particle_dye: cupy.ndarray,
-    angular_velocity: cupy.ndarray,
     kappa_v: cupy.ndarray,
     # Sorted particle arrays (write)
     sorted_position: cupy.ndarray,
@@ -300,13 +298,15 @@ def gather_reorder(
     sorted_sleep_counter: cupy.ndarray,
     sorted_kappa: "Optional[cupy.ndarray]",
     sorted_particle_dye: cupy.ndarray,
-    sorted_angular_velocity: cupy.ndarray,
     sorted_kappa_v: "Optional[cupy.ndarray]",
     # FP16 velocity output (OPT-4.3)
     sorted_velocity_h: "Optional[cupy.ndarray]" = None,
     # Fixed-point temperature (uint16, T*8) + FP16 dye outputs (PERF-011)
     sorted_temperature_h: "Optional[cupy.ndarray]" = None,
     sorted_dye_h: "Optional[cupy.ndarray]" = None,
+    # Ignored: the micropolar angular velocity was removed (n28.140)
+    angular_velocity: "Optional[cupy.ndarray]" = None,
+    sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Re-scatter unsorted data to sorted order using existing sort_perm.
 
@@ -340,7 +340,6 @@ def gather_reorder(
         sleep_counter,
         kappa,
         particle_dye,
-        angular_velocity,
         kappa_v,
         # Sorted outputs
         sorted_position,
@@ -353,7 +352,6 @@ def gather_reorder(
         sorted_sleep_counter,
         sorted_kappa if sorted_kappa is not None else _null,
         sorted_particle_dye,
-        sorted_angular_velocity,
         sorted_kappa_v if sorted_kappa_v is not None else _null,
         # FP16 velocity output (OPT-4.3)
         sorted_velocity_h if sorted_velocity_h is not None else _null,

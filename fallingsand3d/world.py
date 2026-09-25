@@ -247,10 +247,12 @@ class World:
         self.sorted_particle_dye = cp.zeros((n, 4), dtype=cp.float32)
         # Dye diffusion rate (float4: dr, dg, db, unused) -- computed in step1, applied in integrate
         self.sorted_dye_rate = cp.zeros((n, 4), dtype=cp.float32)
-        # Micropolar: angular velocity (float4: omega_x, omega_y, omega_z, unused)
-        # Persistent (like velocity), scattered through sort pipeline
-        self.angular_velocity = cp.zeros((n, 4), dtype=cp.float32)
-        self.sorted_angular_velocity = cp.zeros((n, 4), dtype=cp.float32)
+        # The micropolar angular velocity had no reader and was removed
+        # (bd-r5-review-n28.140). These empty placeholders exist only because
+        # simulation.py still passes them to kernel wrappers that ignore them.
+        # Delete them once simulation.py stops referencing them.
+        self.angular_velocity = cp.zeros((0, 4), dtype=cp.float32)
+        self.sorted_angular_velocity = cp.zeros((0, 4), dtype=cp.float32)
         # FP16 velocity copy for neighbor loop bandwidth reduction (OPT-4.3)
         # Written during sort (counting_sort), read by step1/step2 neighbor loops.
         # 8 bytes per particle (half4) vs 16 bytes (float4) = 50% bandwidth savings on velocity reads.
@@ -468,10 +470,9 @@ class World:
         self.sorted_packed_info[:num_alive] = self.packed_info[:n][alive_idx]
         # uint8 arrays
         self.sorted_sleep_counter[:num_alive] = self.sleep_counter[:n][alive_idx]
-        # Persistent per-particle state (kappa, dye, angular_velocity, kappa_v)
+        # Persistent per-particle state (kappa, dye, kappa_v)
         self.sorted_kappa[:num_alive] = self.kappa[:n][alive_idx]
         self.sorted_particle_dye[:num_alive] = self.particle_dye[:n][alive_idx]
-        self.sorted_angular_velocity[:num_alive] = self.angular_velocity[:n][alive_idx]
         self.sorted_kappa_v[:num_alive] = self.kappa_v[:n][alive_idx]
 
         # Copy back from scratch to primary arrays
@@ -492,7 +493,6 @@ class World:
         self.sleep_counter[:num_alive] = self.sorted_sleep_counter[:num_alive]
         self.kappa[:num_alive] = self.sorted_kappa[:num_alive]
         self.particle_dye[:num_alive] = self.sorted_particle_dye[:num_alive]
-        self.angular_velocity[:num_alive] = self.sorted_angular_velocity[:num_alive]
         self.kappa_v[:num_alive] = self.sorted_kappa_v[:num_alive]
 
         # Zero out the dead tail to prevent stale data. The DFSPH warm-start
@@ -588,7 +588,7 @@ class World:
         self.position[sl] = self.park_positions(
             cp.arange(start, start + count), spacing, grid_min)
         for arr in (self.velocity, self.veleval, self.sph_force, self.color,
-                    self.particle_dye, self.angular_velocity):
+                    self.particle_dye):
             arr[sl] = 0.0
         self.temperature[sl] = T_AMBIENT
         for arr in (self.density, self.mass, self.health, self.lifetime, self.shear_rate, self.exposure_heat,
@@ -618,7 +618,7 @@ class World:
         slot's previous occupant (bd-r5-review-n28.96). `positions` is an
         (N, 3) CuPy array of xyz. position.w gets the material rest density,
         because step1 reads the previous density from there. The DFSPH
-        warm-start fields (kappa, kappa_v) and angular velocity are zeroed.
+        warm-start fields (kappa, kappa_v) are zeroed.
         `lifetime` None gives the per-material default from
         _DEFAULT_LIFETIMES (0 for materials that never expire); an explicit
         value overrides it, and 0 makes a GAS particle permanent.
@@ -634,7 +634,6 @@ class World:
             arr[sl, 2] = vz
             arr[sl, 3] = 0.0
         self.sph_force[sl] = 0.0
-        self.angular_velocity[sl] = 0.0
 
         self.mass[sl] = spawn_mass(material_id)
         self.packed_info[sl] = cp.uint32(_MAKE_PACKED(material_id, mat.behavior_class))

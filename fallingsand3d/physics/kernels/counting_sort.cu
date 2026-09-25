@@ -99,7 +99,6 @@ void K_ScatterReorder(
     const unsigned char* __restrict__ sleep_counter_in,
     const float*  __restrict__ kappa_in,
     const float4* __restrict__ particle_dye_in,
-    const float4* __restrict__ angular_velocity_in,
     const float*  __restrict__ kappa_v_in,          // DFSPH div warm-start (PERF-008)
     // Sorted outputs (write)
     uint*         __restrict__ sorted_hashes_out,
@@ -113,7 +112,6 @@ void K_ScatterReorder(
     unsigned char* __restrict__ sleep_counter_out,
     float*        __restrict__ kappa_out,           // NULL = skip (DFSPH only)
     float4*       __restrict__ particle_dye_out,
-    float4*       __restrict__ angular_velocity_out,
     float*        __restrict__ kappa_v_out,         // DFSPH div warm-start (PERF-008), NULL = skip
     // FP16 velocity output (OPT-4.3: half bandwidth in neighbor loops)
     void*         __restrict__ velocity_h_out,      // half4, 8 bytes per particle (NULL = skip)
@@ -158,7 +156,6 @@ void K_ScatterReorder(
     if (kappa_out) kappa_out[sorted_idx] = __ldg(&kappa_in[idx]);
     float4 dye = __ldg(&particle_dye_in[idx]);
     particle_dye_out[sorted_idx]  = dye;
-    angular_velocity_out[sorted_idx] = __ldg(&angular_velocity_in[idx]);
     if (kappa_v_out) kappa_v_out[sorted_idx] = __ldg(&kappa_v_in[idx]);
 
     // Also write FP16 velocity copy for neighbor loop bandwidth reduction (OPT-4.3).
@@ -196,7 +193,6 @@ void K_GatherReorder(
     const unsigned char* __restrict__ sleep_counter_in,
     const float*  __restrict__ kappa_in,
     const float4* __restrict__ particle_dye_in,
-    const float4* __restrict__ angular_velocity_in,
     const float*  __restrict__ kappa_v_in,           // DFSPH div warm-start (PERF-008)
     // Sorted outputs (write)
     float4*       __restrict__ position_out,
@@ -209,7 +205,6 @@ void K_GatherReorder(
     unsigned char* __restrict__ sleep_counter_out,
     float*        __restrict__ kappa_out,           // NULL = skip (DFSPH only)
     float4*       __restrict__ particle_dye_out,
-    float4*       __restrict__ angular_velocity_out,
     float*        __restrict__ kappa_v_out,          // DFSPH div warm-start (PERF-008), NULL = skip
     // FP16 velocity output (OPT-4.3)
     void*         __restrict__ velocity_h_out,      // NULL = skip
@@ -237,7 +232,6 @@ void K_GatherReorder(
     if (kappa_out) kappa_out[sorted_idx] = __ldg(&kappa_in[orig_idx]);
     float4 dye = __ldg(&particle_dye_in[orig_idx]);
     particle_dye_out[sorted_idx]  = dye;
-    angular_velocity_out[sorted_idx] = __ldg(&angular_velocity_in[orig_idx]);
     if (kappa_v_out) kappa_v_out[sorted_idx] = __ldg(&kappa_v_in[orig_idx]);
 
     // FP16 velocity copy (OPT-4.3); NULL = skip (PBF)

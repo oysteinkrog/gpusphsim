@@ -176,10 +176,17 @@ def integrate(
     temperature_out : cupy.ndarray, optional
         Pre-allocated (N,) float32 unsorted output for updated temperature.
 
+    sorted_vorticity, sorted_angular_velocity, angular_velocity_out
+        Ignored. The micropolar angular velocity had no reader and was
+        removed (bd-r5-review-n28.140). The parameters stay only so callers
+        that still pass them keep working; angular_velocity_out comes back
+        unchanged in slot 8 of the result.
+
     Returns
     -------
     (position_out, velocity_out, color_out, packed_info_out,
-     sleep_counter_out, temperature_out)
+     sleep_counter_out, temperature_out, particle_dye_out,
+     angular_velocity_out)
     """
     n = sorted_position.shape[0]
     if n == 0:
@@ -199,10 +206,6 @@ def integrate(
         sorted_dye_rate = cupy.zeros((n, 4), dtype=cupy.float32)
     if sorted_particle_dye is None:
         sorted_particle_dye = cupy.zeros((n, 4), dtype=cupy.float32)
-    if sorted_vorticity is None:
-        sorted_vorticity = cupy.zeros((n, 4), dtype=cupy.float32)
-    if sorted_angular_velocity is None:
-        sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
     if sorted_lifetime is None:
         sorted_lifetime = cupy.zeros(n, dtype=cupy.float32)
 
@@ -224,8 +227,6 @@ def integrate(
         temperature_out = cupy.zeros(max_idx, dtype=cupy.float32)
     if particle_dye_out is None:
         particle_dye_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
-    if angular_velocity_out is None:
-        angular_velocity_out = cupy.zeros((max_idx, 4), dtype=cupy.float32)
 
     module = _get_module()
     kernel = module.get_function("K_Integrate")  # type: ignore[union-attr]
@@ -266,8 +267,6 @@ def integrate(
             sorted_sleep_counter,
             sorted_dye_rate,
             sorted_particle_dye,
-            sorted_vorticity,
-            sorted_angular_velocity,
             sort_indexes,
             cell_start_ptr,
             cell_end_ptr,
@@ -278,7 +277,6 @@ def integrate(
             sleep_counter_out,
             temperature_out,
             particle_dye_out,
-            angular_velocity_out,
             health_out_ptr,
             lifetime_out_ptr,
             mass_out_ptr,

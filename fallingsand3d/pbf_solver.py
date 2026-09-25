@@ -313,6 +313,12 @@ def pbf_finalize(
     max_displacement: "cupy.ndarray | None" = None,
     displacement_anchor: "cupy.ndarray | None" = None,
 ) -> None:
+    """Run K_PBF_Finalize.
+
+    sorted_angular_velocity and angular_velocity_out are ignored: the
+    micropolar angular velocity had no reader and was removed
+    (bd-r5-review-n28.140). They stay so callers that still pass them work.
+    """
     n = predicted_pos.shape[0]
     _null = np.intp(0)
     _null_f = cupy.ndarray(0, dtype=cupy.float32)
@@ -321,10 +327,6 @@ def pbf_finalize(
     if particle_dye_out is None:
         particle_dye_out = cupy.zeros((n, 4), dtype=cupy.float32)
     s_dye_rate = sorted_dye_rate if sorted_dye_rate is not None else _null
-    if sorted_angular_velocity is None:
-        sorted_angular_velocity = cupy.zeros((n, 4), dtype=cupy.float32)
-    if angular_velocity_out is None:
-        angular_velocity_out = cupy.zeros((n, 4), dtype=cupy.float32)
     vort_in = vorticity_in if vorticity_in is not None else _null
     norm_in = normal_in if normal_in is not None else _null
     pn_in = pressure_normal_in if pressure_normal_in is not None else _null
@@ -350,7 +352,6 @@ def pbf_finalize(
         position_out, velocity_out, color_out, packed_info_out,
         sleep_counter_out, temperature_out,
         sorted_particle_dye, s_dye_rate, particle_dye_out,
-        sorted_angular_velocity, angular_velocity_out,
         vort_in, norm_in, pn_in,
         rb_ptr, rf_ptr, rt_ptr,
         s_lifetime_ptr, health_out_ptr, lifetime_out_ptr, mass_out_ptr,
