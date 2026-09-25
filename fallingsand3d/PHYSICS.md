@@ -1191,7 +1191,9 @@ occupant:
 | health | 1 |
 | lifetime | GAS default below, else 0 |
 | shear_rate, exposure_heat, exposure_corrode | 0 |
-| color | material color |
+
+There is no color field to set: `K_ComputeColor` computes the render color
+from the state every frame (see 10.11).
 
 `presets._clear_world` also zeroes `kappa`, `kappa_v` and `sorted_lambda_pbf`
 for the whole pool, so no DFSPH or PBF warm-start pressure from the previous
@@ -1428,7 +1430,22 @@ Three visual effects combined:
 
 Hot tint and health fade applied on top (same as base color function).
 
-**Source**: `integrate.cu:207-280`
+**Where the color is computed.** No solver stores a color. `K_ComputeColor`
+(`integrate.cu`) runs once per frame from `Simulation.copy_to_vbos`, one
+thread per unsorted slot in `[0, _high_water)`, and writes straight into
+the mapped color VBO. It reads `packed_info`, `temperature`, `health`,
+`velocity` and `position`, with this substep's density in `position.w`.
+K_Integrate, K_PBF_Finalize and K_DFSPH_Finalize all write the density
+there. FLUID slots get `compute_fluid_color(mat, T, health, pos.y, |v|^2,
+rho)`, every other behavior gets `compute_color(mat, T, health, behavior)`.
+The formulas are the ones the solvers used to apply every substep, and the
+last substep's inputs are what the unsorted arrays hold at frame end, so
+the rendered color is the same. At 1M particles the kernel takes about
+0.1 ms per frame and replaces a 16 B per particle scatter on every
+substep (WCSPH integrate 0.96 to 0.72 ms per substep) and the 32 MB of
+`color` and `sorted_color` buffers. (bd-r5-review-n28.145)
+
+**Source**: `sph_shared.cuh:compute_fluid_color`, `integrate.cu:K_ComputeColor`
 
 ### 10.12 OPTIMIZATION: Spatial hash grid (replaces dense linear grid)
 
@@ -1819,8 +1836,7 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
 - **Brush kill.** `World.kill_in_sphere` runs one kernel (`K_KillSphere`, no
   host sync). Each live, non-rigid particle in the sphere gets
   `MAKE_PACKED(DEAD, STATIC)` (`world.DEAD_PACKED`, 0x300), zero mass,
-  health and velocity, and color `(0, 0, 0, -1)`. As STATIC it skips every
-  solver's fluid path.
+  health and velocity. As STATIC it skips every solver's fluid path.
   `World.compact()` fills the dead tail with the same encoding. The alive test
   everywhere is `material_id != 0`, so a bare `packed_info = 0` also counts as
   dead. (bd-r5-review-n28.34)
@@ -1835,9 +1851,9 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   freelist, the same as consumed acid (see 21.3).
 - **Rendering.** Every draw covers `[0, _high_water)`, dead slots included.
   `compute_color` and `compute_fluid_color` (`sph_shared.cuh`) return
-  `(0, 0, 0, -1)` for `MAT_DEAD`, so Integrate and the PBF and DFSPH Finalize
-  kernels mark every dead slot, whatever its behavior bits. `K_KillSphere` and
-  `add_dead_reserve` write `color.w = -1` directly. `particle.vert`,
+  `(0, 0, 0, -1)` for `MAT_DEAD`, so `K_ComputeColor` (see 10.11) marks
+  every dead slot on the next frame, whatever its behavior bits, including
+  slots killed by the brush or parked by `add_dead_reserve`. `particle.vert`,
   `particle_nonfluid.vert`, `ssfr_depth.vert` and `ssfr_thickness.vert` move
   any vertex with `color.w < 0` off screen with point size 0, so a killed
   particle vanishes at once and does not wait for compaction (every 60 frames,
@@ -1845,16 +1861,14 @@ dead slot must add nothing to its neighbours. (bd-r5-review-n28.23)
   (FLUID 0.0, GRANULAR 0.25, GAS 0.5, STATIC 0.75). The dead vertices are
   still fetched, so they cost vertex work but no fragment work.
   (bd-r5-review-n28.60)
-- **Color outside a substep.** The World spawn paths and `K_SpawnGas` write
-  the behavior code into `color.w` at spawn. Save files and undo snapshots
-  hold no color, so `load_scene` and `SnapshotRing.restore` call
-  `World.refresh_color(n)`: one GPU gather that writes each slot's base
-  material color and `behavior * 0.25` (DEAD `(0, 0, 0, -1)`). Heat glow
-  comes back on the next substep. A paused scene therefore shows the right
-  colors right after spawn, load or undo. (bd-r5-review-n28.63)
+- **Color outside a substep.** Nothing stores a color, so spawn, load,
+  undo and kill need no color write. `K_ComputeColor` computes the color
+  from the state on every frame, paused or not, so a paused scene shows the
+  right colors, heat glow included, on the first frame after any of them.
+  (bd-r5-review-n28.63, bd-r5-review-n28.145)
 
 **Source**: `reactions.cu:K_Reactions`, `sph_shared.cuh:static_particle_boundary`,
-`sph_shared.cuh:compute_color`, `shaders/particle.vert`,
+`sph_shared.cuh:compute_color`, `integrate.cu:K_ComputeColor`, `shaders/particle.vert`,
 `simulation.py:_run_reactions_spawn`, `world.py:kill_in_sphere`,
 `dfsph_solver.cu:K_DFSPH_DensitySolverUpdate`, `pbf_solver.cu:K_PBF_ComputeLambda`
 
@@ -2441,7 +2455,8 @@ Per substep:
        Recompute a_press from updated p_rho2
      Apply final: v* += dt * a_press
   7. Final position: x_final = x + dt * v*_final
-  8. Boundary handling, color, writeback (kappa + kappa_v written back for warm-start)
+  8. Boundary handling, writeback (kappa + kappa_v written back for warm-start;
+     position.w gets the density for the per-frame K_ComputeColor)
 ```
 
 Kernels (`dfsph_solver.cu`, 8 in total): ComputeDensityAlpha (step 2),
@@ -3888,8 +3903,9 @@ Runs as `K_UpdateBoundaryParticles`, one thread per boundary particle.
 
 - `inject_boundary_particles()` writes the block once, at the current
   `_high_water`, then raises `_high_water` by `N_b`. It also sets packed_info
-  (MAT_RIGID, STATIC, body id in bits [20:13]), color, density, temperature,
-  health, lifetime and sleep_counter. It syncs, so it runs only on scene events.
+  (MAT_RIGID, STATIC, body id in bits [20:13]), density, temperature,
+  health, lifetime and sleep_counter. The block's color comes from the
+  MAT_RIGID row of the material table through `K_ComputeColor`. It syncs, so it runs only on scene events.
 - `rbm.boundary_injected` is the one flag that says the block exists.
   `reset()` and `mark_for_reinjection()` clear it. Before writing, injection
   kills and compacts away any MAT_RIGID particles already in the world, so
