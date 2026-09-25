@@ -17,10 +17,12 @@ import numpy as np
 import cupy
 import cupy.cuda.compiler as _compiler
 
+import gl_cuda_interop
 from gl_cuda_interop import (
     CudaGLBuffer,
     check_last_error,
     get_interop_stream,
+    map_all,
     map_buffer,
     unmap_buffer,
     register_buffer,
@@ -61,6 +63,8 @@ from OpenGL.GL import (
     glGenVertexArrays,
     glBindVertexArray,
     glDeleteBuffers,
+    glFinish,
+    glGetBufferSubData,
 )
 
 
@@ -350,6 +354,91 @@ def test_double_map_raises(gl_context):
     finally:
         if buf._mapped:
             buf.unmap()
+        buf.close()
+        glDeleteBuffers(1, [vbo])
+
+
+def _make_vbo(nbytes: int) -> int:
+    vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, nbytes, None, GL_DYNAMIC_DRAW)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    _check_gl("VBO creation")
+    return vbo
+
+
+def _read_vbo(vbo: int, n: int) -> np.ndarray:
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    raw = glGetBufferSubData(GL_ARRAY_BUFFER, 0, n * FLOAT4_BYTES)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    _check_gl("glGetBufferSubData")
+    return np.frombuffer(bytes(raw), dtype=np.float32).reshape(n, 4)
+
+
+def test_map_all_two_buffers_one_map_call(gl_context):
+    """map_all maps two buffers with one map call; CuPy writes reach GL.
+
+    bd-r5-review-n28.150: main.py maps pos, col and vel with one
+    cudaGraphicsMapResources call instead of one call per buffer.
+    """
+    n = 256
+    nbytes = n * FLOAT4_BYTES
+    # Plain GL registration (no write-discard) so GL can read the data back.
+    vbo_a, vbo_b = _make_vbo(nbytes), _make_vbo(nbytes)
+    a = CudaGLBuffer(vbo_a, nbytes, flags=0)
+    b = CudaGLBuffer(vbo_b, nbytes, flags=0)
+    try:
+        want_a = np.arange(n * 4, dtype=np.float32).reshape(n, 4)
+        want_b = -want_a - 1.0
+        before = gl_cuda_interop.map_call_count
+        with map_all((a, b)) as (ma, mb):
+            assert ma is a and mb is b
+            assert a._mapped and b._mapped
+            ma.device_pointer_as_cupy_array((n, 4), np.float32)[:] = cupy.asarray(want_a)
+            mb.device_pointer_as_cupy_array((n, 4), np.float32)[:] = cupy.asarray(want_b)
+        assert gl_cuda_interop.map_call_count == before + 1
+        assert not a._mapped and not b._mapped
+        cupy.cuda.Device().synchronize()
+        glFinish()
+        np.testing.assert_array_equal(_read_vbo(vbo_a, n), want_a)
+        np.testing.assert_array_equal(_read_vbo(vbo_b, n), want_b)
+
+        # Mapping again works: the buffers really were unmapped.
+        with map_all((a, b)):
+            pass
+        assert gl_cuda_interop.map_call_count == before + 2
+    finally:
+        a.close()
+        b.close()
+        glDeleteBuffers(2, [vbo_a, vbo_b])
+
+
+def test_map_all_skips_none_and_unmaps_on_error(gl_context):
+    """None entries pass through unmapped; an exception still unmaps."""
+    nbytes = 64 * FLOAT4_BYTES
+    vbo = _make_vbo(nbytes)
+    buf = CudaGLBuffer(vbo, nbytes)
+    try:
+        with map_all((buf, None)) as (m, none):
+            assert m is buf and none is None
+            assert buf._mapped
+        assert not buf._mapped
+
+        with pytest.raises(ZeroDivisionError):
+            with map_all((buf,)):
+                1 / 0
+        assert not buf._mapped
+
+        with pytest.raises(ValueError):
+            with map_all((buf, buf)):
+                pass
+        assert not buf._mapped
+
+        before = gl_cuda_interop.map_call_count
+        with map_all((None,)):
+            pass
+        assert gl_cuda_interop.map_call_count == before
+    finally:
         buf.close()
         glDeleteBuffers(1, [vbo])
 
