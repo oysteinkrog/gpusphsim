@@ -910,6 +910,10 @@ class Simulation:
         # Blast wave: radial impulse from freshly-exploded gunpowder
         from materials import GUNPOWDER
         if GUNPOWDER in w._spawned_material_ids:
+            # Blast impulse on rigid boundary particles goes to the body
+            # force/torque accumulators (zeroed in the substep prologue).
+            rbm = self.rigid_body_manager
+            has_bodies = rbm.num_bodies > 0
             reactions.compute_blast_wave(
                 w.sorted_position[:n],
                 w.sorted_velocity[:n],
@@ -920,6 +924,10 @@ class Simulation:
                 smoothing_length=self._h,
                 predicted_position=(predicted_position[:n]
                                     if predicted_position is not None else None),
+                sorted_mass=w.sorted_mass[:n],
+                d_rigid_bodies=rbm.d_rigid_bodies if has_bodies else None,
+                d_rigid_forces=rbm.rigid_forces if has_bodies else None,
+                d_rigid_torques=rbm.rigid_torques if has_bodies else None,
             )
             mark("blast")
 

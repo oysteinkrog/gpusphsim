@@ -498,9 +498,16 @@ void K_Reactions(
  *
  * Scans for FIRE particles with lifetime == GUNPOWDER_FIRE_LIFETIME (just
  * converted this frame). For each blast source, neighbor loop applies
- * radial impulse to all particles within smoothing_length h.
+ * radial impulse to all non-STATIC particles within smoothing_length h.
  * Uses atomicAdd on velocity for thread safety. Under PBF it also adds
- * dt * dv to the predicted position of every non-STATIC target.
+ * dt * dv to the predicted position of every target.
+ *
+ * STATIC targets get no velocity write: integrate zeroes STATIC velocity
+ * and K_UpdateBoundaryParticles rewrites rigid boundary velocity from the
+ * body state, so the kick would vanish. A MAT_RIGID boundary particle
+ * instead adds the force F = m_j * dv / dt (and torque r_b x F, with
+ * r_b = x_j - COM) to its body's accumulators, which K_IntegrateRigidBodies
+ * reads this substep. Blasts are rare, so plain atomicAdd is used.
  * ====================================================================== */
 
 #define BLAST_SPEED 15.0f
@@ -515,7 +522,11 @@ void K_BlastWave(
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
     float           h,                              // smoothing length
-    float4*         __restrict__ predicted_position // PBF x* (atomicAdd dt*dv); NULL otherwise
+    float4*         __restrict__ predicted_position, // PBF x* (atomicAdd dt*dv); NULL otherwise
+    const float*    __restrict__ sorted_mass,       // particle mass (read for MAT_RIGID targets)
+    const RigidBody* __restrict__ d_rigid_bodies,   // body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,    // force accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques    // torque accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -567,13 +578,42 @@ void K_BlastWave(
                     float3 dv = make_float3(diff.x * inv_dist * impulse,
                                             diff.y * inv_dist * impulse,
                                             diff.z * inv_dist * impulse);
+
+                    uint pi_j = sorted_packed_info[j];
+                    if (GET_BEHAVIOR(pi_j) == STATIC) {
+                        // No velocity write on STATIC. A rigid boundary
+                        // particle passes the impulse to its body as a force.
+                        if (GET_MATERIAL_ID(pi_j) == MAT_RIGID
+                            && d_rigid_forces != NULL && d_rigid_torques != NULL
+                            && d_rigid_bodies != NULL && sorted_mass != NULL) {
+                            int body_id = GET_BODY_ID(pi_j);
+                            if (body_id >= MAX_RIGID_BODIES) continue;
+                            float s = sorted_mass[j] / c_sim.dt;
+                            float3 F = make_float3(s * dv.x, s * dv.y, s * dv.z);
+                            float4 com = d_rigid_bodies[body_id].position;
+                            float3 r_b = make_float3(pos_j4.x - com.x,
+                                                     pos_j4.y - com.y,
+                                                     pos_j4.z - com.z);
+                            float3 tau = make_float3(
+                                r_b.y * F.z - r_b.z * F.y,
+                                r_b.z * F.x - r_b.x * F.z,
+                                r_b.x * F.y - r_b.y * F.x);
+                            atomicAdd(&d_rigid_forces[body_id * 4 + 0], F.x);
+                            atomicAdd(&d_rigid_forces[body_id * 4 + 1], F.y);
+                            atomicAdd(&d_rigid_forces[body_id * 4 + 2], F.z);
+                            atomicAdd(&d_rigid_torques[body_id * 4 + 0], tau.x);
+                            atomicAdd(&d_rigid_torques[body_id * 4 + 1], tau.y);
+                            atomicAdd(&d_rigid_torques[body_id * 4 + 2], tau.z);
+                        }
+                        continue;
+                    }
+
                     atomicAdd(&velocity[j].x, dv.x);
                     atomicAdd(&velocity[j].y, dv.y);
                     atomicAdd(&velocity[j].z, dv.z);
                     // PBF: move x* too, so Finalize's (x* - x)/dt keeps the
-                    // kick. STATIC x* must stay equal to x.
-                    if (predicted_position != NULL
-                        && GET_BEHAVIOR(sorted_packed_info[j]) != STATIC) {
+                    // kick. STATIC targets were skipped above, so x* = x there.
+                    if (predicted_position != NULL) {
                         float dt = c_sim.dt;
                         atomicAdd(&predicted_position[j].x, dt * dv.x);
                         atomicAdd(&predicted_position[j].y, dt * dv.y);

@@ -225,12 +225,21 @@ def compute_blast_wave(
     cell_end: cupy.ndarray,
     smoothing_length: float = 0.04,
     predicted_position: Optional[cupy.ndarray] = None,
+    sorted_mass: Optional[cupy.ndarray] = None,
+    d_rigid_bodies: Optional[cupy.ndarray] = None,
+    d_rigid_forces: Optional[cupy.ndarray] = None,
+    d_rigid_torques: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_BlastWave kernel for radial impulse from gunpowder explosions.
 
     Should be called after compute_reactions(), before step2.
     predicted_position is PBF's sorted_predicted_position: each non-STATIC
     target's x* also moves by dt * dv. WCSPH and DFSPH pass None.
+
+    STATIC targets get no velocity change. When the rigid-body buffers and
+    sorted_mass are given, a MAT_RIGID boundary particle in range adds
+    F = m_j * dv / dt and its torque to d_rigid_forces / d_rigid_torques.
+    Pass None for all four when there are no bodies.
     """
     n = sorted_packed_info.shape[0]
     if n == 0:
@@ -255,5 +264,9 @@ def compute_blast_wave(
             cell_end,
             np.float32(smoothing_length),
             predicted_position if predicted_position is not None else np.intp(0),
+            sorted_mass if sorted_mass is not None else np.intp(0),
+            d_rigid_bodies if d_rigid_bodies is not None else np.intp(0),
+            d_rigid_forces if d_rigid_forces is not None else np.intp(0),
+            d_rigid_torques if d_rigid_torques is not None else np.intp(0),
         ),
     )
