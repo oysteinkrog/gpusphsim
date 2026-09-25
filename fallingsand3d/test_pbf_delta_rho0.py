@@ -75,14 +75,17 @@ def _one_delta(world, sim, blocks, module=None):
             world.sorted_packed_info[:n], sim._cell_start, sim._cell_end,
             world.sorted_density, world.sorted_lambda_pbf,
         )
-        delta = cp.zeros((n, 4), dtype=cp.float32)
+        # K_PBF_ComputeDelta writes the corrected position (bd-r5-review-n28.185);
+        # the scenes sit away from the walls, so pred_out - pred_in is the delta.
+        pred_out = cp.zeros((n, 4), dtype=cp.float32)
         pbf_solver.pbf_compute_delta(
             world.sorted_position[:n], world.sorted_lambda_pbf[:n],
             world.sorted_mass[:n], world.sorted_packed_info[:n],
-            sim._cell_start, sim._cell_end, delta,
+            sim._cell_start, sim._cell_end, pred_out,
         )
         cp.cuda.Device().synchronize()
-        d = cp.asnumpy(delta)[:, :3].astype(np.float64)
+        d = (cp.asnumpy(pred_out)[:, :3].astype(np.float64)
+             - cp.asnumpy(world.sorted_position[:n])[:, :3].astype(np.float64))
         m = cp.asnumpy(world.sorted_mass[:n]).astype(np.float64)
         mat = cp.asnumpy(world.sorted_packed_info[:n]) & 0xFF
         perm = cp.asnumpy(sim._sort_perm[:n])

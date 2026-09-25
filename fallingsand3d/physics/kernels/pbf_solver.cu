@@ -4,9 +4,15 @@
  * Kernels:
  *   K_PBF_Predict       -- Apply gravity, predict position
  *   K_PBF_ComputeLambda -- Density + Lagrange multiplier
- *   K_PBF_ComputeDelta  -- Position correction + artificial pressure
- *   K_PBF_ApplyDelta    -- Apply correction + boundary clamp
+ *   K_PBF_ComputeDelta  -- Position correction, applied and clamped into the
+ *                          other predicted-position buffer (ping-pong)
  *   K_PBF_Finalize      -- Velocity update, XSPH, friction, sleep, writeback
+ *
+ * Predicted positions (bd-r5-review-n28.185): iteration k reads buffer A and
+ * writes buffer B, so the Jacobi update needs no separate apply pass. .w of a
+ * predicted position holds the particle mass. K_PBF_Predict writes it, and
+ * the first K_PBF_ComputeDelta after reactions and spawn (which may change
+ * mass) writes it again from the mass array. Later passes read m_j from .w.
  *
  * All particles participate in density constraints (FLUID + GRANULAR + GAS).
  * GRANULAR gets velocity-space Drucker-Prager friction in Finalize (iteration-independent).
@@ -65,7 +71,7 @@ __device__ inline void pbf_box_wall(
 /* World box collision for K_PBF_Finalize. Same impulse as sdf_box_boundary
  * (restitution on the normal velocity, Coulomb wall friction on the
  * tangential velocity), but contact includes a particle sitting exactly on
- * the margin. K_PBF_Predict and K_PBF_ApplyDelta already clamp the predicted
+ * the margin. K_PBF_Predict and K_PBF_ComputeDelta already clamp the predicted
  * position to world_min + BOUNDARY_MARGIN, so with sdf_box_boundary's strict
  * `<` test Finalize never saw the impact (bd-r5-review-n28.70). A resting
  * particle has zero normal velocity, so the `<=` contact leaves it unchanged. */
@@ -106,7 +112,7 @@ __device__ inline void pbf_rigid_reaction(
 
 /* Move a predicted position to BOUNDARY_MARGIN outside every SDF object it
  * lies inside or within the margin of. Used by K_PBF_Predict and by every
- * K_PBF_ApplyDelta iteration. Position only: K_PBF_Finalize applies the
+ * K_PBF_ComputeDelta iteration. Position only: K_PBF_Finalize applies the
  * restitution and friction impulse. */
 __device__ __forceinline__ void push_out_of_sdf(float3& p) {
     for (int s = 0; s < c_num_sdf_objects; s++) {
@@ -122,6 +128,12 @@ __device__ __forceinline__ void push_out_of_sdf(float3& p) {
     }
 }
 
+/* Mass of particle j: from the mass array when one is given, else from the
+ * .w of its predicted position (bd-r5-review-n28.185). */
+__device__ __forceinline__ float pbf_mass(const float* __restrict__ mass, uint j, float4 pos4_j) {
+    return (mass != 0) ? __ldg(&mass[j]) : pos4_j.w;
+}
+
 /* ======================================================================
  * K_PBF_Predict -- Apply gravity, predict position
  *   x*_i = x_i + dt * (v_i + dt * g)
@@ -134,7 +146,8 @@ void K_PBF_Predict(
     const float4*   __restrict__ velocity,
     const uint*     __restrict__ packed_info,
     const float*    __restrict__ temperature_in,
-    float4*         __restrict__ predicted_out
+    float4*         __restrict__ predicted_out,
+    const float*    __restrict__ mass           // .w of the prediction, or NULL for 1.0
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -144,11 +157,12 @@ void K_PBF_Predict(
 
     float4 pos4 = position[i];
     float3 pos = make_float3(pos4.x, pos4.y, pos4.z);
+    float m_i = (mass != 0) ? mass[i] : 1.0f;
 
     // STATIC skips prediction entirely. Sleeping particles still predict
     // (gravity integration) so PBF corrections can wake them via density changes.
     if (behavior == STATIC) {
-        predicted_out[i] = pos4;
+        predicted_out[i] = make_float4(pos.x, pos.y, pos.z, m_i);
         return;
     }
 
@@ -200,7 +214,7 @@ void K_PBF_Predict(
     clamp_boundary(pred);
     push_out_of_sdf(pred);
 
-    predicted_out[i] = make_float4(pred.x, pred.y, pred.z, 1.0f);
+    predicted_out[i] = make_float4(pred.x, pred.y, pred.z, m_i);
 }
 
 /* ======================================================================
@@ -214,13 +228,13 @@ extern "C" __global__ __launch_bounds__(256, 3)
 void K_PBF_ComputeLambda(
     uint            numParticles,
     const float4*   __restrict__ predicted_pos,
-    const float*    __restrict__ mass,
+    const float*    __restrict__ mass,              // NULL: mass from predicted_pos.w
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
     float*          __restrict__ density_out,
     float*          __restrict__ lambda_out,
-    float4*         __restrict__ pressure_normal_out,
+    float4*         __restrict__ pressure_normal_out, // NULL except on the last call (Finalize reads the last one)
     // Optional heat diffusion + exposure (NULL to skip, used only on first call)
     const float*    __restrict__ temperature_in,
     const float*    __restrict__ density_in,
@@ -257,7 +271,7 @@ void K_PBF_ComputeLambda(
             density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
             lambda_out[i] = 0.0f;
         }
-        pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (pressure_normal_out != 0) pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
 
@@ -293,7 +307,7 @@ void K_PBF_ComputeLambda(
     // Cross-phase heat cap (bd-r5-review-n28.94). The self term bounds rho_i from
     // below, so capping a cross-phase pair coefficient at a_x_max keeps
     // viscosity_lap_coeff * a / (rho_i * cp_i) * dt <= 0.5 for that pair.
-    float rho_i_lb = fmaxf(c_precalc.poly6_coeff * __ldg(&mass[i]) * h_sq * h_sq * h_sq,
+    float rho_i_lb = fmaxf(c_precalc.poly6_coeff * pbf_mass(mass, i, pos4_i) * h_sq * h_sq * h_sq,
                            is_gas_i ? RHO_EPSILON : 1.0f);
     float a_x_max = 0.5f * rho_i_lb * c_materials[mat_id_i].heat_capacity
                   / fmaxf(c_precalc.viscosity_lap_coeff * c_sim.dt, 1e-30f);
@@ -324,7 +338,7 @@ void K_PBF_ComputeLambda(
                 for (uint j = start; j < end_idx; j++) {
                     // Speculative ILP: issue all loads before distance check (OPT-4.2)
                     float4 pos4_j = __ldg(&predicted_pos[j]);
-                    float m_j = __ldg(&mass[j]);
+                    float m_j = pbf_mass(mass, j, pos4_j);
                     uint pi_j = __ldg(&packed_info[j]);
 
                     float3 r = make_float3(
@@ -494,7 +508,9 @@ void K_PBF_ComputeLambda(
 
     // Store normalized density gradient as pressure normal for GRANULAR friction
     // grad_ci points in the direction of maximum density increase (into the pile)
-    if (behavior_i == GRANULAR) {
+    if (pressure_normal_out == 0) {
+        // Not the last call: Finalize never reads this one.
+    } else if (behavior_i == GRANULAR) {
         float grad_len = sqrtf(grad_ci.x*grad_ci.x + grad_ci.y*grad_ci.y + grad_ci.z*grad_ci.z);
         if (grad_len > 1e-8f) {
             float inv = 1.0f / grad_len;
@@ -523,7 +539,7 @@ void K_PBF_ComputeLambda(
             density_out[i] = rho;
             lambda_out[i] = compute_pressure(rho, GAS, mat_id_i) / (rho * rho);
         }
-        pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (pressure_normal_out != 0) pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
 
@@ -549,6 +565,14 @@ void K_PBF_ComputeLambda(
  * K_PBF_ComputeDelta -- Position correction + artificial pressure
  *   s_corr = -k * (W(r) / W(dq*h))^n
  *   dx_i = SUM_j m_j (lambda_i/rho0_i + lambda_j/rho0_j + s_corr/rho0_i) * gradW_spiky
+ *   x*_out = push_out_of_sdf(clamp_boundary(x*_in + dx_i))
+ *
+ * Reads predicted_pos, writes pred_out (the other ping-pong buffer), so every
+ * particle sees the same iteration's positions (Jacobi). STATIC copies its
+ * position through. .w of pred_out is the mass: mass[i] when the mass array
+ * is given (the first pass after reactions and spawn), else predicted_pos.w.
+ * vel_out (last iteration only) gets (x*_out - x) / dt, which Finalize reads
+ * as the neighbour velocity for XSPH.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -556,14 +580,16 @@ void K_PBF_ComputeDelta(
     uint            numParticles,
     const float4*   __restrict__ predicted_pos,
     const float*    __restrict__ lambda_in,     // this iteration's lambda from K_PBF_ComputeLambda (sorted)
-    const float*    __restrict__ mass,
+    const float*    __restrict__ mass,          // NULL: mass from predicted_pos.w
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float4*         __restrict__ delta_out,
+    float4*         __restrict__ pred_out,      // corrected predicted position (other buffer)
     const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques   // torque accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques,  // torque accumulator (NULL if no bodies)
+    const float4*   __restrict__ original_pos,  // substep start position, needed with vel_out
+    float4*         __restrict__ vel_out        // (x*_out - x) / dt, or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -572,20 +598,32 @@ void K_PBF_ComputeDelta(
     int behavior_i = GET_BEHAVIOR(pi_i);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
     bool is_gas_i = (behavior_i == GAS);
+
+    float4 pos4_i = predicted_pos[i];
+    float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
+    float m_i = (mass != 0) ? mass[i] : pos4_i.w;
+
     // Reaction on a rigid body: the pair's position correction dx on i is an
     // impulse m_i * dx / dt on the fluid over the substep, i.e. a force
     // m_i * dx / dt^2. The body gets the negative of it.
     float rigid_scale = 0.0f;
     if (d_rigid_bodies != 0) {
         float dt_r = fmaxf(c_sim.dt, 1e-8f);
-        rigid_scale = mass[i] / (dt_r * dt_r);
+        rigid_scale = m_i / (dt_r * dt_r);
     }
 
     // STATIC skips. Sleeping particles still participate so density
     // corrections can wake them. GAS has no density constraint; it takes the
     // gas EOS pressure from GAS neighbours below (bd-r5-review-n28.91).
     if (behavior_i == STATIC) {
-        delta_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        pred_out[i] = make_float4(pos_i.x, pos_i.y, pos_i.z, m_i);
+        if (vel_out != 0) {
+            float inv_dt_s = 1.0f / fmaxf(c_sim.dt, 1e-8f);
+            float4 o4 = original_pos[i];
+            vel_out[i] = make_float4((pos_i.x - o4.x) * inv_dt_s,
+                                     (pos_i.y - o4.y) * inv_dt_s,
+                                     (pos_i.z - o4.z) * inv_dt_s, 0.0f);
+        }
         return;
     }
     // GAS: the lambda slot holds p/rho^2. The WCSPH acceleration
@@ -598,9 +636,6 @@ void K_PBF_ComputeDelta(
         gas_scale = c_granular.force_scale * dt_g * dt_g
                   / (float)max(c_pbf.num_iterations, 1);
     }
-
-    float4 pos4_i = predicted_pos[i];
-    float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
 
     float h = c_sim.smoothing_length;
     float h_sq = c_sim.smoothing_length_sq;
@@ -629,7 +664,7 @@ void K_PBF_ComputeDelta(
                     float4 pos4_j = __ldg(&predicted_pos[j]);
                     uint pi_j = __ldg(&packed_info[j]);
                     float lambda_j = __ldg(&lambda_in[j]);
-                    float m_j = __ldg(&mass[j]);
+                    float m_j = pbf_mass(mass, j, pos4_j);
 
                     int bj_delta = GET_BEHAVIOR(pi_j);
 
@@ -724,38 +759,23 @@ void K_PBF_ComputeDelta(
         delta.z *= scale;
     }
 
-    delta_out[i] = make_float4(delta.x, delta.y, delta.z, 0.0f);
-}
-
-/* ======================================================================
- * K_PBF_ApplyDelta -- Apply correction + boundary clamp
- * (GRANULAR friction moved to K_PBF_Finalize for iteration-independence)
- * ====================================================================== */
-
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_PBF_ApplyDelta(
-    uint            numParticles,
-    float4*         __restrict__ predicted_pos,   // in-out
-    const float4*   __restrict__ delta_pos,
-    const uint*     __restrict__ packed_info
-) {
-    uint i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numParticles) return;
-
-    uint pi = packed_info[i];
-    if (GET_BEHAVIOR(pi) == STATIC) return;
-
-    float4 pos4 = predicted_pos[i];
-    float4 d4 = delta_pos[i];
-
-    float3 pos = make_float3(pos4.x + d4.x, pos4.y + d4.y, pos4.z + d4.z);
-
+    float3 pos = make_float3(pos_i.x + delta.x, pos_i.y + delta.y, pos_i.z + delta.z);
     clamp_boundary(pos);
     // A delta can push the particle back into an SDF collider, so project
     // it out again every iteration, as K_PBF_Predict does. The loop bound is
     // 0 when the scene has no SDF objects.
     push_out_of_sdf(pos);
-    predicted_pos[i] = make_float4(pos.x, pos.y, pos.z, 1.0f);
+    pred_out[i] = make_float4(pos.x, pos.y, pos.z, m_i);
+
+    // Last iteration: the PBF velocity (x* - x) / dt, so Finalize reads it
+    // per neighbour instead of loading both positions.
+    if (vel_out != 0) {
+        float inv_dt_v = 1.0f / fmaxf(c_sim.dt, 1e-8f);
+        float4 o4 = original_pos[i];
+        vel_out[i] = make_float4((pos.x - o4.x) * inv_dt_v,
+                                 (pos.y - o4.y) * inv_dt_v,
+                                 (pos.z - o4.z) * inv_dt_v, 0.0f);
+    }
 }
 
 /* ======================================================================
@@ -800,7 +820,9 @@ void K_PBF_Finalize(
     uint*           __restrict__ max_displacement_out, // [1] atomicMax of displacement^2 (float-as-uint), or NULL
     const float4*   __restrict__ displacement_anchor, // [N] sorted position at the last full sort, or NULL
     uint*           __restrict__ cell_wake_flags,  // wake stamp table, or NULL (bd-r5-review-n28.167)
-    const uint*     __restrict__ frame_ptr         // per-substep counter for the stamp, or NULL
+    const uint*     __restrict__ frame_ptr,        // per-substep counter for the stamp, or NULL
+    const float4*   __restrict__ vel_pred_in,      // (x* - x) / dt from the last K_PBF_ComputeDelta, or NULL
+    int             nbr_mass_in_pred_w             // 1: neighbour mass from predicted_pos.w
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -1030,7 +1052,7 @@ void K_PBF_Finalize(
 
                         // One mass and one density load per neighbour, shared
                         // by the vorticity and XSPH blocks (bd-r5-review-n28.175).
-                        float m_j = __ldg(&mass[j]);
+                        float m_j = nbr_mass_in_pred_w ? pred4_j.w : __ldg(&mass[j]);
                         float rho_j = __ldg(&density[j]);
 
                         // Vorticity eta (FLUID neighbours only -- PERF-002).
@@ -1077,12 +1099,18 @@ void K_PBF_Finalize(
                             continue;
                         }
 
-                        float4 orig4_j = __ldg(&original_pos[j]);
-                        float3 vel_j = make_float3(
-                            (pred4_j.x - orig4_j.x) * inv_dt,
-                            (pred4_j.y - orig4_j.y) * inv_dt,
-                            (pred4_j.z - orig4_j.z) * inv_dt
-                        );
+                        float3 vel_j;
+                        if (vel_pred_in != 0) {
+                            float4 vj4 = __ldg(&vel_pred_in[j]);
+                            vel_j = make_float3(vj4.x, vj4.y, vj4.z);
+                        } else {
+                            float4 orig4_j = __ldg(&original_pos[j]);
+                            vel_j = make_float3(
+                                (pred4_j.x - orig4_j.x) * inv_dt,
+                                (pred4_j.y - orig4_j.y) * inv_dt,
+                                (pred4_j.z - orig4_j.z) * inv_dt
+                            );
+                        }
                         float w = W_poly6(r_sq, h_sq);
                         float rho_avg = 0.5f * (rho_i + rho_j);
                         float factor = (m_j / rho_avg) * w;

@@ -1,7 +1,11 @@
 """PBF solver kernel wrapper -- Position Based Fluids (Macklin & Muller 2013).
 
 Compiles physics/kernels/pbf_solver.cu via CuPy RawModule and provides
-launch functions for the 5 PBF kernels.
+launch functions for the 4 PBF kernels.
+
+Predicted positions ping-pong between two buffers: each K_PBF_ComputeDelta
+reads one and writes the corrected position into the other, and .w of a
+predicted position holds the particle mass (bd-r5-review-n28.185).
 
 Constant memory (each RawModule has its own address space):
   c_grid, c_sim, c_precalc, c_materials -- shared with other kernels
@@ -173,26 +177,30 @@ def pbf_predict(
     packed_info: cupy.ndarray,
     temperature: cupy.ndarray,
     predicted_out: cupy.ndarray,
+    mass: "cupy.ndarray | None" = None,
 ) -> None:
+    """Predict x* = x + dt * v*. With mass, predicted_out.w = mass, else 1.0."""
     n = position.shape[0]
     module = _get_module()
     kernel = module.get_function("K_PBF_Predict")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
+    m_ptr = mass if mass is not None else np.intp(0)
     kernel(grid, block, (
         np.uint32(n), position, velocity, packed_info, temperature, predicted_out,
+        m_ptr,
     ))
 
 
 def pbf_compute_lambda(
     predicted_pos: cupy.ndarray,
-    mass: cupy.ndarray,
+    mass: "cupy.ndarray | None",
     packed_info: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     density_out: cupy.ndarray,
     lambda_out: cupy.ndarray,
-    pressure_normal_out: cupy.ndarray = None,
+    pressure_normal_out: "cupy.ndarray | None" = None,
     # Optional heat diffusion + exposure (pass on first call only)
     temperature_in: "cupy.ndarray | None" = None,
     density_in: "cupy.ndarray | None" = None,
@@ -203,11 +211,16 @@ def pbf_compute_lambda(
     vorticity_out: "cupy.ndarray | None" = None,
     normal_out: "cupy.ndarray | None" = None,
 ) -> None:
+    """Density and lambda. mass=None reads each mass from predicted_pos.w.
+
+    pressure_normal_out is written only when given; pass it on the last call
+    of the substep, the one K_PBF_Finalize reads.
+    """
     n = predicted_pos.shape[0]
-    if pressure_normal_out is None:
-        pressure_normal_out = cupy.zeros((n, 4), dtype=cupy.float32)
     # NULL pointers for optional params
     _null = np.intp(0)
+    m_ptr = mass if mass is not None else _null
+    pn_out = pressure_normal_out if pressure_normal_out is not None else _null
     t_in = temperature_in if temperature_in is not None else _null
     d_in = density_in if density_in is not None else _null
     dt_out = dTdt_out if dTdt_out is not None else _null
@@ -221,9 +234,9 @@ def pbf_compute_lambda(
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     kernel(grid, block, (
-        np.uint32(n), predicted_pos, mass, packed_info,
+        np.uint32(n), predicted_pos, m_ptr, packed_info,
         cell_start, cell_end, density_out, lambda_out,
-        pressure_normal_out,
+        pn_out,
         t_in, d_in, dt_out, eh_out, ec_out,
         vel_in, vort_out, norm_out,
     ))
@@ -232,18 +245,30 @@ def pbf_compute_lambda(
 def pbf_compute_delta(
     predicted_pos: cupy.ndarray,
     lambda_in: cupy.ndarray,
-    mass: cupy.ndarray,
+    mass: "cupy.ndarray | None",
     packed_info: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
-    delta_out: cupy.ndarray,
+    pred_out: cupy.ndarray,
     d_rigid_bodies: "cupy.ndarray | None" = None,
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
+    original_pos: "cupy.ndarray | None" = None,
+    vel_out: "cupy.ndarray | None" = None,
 ) -> None:
-    """Position correction. With rigid bodies, also adds the reaction of each
-    fluid-rigid pair to d_rigid_forces / d_rigid_torques."""
+    """Position correction, applied and clamped into pred_out.
+
+    pred_out must not alias predicted_pos: every particle reads the same
+    iteration's positions. pred_out.w is the mass: mass[i] when mass is
+    given, else predicted_pos.w. With vel_out (and original_pos), also
+    writes (pred_out - original_pos) / dt. With rigid bodies, also adds the
+    reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
+    """
     n = predicted_pos.shape[0]
+    if pred_out.data.ptr == predicted_pos.data.ptr:
+        raise ValueError("pbf_compute_delta: pred_out must not alias predicted_pos")
+    if vel_out is not None and original_pos is None:
+        raise ValueError("pbf_compute_delta: vel_out needs original_pos")
     module = _get_module()
     kernel = module.get_function("K_PBF_ComputeDelta")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -252,25 +277,14 @@ def pbf_compute_delta(
     rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null_f
     rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null_f
     rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null_f
+    m_ptr = mass if mass is not None else _null_f
+    op_ptr = original_pos if original_pos is not None else _null_f
+    vo_ptr = vel_out if vel_out is not None else _null_f
     kernel(grid, block, (
-        np.uint32(n), predicted_pos, lambda_in, mass, packed_info,
-        cell_start, cell_end, delta_out,
+        np.uint32(n), predicted_pos, lambda_in, m_ptr, packed_info,
+        cell_start, cell_end, pred_out,
         rb_ptr, rf_ptr, rt_ptr,
-    ))
-
-
-def pbf_apply_delta(
-    predicted_pos: cupy.ndarray,
-    delta_pos: cupy.ndarray,
-    packed_info: cupy.ndarray,
-) -> None:
-    n = predicted_pos.shape[0]
-    module = _get_module()
-    kernel = module.get_function("K_PBF_ApplyDelta")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
-    kernel(grid, block, (
-        np.uint32(n), predicted_pos, delta_pos, packed_info,
+        op_ptr, vo_ptr,
     ))
 
 
@@ -309,8 +323,14 @@ def pbf_finalize(
     displacement_anchor: "cupy.ndarray | None" = None,
     cell_wake_flags: "cupy.ndarray | None" = None,
     frame_counter: "cupy.ndarray | None" = None,
+    vel_pred_in: "cupy.ndarray | None" = None,
+    mass_in_pred_w: bool = False,
 ) -> None:
     """Run K_PBF_Finalize.
+
+    vel_pred_in is the (x* - x) / dt array the last pbf_compute_delta wrote;
+    None derives neighbour velocity from predicted_pos and original_pos.
+    mass_in_pred_w reads neighbour mass from predicted_pos.w instead of mass.
 
     sorted_angular_velocity and angular_velocity_out are ignored: the
     micropolar angular velocity had no reader and was removed
@@ -337,6 +357,7 @@ def pbf_finalize(
     # NULL table: no mark, so the caller must run K_MarkWakeCells instead.
     wake_ptr = cell_wake_flags if cell_wake_flags is not None else np.intp(0)
     frame_ptr = frame_counter if frame_counter is not None else np.intp(0)
+    vp_ptr = vel_pred_in if vel_pred_in is not None else np.intp(0)
     module = _get_module()
     kernel = module.get_function("K_PBF_Finalize")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
@@ -353,4 +374,5 @@ def pbf_finalize(
         max_disp_ptr,
         anchor_ptr,
         wake_ptr, frame_ptr,
+        vp_ptr, np.int32(1 if mass_in_pred_w else 0),
     ))

@@ -216,12 +216,15 @@ void K_SpawnGas(
 
         // PBF: K_PBF_Predict already ran and left the dead slot's old
         // position here. Finalize derives velocity from pred - pos, so
-        // write the child's own prediction.
+        // write the child's own prediction. .w carries the mass, as
+        // K_PBF_Predict writes it (bd-r5-review-n28.185). The source keeps
+        // its old .w: the first K_PBF_ComputeDelta rewrites every .w from
+        // the mass array, so the zero source mass reaches the solver there.
         if (predicted != NULL) {
             float3 pred = spawn_clamp(make_float3(cpos.x + dt * child_vel.x,
                                                   cpos.y + dt * child_vel.y,
                                                   cpos.z + dt * child_vel.z));
-            predicted[slot] = make_float4(pred.x, pred.y, pred.z, 1.0f);
+            predicted[slot] = make_float4(pred.x, pred.y, pred.z, child_mass);
         }
         // Step2 reads neighbour velocity from the FP16 mirror.
         if (velocity_h != NULL) store_half4(&velocity_h[slot], child_vel);

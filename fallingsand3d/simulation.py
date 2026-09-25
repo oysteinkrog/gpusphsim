@@ -1326,12 +1326,23 @@ class Simulation:
         }
 
     def _run_pbf_body(self, n: int, mark: StageMark = _no_mark) -> None:
-        """PBF pipeline: Grid -> Predict -> [Lambda -> Delta -> Apply]xN -> Finalize.
+        """PBF pipeline: Grid -> Predict -> [Lambda -> Delta]xN -> Finalize.
+
+        Predicted positions ping-pong between sorted_predicted_position (A)
+        and sorted_delta_position (B): iteration k reads one and K_PBF_ComputeDelta
+        writes the corrected position into the other, so after N iterations
+        the result is in A for even N and B for odd N. N is fixed per graph
+        capture. .w of a predicted position is the particle mass
+        (bd-r5-review-n28.185).
 
         mark(label) is called after each stage (PBF_STAGES); see _run_graph_body.
         """
         import pbf_solver
         w = self.world
+        num_iters = int(self._profile.pbf_iterations)
+        if num_iters < 1:
+            raise ValueError(f"pbf_iterations must be >= 1, got {num_iters}")
+        pred_bufs = (w.sorted_predicted_position, w.sorted_delta_position)
 
         # Grid setup
         self._run_grid_setup(n)
@@ -1342,6 +1353,7 @@ class Simulation:
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_predicted_position,
+            mass=w.sorted_mass[:n],
         )
         mark("predict")
 
@@ -1350,13 +1362,15 @@ class Simulation:
         # value-guards zero entries to 1000 (bd-r4fix-uup.14).
         cupy.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
 
-        # 2. Initial density + lambda + heat diffusion + exposure (first call only)
+        # 2. Initial density + lambda + heat diffusion + exposure (first call only).
+        # Mass comes from predicted.w (K_PBF_Predict wrote it). The pressure
+        # normal is written only by the last lambda call, the one Finalize reads.
         pbf_solver.pbf_compute_lambda(
-            w.sorted_predicted_position[:n], w.sorted_mass[:n],
+            w.sorted_predicted_position[:n], None,
             w.sorted_packed_info[:n],
             self._cell_start, self._cell_end,
             w.sorted_density, w.sorted_lambda_pbf,
-            w.sorted_pressure_normal,
+            w.sorted_pressure_normal if num_iters == 1 else None,
             temperature_in=w.sorted_temperature[:n],
             density_in=w.sorted_density_prev[:n],
             dTdt_out=w.sorted_dTdt,
@@ -1375,35 +1389,41 @@ class Simulation:
 
         # 4. Solver iterations (fixed count for CUDA graph).
         # Each iteration's delta moves the fluid, so each adds its rigid reaction.
+        # Iteration 0 reads mass from sorted_mass: reactions and spawn may have
+        # changed it since K_PBF_Predict, and that pass writes it into .w for
+        # the later passes. The last pass also writes (x* - x) / dt into
+        # sorted_veleval for Finalize's XSPH neighbour loop.
         rbm = self.rigid_body_manager
         rigid_kw = self._rigid_kwargs()
-        for i in range(self._profile.pbf_iterations):
+        for i in range(num_iters):
+            src = pred_bufs[i % 2]
+            dst = pred_bufs[(i + 1) % 2]
+            last = i == num_iters - 1
             if i > 0:
                 pbf_solver.pbf_compute_lambda(
-                    w.sorted_predicted_position[:n], w.sorted_mass[:n],
+                    src[:n], None,
                     w.sorted_packed_info[:n],
                     self._cell_start, self._cell_end,
                     w.sorted_density, w.sorted_lambda_pbf,
-                    w.sorted_pressure_normal,
+                    w.sorted_pressure_normal if last else None,
                 )
 
             pbf_solver.pbf_compute_delta(
-                w.sorted_predicted_position[:n], w.sorted_lambda_pbf[:n],
-                w.sorted_mass[:n], w.sorted_packed_info[:n],
+                src[:n], w.sorted_lambda_pbf[:n],
+                w.sorted_mass[:n] if i == 0 else None,
+                w.sorted_packed_info[:n],
                 self._cell_start, self._cell_end,
-                w.sorted_delta_position,
+                dst,
+                original_pos=w.sorted_position[:n] if last else None,
+                vel_out=w.sorted_veleval if last else None,
                 **rigid_kw,
             )
-
-            pbf_solver.pbf_apply_delta(
-                w.sorted_predicted_position[:n], w.sorted_delta_position[:n],
-                w.sorted_packed_info[:n],
-            )
         mark("iterations")
+        pred_final = pred_bufs[num_iters % 2]
 
         # 5. Finalize: velocity update, XSPH, friction, sleep, writeback
         pbf_solver.pbf_finalize(
-            w.sorted_predicted_position[:n], w.sorted_position[:n],
+            pred_final[:n], w.sorted_position[:n],
             w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_health[:n], w.sorted_dTdt[:n], w.sorted_sleep_counter[:n],
@@ -1424,6 +1444,8 @@ class Simulation:
             displacement_anchor=w.sorted_anchor,
             cell_wake_flags=self._cell_wake_flags,
             frame_counter=self._frame_counter_d,
+            vel_pred_in=w.sorted_veleval[:n],
+            mass_in_pred_w=True,
         )
         mark("finalize")
 

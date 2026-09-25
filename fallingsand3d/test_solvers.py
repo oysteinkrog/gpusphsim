@@ -161,34 +161,31 @@ def test_pbf_detailed(world, sim):
         print(f"  lambda:  min={lam.min():.6f} mean={lam.mean():.6f} max={lam.max():.6f} "
               f"nonzero={np.count_nonzero(lam)}/{n}")
 
-        # Full PBF iteration
+        # Full PBF iteration: ping-pong between the two predicted buffers
+        bufs = (w.sorted_predicted_position, w.sorted_delta_position)
         for it in range(profile.pbf_iterations):
+            src, dst = bufs[it % 2], bufs[(it + 1) % 2]
             if it > 0:
                 pbf_solver.pbf_compute_lambda(
-                    w.sorted_predicted_position[:n], w.sorted_mass[:n],
+                    src[:n], w.sorted_mass[:n],
                     w.sorted_packed_info[:n],
                     sim._cell_start, sim._cell_end,
                     w.sorted_density, w.sorted_lambda_pbf,
                 )
             pbf_solver.pbf_compute_delta(
-                w.sorted_predicted_position[:n], w.sorted_lambda_pbf[:n],
+                src[:n], w.sorted_lambda_pbf[:n],
                 w.sorted_mass[:n], w.sorted_packed_info[:n],
                 sim._cell_start, sim._cell_end,
-                w.sorted_delta_position,
+                dst,
             )
             cp.cuda.Device().synchronize()
-            delta = w.sorted_delta_position[:n].get()
+            delta = dst[:n].get() - src[:n].get()
             delta_mag = np.linalg.norm(delta[:,:3], axis=1)
             print(f"  iter {it}: delta mag min={delta_mag.min():.8f} mean={delta_mag.mean():.8f} max={delta_mag.max():.8f}")
 
-            pbf_solver.pbf_apply_delta(
-                w.sorted_predicted_position[:n], w.sorted_delta_position[:n],
-                w.sorted_packed_info[:n],
-            )
-
         # Finalize — API matches current pbf_finalize positional signature
         pbf_solver.pbf_finalize(
-            w.sorted_predicted_position[:n], w.sorted_position[:n],
+            bufs[profile.pbf_iterations % 2][:n], w.sorted_position[:n],
             w.sorted_velocity[:n], w.sorted_density[:n], w.sorted_mass[:n],
             w.sorted_packed_info[:n], w.sorted_temperature[:n],
             w.sorted_health[:n], w.sorted_dTdt[:n], w.sorted_sleep_counter[:n],
