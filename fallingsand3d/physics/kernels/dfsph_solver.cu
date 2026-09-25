@@ -65,7 +65,7 @@ __constant__ DFSPHParams c_dfsph;
  * (Modified Step1 that also computes the DFSPH alpha diagonal factor)
  *
  * alpha_i = 1 / (|SUM_j (m_j/rho_j) gradW_ij|^2
- *              + SUM_j (m_j/rho_j)^2 |gradW_ij|^2 + eps)
+ *              + SUM_{j not STATIC} (m_j/rho_j)^2 |gradW_ij|^2 + eps)
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 3)
@@ -165,7 +165,7 @@ void K_DFSPH_ComputeDensityAlpha(
 
     // Alpha accumulators
     float3 grad_sum = make_float3(0.0f, 0.0f, 0.0f);  // SUM_j (m_j/rho_j) gradW_ij
-    float grad_norm_sum = 0.0f;                          // SUM_j (m_j/rho_j)^2 |gradW_ij|^2
+    float grad_norm_sum = 0.0f;                          // SUM_{j not STATIC} (m_j/rho_j)^2 |gradW_ij|^2
 
     int3 cell_i = get_cell(pos_i);
 
@@ -267,13 +267,18 @@ void K_DFSPH_ComputeDensityAlpha(
                             }
                         }
 
-                        // Alpha factor (using Spiky gradient)
+                        // Alpha factor (using Spiky gradient). STATIC neighbours
+                        // (STONE, MAT_RIGID, ...) enter only grad_sum: the squared
+                        // term is neighbour j's own response to kappa_i, and a
+                        // boundary particle never moves under pressure
+                        // (SPlisHSPlasH computeDFSPHFactor, bd-r5-review-n28.108).
                         float3 gW = grad_spiky(r, rlen, h);
                         float w_j = m_j / fmaxf(rho_j, RHO_EPSILON);
                         grad_sum.x += w_j * gW.x;
                         grad_sum.y += w_j * gW.y;
                         grad_sum.z += w_j * gW.z;
-                        grad_norm_sum += w_j * w_j * (gW.x * gW.x + gW.y * gW.y + gW.z * gW.z);
+                        if (behavior_j != STATIC)
+                            grad_norm_sum += w_j * w_j * (gW.x * gW.x + gW.y * gW.y + gW.z * gW.z);
 
                         // Surface normal and neighbour count include MAT_RIGID
                         // (bd-r5-review-n28.68); vorticity and strain-rate skip it.
