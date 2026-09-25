@@ -1757,3 +1757,97 @@ def test_exposure_matches_across_solvers(world, sim):
         dh = np.abs(eh[name][live] - eh["wcsph"][live]).max()
         assert dh < 1e-4 * max(1.0, ref_h), (
             f"{name} exposure_heat differs from WCSPH by {dh:.3g} (max {ref_h:.3g})")
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.94: GAS/non-GAS heat conduction agrees across solvers
+# ---------------------------------------------------------------------------
+
+def test_cross_phase_heat_matches_across_solvers(world, sim):
+    """WCSPH K_Step1, K_PBF_ComputeLambda (do_heat call) and
+    K_DFSPH_ComputeDensityAlpha give the same dTdt in a block that mixes
+    WATER, SAND, STONE (STATIC), FIRE and STEAM (GAS).
+
+    Every non-GAS particle starts at 293 K and every GAS particle is hotter,
+    so the only heat source for WATER, SAND and STONE is the cross-phase term.
+    Before bd-r5-review-n28.94 all three solvers skipped it and every non-GAS
+    dTdt was exactly 0.
+    """
+    import dfsph_solver
+    import pbf_solver
+    import step1
+    from materials import STONE, FIRE, STEAM, MATERIALS
+
+    w = world
+    w.packed_info[:] = 0
+    w._high_water = 0
+    sim.set_solver_profile(PROFILES["PBF"])
+    sim.set_solver_profile(PROFILES["DFSPH"])
+    half = 0.05
+    n = w.spawn_cube((-half, 0.3 - half, -half), (half, 0.3 + half, half),
+                     WATER, spacing=0.02)
+    assert n >= 100
+    rng = np.random.default_rng(94)
+    pos = cp.asnumpy(w.position[:n]).copy()
+    pos[:, :3] += rng.uniform(-0.002, 0.002, size=(n, 3)).astype(np.float32)
+    w.position[:n] = cp.asarray(pos)
+    w._density_initialized = True
+    sim._run_grid_setup(n, force_sort=True)
+
+    def packed(mat):
+        return (mat & 0xFF) | ((MATERIALS[mat].behavior_class & 0x3) << 8)
+
+    mats = rng.choice([WATER, SAND, STONE, FIRE, STEAM], size=n,
+                      p=[0.4, 0.15, 0.1, 0.25, 0.1])
+    info = np.array([packed(int(m)) for m in mats], dtype=np.uint32)
+    w.sorted_packed_info[:n] = cp.asarray(info)
+    is_gas = (mats == FIRE) | (mats == STEAM)
+    temp = np.where(mats == FIRE, 1200.0, np.where(mats == STEAM, 400.0, 293.0))
+    w.sorted_temperature[:n] = cp.asarray(temp.astype(np.float32))
+
+    def outs():
+        return (cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
+                cp.zeros(n, cp.float32))
+
+    s1_dTdt, s1_eh, s1_ec = outs()
+    step1.compute_step1(
+        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], None,
+        w.sorted_packed_info[:n], w.sorted_temperature[:n],
+        sim._cell_start, sim._cell_end,
+        density_out=cp.zeros(n, cp.float32), shear_rate_out=cp.zeros(n, cp.float32),
+        dTdt_out=s1_dTdt, exposure_heat_out=s1_eh, exposure_corrode_out=s1_ec,
+    )
+    pbf_dTdt, pbf_eh, pbf_ec = outs()
+    pbf_solver.pbf_compute_lambda(
+        w.sorted_position[:n], w.sorted_mass[:n], w.sorted_packed_info[:n],
+        sim._cell_start, sim._cell_end,
+        cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
+        temperature_in=w.sorted_temperature[:n],
+        dTdt_out=pbf_dTdt, exposure_heat_out=pbf_eh, exposure_corrode_out=pbf_ec,
+    )
+    df_dTdt, df_eh, df_ec = outs()
+    dfsph_solver.compute_density_alpha(
+        w.sorted_position[:n], w.sorted_velocity[:n], w.sorted_mass[:n], None,
+        w.sorted_packed_info[:n], w.sorted_temperature[:n],
+        sim._cell_start, sim._cell_end,
+        cp.zeros(n, cp.float32), cp.zeros(n, cp.float32), cp.zeros(n, cp.float32),
+        df_dTdt, df_eh, df_ec,
+    )
+    d = {k: cp.asnumpy(v).astype(np.float64) for k, v in
+         (("wcsph", s1_dTdt), ("pbf", pbf_dTdt), ("dfsph", df_dTdt))}
+
+    # The cross-phase term must be live: non-GAS particles only gain heat,
+    # and most of them gain some.
+    solid = ~is_gas
+    ref = d["wcsph"]
+    print(f"  non-GAS dTdt: max {ref[solid].max():.1f} K/s, "
+          f"{np.count_nonzero(ref[solid] > 0)}/{solid.sum()} heated")
+    assert ref[solid].min() >= -1e-3, ref[solid].min()
+    assert np.count_nonzero(ref[solid] > 1.0) > 0.5 * solid.sum()
+
+    scale = np.abs(ref).max()
+    for name in ("pbf", "dfsph"):
+        diff = np.abs(d[name] - ref).max()
+        print(f"  {name}: max |dTdt - WCSPH| = {diff:.3g} (scale {scale:.3g})")
+        assert diff < 1e-4 * scale, (
+            f"{name} dTdt differs from WCSPH by {diff:.3g} (max {scale:.3g})")
