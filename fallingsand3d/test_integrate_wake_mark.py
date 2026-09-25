@@ -55,7 +55,7 @@ def _particles(rows):
     d = make_simple_particles(n, SAND, GRANULAR, pos=pos, vel=vel)
     d["sorted_packed_info"] = cupy.asarray(
         np.array([r[4] for r in rows], dtype=np.uint32))
-    d["sort_indexes"] = cupy.arange(n - 1, -1, -1, dtype=cupy.uint32)
+    d["sort_indexes"] = cupy.asarray(np.arange(n - 1, -1, -1).astype(np.uint32))
     d["sorted_sleep_counter"] = cupy.asarray(
         np.array([200 if (r[4] & SLEEPING_BIT) else 0 for r in rows],
                  dtype=np.uint8))
