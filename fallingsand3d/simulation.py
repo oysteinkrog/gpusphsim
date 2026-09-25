@@ -1578,6 +1578,9 @@ class Simulation:
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
                 kv_delta,
+                # .w neighbour count gates the solve below 20 neighbours
+                # (bd-r5-review-n28.71).
+                normal_in=w.sorted_normal[:n],
                 kappa_v_total=kv_total,
             )
             dfsph_solver.correct_velocity_div(
