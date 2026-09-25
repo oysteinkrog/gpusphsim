@@ -2455,9 +2455,15 @@ multiplied by `1 - a_1 S_1 - a_2 S_2` per iteration. At sigma 2.0 that was
 about -0.73 (a damped sign flip each iteration). At sigma 1.0 it was about
 +0.13. The UI caps sigma at 1.0.
 
-Surface particles (fewer neighbors) receive stronger smoothing. Interior
-particles pass through unchanged. Uses ping-pong velocity buffers for proper
-Jacobi iteration (read from old, write to new).
+Surface particles (fewer neighbors) receive stronger smoothing. Interior,
+sleeping and non-FLUID particles keep their velocity. Uses ping-pong velocity
+buffers for proper Jacobi iteration (read from old, write to new).
+`run_implicit_st` copies the input velocity into the scratch buffer once before
+the first iteration, and `K_IST_Iterate` writes only the particles it smooths.
+The unsmoothed particles then hold the same value in both buffers for the whole
+pass, so the kernel skips their 16 B pass-through write each iteration. The
+result is bit-identical to writing every particle
+(`test_implicit_st.py::test_surface_only_writes_match_old_path`).
 
 ### Parameters
 
@@ -2465,7 +2471,7 @@ Jacobi iteration (read from old, write to new).
 |-----------|---------|-------------|
 | `sigma` | 0.5 | Smoothing strength, UI range 0.01-1.0 (higher = stronger smoothing; clamped per particle) |
 | `surface_threshold` | 25.0 | Neighbor count below which particle is "surface" |
-| `num_iterations` | 5 | Jacobi iterations per substep, UI range 1-20 |
+| `num_iterations` | 4 | Jacobi iterations per substep, UI range 1-20. Even counts end in `sorted_velocity` and skip the copy-back |
 
 ### Pipeline Position
 
@@ -2473,7 +2479,8 @@ Runs between Step2 (force computation) and Integrate in the WCSPH pipeline.
 Modifies `sorted_velocity` before integration uses it. The Jacobi ping-pong
 uses its own buffer, `World.sorted_ist_scratch` (min(100K, max_particles) x float4,
 allocated in the substep prologue when IST is on, outside any CUDA graph capture).
-With an odd iteration count the result is copied back into `sorted_velocity`.
+With an odd iteration count the result ends in the scratch buffer and is copied
+back into `sorted_velocity` (one extra device copy); the default of 4 avoids it.
 `sorted_veleval` is left as step2 wrote it (`v_pre + eps * xsph_sum`, from the
 pre-IST velocity). K_Integrate (4.3) advects FLUID with
 `vel_new + (veleval - vel)`, where `vel` is the post-IST velocity, so the IST

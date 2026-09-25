@@ -16,6 +16,11 @@ bd-r5-review-n28.133 (weight clamp, sigma * w_surface * S <= 1):
   surface kinetic energy ends at or below its start.
 - Same with sigma 50 (far past the UI cap), where the unclamped update
   overshoots and grows.
+
+bd-r5-review-n28.181 (surface-only writes):
+- On a 10K droplet beside a sand block with random velocities, 4 and 5
+  iterations of the surface-only path match the old pass-through path
+  (max abs diff < 1e-6), whatever the scratch held before.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ _apply_ptx_workaround()
 
 import cupy as cp  # noqa: E402
 import implicit_st  # noqa: E402
-from materials import WATER  # noqa: E402
+from materials import SAND, WATER  # noqa: E402
 from simulation import Simulation  # noqa: E402
 from world import World  # noqa: E402
 
@@ -227,3 +232,81 @@ def test_surface_speed_never_grows(sigma):
     for a, b in zip(speeds, speeds[1:]):
         assert b <= a * (1.0 + 1e-5) + 1e-7, speeds
     assert kes[-1] <= kes[0]
+
+
+# ---------------------------------------------------------------------------
+# bd-r5-review-n28.181: surface-only writes
+# ---------------------------------------------------------------------------
+
+def _old_path(sim, world, n, iterations):
+    """The pre-n28.181 result: every launch wrote vel_dst for every
+    particle, with pass-through copies for interior and non-FLUID ones.
+    A full copy of src into dst before each launch gives exactly that."""
+    src = world.sorted_velocity[:n].copy()
+    dst = cp.zeros_like(src)
+    kernel = implicit_st._get_module().get_function("K_IST_Iterate")
+    blocks = ((n + implicit_st.BLOCK_SIZE - 1) // implicit_st.BLOCK_SIZE,)
+    for _ in range(iterations):
+        dst[...] = src
+        kernel(blocks, (implicit_st.BLOCK_SIZE,), (
+            np.uint32(n), src, dst,
+            world.sorted_position[:n], world.sorted_density[:n],
+            world.sorted_mass[:n], world.sorted_packed_info[:n],
+            world.sorted_normal[:n], sim._cell_start, sim._cell_end,
+        ))
+        src, dst = dst, src
+    return src
+
+
+@pytest.mark.parametrize("iterations", [4, 5])
+def test_surface_only_writes_match_old_path(iterations):
+    """10K water droplet next to a sand block, random velocities: the
+    surface-only path gives the same velocities as the pass-through path."""
+    world = World(max_particles=14_000)
+    sim = Simulation(world, dt=DT, speed=1.0, accuracy=0.4,
+                     fixed_dt=True, max_substeps=1)
+    sim.fixed_dt_value = DT
+    sim._upload_dt(DT)
+    sim._spawn_substep = sim._damping_duration
+    sim.set_gravity(0.0)
+    world.spawn_cube(min_corner=(-0.22, -0.22, -0.22), max_corner=(0.22, 0.22, 0.22),
+                     material_id=WATER, spacing=0.02)
+    world.spawn_cube(min_corner=(0.24, -0.1, -0.1), max_corner=(0.34, 0.1, 0.1),
+                     material_id=SAND, spacing=0.02)
+    sim.notify_scene_changed()
+    sim._invalidate_graphs()
+    n = world._high_water
+    sim._sim_step(n)
+    cp.cuda.Device().synchronize()
+    world.ensure_ist_scratch(sim._IST_MAX_PARTICLES)
+    implicit_st.upload_ist_params(sigma=0.5, num_iterations=iterations)
+    try:
+        assert n >= 10_000
+        rng = np.random.default_rng(1)
+        world.sorted_velocity[:n] = cp.asarray(
+            rng.standard_normal((n, 4)).astype(np.float32))
+        # Stale scratch contents must not leak into the result.
+        world.sorted_ist_scratch[:n] = cp.float32(1e6)
+        expected = _old_path(sim, world, n, iterations)
+        start = world.sorted_velocity[:n].copy()
+        result = implicit_st.run_implicit_st(
+            world.sorted_velocity[:n],
+            world.sorted_ist_scratch[:n],
+            world.sorted_position[:n],
+            world.sorted_density[:n],
+            world.sorted_mass[:n],
+            world.sorted_packed_info[:n],
+            world.sorted_normal[:n],
+            sim._cell_start,
+            sim._cell_end,
+            num_iterations=iterations,
+        )
+        cp.cuda.Device().synchronize()
+        want_ptr = (world.sorted_velocity if iterations % 2 == 0
+                    else world.sorted_ist_scratch)[:n].data.ptr
+        assert result.data.ptr == want_ptr
+        # The pass acts on the surface, so the check is not vacuous.
+        assert not bool(cp.array_equal(result, start))
+        assert float(cp.abs(result - expected).max()) < 1e-6
+    finally:
+        implicit_st.upload_ist_params()
