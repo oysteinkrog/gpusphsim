@@ -93,3 +93,86 @@ def test_spray_follows_new_gravity(world, sim, gy, expect):
     else:
         assert vy.min() > 0.1, f"spray vy {vy.min():.4f}, want upward"
         assert py.min() > y0
+
+
+# ---------------------------------------------------------------------------
+# Emission cadence (bd-r5-review-n28.122)
+# ---------------------------------------------------------------------------
+
+WATER_INFO = 5  # material WATER, behavior FLUID (bits 9:8 = 0)
+
+
+def test_generate_rate_scales_with_dt_emit(world):
+    """10K identical surface particles with phi = 4: expected k_rate*(phi-thr)*dt each."""
+    k_rate, threshold, dt_emit = 5.0, 2.0, 0.01
+    n = 10_000
+    params = foam.build_foam_params(max_foam=world._max_foam, k_rate=k_rate,
+                                    threshold=threshold)
+    foam.upload_foam_params(params)
+    # phi = 0.5*s + 0.2*0.5*s^2 = 4 (no wave crest: zero normal).
+    s = (-5.0 + np.sqrt(25.0 + 160.0)) / 2.0
+    phi = 0.5 * s + 0.1 * s * s
+    assert abs(phi - 4.0) < 1e-6
+    pos = cp.zeros((n, 4), dtype=cp.float32)
+    vel = cp.zeros((n, 4), dtype=cp.float32)
+    vel[:, 0] = s
+    nrm = cp.zeros((n, 4), dtype=cp.float32)
+    nrm[:, 3] = 10.0  # neighbor count: surface particle
+    info = cp.full(n, WATER_INFO, dtype=cp.uint32)
+    expect = n * k_rate * (phi - threshold) * dt_emit  # 1000
+    counts = []
+    for seed in (7, 1234, 99999):
+        world.foam_count[:] = 0
+        foam.foam_generate(pos, vel, nrm, info, world.foam_position,
+                           world.foam_velocity, world.foam_count, n, seed, dt_emit)
+        counts.append(int(world.foam_count.get()[0]))
+    world.foam_count[:] = 0
+    for c in counts:
+        assert abs(c - expect) < 0.15 * expect, f"emitted {counts}, want about {expect:.0f}"
+    # Doubling dt_emit doubles the expected count.
+    foam.foam_generate(pos, vel, nrm, info, world.foam_position,
+                       world.foam_velocity, world.foam_count, n, 7, 2 * dt_emit)
+    c2 = int(world.foam_count.get()[0])
+    world.foam_count[:] = 0
+    assert abs(c2 - 2 * expect) < 0.15 * 2 * expect, f"emitted {c2} at 2*dt_emit"
+
+
+def test_step_frame_generates_once_per_frame_and_compacts_every_8(world, monkeypatch):
+    """16 step_frame calls: 16 generate launches and exactly 2 compactions."""
+    import time
+    world.foam_count[:] = 0
+    world.spawn_cube(min_corner=(-0.2, -0.2, -0.2), max_corner=(0.2, 0.2, 0.2),
+                     material_id=5, spacing=0.02, velocity=(0.0, -3.0, 0.0))
+    world.foam_enabled = True
+    sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
+                     fixed_dt=True, max_substeps=20)
+    calls = {"gen": [], "compact": 0}
+    real_gen, real_compact = foam.foam_generate, foam.foam_compact
+
+    def _gen(*a, **k):
+        calls["gen"].append(a[-1])  # dt_emit
+        return real_gen(*a, **k)
+
+    def _compact(*a, **k):
+        calls["compact"] += 1
+        return real_compact(*a, **k)
+
+    monkeypatch.setattr(foam, "foam_generate", _gen)
+    monkeypatch.setattr(foam, "foam_compact", _compact)
+    try:
+        sim.step_frame()  # first call only sets the clock
+        steps = []
+        for _ in range(16):
+            sim._last_frame_time = time.perf_counter() - 1.0 / 60.0
+            steps.append(sim.step_frame())
+        cp.cuda.Device().synchronize()
+        assert all(s > 1 for s in steps), steps
+        assert len(calls["gen"]) == 16, calls["gen"]
+        for s_, dt_emit in zip(steps, calls["gen"]):
+            assert abs(dt_emit - s_ * sim.dt) < 1e-9
+        assert calls["compact"] == 2
+    finally:
+        monkeypatch.undo()
+        world.foam_enabled = False
+        world.foam_count[:] = 0
+        sim.close()
