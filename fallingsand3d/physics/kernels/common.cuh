@@ -240,8 +240,21 @@ __constant__ PrecalcParams c_precalc;
  * sorted_shear_rate, sorted_exposure_heat, sorted_exposure_corrode (float).
  *
  * half4 arrays (FP16 copies for bandwidth reduction in neighbor loops):
- *   sorted_velocity_h -- populated during sort, read in step1/step2
+ *   sorted_velocity_h -- populated during sort. xyz = velocity,
+ *     w = mass / MASS_H_UNIT (bd-r5-review-n28.161). Step1 reads the
+ *     neighbour mass from .w; step2 reads velocity only. The float mass
+ *     array stays the source of truth for particle i and for any kernel
+ *     that runs after reactions or spawn change sorted_mass in place.
  * ====================================================================== */
+
+/* Unit of the mass carried in sorted_velocity_h.w (bd-r5-review-n28.161).
+ * Equal to world.PARTICLE_MASS, so a PARTICLE_MASS particle stores exactly
+ * 1.0 and reads back its exact float mass. Any mass from 1.2e-6 to 1300 kg
+ * is a normal FP16 value with relative error <= 2^-11 (the spawn masses,
+ * 0.0067 to 0.052 kg, store as 0.33 to 2.6). Mass 0 (DEAD) stays exactly 0.
+ * The sort divides with __fdiv_rn so --use_fast_math does not change the
+ * rounding. A different unit only changes rounding, never correctness. */
+#define MASS_H_UNIT 0.02f
 
 /* ======================================================================
  * RigidBody -- dynamic rigid body for Akinci two-way coupling.

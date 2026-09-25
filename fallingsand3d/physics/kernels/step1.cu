@@ -60,7 +60,7 @@ void K_Step1(
     float*          __restrict__ exposure_corrode_out, // output: corrosion exposure from interactions
     float4*         __restrict__ vorticity_out,        // output: (omega_x, omega_y, omega_z, |omega|) -- FLUID only
     float4*         __restrict__ normal_out,           // output: (n_x, n_y, n_z, neighbor_count) -- FLUID only
-    const void*     __restrict__ velocity_h,           // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
+    const void*     __restrict__ velocity_h,           // FP16 velocity for neighbor reads (OPT-4.3), .w = mass / MASS_H_UNIT, may be NULL
     float*          __restrict__ pressure_out,         // output: pre-computed pressure per particle (PERF-007)
     const void*     __restrict__ temperature_h,        // uint16 T*8 temperature mirror for neighbor reads (PERF-011), may be NULL
     float2*         __restrict__ pr2_omega_out         // output: (p / rho^2, |omega|) for K_Step2 neighbour reads, may be NULL
@@ -173,7 +173,13 @@ void K_Step1(
                 for (uint index_j = start; index_j < end_idx; index_j++) {
                     // --- Speculative ILP: issue ALL loads before distance check ---
                     float4 pos4_j = __ldg(&position_ro[index_j]);
-                    float m_j = __ldg(&mass[index_j]);
+                    // One 8 B load gives the neighbour velocity and mass: the
+                    // sort packs mass / MASS_H_UNIT into the mirror's .w
+                    // (bd-r5-review-n28.161). Nothing changes sorted_mass
+                    // between the sort and this kernel, so the copy is current.
+                    float4 vel4_j = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
+                                               : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    float m_j = velocity_h ? vel4_j.w * MASS_H_UNIT : __ldg(&mass[index_j]);
                     uint pi_j = __ldg(&packed_info[index_j]);
                     float T_j = temperature_h ? load_t16((const unsigned short*)temperature_h + index_j)
                                               : __ldg(&temperature_in[index_j]);
@@ -268,8 +274,7 @@ void K_Step1(
                                     float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
 
                                     if (is_fluid) {
-                                        float4 vel4_j_v = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
-                                                                     : __ldg(&velocity[index_j]);
+                                        float4 vel4_j_v = velocity_h ? vel4_j : __ldg(&velocity[index_j]);
                                         float dvx_v = vel4_j_v.x - vel_i.x;
                                         float dvy_v = vel4_j_v.y - vel_i.y;
                                         float dvz_v = vel4_j_v.z - vel_i.z;
@@ -286,11 +291,10 @@ void K_Step1(
                                     if (m_j > 0.0f) neighbor_count += 1.0f;  // DEAD slots have mass 0
 
                                     if (is_granular) {
-                                        float4 vel4_j = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
-                                                                   : __ldg(&velocity[index_j]);
-                                        float dvx = vel_i.x - vel4_j.x;
-                                        float dvy = vel_i.y - vel4_j.y;
-                                        float dvz = vel_i.z - vel4_j.z;
+                                        float4 vel4_g = velocity_h ? vel4_j : __ldg(&velocity[index_j]);
+                                        float dvx = vel_i.x - vel4_g.x;
+                                        float dvy = vel_i.y - vel4_g.y;
+                                        float dvz = vel_i.z - vel4_g.z;
                                         float weight = m_j / fmaxf(rho_j, RHO_EPSILON);
                                         Dxx += weight * dvx * gWx;
                                         Dyy += weight * dvy * gWy;

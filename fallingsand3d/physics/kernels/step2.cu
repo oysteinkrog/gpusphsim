@@ -267,6 +267,10 @@ void K_Step2(
                     // OPT-4.3: read from FP16 buffer (8B vs 16B per neighbor)
                     float4 vel4_j = velocity_h ? load_half4((const uint2*)velocity_h + index_j)
                                                : __ldg(&velocity[index_j]);
+                    // Mass stays on the float array here, not the mirror's .w:
+                    // reactions and spawn run between step1 and step2 and change
+                    // sorted_mass (kills, conversions, steam children) without
+                    // updating the mirror (bd-r5-review-n28.161).
                     float m_j = __ldg(&mass[index_j]);
 
                     float3 r = make_float3(

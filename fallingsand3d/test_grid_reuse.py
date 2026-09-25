@@ -137,7 +137,9 @@ def _check_gather(world, sim, n, snap, skip=()):
         expected = snap[u].get()[perm]
         got = getattr(world, s)[:n].get()
         assert np.array_equal(got, expected), f"{s} != {u}[sort_perm]"
-    vel = snap["velocity"].get()[perm]
+    # The mirror is (vx, vy, vz, mass / MASS_H_UNIT) in FP16 (bd-r5-review-n28.161).
+    vel = snap["velocity"].get()[perm].copy()
+    vel[:, 3] = snap["mass"].get()[perm] / np.float32(0.02)
     vel_h = world.sorted_velocity_h[:n].get().view(np.float16).reshape(n, 4)
     assert np.array_equal(vel_h.view(np.uint16),
                           vel.astype(np.float16).view(np.uint16)), "sorted_velocity_h"

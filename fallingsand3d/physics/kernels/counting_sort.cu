@@ -134,7 +134,8 @@ void K_ScatterReorder(
     if (anchor_out) anchor_out[sorted_idx] = pos4;
     float4 vel = __ldg(&velocity_in[idx]);
     velocity_out[sorted_idx]      = vel;
-    mass_out[sorted_idx]          = __ldg(&mass_in[idx]);
+    const float m = __ldg(&mass_in[idx]);
+    mass_out[sorted_idx]          = m;
     packed_info_out[sorted_idx]   = __ldg(&packed_info_in[idx]);
     float temp = __ldg(&temperature_in[idx]);
     temperature_out[sorted_idx]   = temp;
@@ -148,7 +149,10 @@ void K_ScatterReorder(
 
     // Also write FP16 velocity copy for neighbor loop bandwidth reduction (OPT-4.3).
     // NULL when the active solver has no FP16 neighbor reads (PBF).
-    if (velocity_h_out) store_half4((uint2*)velocity_h_out + sorted_idx, vel);
+    // .w carries mass / MASS_H_UNIT for step1's neighbour loop (bd-r5-review-n28.161).
+    if (velocity_h_out)
+        store_half4((uint2*)velocity_h_out + sorted_idx,
+                    make_float4(vel.x, vel.y, vel.z, __fdiv_rn(m, MASS_H_UNIT)));
 
     // Fixed-point temperature (0.125 K) copy for neighbor loop bandwidth (PERF-011)
     if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + sorted_idx, temp);
@@ -205,7 +209,8 @@ void K_GatherReorder(
     position_out[sorted_idx]      = __ldg(&position_in[orig_idx]);
     float4 vel = __ldg(&velocity_in[orig_idx]);
     velocity_out[sorted_idx]      = vel;
-    mass_out[sorted_idx]          = __ldg(&mass_in[orig_idx]);
+    const float m = __ldg(&mass_in[orig_idx]);
+    mass_out[sorted_idx]          = m;
     packed_info_out[sorted_idx]   = __ldg(&packed_info_in[orig_idx]);
     float temp = __ldg(&temperature_in[orig_idx]);
     temperature_out[sorted_idx]   = temp;
@@ -216,8 +221,11 @@ void K_GatherReorder(
     if (kappa_out) kappa_out[sorted_idx] = __ldg(&kappa_in[orig_idx]);
     if (kappa_v_out) kappa_v_out[sorted_idx] = __ldg(&kappa_v_in[orig_idx]);
 
-    // FP16 velocity copy (OPT-4.3); NULL = skip (PBF)
-    if (velocity_h_out) store_half4((uint2*)velocity_h_out + sorted_idx, vel);
+    // FP16 velocity copy (OPT-4.3); NULL = skip (PBF).
+    // .w carries mass / MASS_H_UNIT (bd-r5-review-n28.161).
+    if (velocity_h_out)
+        store_half4((uint2*)velocity_h_out + sorted_idx,
+                    make_float4(vel.x, vel.y, vel.z, __fdiv_rn(m, MASS_H_UNIT)));
 
     // Fixed-point temperature (0.125 K) copy (PERF-011)
     if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + sorted_idx, temp);

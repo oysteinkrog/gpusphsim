@@ -119,9 +119,12 @@ def test_counting_sort_full_cell_tables() -> None:
     np.testing.assert_array_equal(cupy.asnumpy(scene["velocity"]), vel[perm])
     np.testing.assert_array_equal(cupy.asnumpy(scene["mass"]), mass[perm])
 
-    # FP16 velocity mirror (read by step1/step2 neighbour loops).
+    # FP16 velocity mirror (read by step1/step2 neighbour loops). Its .w holds
+    # mass / MASS_H_UNIT, the neighbour mass step1 reads (bd-r5-review-n28.161).
     vh = cupy.asnumpy(scene["velocity_h"]).view(np.float16).reshape(n, 4)
-    np.testing.assert_allclose(vh.astype(np.float32), vel[perm], rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(vh[:, :3].astype(np.float32), vel[perm][:, :3], rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(vh[:, 3].astype(np.float32) * np.float32(0.02), mass[perm],
+                               rtol=2.0 ** -11, atol=0.0)
 
     # Histogram and cell tables.
     assert hist.sum() == n
