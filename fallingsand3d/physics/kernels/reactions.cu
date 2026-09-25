@@ -42,6 +42,12 @@
 #define MAT_WET_SAND  16
 #define MAT_MUD       17
 
+/* Material-set bitmasks for material IDs below 32 (K_Reactions). */
+#define MAT_BIT(m) (1u << (m))
+/* Acid-corrosion whitelist: the only materials whose health acid lowers. */
+#define CORRODIBLE_MATS (MAT_BIT(MAT_STONE) | MAT_BIT(MAT_METAL) | MAT_BIT(MAT_WOOD) \
+                       | MAT_BIT(MAT_GRAVEL) | MAT_BIT(MAT_OIL) | MAT_BIT(MAT_GUNPOWDER))
+
 /* ======================================================================
  * Reaction thresholds
  * ====================================================================== */
@@ -215,11 +221,26 @@ void K_Reactions(
         return;
     }
 
-    float temp = temperature[i];
-    float hlth = health[i];
-    float lt = lifetime[i];
-    float exp_heat = exposure_heat[i];
-    float exp_corrode = exposure_corrode[i];
+    // Load only the per-particle fields this material tests
+    // (bd-r5-review-n28.148).  nvcc does not sink these loads into the
+    // material branches on its own, so loading all five up front cost
+    // 20 B per live particle; WATER now reads 4 B, SAND 8 B.  health is
+    // read only on the corrosion and acid paths, lifetime only for GAS.
+    // A skipped load leaves 0, which no test below can see: every test on
+    // a field is gated on a material that loads it.
+    const bool mat_in_table = mat_id < 32u;
+    const uint mat_bit = mat_in_table ? (1u << mat_id) : 0u;
+    const uint TEMP_MATS = MAT_BIT(MAT_ICE) | MAT_BIT(MAT_STONE) | MAT_BIT(MAT_SAND)
+                         | MAT_BIT(MAT_LAVA) | MAT_BIT(MAT_WATER) | MAT_BIT(MAT_STEAM)
+                         | MAT_BIT(MAT_WET_SAND) | MAT_BIT(MAT_MUD);
+    const uint HEAT_MATS = MAT_BIT(MAT_WOOD) | MAT_BIT(MAT_OIL) | MAT_BIT(MAT_GUNPOWDER);
+    const uint CORRODE_MATS = MAT_BIT(MAT_SAND) | MAT_BIT(MAT_DIRT)
+                            | MAT_BIT(MAT_WET_SAND) | MAT_BIT(MAT_MUD)
+                            | CORRODIBLE_MATS | MAT_BIT(MAT_ACID) | MAT_BIT(MAT_FIRE);
+    float temp = (mat_bit & TEMP_MATS) ? temperature[i] : 0.0f;
+    float exp_heat = (mat_bit & HEAT_MATS) ? exposure_heat[i] : 0.0f;
+    float exp_corrode = (mat_bit & CORRODE_MATS) ? exposure_corrode[i] : 0.0f;
+    float hlth = 0.0f;
     float dt = c_sim.dt;
 
     // ---- Phase transitions based on temperature ----
@@ -442,9 +463,8 @@ void K_Reactions(
     // otherwise lava would eat metal here (bd-r5-review-n28.38).
     // TODO: a separate acid exposure channel would remove the dependence on
     // the table having rate 0 for every non-acid pair on the whitelist.
-    if (exp_corrode > 0.0f && (mat_id == MAT_STONE || mat_id == MAT_METAL ||
-        mat_id == MAT_WOOD || mat_id == MAT_GRAVEL ||
-        mat_id == MAT_OIL || mat_id == MAT_GUNPOWDER)) {
+    if (exp_corrode > 0.0f && (mat_bit & CORRODIBLE_MATS)) {
+        hlth = health[i];
         float damage = exp_corrode * dt;
         hlth -= damage;
         if (hlth <= 0.0f) {
@@ -466,6 +486,7 @@ void K_Reactions(
 
     // ---- Acid consumption: acid loses health when corroding ----
     if (mat_id == MAT_ACID && exp_corrode > 0.0f) {
+        hlth = health[i];
         hlth -= exp_corrode * dt * 0.5f;
         if (hlth <= 0.0f) {
             packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
@@ -491,7 +512,9 @@ void K_Reactions(
 
     // ---- GAS lifetime decay ----
     int behavior = GET_BEHAVIOR(pi);
-    if (behavior == GAS && lt > 0.0f) {
+    if (behavior != GAS) return;
+    float lt = lifetime[i];
+    if (lt > 0.0f) {
         lt -= dt;
         if (lt <= 0.0f) {
             if (mat_id == MAT_FIRE) {
@@ -499,7 +522,7 @@ void K_Reactions(
                 packed_info[i] = MAKE_PACKED(MAT_SMOKE, GAS);
                 rescale_mass(mass, i, MAT_FIRE, MAT_SMOKE);
                 lifetime[i] = 3.0f;
-                temperature[i] = fminf(temp, 500.0f);  // cool down
+                temperature[i] = fminf(temperature[i], 500.0f);  // cool down
             } else {
                 // Other gas expired -- add to freelist
                 packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
