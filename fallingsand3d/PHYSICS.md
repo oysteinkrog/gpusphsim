@@ -282,7 +282,7 @@ FLUID/GAS i:  a_visc += base_viscosity_i * [45/(pi*h^6)] * m_b * (v_b - v_i) / (
 GRANULAR i:   a_visc += mu0 * [45/(pi*h^6)] * m_b * (v_b - v_i) / (rho_i * rho0_i) * (h - |r|)
 ```
 The FLUID/GAS term, like the FLUID pair, is divided by `fs_i` before the final multiply.
-K_Step2_NL uses the same helper. Both behaviours use the same dynamic form as their pair code, with the boundary density taken as
+Both behaviours use the same dynamic form as their pair code, with the boundary density taken as
 the rest density `rho0_i` of i's own material (Akinci mirror: the wall stands in for more
 sand). It does not read the STATIC particle's own density. The drag rate per boundary
 neighbour therefore equals the FLUID-GRANULAR pair drag at rest density rescaled from
@@ -349,15 +349,13 @@ WATER and 0.18 for LAVA, and vorticity up to 0.012 1/s. It now gets exactly zero
 Dam Break KE (WCSPH, 0.25 to 1.5 s) is unchanged within 1%.
 
 Tests: `test_step2.py::test_translating_block_no_fp16_viscous_bias`,
-`test_step1.py::test_translating_block_zero_vorticity_strain_dye` (K_Step1 and
-K_Step1_BuildNL). `neighbor_list.cu` K_Step1_NL and K_Step2_NL still use FP32 `v_i`.
+`test_step1.py::test_translating_block_zero_vorticity_strain_dye`.
 
 Tests: `test_visc_dynamic_form.py` (pair and free-surface block momentum at round-off,
-pair value equals the formula above, K_Step2 and K_Step2_NL), `test_implicit_viscosity.py`.
+pair value equals the formula above), `test_implicit_viscosity.py`.
 
 **Source**: `step2.cu` K_Step2 FLUID/GAS pair branch, GRANULAR branch, `cross_pair_visc`,
-`boundary_visc_factor`, implicit scale before PostCalc; `neighbor_list.cu` K_Step2_NL
-(same formulas and scale); `dfsph_solver.cu` K_DFSPH_NonPressureForces
+`boundary_visc_factor`, implicit scale before PostCalc; `dfsph_solver.cu` K_DFSPH_NonPressureForces
 
 ### 3.4 XSPH Velocity Correction (FLUID only)
 
@@ -390,7 +388,6 @@ GRANULAR neighbours are skipped too: a settled sand bed is asleep at v = 0, so c
 pulled water's advection velocity toward 0 while its stored velocity stayed, and water
 crawled over sand. Water over sand or stone now advects at its own velocity plus the
 average over nearby water. Test: `test_step2.py::test_xsph_skips_granular_neighbour`.
-`neighbor_list.cu` K_Step2_NL still sums over every non-STATIC neighbour.
 
 **Source**: `step2.cu` K_Step2 XSPH block in the neighbour loop (accumulation, FLUID guards),
 `veleval_out` write after the loop (output)
@@ -607,7 +604,7 @@ global `mu_s` when that is 0. The gap `mu_2 - mu_s = 0.30` stays global, so each
 material's `mu_2 = friction_coeff + 0.30`. Each particle's `eta` uses its own
 material, and the pair uses the harmonic mean of the two (5.5). Table values:
 DIRT 0.5, GUNPOWDER 0.5, SAND 0.6, GRAVEL 0.65, WET_SAND 0.75 (bd-r5-review-n28.89).
-DFSPH and the neighbour-list Step2 still use the global `mu_s`.
+DFSPH still uses the global `mu_s`.
 
 Measured effect (WCSPH, 0.2 x 0.6 x 0.2 m column on the floor, 2 s, pile height
 over 95th-percentile radius): DIRT 0.102, SAND 0.119, WET_SAND 0.121, GRAVEL 0.131.
@@ -890,9 +887,8 @@ STATIC wall particle (11.1).
 `SUM_i m_i cp_i T_i` is conserved, as long as the density a particle divides by matches
 the `density_in` its neighbours read. Same-material pairs get `k_ij = kappa_i`
 (unchanged). Mixed pairs are limited by the poorer conductor: LAVA (500) and WATER (50)
-give `k_ij = 91`, LAVA and METAL (2000) give 800. All five loop copies use this form:
-`K_Step1`, `K_Step1_BuildNL`, the neighbour-list step1 (`neighbor_list.cu`),
-`K_PBF_ComputeLambda` and `K_DFSPH_ComputeDensityAlpha`.
+give `k_ij = 91`, LAVA and METAL (2000) give 800. All three loop copies use this form:
+`K_Step1`, `K_PBF_ComputeLambda` and `K_DFSPH_ComputeDensityAlpha`.
 
 `test_step1.py::test_heat_energy_conserved_lava_water` checks the step-0 rate balance
 (`|SUM m cp dTdt| / SUM |m cp dTdt| < 1e-4`, measured 3e-8) and the drift of
@@ -957,10 +953,8 @@ not hit: WATER at 293 K with one FIRE neighbour at 1200 K at r = h/2 (both mass
 2.8 K per 1 ms substep against a 454 K cap. MAT_RIGID neighbours never exchange
 heat, in either branch. The cap reads `c_sim.dt` of the solver's own module.
 
-This is in `K_Step1`, `K_Step1_BuildNL`, `K_PBF_ComputeLambda` (do_heat call) and
-`K_DFSPH_ComputeDensityAlpha`. The neighbour-list step1 in `neighbor_list.cu`
-(used only by `benchmark.py` and tests, not by `simulation.py`) still skips
-cross-phase heat. Tests: `test_step1.py::test_fire_heats_water_across_phase`,
+This is in `K_Step1`, `K_PBF_ComputeLambda` (do_heat call) and
+`K_DFSPH_ComputeDensityAlpha`. Tests: `test_step1.py::test_fire_heats_water_across_phase`,
 `test_step1.py::test_cross_phase_heat_capped_at_half_gap` and
 `test_solvers.py::test_cross_phase_heat_matches_across_solvers` (all three
 solvers give identical dTdt in a WATER/SAND/STONE/FIRE/STEAM block).
@@ -1046,11 +1040,10 @@ Thresholds in `reactions.cu`:
 | ACID self-consumption | health -= 0.5 * exposure_corrode * dt | |
 | Sand wetting | see §21.1 | thresholds are rate × water fraction |
 
-K_Step1 and K_Step1_BuildNL use this definition. The PBF and DFSPH density
-kernels and the benchmark-only `K_Step1_NL` (`neighbor_list.cu`) still output
-the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
+K_Step1 uses this definition. The PBF and DFSPH density kernels still
+output the older unnormalised `poly6_coeff * SUM_j rate_ij * W_ij`.
 
-**Source**: `step1.cu` (K_Step1, K_Step1_BuildNL PostCalc), `reactions.cu` thresholds
+**Source**: `step1.cu` (K_Step1 PostCalc), `reactions.cu` thresholds
 
 ### 9.5 Temperature Phase Transitions (K_Reactions)
 
@@ -1651,7 +1644,7 @@ Each item names its bead (`bd-r4fix-uup.N`).
   - PBF and DFSPH fill it from `sorted_density`. This removes the race, but the
     values are still in the previous sort order after a full re-sort. The
     effect is bounded noise in the weighting, not a blow-up.
-  - Every read site (K_Step1, K_Step1_BuildNL, K_DFSPH_ComputeDensityAlpha,
+  - Every read site (K_Step1, K_DFSPH_ComputeDensityAlpha,
     K_PBF_ComputeLambda; same-phase and cross-phase heat, and the PBF
     vorticity/normal sum) replaces a value `<= 0` with the
     neighbour's own `rest_density`, floored at `RHO_EPSILON` so GAS keeps its
@@ -1901,7 +1894,7 @@ All three solvers now support the complete material behavior set:
 **STATIC wall volume convention** (bd-r5-review-n28.116). A regular STATIC
 particle (STONE, METAL, WOOD, ...; not MAT_RIGID) has mass 0.02 whatever its
 material, and every solver stores `max(rest_density, 1)` as its density:
-K_Step1 and K_Step1_BuildNL (WCSPH), K_PBF_ComputeLambda and
+K_Step1 (WCSPH), K_PBF_ComputeLambda and
 K_DFSPH_ComputeDensityAlpha. So:
 
 - Heat, normal, vorticity and dye sums weight a wall neighbour by
@@ -2811,7 +2804,7 @@ Output: `vorticity_out[i] = float4(omega_x, omega_y, omega_z, |omega|)`
 
 The magnitude `|omega|` is stored in `.w` for use by the Step2 confinement force.
 
-**Source**: `step1.cu` (K_Step1 and K_Step1_BuildNL, FLUID branch),
+**Source**: `step1.cu` (K_Step1, FLUID branch),
 `pbf_solver.cu` (K_PBF_ComputeLambda), `dfsph_solver.cu`
 (K_DFSPH_ComputeDensityAlpha).
 
@@ -2901,7 +2894,7 @@ Output: `normal_out[i] = float4(n_x, n_y, n_z, as_float(neighbor_count))`
 
 The neighbor count is packed into `.w` as a reinterpreted float for efficient storage.
 
-**Source**: `step1.cu` (K_Step1 and K_Step1_BuildNL neighbor loops),
+**Source**: `step1.cu` (K_Step1 neighbor loop),
 test: `test_step1.py::test_rigid_wall_contact_layer_matches_stone`
 
 ### 17.2 Surface Detection
@@ -3120,19 +3113,19 @@ Foam rendered as separate draw call after main scene (both point sprite and SSFR
 
 ### 20.1 Pack Density into position.w (OPT-4.1)
 
-After Step1 computes density, `K_PackDensity` writes `density[i]` into
+At the end of each particle, `K_Step1` writes `density[i]` into
 `sorted_position[i].w`. Step2 then reads `rho_j = position[j].w` instead of
 issuing a separate `__ldg(&density[j])` load per neighbor. This eliminates one
 global memory load per neighbor interaction in the Step2 inner loop.
 
-Pipeline order: Step1 → K_PackDensity → Step2
+Pipeline order: Step1 (writes density and `.w`) → Step2
 
 Applied to WCSPH path only. PBF and DFSPH use their own density pipelines
 (PBF computes density from predicted positions; DFSPH reads density from a
 separate buffer across multiple correction kernels).
 
-**Source**: `step1.cu:K_PackDensity`, `step2.cu:K_Step2` (reads `pos4_j.w`),
-`step1.py:pack_density()`, `simulation.py:_run_wcsph_body`
+**Source**: `step1.cu:K_Step1` (end of kernel), `step2.cu:K_Step2` (reads `pos4_j.w`),
+`simulation.py:_run_wcsph_body`
 
 ### 20.2 Speculative ILP (OPT-4.2)
 
@@ -3163,15 +3156,28 @@ ComputePressureAccel, DensitySolverUpdate)
 ### 20.3 Pre-computed Pressure Array (PERF-007)
 
 WCSPH Step2 no longer calls `compute_pressure()` per neighbor (~50 calls/particle).
-Instead, `K_ComputePressure` runs once after Step1 to write per-particle pressure
-to `sorted_pressure[]`. Step2 reads `p_i` and `p_j` via `__ldg(&pressure_in[i])`.
+Instead, `K_Step1` writes per-particle pressure to `sorted_pressure[]`
+(`pressure_out`) right after it computes density. Step2 reads `p_i` and `p_j`
+via `__ldg(&pressure_in[i])`.
 
 This eliminates the per-neighbor `powf()` call (Tait EOS) from the Step2 inner loop.
 
-Pipeline: Step1 → K_ComputePressure → Step2
+Pipeline: Step1 (writes density and pressure) → Step2
 
-**Source**: `step2.cu:K_ComputePressure`, `step2.py:compute_pressure()`,
+`K_ComputePressure` (`step2.cu`, `step2.py:compute_pressure()`) computes the same
+pressure from a density array. It is test-only: the simulation never launches
+it, and tests that set density by hand use it to build `pressure_in`.
+
+**Source**: `step1.cu:K_Step1` (`pressure_out`), `step2.cu:K_Step2`,
 `simulation.py:_run_wcsph_body`
+
+### 20.3a No neighbour-list path
+
+Every WCSPH neighbour loop scans the 27 grid cells directly; there are no
+neighbour lists. A neighbour-list variant (`K_Step1_BuildNL`, `K_Step1_NL`,
+`K_Step2_NL` in `neighbor_list.cu`) netted only about 6% at 1M particles
+(`perf_benchmark.md`), so it was retired (bd-r5-review-n28.154). Its copy of the
+step1 loop had to be kept in sync with `K_Step1` by hand.
 
 ### 20.4 Warm-start kappa_v (PERF-008) and PBF reorder skips
 
@@ -3616,7 +3622,7 @@ rho_i += SUM_b psi_b * W(r_i - r_b, h),   psi_b = rho0_i * V_b = m_b * (rho0_i /
 ```
 The neighbour loop multiplies a MAT_RIGID neighbour's mass by `rho0_i / RIGID_PSI_RHO0`
 (one multiply per rigid pair). Every other neighbour uses `m_j` unchanged. The same
-term is in K_Step1, K_Step1_BuildNL, K_DFSPH_ComputeDensityAlpha and
+term is in K_Step1, K_DFSPH_ComputeDensityAlpha and
 K_PBF_ComputeLambda. MAT_RIGID particles skip their own density computation (early return).
 
 Measured with a kinematic 12 cm box submerged in a 0.6 m pool for 1.5 s
