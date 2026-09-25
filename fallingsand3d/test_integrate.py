@@ -1455,6 +1455,87 @@ def test_sleep_hysteresis_wake():
     print("PASS: test_sleep_hysteresis_wake")
 
 
+def _wake_and_nonfluid_scene(force_fill, veleval_fill):
+    """Particles whose sph_force/veleval rows K_Step2 does not write.
+
+    0: sleeping SAND kicked above v_wake (wakes in integrate)
+    1: sleeping WATER kicked above v_wake (wakes in integrate)
+    2: awake SAND (veleval row not written)
+    3: awake STEAM (veleval row not written)
+    4: sleeping SAND below v_wake (stays asleep)
+    5: STONE
+    Rows 0, 1, 4, 5 of sph_force and rows 0 to 5 of veleval get the fill
+    value; row 2 and 3 of sph_force hold a real force.
+    """
+    n = 6
+    pos = np.zeros((n, 4), dtype=np.float32)
+    pos[:, 0] = np.arange(n, dtype=np.float32) * 0.1 - 0.25
+    pos[:, 3] = 1.0
+    vel = np.zeros((n, 4), dtype=np.float32)
+    vel[0, :3] = (0.05, 0.02, 0.0)
+    vel[1, :3] = (-0.04, 0.03, 0.01)
+    vel[2, :3] = (0.3, -0.2, 0.1)
+    vel[3, :3] = (0.0, 0.4, -0.1)
+    vel[4, 0] = 0.01
+    packed = np.array([
+        SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)),
+        SET_SLEEPING(MAKE_PACKED(WATER, FLUID)),
+        MAKE_PACKED(SAND, GRANULAR),
+        MAKE_PACKED(STEAM, GAS),
+        SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR)),
+        MAKE_PACKED(STONE, STATIC),
+    ], dtype=np.uint32)
+    force = np.full((n, 4), force_fill, dtype=np.float32)
+    force[2] = (0.5, 3.0, -0.2, 0.0)
+    force[3] = (-0.1, 1.0, 0.3, 0.0)
+    veleval = np.full((n, 4), veleval_fill, dtype=np.float32)
+    return {
+        "sorted_position": cupy.asarray(pos),
+        "sorted_velocity": cupy.asarray(vel),
+        "sorted_veleval": cupy.asarray(veleval),
+        "sorted_sph_force": cupy.asarray(force),
+        "sorted_mass": cupy.full(n, MASS, dtype=cupy.float32),
+        "sorted_packed_info": cupy.asarray(packed),
+        "sorted_temperature": cupy.full(n, 293.0, dtype=cupy.float32),
+        "sorted_health": cupy.full(n, 1.0, dtype=cupy.float32),
+        "sorted_density": cupy.full(n, 1700.0, dtype=cupy.float32),
+        "sorted_shear_rate": cupy.full(n, 0.5, dtype=cupy.float32),
+        "sorted_sleep_counter": cupy.full(n, 15, dtype=cupy.uint8),
+        "sort_indexes": cupy.arange(n, dtype=cupy.uint32),
+    }
+
+
+def test_unwritten_force_and_veleval_rows_are_not_read():
+    """K_Integrate ignores the sph_force/veleval rows K_Step2 skips.
+
+    bd-r5-review-n28.170: step2 writes nothing for STATIC and sleeping
+    particles and writes veleval for awake FLUID only. A particle that
+    wakes in integrate must use zero SPH force and no XSPH delta, and
+    GRANULAR/GAS must never read veleval. NaN in those rows must give
+    the same bits as the zero force and veleval = vel that step2 used to
+    write.
+    """
+    setup_params()
+    ref = _wake_and_nonfluid_scene(0.0, 0.0)
+    # What step2 used to store: veleval = velocity for every skipped row.
+    ref["sorted_veleval"] = ref["sorted_velocity"].copy()
+    nan = _wake_and_nonfluid_scene(np.nan, np.nan)
+
+    out_ref = [a.get() for a in integrate(**ref)]
+    out_nan = [a.get() for a in integrate(**nan)]
+    for name, a, b in zip(("position", "velocity", "packed_info",
+                           "sleep_counter", "temperature"), out_ref, out_nan):
+        assert np.array_equal(a.view(np.uint8), b.view(np.uint8)), (
+            f"{name} differs when unwritten rows hold NaN:\n{a}\n{b}"
+        )
+    pi_h = out_nan[2]
+    assert IS_SLEEPING(int(pi_h[0])) == 0 and IS_SLEEPING(int(pi_h[1])) == 0
+    assert IS_SLEEPING(int(pi_h[4])) == 1
+    # The woken particles moved under gravity alone.
+    pos_h = out_nan[0]
+    assert pos_h[0, 0] > -0.25 and pos_h[1, 0] < -0.15
+
+
 def test_sleeping_skip_force_integration():
     """Sleeping particles skip force integration -- position unchanged.
 

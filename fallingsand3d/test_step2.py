@@ -6,8 +6,8 @@ Acceptance criteria:
   - Pressure force: pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable
   - Viscosity force: viscosity_precalc * m_j * (v_j - v_i) / rho_j * lap_visc_variable
   - XSPH (FLUID only): epsilon * sum(m_j / rho_avg * (v_j - v_i) * W_poly6)
-  - STATIC (behavior_class == 3) -> zero force (early return)
-  - SLEEPING (IS_SLEEPING flag) -> zero force (early return)
+  - STATIC (behavior_class == 3) -> early return, outputs not written
+  - SLEEPING (IS_SLEEPING flag) -> early return, outputs not written
   - sph_force as float4 to sorted buffer; veleval_xsph to sorted veleval buffer
   - Two fluid particles at rest density -> ~zero net force
   - Compressed fluid particles -> repulsive forces (pushed apart)
@@ -459,19 +459,54 @@ def test_xsph_not_for_granular() -> None:
         bclass_b=GRANULAR,
     )
 
+    # K_Step2 writes veleval for FLUID only (bd-r5-review-n28.170): the
+    # GRANULAR rows keep whatever the buffer held before the launch.
+    sentinel = np.float32(-123.5)
+    data["veleval_out"] = cupy.full((2, 4), sentinel, dtype=cupy.float32)
     _, veleval_out = _step2_original_order(data)
     cupy.cuda.Device().synchronize()
 
     vels = cupy.asnumpy(veleval_out)
 
-    # GRANULAR should keep original velocity (no XSPH)
-    assert abs(vels[0, 0] - vel_a[0]) < 1e-6, (
-        f"GRANULAR should keep v_x={vel_a[0]}, got {vels[0, 0]}"
+    assert np.all(vels == sentinel), (
+        f"GRANULAR veleval rows should not be written, got {vels}"
     )
-    assert abs(vels[1, 0] - vel_b[0]) < 1e-6, (
-        f"GRANULAR should keep v_x={vel_b[0]}, got {vels[1, 0]}"
-    )
-    print("[OK] GRANULAR particles -> veleval unchanged (no XSPH)")
+    print("[OK] GRANULAR particles -> veleval not written (no XSPH)")
+
+
+def test_step2_writes_nothing_for_static_and_sleeping() -> None:
+    """STATIC and sleeping rows of sph_force and veleval are not written.
+
+    K_Integrate never reads them (bd-r5-review-n28.170), so the early
+    returns skip the 32 B of stores. Awake FLUID rows are written.
+    """
+    _upload_all_params()
+    sentinel = np.float32(-123.5)
+    for bclass_a, mat_a, sleeping_a in ((STATIC, 1, False),
+                                        (GRANULAR, 2, True),
+                                        (FLUID, 5, True)):
+        data = _make_two_particle_setup(
+            pos_a=[0.0, 0.0, 0.0],
+            pos_b=[H * 0.3, 0.0, 0.0],
+            vel_a=[0.01, 0.0, 0.0],
+            vel_b=[-0.5, 0.0, 0.0],
+            density_a=3000.0,
+            density_b=3000.0,
+            mat_id_a=mat_a,
+            bclass_a=bclass_a,
+            sleeping_a=sleeping_a,
+            mat_id_b=5,  # WATER
+            bclass_b=FLUID,
+        )
+        data["sph_force_out"] = cupy.full((2, 4), sentinel, dtype=cupy.float32)
+        data["veleval_out"] = cupy.full((2, 4), sentinel, dtype=cupy.float32)
+        force, veleval = _step2_original_order(data)
+        f = cupy.asnumpy(force)
+        v = cupy.asnumpy(veleval)
+        assert np.all(f[0] == sentinel), f"skipped particle force written: {f[0]}"
+        assert np.all(v[0] == sentinel), f"skipped particle veleval written: {v[0]}"
+        assert not np.any(f[1] == sentinel), f"FLUID force not written: {f[1]}"
+        assert not np.any(v[1] == sentinel), f"FLUID veleval not written: {v[1]}"
 
 
 @pytest.mark.parametrize("sleeping", [True, False], ids=["sleeping", "awake"])
