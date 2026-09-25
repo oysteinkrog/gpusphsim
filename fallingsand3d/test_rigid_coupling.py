@@ -17,6 +17,15 @@ so the fluid and the body exchange equal and opposite impulses.
     a kinematic body with a velocity acts as a moving surface in place, like a
     conveyor. That isolates the drag from the pressure push.
 
+(d) Round-4 regressions and WCSPH (bd-r5-review-n28.124): the pressure push on
+    a plate points away from the fluid in every solver; the WCSPH reaction is
+    -m_i * a_i (doubling the fluid mass doubles it); a kinematic box in a
+    WCSPH pool gets rho * V_eff * g with near-zero torque; a free box floats
+    or sinks by its mass and keeps its MAT_RIGID boundary slots.
+(e) Setup checks from the old _test_rigid*.py smoke scripts.
+
+The rotated-inertia check for K_IntegrateRigidBodies is in test_integrate.py.
+
 The kinematic body is not integrated, so rigid_forces still holds the last
 substep's accumulated force when _sim_step returns.
 """
@@ -46,7 +55,7 @@ def _make_sim(profile_name: str, fluid_min, fluid_max, body_pos, gravity: float,
               n_max: int = 120_000, world_half_size: float = 1.0,
               half_extents=(HALF, HALF, HALF), is_kinematic: bool = True,
               velocity=(0.0, 0.0, 0.0), ang_vel=None, mass: float = 4.32,
-              sdf_type=None):
+              sdf_type=None, spacing: float = SPACING):
     from simulation import Simulation
     from solver_profiles import PROFILES
     from world import World
@@ -54,7 +63,7 @@ def _make_sim(profile_name: str, fluid_min, fluid_max, body_pos, gravity: float,
     world = World(n_max)
     ex = [h + 0.005 for h in half_extents]
     world.spawn_cube(
-        fluid_min, fluid_max, WATER, SPACING,
+        fluid_min, fluid_max, WATER, spacing,
         exclude_box=(
             (body_pos[0] - ex[0], body_pos[1] - ex[1], body_pos[2] - ex[2]),
             (body_pos[0] + ex[0], body_pos[1] + ex[1], body_pos[2] + ex[2]),
@@ -328,3 +337,209 @@ def test_pbf_drag_reaction_balances_fluid_momentum():
     assert impulse[0] < 0.0, impulse
     err = np.linalg.norm(dp_fluid + impulse)
     assert err <= 0.05 * np.linalg.norm(dp_fluid), (dp_fluid, impulse)
+
+
+# ---------------------------------------------------------------------------
+# (d) Pressure sign, m_i scaling, WCSPH buoyancy, floating and sinking
+#     (bd-r5-review-n28.124)
+# ---------------------------------------------------------------------------
+
+# WCSPH water settles at about 2.1 rho0 (PHYSICS.md 3.2). A pool spawned at
+# the 0.02 lattice collapses to half its height and sloshes for seconds, so the
+# WCSPH scenes spawn at 0.02 / 2.1^(1/3) = 0.0155 with the same particle mass.
+# The pool then starts close to its settled density.
+WCSPH_SPACING = 0.0155
+PLATE = (0.0, -0.30, 0.0)
+PLATE_HE = (0.2, 0.02, 0.2)
+
+
+def _plate_under_block(profile_name: str):
+    """Pre-compressed water block resting on a kinematic plate, no gravity.
+
+    The block starts at about 2.1 rho0, so every solver sees p > 0 in the
+    first substeps and pushes on the plate.
+    """
+    return _make_sim(
+        profile_name,
+        fluid_min=(-0.15, -0.275, -0.15), fluid_max=(0.15, -0.17, 0.15),
+        body_pos=PLATE, gravity=0.0, world_half_size=0.4,
+        half_extents=PLATE_HE, spacing=WCSPH_SPACING,
+    )
+
+
+@pytest.mark.parametrize("profile_name", ["WCSPH"] + SOLVERS)
+def test_pressure_pushes_body_away_from_fluid(profile_name):
+    """Round-4 sign fix: the fluid above the plate pushes it down.
+
+    With the Akinci pressure gradient sign flipped, the plate is pulled up
+    toward the fluid and F_y > 0.
+    """
+    world, sim, rbm = _plate_under_block(profile_name)
+    _step(sim)  # inject the boundary block
+    F = np.zeros(3)
+    for _ in range(3):
+        _step(sim)
+        F += _body_force(rbm)
+    n = world._high_water
+    mat = world.packed_info[:n].get() & 0xFF
+    centroid = world.position[:n, :3].get()[mat == WATER].mean(axis=0)
+    toward_fluid = centroid - np.array(PLATE)
+    print(f"{profile_name}: F = {F}, fluid centroid - plate = {toward_fluid}")
+    assert F[1] < -1.0, F
+    assert float(np.dot(F, toward_fluid)) < 0.0, F
+    # The block is centred on the plate, so the push is along y.
+    assert np.hypot(F[0], F[2]) < 0.05 * abs(F[1]), F
+
+
+def test_wcsph_body_reaction_scales_with_fluid_mass():
+    """Round-4 m_i fix: the reaction on the body is -m_i * a_i.
+
+    K_Step2 is launched twice on the same sorted state, the second time with
+    every fluid mass doubled. Density and pressure come from K_Step1 and stay
+    the same, so a_i on the fluid next to the plate is unchanged and the body
+    force must double. Without the m_i factor the ratio is 1.
+    """
+    import step2
+
+    world, sim, rbm = _plate_under_block("WCSPH")
+    _step(sim)  # inject the boundary block
+    real = step2.compute_step2
+    captured = {}
+
+    def twice(pos, vel, mass, packed, *args, **kwargs):
+        rbm.rigid_forces.fill(0)
+        real(pos, vel, mass, packed, *args, **kwargs)
+        captured["F1"] = rbm.rigid_forces[0, :3].copy()
+        fluid = (packed & 0xFF) == WATER
+        heavy = cp.where(fluid, mass * 2.0, mass).astype(cp.float32)
+        rbm.rigid_forces.fill(0)
+        real(pos, vel, heavy, packed, *args, **kwargs)
+        captured["F2"] = rbm.rigid_forces[0, :3].copy()
+        # Leave the substep with the real masses.
+        rbm.rigid_forces.fill(0)
+        real(pos, vel, mass, packed, *args, **kwargs)
+
+    step2.compute_step2 = twice
+    try:
+        _step(sim)
+    finally:
+        step2.compute_step2 = real
+    F1 = captured["F1"].get().astype(np.float64)
+    F2 = captured["F2"].get().astype(np.float64)
+    print(f"F(m) = {F1}, F(2m) = {F2}")
+    assert F1[1] < -1.0, F1
+    assert np.linalg.norm(F2 - 2.0 * F1) <= 0.05 * np.linalg.norm(2.0 * F1), (F1, F2)
+
+
+def test_wcsph_submerged_box_gets_buoyancy():
+    """Kinematic 12 cm box in a settled WCSPH pool: F_y = rho * V_eff * g.
+
+    rho is the measured water density next to the box (about 2.1 rho0 in
+    WCSPH, PHYSICS.md 3.2), not rho0, because WCSPH hydrostatic pressure grows
+    with the density it actually settles at. Measured: F_y about 63 N against
+    rho * V_eff * g about 57 N. The mean torque stays near zero.
+    """
+    body = (0.0, -0.25, 0.0)
+    world, sim, rbm = _make_sim(
+        "WCSPH", fluid_min=(-0.4, -0.4, -0.4), fluid_max=(0.4, -0.1, 0.4),
+        body_pos=body, gravity=G, world_half_size=0.4, spacing=WCSPH_SPACING,
+    )
+    n_settle, n_avg = 200, 1000
+    for _ in range(n_settle):
+        sim._sim_step(world._high_water)
+    # One substep of WCSPH is noisy (pressure waves), so average on the GPU.
+    f_sum = cp.zeros(3, dtype=cp.float64)
+    t_sum = cp.zeros(3, dtype=cp.float64)
+    for _ in range(n_avg):
+        sim._sim_step(world._high_water)
+        f_sum += rbm.rigid_forces[0, :3]
+        t_sum += rbm.rigid_torques[0, :3]
+    F = (f_sum / n_avg).get()
+    tau = (t_sum / n_avg).get()
+
+    n = world._high_water
+    mat = world.sorted_packed_info[:n].get() & 0xFF
+    pos = world.sorted_position[:n, :3].get()
+    rho = world.sorted_density[:n].get()
+    side = ((mat == WATER) & (np.abs(pos[:, 1] - body[1]) < HALF)
+            & (np.abs(pos[:, 0]) > HALF + 0.02) & (np.abs(pos[:, 0]) < HALF + 0.15))
+    rho_local = float(np.median(rho[side]))
+    expected = rho_local * (2 * HALF + SPACING) ** 3 * G
+    print(f"WCSPH: F = {F}, tau = {tau}, rho_local = {rho_local:.0f}, "
+          f"rho * V_eff * g = {expected:.2f} N")
+    assert F[1] > 0.0, F
+    assert abs(F[1] - expected) <= 0.3 * expected, (F, expected)
+    assert np.linalg.norm(tau) < 0.05 * np.linalg.norm(F) * HALF, (tau, F)
+
+
+# Neutral mass of the 12 cm box: PBF about 7 kg (27-30 N at g = 4), WCSPH
+# about 15 kg (the over-compressed water above gives about 60 N).
+_FLOAT_SINK = [
+    ("PBF", 2.0, +1),
+    ("PBF", 12.0, -1),
+    ("WCSPH", 2.0, +1),
+    ("WCSPH", 30.0, -1),
+]
+
+
+@pytest.mark.parametrize("profile_name,mass,direction", _FLOAT_SINK)
+def test_free_box_floats_or_sinks(profile_name, mass, direction):
+    """A free submerged box released from rest rises when lighter than the
+    water it displaces and sinks when heavier. Its boundary slots keep
+    MAT_RIGID with body id 0 the whole time.
+    """
+    wcsph = profile_name == "WCSPH"
+    body = (0.0, -0.25, 0.0) if wcsph else (0.0, -0.15, 0.0)
+    world, sim, rbm = _make_sim(
+        profile_name, fluid_min=(-0.4, -0.4, -0.4),
+        fluid_max=(0.4, -0.1 if wcsph else 0.1, 0.4),
+        body_pos=body, gravity=G, world_half_size=0.4,
+        spacing=WCSPH_SPACING if wcsph else SPACING,
+        is_kinematic=False, mass=mass,
+    )
+    for _ in range(600):
+        sim._sim_step(world._high_water)
+    y = float(rbm.download_bodies()[0]["position"][1])
+    print(f"{profile_name} mass {mass}: y {body[1]:.3f} -> {y:.3f}")
+    assert direction * (y - body[1]) > 0.05, y
+
+    off, nb = rbm.boundary_offset, rbm.num_boundary_particles
+    assert nb > 0
+    pi = world.packed_info[off:off + nb].get()
+    assert np.all((pi & 0xFF) == MAT_RIGID)
+    assert np.all((pi >> 13) == 0)
+
+
+# ---------------------------------------------------------------------------
+# (e) Setup checks that used to live in the _test_rigid*.py smoke scripts
+# ---------------------------------------------------------------------------
+
+def test_rigid_setup_basics():
+    import integrate
+    from materials import MATERIALS, NUM_DEFINED, STATIC
+    from rigid_bodies import RIGID_BODY_DTYPE, SDF_SPHERE, RigidBodyManager
+
+    assert RIGID_BODY_DTYPE.itemsize == 96
+    assert MAT_RIGID == 18
+    assert len(MATERIALS) == NUM_DEFINED
+    assert MATERIALS[MAT_RIGID].behavior_class == STATIC
+
+    mgr = RigidBodyManager()
+    mgr.add_rigid_body((0, 0.5, 0), (0.1, 0.2, 0.3), 2.0)
+    mgr.add_rigid_body((1, 0.5, 0), (0.2, 0.2, 0.2), 2.0, sdf_type=SDF_SPHERE)
+    mgr.add_rigid_body((2, 0.5, 0), (0.1, 0.1, 0.1), 2.0, is_kinematic=True)
+    box, sphere, kin = mgr._bodies_cpu[:3]
+    assert box["position"][3] == pytest.approx(0.5)
+    np.testing.assert_allclose(
+        box["inertia_inv"][:3],
+        [3.0 / (2.0 * (0.04 + 0.09)), 3.0 / (2.0 * (0.01 + 0.09)), 3.0 / (2.0 * (0.01 + 0.04))],
+        rtol=1e-6)
+    np.testing.assert_allclose(sphere["inertia_inv"][:3], 1.0 / (0.4 * 2.0 * 0.04), rtol=1e-6)
+    assert kin["position"][3] == 0.0
+    assert np.all(kin["inertia_inv"][:3] == 0.0)
+
+    for name in ("integrate_rigid_bodies", "update_boundary_particles", "rigid_body_collisions"):
+        assert hasattr(integrate, name), name
+    module = integrate._get_module()
+    for kernel in ("K_IntegrateRigidBodies", "K_RigidBodyCollisions"):
+        module.get_function(kernel)
