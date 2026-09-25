@@ -24,7 +24,7 @@ linearized flow solver (finite differences, np.roll stencils) used purely as a
 measurement rig. It runs five decisive tests. Each prints PASS/FAIL against the
 theory so the theory can be *falsified*, not just illustrated.
 
-The same five observables are what the GPU pytest (test_odd_viscosity.py) probes
+The GPU probe script (eval_vorticity.py) measures the analogous observables
 in the real SPH sim. If the CPU rig and the SPH sim disagree in SIGN or SCALING,
 the theory is wrong.
 
@@ -281,7 +281,7 @@ def main():
     print("\n  " + ("ALL PASS -- theory survives every falsification test on the CPU rig."
                      if allpass else
                      "SOME FAIL -- theory is (at least partly) falsified; inspect above."))
-    print("  Next: run test_odd_viscosity.py on the CUDA box to check the *real* SPH")
+    print("  Next: run eval_vorticity.py on the CUDA box to check the *real* SPH")
     print("  sim shows the same sign + k^2 scaling. Divergence there falsifies the")
     print("  claim that fallingsand3d's spurious rotation is odd-viscosity-driven.")
     return 0 if allpass else 1

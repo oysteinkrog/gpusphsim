@@ -246,7 +246,13 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 - **Problem:** SPH gradient of scalar A should use `(A_j - A_i) * grad_W`. Using `A_j` alone
   relies on `SUM (m_j/rho_j) * grad_W = 0` which fails near free surfaces. Produces spurious
   confinement force at surfaces. Mitigated by small epsilon=0.05.
-- **Fix:** Replace `omega_j` with `(omega_j - omega_mag_i)` at step2.cu:277-279.
+- **Fix:** step2.cu (K_Step2 confinement block) uses `omega_diff = omega_j - omega_mag_i`.
+- **Measured (2026-09-25, `eval_vorticity.py`):** gravity-free 0.4 m WATER cube, Taylor-Green
+  field A = 0.3 m/s, WCSPH, 300 substeps. Net L_z drift is +1.5e-6 (eps 0), -5.1e-6 (eps 0.05)
+  and -2.7e-6 (eps 0.10), with no trend in eps. KE/KE0 is 0.836, 0.841 and 0.846, so confinement
+  feeds the vortex. Transverse RMS v_x under a pure shear is 7.3009e-3 (eps 0) and 7.3011e-3
+  (eps 0.10). Confinement injects no measurable net angular momentum.
+  `test_vorticity_confinement.py` guards the KE result.
 
 ### G4. Documented: Surface tension is not Akinci model (naming)
 - **File:** `step2.cu:298-315`

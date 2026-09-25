@@ -25,7 +25,7 @@ Three items already in `PROBLEMS.md` are, in this language, the same phenomenon:
 
 | PROBLEMS.md | Called | Reinterpreted as |
 |---|---|---|
-| **G3** (`step2.cu:277`) — confinement uses `omega_j`, not `(omega_j - omega_i)` | "spurious surface force" | a deterministic **odd-viscosity source at the free surface** |
+| **G3** (`step2.cu`, fixed): confinement used `omega_j`, not `(omega_j - omega_i)`; the code now uses the difference form | "spurious surface force" | a deterministic **odd-viscosity source at the free surface** |
 | **I1** (`integrate.cu:258`) — advection uses pre-integration velocity | "one-substep lag" | **broken time-reversal symmetry** (the T-breaking odd viscosity needs) |
 | **G2/F2** — asymmetric `1/rho` viscosity conventions | "unit mismatch" | asymmetric momentum stencil → nonzero parity-odd part |
 
@@ -63,17 +63,16 @@ built-in null control.
 
 Run it: `python odd_viscosity_probe.py` (needs only numpy).
 
-## Next: confirm on the real SPH sim
+## Probe on the real SPH sim
 
-`test_odd_viscosity.py` runs the analogous probe inside the actual
-weakly-compressible SPH solver (skips cleanly without a CUDA GPU). It seeds a
-symmetric, zero-net-angular-momentum Taylor-Green field in a gravity-free water
-block and checks whether the parity-broken confinement term spins up a
-sign-definite net `L_z` that **scales with the confinement coefficient** and
-vanishes when it is switched off. Divergence there (F1–F3 in the file) falsifies
-the claim that `fallingsand3d`'s spurious rotation is odd-viscosity-driven.
+`eval_vorticity.py` runs the analogous probe inside the actual
+weakly-compressible SPH solver and prints the numbers; it asserts nothing. It
+seeds a symmetric, zero-net-angular-momentum Taylor-Green field in a
+gravity-free water block and measures whether the confinement term spins up a
+net `L_z` that **scales with the confinement coefficient** and vanishes when it
+is switched off. It also measures the transverse response to a pure shear.
 
-Run on the CUDA box: `python test_odd_viscosity.py` or `pytest test_odd_viscosity.py`.
+Run on the CUDA box: `python eval_vorticity.py`.
 
 ## Turning the bug into a feature
 
@@ -92,23 +91,23 @@ signatures (edge currents hugging the walls in one handedness, unidirectional
 surface ripples, a droplet that spins itself up). The artifact everyone
 symmetrizes away becomes a dial.
 
-## First GPU run (2026-09-24)
+## GPU results
 
-`test_odd_viscosity.py` first ran on the real sim on 2026-09-24 (RTX 5070 Ti,
-WCSPH, 300 substeps). The harness originally called `Simulation.step_frame()`,
-which is paced by wall-clock time and ran zero substeps in a tight loop. It now
-drives `_sim_step` directly.
+The probe first ran as `test_odd_viscosity.py` on 2026-09-24 (RTX 5070 Ti,
+WCSPH, 300 substeps). It now lives in `eval_vorticity.py`. The 2026-09-25 run
+keeps the WCSPH profile's XSPH, force scale and viscosity, and disables spawn
+velocity damping.
 
-| Test | Result |
+| Probe | 2026-09-25 result |
 |---|---|
-| F1 null control (`eps = 0`) | Holds. Drift 2.9e-8 to 1.2e-7. |
-| F2 spin-up scales with `eps` | Fails. Drift is 1.1e-7 at `eps = 0.05` and 4.2e-7 at `eps = 0.10`. It grows with `eps` but stays near the noise floor, far below the 5e-5 the theory needs. |
-| F3 transverse shear coupling | Fails. Transverse RMS `v_x` is 2.822e-3 with and without confinement. |
+| Null control (`eps = 0`) | Net L_z drift +1.5e-6. |
+| Spin-up scales with `eps` | Drift -5.1e-6 at `eps = 0.05` and -2.7e-6 at `eps = 0.10`. No trend in `eps`, and all three values are at the noise floor. |
+| Transverse shear coupling | Transverse RMS `v_x` is 7.3009e-3 at `eps = 0` and 7.3011e-3 at `eps = 0.10`. |
 
 On this code, at these flow amplitudes, the theory is falsified: the
-parity-broken confinement term produces no measurable odd-viscosity signature.
+confinement term produces no measurable odd-viscosity signature.
 
-A first pass the same day reported drift of about 1.9 and a transverse response
+An early run on 2026-09-24 reported drift of about 1.9 and a transverse response
 of 0.366 vs 0.584. Both came from a `density_in` bug on master at the time
 (`K_Integrate` wrote `position.w = 1.0`, so step1 used `rho_j = 1` and vorticity
 was about 2500x too large). They are not evidence for the theory.
