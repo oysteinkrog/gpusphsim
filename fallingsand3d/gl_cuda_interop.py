@@ -11,6 +11,7 @@ Exported API
 - get_mapped_pointer(resource) -> (dev_ptr, size)
 - unmap_buffer(resource, stream=None)
 - CudaGLBuffer  -- convenience class wrapping the lifecycle
+- map_all(buffers) -- map several CudaGLBuffers with one map call
 - get_interop_stream() -> cupy.cuda.Stream  -- shared non-null interop stream
 """
 
@@ -27,7 +28,8 @@ from ctypes import (
     c_uint,
     c_void_p,
 )
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional, Sequence
 
 # ---------------------------------------------------------------------------
 # Load the CUDA runtime library
@@ -266,6 +268,47 @@ def map_buffer(resource: int, stream: Optional[object] = None) -> None:
     err = _cudart.cudaGraphicsMapResources(1, byref(res_ptr), stream_ptr)
     _check(err, "cudaGraphicsMapResources")
     check_last_error("cudaGraphicsMapResources (post)")
+    global map_call_count
+    map_call_count += 1
+
+
+# Number of cudaGraphicsMapResources calls made through this module. A plain
+# host int, so tests and tools can check how many interop map calls a frame
+# made (bd-r5-review-n28.150).
+map_call_count = 0
+
+
+def _stream_ptr(stream: Optional[object]) -> c_void_p:
+    """NULL stream when *stream* is None, else the stream's handle."""
+    return c_void_p(0) if stream is None else c_void_p(stream.ptr)
+
+
+def map_buffers(resources: Sequence[int], stream: Optional[object] = None) -> None:
+    """Map several registered resources with one cudaGraphicsMapResources call.
+
+    Same stream rules as :func:`map_buffer`. Follow with :func:`unmap_buffers`
+    on the same list.
+    """
+    count = len(resources)
+    if count == 0:
+        return
+    arr = (c_void_p * count)(*resources)
+    err = _cudart.cudaGraphicsMapResources(count, arr, _stream_ptr(stream))
+    _check(err, "cudaGraphicsMapResources")
+    check_last_error("cudaGraphicsMapResources (post)")
+    global map_call_count
+    map_call_count += 1
+
+
+def unmap_buffers(resources: Sequence[int], stream: Optional[object] = None) -> None:
+    """Unmap several resources with one cudaGraphicsUnmapResources call."""
+    count = len(resources)
+    if count == 0:
+        return
+    arr = (c_void_p * count)(*resources)
+    err = _cudart.cudaGraphicsUnmapResources(count, arr, _stream_ptr(stream))
+    _check(err, "cudaGraphicsUnmapResources")
+    check_last_error("cudaGraphicsUnmapResources (post)")
 
 
 def get_mapped_pointer(resource: int) -> tuple[int, int]:
@@ -437,3 +480,41 @@ class CudaGLBuffer:
             self.close()
         except Exception:
             pass
+
+
+@contextmanager
+def map_all(
+    buffers: Sequence[Optional[CudaGLBuffer]],
+    stream: Optional[object] = None,
+) -> Iterator[tuple[Optional[CudaGLBuffer], ...]]:
+    """Map several CudaGLBuffers with one map call and one unmap call.
+
+    ``None`` entries are skipped and yielded back as ``None``, so a caller can
+    pass an optional buffer (for example the motion blur velocity VBO) in a
+    fixed position::
+
+        with map_all([pos, col, vel_or_none]) as (p, c, v):
+            ...
+
+    Same stream rules as :meth:`CudaGLBuffer.map` (NULL stream by default).
+    """
+    active = [b for b in buffers if b is not None]
+    for b in active:
+        if b._mapped:
+            raise RuntimeError(
+                "map_all: a CudaGLBuffer is already mapped, missing unmap()?"
+            )
+        if b._resource is None:
+            raise RuntimeError("map_all: CudaGLBuffer resource already closed")
+    if len(set(id(b) for b in active)) != len(active):
+        raise ValueError("map_all: the same CudaGLBuffer was passed twice")
+    resources = [b._resource for b in active]
+    map_buffers(resources, stream=stream)
+    for b in active:
+        b._mapped = True
+    try:
+        yield tuple(buffers)
+    finally:
+        unmap_buffers(resources, stream=stream)
+        for b in active:
+            b._mapped = False

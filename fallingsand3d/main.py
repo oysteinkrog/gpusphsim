@@ -21,6 +21,7 @@ from OpenGL.GL import (
 )
 from camera import OrbitCamera
 from renderer import Renderer
+from gl_cuda_interop import map_all
 
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
@@ -151,10 +152,16 @@ def main():
     ui.snapshots = snapshots  # expose to UI for timeline display
 
     # Copy initial state to VBOs
-    with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+    with map_all((renderer.cuda_pos, renderer.cuda_col, renderer.cuda_vel)) as (pos_buf, col_buf, vel_buf):
         sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
     import cupy
     cupy.cuda.Device().synchronize()
+
+    # The initial copy filled the velocity VBO. A per-frame copy with motion
+    # blur off skips it, which makes it stale until the next copy with blur
+    # on. Foam has its own VBO, filled only while foam is on.
+    vel_vbo_fresh = True
+    foam_vbo_fresh = False
 
     # Input state for camera
     left_pressed = False
@@ -168,8 +175,9 @@ def main():
         Used by Ctrl+Z and the timeline Restore button. Keeps the snapshot
         ring so older slots stay reachable (bd-r5-review-n28.85).
         """
-        nonlocal active_spawner, spawner_frame_counter
-        after_restore(world, sim, renderer)
+        nonlocal active_spawner, spawner_frame_counter, vel_vbo_fresh
+        after_restore(world, sim, renderer)  # copies pos, col and vel
+        vel_vbo_fresh = True
         active_spawner = None
         spawner_frame_counter = 0
 
@@ -314,13 +322,19 @@ def main():
             snapshots.tick(world, sim=sim)
 
         # --- Copy to VBOs (once per frame) ---
-        vel_ctx = renderer.cuda_vel if renderer.motion_blur_enabled else None
-        with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf:
-            if vel_ctx is not None:
-                with vel_ctx as vel_buf:
-                    sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
-            else:
-                sim.copy_to_vbos(pos_buf, col_buf)
+        # Skip the copy and the interop map when nothing changed: no substep
+        # ran (paused, speed 0, or the accumulator did not reach dt) and no
+        # scene edit set sim.scene_dirty. Turning motion blur on while the
+        # velocity VBO is stale also forces a copy. One map call covers all
+        # the buffers (bd-r5-review-n28.150).
+        blur = renderer.motion_blur_enabled
+        vbo_update = substeps > 0 or sim.scene_dirty
+        if vbo_update or (blur and not vel_vbo_fresh):
+            vel_vbo = renderer.cuda_vel if blur else None
+            with map_all((renderer.cuda_pos, renderer.cuda_col, vel_vbo)) as (pos_buf, col_buf, vel_buf):
+                sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+            vel_vbo_fresh = blur
+            vbo_update = True
 
         # Update active count for renderer
         renderer.num_active = world._high_water
@@ -328,12 +342,16 @@ def main():
         # Sync foam enable state from renderer (UI) to world (sim)
         world.foam_enabled = renderer.foam_enabled
 
-        # Copy foam particles to VBO (if enabled)
+        # Copy foam particles to VBO (if enabled), on the same frames as the
+        # particle copy. The foam count only changes on frames with substeps.
         if renderer.foam_enabled:
-            with renderer.cuda_foam as foam_buf:
-                renderer.num_foam = sim.copy_foam_to_vbo(foam_buf)
+            if vbo_update or not foam_vbo_fresh:
+                with renderer.cuda_foam as foam_buf:
+                    renderer.num_foam = sim.copy_foam_to_vbo(foam_buf)
+                foam_vbo_fresh = True
         else:
             renderer.num_foam = 0
+            foam_vbo_fresh = False
 
         # --- Update 3D cursor ---
         cursor_pos = ui.get_cursor_world_pos(camera)
@@ -382,8 +400,9 @@ def main():
             spawner_frame_counter = 0
             # bd-r4-epic-x2j.5: clear snapshots on solver switch (stale GPU state is invalid after solver reset)
             snapshots.clear()
-            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+            with map_all((renderer.cuda_pos, renderer.cuda_col, renderer.cuda_vel)) as (pos_buf, col_buf, vel_buf):
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+            vel_vbo_fresh = True
 
         # --- Handle preset loading ---
         preset_name = ui.pending_preset
@@ -405,8 +424,9 @@ def main():
             sim.notify_scene_changed()  # stale sort perm after preset load (CRIT-5)
             sim.reset_spawn_damping()
             snapshots.clear()
-            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+            with map_all((renderer.cuda_pos, renderer.cuda_col, renderer.cuda_vel)) as (pos_buf, col_buf, vel_buf):
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+            vel_vbo_fresh = True
 
         # Handle max_particles change
         if 'new_max' in ui_changes:
@@ -416,6 +436,7 @@ def main():
             sim.close()  # drain readback stream + free pinned buffers/graphs before reassign
             fb_w, fb_h = _framebuffer_size(window)
             renderer = Renderer(new_max, point_scale=20.0, width=fb_w, height=fb_h)
+            foam_vbo_fresh = False  # new, empty foam VBO
             renderer.num_active = 0
             num_active = _spawn_initial_scene(world)
             renderer.num_active = num_active
@@ -427,8 +448,9 @@ def main():
             spawner_frame_counter = 0
             snapshots = SnapshotRing(max_snapshots=12, max_particles=new_max)
             ui.snapshots = snapshots
-            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+            with map_all((renderer.cuda_pos, renderer.cuda_col, renderer.cuda_vel)) as (pos_buf, col_buf, vel_buf):
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+            vel_vbo_fresh = True
 
         # Timeline Restore: same as Ctrl+Z, keeps the snapshot ring
         # (bd-r5-review-n28.85).
@@ -451,8 +473,9 @@ def main():
             sim._last_foam_count = 0
             ui.sync_from_sim(sim)  # load may change world size and SDFs (bd-r5-review-n28.86)
             snapshots.clear()
-            with renderer.cuda_pos as pos_buf, renderer.cuda_col as col_buf, renderer.cuda_vel as vel_buf:
+            with map_all((renderer.cuda_pos, renderer.cuda_col, renderer.cuda_vel)) as (pos_buf, col_buf, vel_buf):
                 sim.copy_to_vbos(pos_buf, col_buf, vel_buf)
+            vel_vbo_fresh = True
 
         # Handle world size change
         if 'new_world_size' in ui_changes:

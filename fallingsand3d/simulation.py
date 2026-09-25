@@ -197,6 +197,12 @@ class Simulation:
         # The displacement starts at the "unknown" sentinel, which never skips.
         self._last_max_disp_uint = self._MAX_DISP_UNKNOWN
         self._last_foam_count = 0
+        # True when the particle state changed outside the substep loop and
+        # the GL VBOs have not been refilled since. Set by
+        # notify_scene_changed() and set_world_size(); cleared by
+        # copy_to_vbos(). main.py skips the VBO copy on frames with no
+        # substeps unless this is set (bd-r5-review-n28.150).
+        self.scene_dirty = True
         # Max particle speed (m/s) estimated from the latched drift: drift
         # since the last full sort / sim time since that sort. 1-2 frames
         # old. Kept when the latch is unknown (scene change, +inf sentinel).
@@ -474,6 +480,8 @@ class Simulation:
         self._invalidate_graphs()
         self._sort_skip_next = False
         self._sort_skip_consecutive = 0
+        # The render color's depth tint uses the world bounds.
+        self.scene_dirty = True
 
     def _upload_constants(self) -> None:
         """Compile all .cu kernels and upload constant memory to each module."""
@@ -797,6 +805,8 @@ class Simulation:
         self._readback_epoch += 1
         # Check the parked DEAD reserve on the next frame (bd-r5-review-n28.27).
         self._dead_reserve_check_pending = True
+        # The VBOs show the old particle set (bd-r5-review-n28.150).
+        self.scene_dirty = True
 
     def _run_grid_setup(self, n: int, force_sort: bool = False) -> None:
         """Common grid setup: full counting sort or gather-only (grid reuse).
@@ -2186,7 +2196,10 @@ class Simulation:
             Color VBO wrapper (must be context-managed externally).
         cuda_vel : CudaGLBuffer, optional
             Velocity VBO wrapper for motion blur.
+
+        Clears scene_dirty: the VBOs now match the current state.
         """
+        self.scene_dirty = False
         n = self.world._high_water
         if n == 0:
             return
