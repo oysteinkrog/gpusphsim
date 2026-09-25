@@ -877,8 +877,8 @@ stamp = frame_counter_d[0] + 1     (never 0, the value of a fresh table)
 mark:  cell_wake_flags[hash(own cell)] = stamp
 wake:  any(cell_wake_flags[hash(c)] == stamp for c in 27 cells)
 ```
-`frame_counter_d` holds `_substep_counter`, which rises by one every substep
-and never resets, so a mark from an earlier substep no longer matches and the
+`frame_counter_d` is advanced by one on the device by `K_IncrementCounter`, the
+first node of every substep body (graph replay or direct launch). It never resets, so a mark from an earlier substep no longer matches and the
 table is never cleared per substep (the 1 MB memset is gone). The table is
 zeroed only when it is allocated. The uint32 counter would wrap after about
 4e9 substeps. A caller that passes no frame counter gets stamp 1 and
@@ -3142,8 +3142,11 @@ Type selection:
 - FOAM: `neighbor_count < 15` (surface particle with few neighbors)
 - BUBBLE: otherwise (near-surface interior)
 
-The RNG seed is `Simulation._substep_counter` at the launch substep, which is
-unique per launch. `_frame_counter` would repeat for launches within one frame.
+The RNG seed is `frame_ptr[0]`, the device counter `Simulation._frame_counter_d`
+that `K_IncrementCounter` advances once per substep (the same counter `K_Reactions`
+and the wake kernels read). It is unique per launch. `_frame_counter` would repeat
+for launches within one frame. Generation runs outside the CUDA graph, because
+`dt_emit` changes with the frame's substep count.
 
 Spawn position: parent position + random jitter (±0.01).
 Spawn velocity: parent velocity × scale (1.2 for spray, 0.5 for others).
@@ -3176,6 +3179,10 @@ Launch size: `max_foam` threads. The kernel reads the live count from device
 memory and threads past it exit at once, so foam made since the deferred
 readback (section 20.5) gets physics on its next substep.
 
+With foam on, `K_FoamPhysics` is the last node of the substep body, so it is
+captured in both CUDA graphs (full sort and gather only). Turning foam on or off
+drops the graphs.
+
 ### 19.5 Compaction (K_FoamCompact)
 
 Stream compaction runs once per frame at most, from `step_frame` after the
@@ -3185,7 +3192,10 @@ while the deferred foam count is above 80% of the pool:
 2. `K_FoamClearTail` sets `pos.w = -1` for slots `[alive_count, max_foam)` of
    the output buffer. Those slots hold positions from an earlier cycle, and the
    draw count is the deferred readback, which can be above alive_count.
-3. Swap input/output buffers
+3. Device-to-device copy of the whole output pool back into `foam_position` and
+   `foam_velocity` (2 x max_foam x 16 B, 6.4 MB at 200K). The buffers are not
+   swapped, because the captured graphs hold the `foam_position`/`foam_velocity`
+   pointers for `K_FoamPhysics`.
 4. Device-to-device copy of alive_count → foam_count (no GPU→CPU sync)
 
 ### 19.6 Rendering
