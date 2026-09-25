@@ -255,3 +255,83 @@ def test_compaction_clears_stale_tail(world, sim):
     assert count == 10
     assert np.all(p[:10, 3] == 1.0)
     assert np.all(p[10:, 3] < 0), "stale tail still drawable after compaction"
+
+
+# ---------------------------------------------------------------------------
+# Generate load order, pool-full skip, compaction (bd-r5-review-n28.179)
+# ---------------------------------------------------------------------------
+
+def test_compaction_keeps_exactly_the_alive_set(world):
+    """50K alive plus 50K dead in: exactly the 50K alive (pos, vel) rows out."""
+    k = 100_000
+    assert world._max_foam >= k
+    rng = np.random.default_rng(179)
+    pos = rng.standard_normal((k, 4)).astype(np.float32)
+    pos[:, 3] = rng.integers(0, 3, k).astype(np.float32)
+    vel = rng.standard_normal((k, 4)).astype(np.float32)
+    alive = rng.permutation(k) < k // 2
+    vel[:, 3] = np.where(alive, rng.uniform(0.1, 2.0, k), -1.0).astype(np.float32)
+    _seed_foam(world, pos, vel)
+    world.foam_alive_count[:] = 12345  # the wrapper must reset it
+    foam.foam_compact(world.foam_position, world.foam_velocity,
+                      world.foam_position_b, world.foam_velocity_b,
+                      world.foam_alive_count, world.foam_count, world._max_foam)
+    n_out = int(world.foam_alive_count.get()[0])
+    out = np.concatenate([cp.asnumpy(world.foam_position_b[:n_out]),
+                          cp.asnumpy(world.foam_velocity_b[:n_out])], axis=1)
+    world.foam_count[:] = 0
+    assert n_out == k // 2
+    want = np.concatenate([pos[alive], vel[alive]], axis=1)
+    order = lambda a: a[np.lexsort(a.T[::-1])]  # noqa: E731
+    np.testing.assert_array_equal(order(out), order(want))
+
+
+def _surface_inputs(n: int, s: float, nbr: float):
+    pos = cp.zeros((n, 4), dtype=cp.float32)
+    pos[:, 0] = cp.arange(n, dtype=cp.float32) * 1e-3
+    vel = cp.zeros((n, 4), dtype=cp.float32)
+    vel[:, 0] = s
+    nrm = cp.zeros((n, 4), dtype=cp.float32)
+    nrm[:, 3] = nbr
+    info = cp.full(n, WATER_INFO, dtype=cp.uint32)
+    return pos, vel, nrm, info
+
+
+def test_generate_half_velocity_matches_float(world):
+    """The half4 velocity path emits the same particles as the float4 path."""
+    n = 10_000
+    foam.upload_foam_params(foam.build_foam_params(max_foam=world._max_foam))
+    s = 3.0  # exactly representable in half
+    pos, vel, nrm, info = _surface_inputs(n, s, 10.0)
+    vel_h = vel.astype(cp.float16).view(cp.uint32).reshape(n, 2)
+    runs = []
+    for vh in (None, vel_h):
+        world.foam_count[:] = 0
+        foam.foam_generate(pos, vel, nrm, info, world.foam_position,
+                           world.foam_velocity, world.foam_count, n, 42, 0.01,
+                           sorted_velocity_h=vh)
+        c = int(world.foam_count.get()[0])
+        rows = np.concatenate([cp.asnumpy(world.foam_position[:c]),
+                               cp.asnumpy(world.foam_velocity[:c])], axis=1)
+        runs.append(rows[np.lexsort(rows.T[::-1])])
+    world.foam_count[:] = 0
+    assert runs[0].shape[0] > 0
+    np.testing.assert_array_equal(runs[0], runs[1])
+
+
+def test_generate_skips_interior_and_respects_full_pool(world):
+    """Interior particles (neighbor count > 25) never emit; a full pool stays full."""
+    n = 10_000
+    foam.upload_foam_params(foam.build_foam_params(max_foam=world._max_foam))
+    pos, vel, nrm, info = _surface_inputs(n, 3.0, 30.0)
+    world.foam_count[:] = 0
+    foam.foam_generate(pos, vel, nrm, info, world.foam_position,
+                       world.foam_velocity, world.foam_count, n, 42, 1.0)
+    assert int(world.foam_count.get()[0]) == 0
+    nrm[:, 3] = 10.0
+    world.foam_count[:] = world._max_foam
+    foam.foam_generate(pos, vel, nrm, info, world.foam_position,
+                       world.foam_velocity, world.foam_count, n, 42, 1.0)
+    c = int(world.foam_count.get()[0])
+    world.foam_count[:] = 0
+    assert c == world._max_foam

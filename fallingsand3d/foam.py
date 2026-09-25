@@ -151,6 +151,7 @@ def upload_sim_params(params: np.ndarray) -> None:
 # ---------------------------------------------------------------------------
 
 _BLOCK = 256
+_NULL = cupy.ndarray(0, dtype=cupy.uint32)  # NULL pointer for an optional argument
 
 
 def foam_generate(
@@ -164,6 +165,7 @@ def foam_generate(
     num_particles: int,
     frame_seed: int,
     dt_emit: float,
+    sorted_velocity_h: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_FoamGenerate: emit secondary particles from FLUID particles.
 
@@ -171,6 +173,11 @@ def foam_generate(
     emits with probability min(1, k_rate * (phi - threshold) * dt_emit).
     It is a kernel argument, not a c_foam field, so a per-frame value needs
     no constant-memory upload.
+
+    sorted_velocity_h is the half4 velocity mirror ((N, 2) uint32). When
+    given, the kernel reads velocity from it (8 B per particle instead of
+    16 B). Pass None when the mirror is not kept current (PBF skips it);
+    the kernel then reads sorted_velocity.
     """
     module = _get_module()
     kernel = module.get_function("K_FoamGenerate")
@@ -181,6 +188,7 @@ def foam_generate(
         (
             sorted_position,
             sorted_velocity,
+            sorted_velocity_h if sorted_velocity_h is not None else _NULL,
             sorted_normal,
             sorted_packed_info,
             foam_position,
@@ -248,8 +256,8 @@ def foam_compact(
     renderer never draws stale positions from an earlier cycle.
     Caller should swap in/out buffers and copy alive_count to foam_count.
     """
-    # Reset alive counter
-    alive_count.fill(0)
+    # Reset alive counter (a 4-byte memset, not an elementwise kernel)
+    alive_count.data.memset_async(0, 4)
     module = _get_module()
     kernel = module.get_function("K_FoamCompact")
     grid = ((max_foam + _BLOCK - 1) // _BLOCK,)

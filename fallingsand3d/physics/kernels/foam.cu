@@ -54,14 +54,23 @@ __device__ inline float hash_rand(uint seed, uint salt) {
 /* ======================================================================
  * K_FoamGenerate -- per FLUID particle, emit secondary particles
  *
- * Inputs: sorted_position, sorted_velocity, sorted_normal, sorted_packed_info
+ * Inputs: sorted_position, sorted_velocity (or its half4 mirror),
+ *         sorted_normal, sorted_packed_info
  * Output: foam_position, foam_velocity (appended via atomicAdd on foam_count)
+ *
+ * Load order: packed_info, then the normal, whose .w (neighbor count)
+ * rejects interior particles (85 to 90% of FLUID) before position and
+ * velocity are read. nvcc does not sink those loads past the branch on its
+ * own (checked in SASS, bd-r5-review-n28.179). When sorted_velocity_h is
+ * not NULL, velocity comes from that 8-byte half4 mirror instead of the
+ * 16-byte float4 array.
  * ====================================================================== */
 
 extern "C" __global__
 void K_FoamGenerate(
     const float4* __restrict__ sorted_position,
     const float4* __restrict__ sorted_velocity,
+    const uint2*  __restrict__ sorted_velocity_h,  // half4 mirror, or NULL
     const float4* __restrict__ sorted_normal,
     const uint*   __restrict__ sorted_packed_info,
     float4*       foam_position,
@@ -78,9 +87,14 @@ void K_FoamGenerate(
     int behavior = GET_BEHAVIOR(info);
     if (behavior != FLUID) return;
 
-    float4 pos_i = sorted_position[i];
-    float4 vel_i = sorted_velocity[i];
+    // Surface check first: only generate near surface (low neighbor count).
+    // Interior particles (high neighbor count) never generate foam.
     float4 nrm_i = sorted_normal[i];
+    float neighbor_count = nrm_i.w;
+    if (neighbor_count > 25.0f) return;
+
+    float4 vel_i = sorted_velocity_h ? load_half4(&sorted_velocity_h[i])
+                                     : sorted_velocity[i];
 
     float vx = vel_i.x, vy = vel_i.y, vz = vel_i.z;
     float speed_sq = vx*vx + vy*vy + vz*vz;
@@ -88,7 +102,6 @@ void K_FoamGenerate(
 
     float nx = nrm_i.x, ny = nrm_i.y, nz = nrm_i.z;
     float n_len = sqrtf(nx*nx + ny*ny + nz*nz);
-    float neighbor_count = nrm_i.w;
 
     // Trapped air: high relative velocity (approximated by speed in splash zones)
     float trapped_air = speed;
@@ -105,10 +118,6 @@ void K_FoamGenerate(
     // Kinetic energy
     float kinetic = 0.5f * speed_sq;
 
-    // Surface check: only generate near surface (low neighbor count)
-    // Interior particles (high neighbor count) should not generate foam
-    if (neighbor_count > 25.0f) return;
-
     float phi = c_foam.k_ta * trapped_air
               + c_foam.k_wc * wave_crest
               + c_foam.k_ke * kinetic;
@@ -121,6 +130,11 @@ void K_FoamGenerate(
     float p_emit = fminf(1.0f, c_foam.k_rate * (phi - c_foam.threshold) * dt_emit);
     if (hash_rand((uint)i, frame_seed + 4u) >= p_emit) return;
 
+    // Pool full: skip the atomicAdd/atomicSub pair. The volatile read sees
+    // the count as it stands; a stale value only lets a thread reach the
+    // atomic below, which still guards the pool bound.
+    if (*((volatile uint*)foam_count) >= (uint)c_foam.max_foam) return;
+
     // Claim a slot in the foam pool
     uint slot = atomicAdd(foam_count, 1u);
     if (slot >= (uint)c_foam.max_foam) {
@@ -128,6 +142,8 @@ void K_FoamGenerate(
         atomicSub(foam_count, 1u);
         return;
     }
+
+    float4 pos_i = sorted_position[i];
 
     // Determine foam type based on velocity direction
     // Upward velocity = spray, near-surface & slow = foam, downward = bubble
@@ -259,6 +275,11 @@ void K_FoamPhysics(
  * Two-pass approach:
  *   Pass 1 (this kernel): compute alive prefix + scatter alive to output
  *   Using simple atomic approach for simplicity (foam count is small)
+ *
+ * The output order is not the input order. ptxas already turns the
+ * atomicAdd(alive_count, 1) into one atomic per warp (VOTEU.ANY + POPC +
+ * SHFL in the SASS), so hand-written warp aggregation gains nothing
+ * (checked for bd-r5-review-n28.179).
  * ====================================================================== */
 
 extern "C" __global__
