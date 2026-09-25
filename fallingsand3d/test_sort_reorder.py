@@ -538,6 +538,89 @@ def test_fused_reorder_not_on_production_path() -> None:
           "(dead code path — live pipeline uses counting_sort.counting_sort_full)")
 
 
+def test_reorder_wrappers_accept_null_fp16_outputs() -> None:
+    """bd-r5-review-n28.155: sorted_velocity_h, sorted_temperature_h and
+    sorted_dye_h may be None. The wrappers pass a NULL pointer and
+    K_ScatterReorder / K_GatherReorder skip those stores, so neither the
+    full sort nor the gather reorder faults, and the float32 outputs are
+    still the unsorted arrays gathered through sort_perm."""
+    import counting_sort
+    import hash_sort
+
+    rng = np.random.default_rng(3)
+    n = 1500
+    pos_h = np.zeros((n, 4), dtype=np.float32)
+    pos_h[:, :3] = rng.uniform(-0.3, 0.3, size=(n, 3))
+    pos_h[:, 3] = 1.0
+    vel_h = rng.uniform(-1.0, 1.0, size=(n, 4)).astype(np.float32)
+
+    grid_params = hash_sort.build_grid_params()
+    num_cells = int(grid_params[0]["table_size"])
+    counting_sort.upload_grid_params(grid_params)
+    scratch = counting_sort.allocate_scratch(num_cells, n)
+
+    def unsorted() -> dict:
+        return dict(
+            position=cupy.asarray(pos_h), velocity=cupy.asarray(vel_h),
+            mass=cupy.full(n, 0.02, dtype=cupy.float32),
+            packed_info=cupy.full(n, 5, dtype=cupy.uint32),
+            temperature=cupy.full(n, 293.0, dtype=cupy.float32),
+            health=cupy.ones(n, dtype=cupy.float32),
+            lifetime=cupy.zeros(n, dtype=cupy.float32),
+            sleep_counter=cupy.zeros(n, dtype=cupy.uint8),
+            kappa=cupy.zeros(n, dtype=cupy.float32),
+            particle_dye=cupy.zeros((n, 4), dtype=cupy.float32),
+            kappa_v=cupy.zeros(n, dtype=cupy.float32),
+        )
+
+    def sorted_out() -> dict:
+        return dict(
+            sorted_position=cupy.empty((n, 4), dtype=cupy.float32),
+            sorted_velocity=cupy.empty((n, 4), dtype=cupy.float32),
+            sorted_mass=cupy.empty(n, dtype=cupy.float32),
+            sorted_packed_info=cupy.empty(n, dtype=cupy.uint32),
+            sorted_temperature=cupy.empty(n, dtype=cupy.float32),
+            sorted_health=cupy.empty(n, dtype=cupy.float32),
+            sorted_lifetime=cupy.empty(n, dtype=cupy.float32),
+            sorted_sleep_counter=cupy.empty(n, dtype=cupy.uint8),
+            sorted_kappa=None,
+            sorted_particle_dye=cupy.empty((n, 4), dtype=cupy.float32),
+            sorted_kappa_v=None,
+            sorted_velocity_h=None,
+            sorted_temperature_h=None,
+            sorted_dye_h=None,
+        )
+
+    src = unsorted()
+    out = sorted_out()
+    sort_perm = cupy.zeros(n, dtype=cupy.uint32)
+    counting_sort.counting_sort_full(
+        num_particles=n, num_cells=num_cells,
+        histogram=scratch["histogram"], write_offset=scratch["write_offset"],
+        cell_start=scratch["cell_start"], cell_end=scratch["cell_end"],
+        sort_perm=sort_perm, positions=src["position"],
+        hashes=cupy.zeros(n, dtype=cupy.uint32),
+        sorted_hashes=cupy.zeros(n, dtype=cupy.uint32),
+        **src, **out,
+    )
+    cupy.cuda.Device().synchronize()
+    perm = cupy.asnumpy(sort_perm).astype(np.int64)
+    assert np.array_equal(np.sort(perm), np.arange(n))
+    np.testing.assert_array_equal(cupy.asnumpy(out["sorted_velocity"]), vel_h[perm])
+
+    # Grid-reuse path: re-gather with the same sort_perm and changed velocity.
+    vel_h = vel_h * 2.0
+    src = unsorted()
+    out2 = sorted_out()
+    counting_sort.gather_reorder(
+        num_particles=n, sort_perm=sort_perm, **src, **out2,
+    )
+    cupy.cuda.Device().synchronize()
+    np.testing.assert_array_equal(cupy.asnumpy(out2["sorted_velocity"]), vel_h[perm])
+    np.testing.assert_array_equal(cupy.asnumpy(out2["sorted_position"]), pos_h[perm])
+    print("[OK] reorder wrappers accept None FP16 outputs")
+
+
 def main() -> None:
     test_sort_produces_sorted_hashes()
     test_sorted_index_maps_correctly()
@@ -549,6 +632,7 @@ def main() -> None:
     test_end_to_end_world_sort_reorder()
     test_500k_sort_reorder_no_errors()
     test_zero_particles()
+    test_reorder_wrappers_accept_null_fp16_outputs()
     test_fused_reorder_not_on_production_path()
     print("\n=== ALL US-009 CHECKS PASSED ===")
 

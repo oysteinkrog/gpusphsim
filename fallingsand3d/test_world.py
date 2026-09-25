@@ -153,8 +153,9 @@ def test_kill_in_sphere():
     w.spawn_sphere((0.0, 0.0, 0.0), 0.5, WATER, 10_000)
     before = w.num_active
     assert before == 10_000
-    # kill_in_sphere returns 0 (count is unused by all callers; bd-mzc.39 removes the sync)
-    w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
+    # count=True returns the number killed; the UI brush uses it so main.py
+    # sees a nonzero delta (bd-r5-review-n28.155).
+    killed = w.kill_in_sphere((0.0, 0.0, 0.0), 0.25, count=True)
     # Killed slots are MAKE_PACKED(DEAD, STATIC) with zero mass, health,
     # velocity and rgb, and color.w = -1 so the vertex shaders cull them
     # (bd-r5-review-n28.34, bd-r5-review-n28.60).
@@ -162,6 +163,9 @@ def test_kill_in_sphere():
     dead_mask = (w.packed_info[:n] & 0xFF) == 0
     dead_count = int(cp.sum(dead_mask))
     assert dead_count > 0, "Expected some particles to be killed inside sphere"
+    assert killed == dead_count, f"kill_in_sphere returned {killed}, {dead_count} slots are DEAD"
+    # A second kill in the same sphere finds nothing live and returns 0.
+    assert w.kill_in_sphere((0.0, 0.0, 0.0), 0.25, count=True) == 0
     assert bool(cp.all(w.packed_info[:n][dead_mask] == 0x300))
     assert bool(cp.all(w.mass[:n][dead_mask] == 0.0))
     assert bool(cp.all(w.health[:n][dead_mask] == 0.0))
@@ -323,7 +327,8 @@ def test_kill_in_sphere_no_gpu_sync():
 
         builtins.int = spy_int
         try:
-            w.kill_in_sphere((0.0, 0.0, 0.0), 0.25)
+            # Default count=False: no readback, returns 0.
+            assert w.kill_in_sphere((0.0, 0.0, 0.0), 0.25) == 0
         finally:
             builtins.int = orig_int
 
