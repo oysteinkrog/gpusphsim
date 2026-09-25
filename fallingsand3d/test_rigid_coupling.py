@@ -391,7 +391,7 @@ def test_pressure_pushes_body_away_from_fluid(profile_name):
     assert np.hypot(F[0], F[2]) < 0.05 * abs(F[1]), F
 
 
-def test_wcsph_body_reaction_scales_with_fluid_mass():
+def test_wcsph_body_reaction_scales_with_fluid_mass(monkeypatch):
     """Round-4 m_i fix: the reaction on the body is -m_i * a_i.
 
     K_Step2 is launched twice on the same sorted state, the second time with
@@ -419,11 +419,9 @@ def test_wcsph_body_reaction_scales_with_fluid_mass():
         rbm.rigid_forces.fill(0)
         real(pos, vel, mass, packed, *args, **kwargs)
 
-    step2.compute_step2 = twice
-    try:
-        _step(sim)
-    finally:
-        step2.compute_step2 = real
+    monkeypatch.setattr(step2, "compute_step2", twice)
+    _step(sim)
+    monkeypatch.undo()
     F1 = captured["F1"].get().astype(np.float64)
     F2 = captured["F2"].get().astype(np.float64)
     print(f"F(m) = {F1}, F(2m) = {F2}")
