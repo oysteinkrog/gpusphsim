@@ -287,9 +287,8 @@ def test_dfsph_detailed(world, sim):
         # Density solver: the live Jacobi loop on p/rho^2 (same calls as
         # Simulation._sim_step DFSPH path).  sorted_kappa holds p_rho2 and
         # sorted_predicted_position holds a_press.
-        p_rho2 = w.sorted_kappa
+        p_rho2 = w.sorted_kappa  # K_DFSPH_Finalize already applied the warm start
         a_press = w.sorted_predicted_position
-        p_rho2[:n] *= profile.dfsph_warm_start
         dfsph_solver.compute_pressure_accel(
             p_rho2[:n], w.sorted_position[:n],
             w.sorted_density[:n], w.sorted_mass[:n],

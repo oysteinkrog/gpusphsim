@@ -7,6 +7,10 @@ lithostatic pressure rho0 * |g| * spacing. The neighbour's eta uses the
 neighbour's own stored shear rate and pressure, so for a GRANULAR pair
 eta_ij computed by i equals eta_ji computed by j.
 
+K_DFSPH_Finalize stores sorted_kappa times the warm-start carry
+(bd-r5-review-n28.173) and the kernel divides it back out, so the helper
+below stores p_prev * carry.
+
 Checks on a two-particle SAND pair:
 - the pair force is antisymmetric (a_i + a_j = 0 along the pair) when the
   two particles have different shear rates and pressures;
@@ -46,6 +50,7 @@ from materials import SAND, MATERIALS  # noqa: E402
 
 RHO = 4000.0
 DV = 1e-4  # m/s, keeps the viscous acceleration far below ACCEL_MAX
+CARRY = float(PROFILES["DFSPH"].dfsph_warm_start)  # kappa_carry for this profile
 
 
 def _eta_host(gamma_dot, p_eff, rho):
@@ -94,7 +99,8 @@ def _accel_x(pair, shear, p_prev):
     pp = None
     if p_prev is not None:
         pp_s = np.zeros(n, dtype=np.float32)
-        pp_s[order] = p_prev
+        # Stored as K_DFSPH_Finalize writes it: p/rho times the carry.
+        pp_s[order] = np.asarray(p_prev, dtype=np.float32) * CARRY
         pp = cp.asarray(pp_s)
     out = cp.zeros((n, 4), dtype=cp.float32)
     dfsph_solver.compute_non_pressure_forces(
