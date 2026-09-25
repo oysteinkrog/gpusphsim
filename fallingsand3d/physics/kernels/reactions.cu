@@ -11,12 +11,17 @@
  * Step2 (which computes forces). Modifications to sorted_packed_info
  * flow through Step2 and Integrate naturally.
  *
+ * Every write to health, lifetime or mass also sets the state-dirty bit
+ * (state_dirty.cuh) in packed_info, so K_Integrate scatters those three
+ * arrays back to unsorted for this particle (bd-r5-review-n28.162).
+ *
  * Constant memory used:
  *   c_sim       -- SimParams (dt)
  *   c_materials -- MaterialProps[32] (for looking up current material props)
  */
 
 #include "common.cuh"
+#include "state_dirty.cuh"
 
 /* Forward declare grid helpers for blast wave kernel */
 
@@ -217,7 +222,12 @@ void K_Reactions(
     }
     if (!in_range) return;
     if (is_dead) {
-        if (mass != 0) mass[i] = 0.0f;  // defensive: every dead slot is massless
+        // Defensive: every dead slot is massless.  Store (and mark the slot
+        // for K_Integrate's carry-back) only when the mass is not already 0.
+        if (mass != 0 && mass[i] != 0.0f) {
+            mass[i] = 0.0f;
+            packed_info[i] = SET_STATE_DIRTY(pi);
+        }
         return;
     }
 
@@ -252,7 +262,7 @@ void K_Reactions(
     // ICE (mat=11, temp > 273K) -> WATER (in-place, small density ratio)
     const float ice_melt_temp = c_materials[MAT_ICE].temp_melt;
     if (mat_id == MAT_ICE && temp > ice_melt_temp) {
-        pi = MAKE_PACKED(MAT_WATER, FLUID);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_WATER, FLUID));
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_ICE, MAT_WATER);
         temperature[i] = ice_melt_temp;
@@ -261,7 +271,7 @@ void K_Reactions(
 
     // STONE (mat=1, temp > temp_melt=1500K) -> LAVA (melting)
     if (mat_id == MAT_STONE && temp > c_materials[MAT_STONE].temp_melt) {
-        pi = MAKE_PACKED(MAT_LAVA, FLUID);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_LAVA, FLUID));
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_STONE, MAT_LAVA);
         temperature[i] = c_materials[MAT_STONE].temp_melt;
@@ -270,7 +280,7 @@ void K_Reactions(
 
     // SAND (mat=2, temp > temp_melt=1700K) -> LAVA (melting)
     if (mat_id == MAT_SAND && temp > c_materials[MAT_SAND].temp_melt) {
-        pi = MAKE_PACKED(MAT_LAVA, FLUID);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_LAVA, FLUID));
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_SAND, MAT_LAVA);
         temperature[i] = c_materials[MAT_SAND].temp_melt;
@@ -282,7 +292,7 @@ void K_Reactions(
     // flight or in a water pool would hang in mid-air.  GRAVEL falls until it
     // is supported and then the sleep system pins it (bd-r5-review-n28.112).
     if (mat_id == MAT_LAVA && temp < c_materials[MAT_LAVA].temp_melt) {
-        pi = MAKE_PACKED(MAT_GRAVEL, GRANULAR);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_GRAVEL, GRANULAR));
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_LAVA, MAT_GRAVEL);
         temperature[i] = c_materials[MAT_LAVA].temp_melt;
@@ -313,7 +323,7 @@ void K_Reactions(
         float v_sq = v.x * v.x + v.y * v.y + v.z * v.z;
         if (IS_SLEEPING(pi) ||
                 v_sq < WATER_FREEZE_MAX_SPEED * WATER_FREEZE_MAX_SPEED) {
-            pi = MAKE_PACKED(MAT_ICE, STATIC);
+            pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_ICE, STATIC));
             packed_info[i] = pi;
             rescale_mass(mass, i, MAT_WATER, MAT_ICE);
             temperature[i] = water_freeze_temp;
@@ -338,7 +348,7 @@ void K_Reactions(
             uint h = wang_hash(wang_hash(i ^ 0x5bd1e995u) + frame * 0x9E3779B9u);
             float u = (float)(h >> 8) * (1.0f / 16777216.0f);  // [0, 1)
             if (u >= p_keep) {
-                packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+                packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_DEAD, STATIC));
                 lifetime[i] = 0.0f;
                 health[i] = 0.0f;
                 mass[i] = 0.0f;
@@ -350,7 +360,7 @@ void K_Reactions(
             }
             mass[i] = water_mass;
         }
-        pi = MAKE_PACKED(MAT_WATER, FLUID);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_WATER, FLUID));
         packed_info[i] = pi;
         temperature[i] = temp;
         return;
@@ -360,7 +370,7 @@ void K_Reactions(
 
     // WOOD (mat=9, exposure_heat > WOOD_IGNITE_EXPOSURE) -> FIRE
     if (mat_id == MAT_WOOD && exp_heat > WOOD_IGNITE_EXPOSURE) {
-        pi = MAKE_PACKED(MAT_FIRE, GAS);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_FIRE, GAS));
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_WOOD, MAT_FIRE);
         temperature[i] = FIRE_TEMPERATURE;
@@ -370,7 +380,7 @@ void K_Reactions(
 
     // OIL (mat=6, exposure_heat > OIL_IGNITE_EXPOSURE) -> FIRE
     if (mat_id == MAT_OIL && exp_heat > OIL_IGNITE_EXPOSURE) {
-        pi = MAKE_PACKED(MAT_FIRE, GAS);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_FIRE, GAS));
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_OIL, MAT_FIRE);
         temperature[i] = FIRE_TEMPERATURE;
@@ -380,7 +390,7 @@ void K_Reactions(
 
     // GUNPOWDER (mat=15, exposure_heat > GUNPOWDER_EXPOSURE) -> FIRE + explosion
     if (mat_id == MAT_GUNPOWDER && exp_heat > GUNPOWDER_EXPOSURE) {
-        pi = MAKE_PACKED(MAT_FIRE, GAS);
+        pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_FIRE, GAS));
         packed_info[i] = pi;
         rescale_mass(mass, i, MAT_GUNPOWDER, MAT_FIRE);
         temperature[i] = FIRE_TEMPERATURE;
@@ -422,31 +432,31 @@ void K_Reactions(
     // WATER has a non-zero corrosion reaction_rate with DIRT in the interaction
     // matrix, so exp_corrode accumulates when DIRT neighbours WATER.
     if (mat_id == MAT_DIRT && exp_corrode > SAND_WET_THRESHOLD) {
-        packed_info[i] = MAKE_PACKED(MAT_MUD, FLUID);
+        packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_MUD, FLUID));
         rescale_mass(mass, i, MAT_DIRT, MAT_MUD);
         return;
     }
 
     // ---- Sand wetting/drying transitions ----
     if (mat_id == MAT_SAND && exp_corrode > SAND_WET_THRESHOLD) {
-        packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
+        packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_WET_SAND, GRANULAR));
         rescale_mass(mass, i, MAT_SAND, MAT_WET_SAND);
         return;
     }
     if (mat_id == MAT_WET_SAND && exp_corrode > WETSAND_MUD_THRESHOLD) {
-        packed_info[i] = MAKE_PACKED(MAT_MUD, FLUID);
+        packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_MUD, FLUID));
         rescale_mass(mass, i, MAT_WET_SAND, MAT_MUD);
         return;
     }
     if (mat_id == MAT_MUD && exp_corrode < MUD_DRY_THRESHOLD
             * (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
-        packed_info[i] = MAKE_PACKED(MAT_WET_SAND, GRANULAR);
+        packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_WET_SAND, GRANULAR));
         rescale_mass(mass, i, MAT_MUD, MAT_WET_SAND);
         return;
     }
     if (mat_id == MAT_WET_SAND && exp_corrode < WETSAND_DRY_THRESHOLD
             * (1.0f + DRYING_TEMP_ACCEL * fmaxf(temp - 293.0f, 0.0f))) {
-        packed_info[i] = MAKE_PACKED(MAT_SAND, GRANULAR);
+        packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_SAND, GRANULAR));
         rescale_mass(mass, i, MAT_WET_SAND, MAT_SAND);
         return;
     }
@@ -471,7 +481,7 @@ void K_Reactions(
             // Fully corroded: the particle is removed. It does not become a
             // FIRE spark: heat exposure has no temperature threshold, so a
             // 400 K spark ignited neighbouring wood, oil and gunpowder.
-            packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+            packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_DEAD, STATIC));
             health[i] = 0.0f;
             lifetime[i] = 0.0f;
             if (mass != 0) mass[i] = 0.0f;
@@ -482,6 +492,8 @@ void K_Reactions(
             return;
         }
         health[i] = hlth;
+        pi = SET_STATE_DIRTY(pi);
+        packed_info[i] = pi;
     }
 
     // ---- Acid consumption: acid loses health when corroding ----
@@ -489,7 +501,7 @@ void K_Reactions(
         hlth = health[i];
         hlth -= exp_corrode * dt * 0.5f;
         if (hlth <= 0.0f) {
-            packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+            packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_DEAD, STATIC));
             health[i] = 0.0f;
             if (mass != 0) mass[i] = 0.0f;
             if (dead_indices != 0 && dead_count != 0) {
@@ -499,11 +511,13 @@ void K_Reactions(
             return;
         }
         health[i] = hlth;
+        pi = SET_STATE_DIRTY(pi);
+        packed_info[i] = pi;
     }
 
     // ---- Fire extinguished by water: FIRE -> SMOKE (bd-r5-review-n28.73) ----
     if (mat_id == MAT_FIRE && exp_corrode > FIRE_EXTINGUISH_EXPOSURE) {
-        packed_info[i] = MAKE_PACKED(MAT_SMOKE, GAS);
+        packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_SMOKE, GAS));
         rescale_mass(mass, i, MAT_FIRE, MAT_SMOKE);
         lifetime[i] = EXTINGUISHED_SMOKE_LIFETIME;
         temperature[i] = EXTINGUISHED_SMOKE_TEMP;
@@ -519,13 +533,13 @@ void K_Reactions(
         if (lt <= 0.0f) {
             if (mat_id == MAT_FIRE) {
                 // Fire expires -> becomes SMOKE with new lifetime
-                packed_info[i] = MAKE_PACKED(MAT_SMOKE, GAS);
+                packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_SMOKE, GAS));
                 rescale_mass(mass, i, MAT_FIRE, MAT_SMOKE);
                 lifetime[i] = 3.0f;
                 temperature[i] = fminf(temperature[i], 500.0f);  // cool down
             } else {
                 // Other gas expired -- add to freelist
-                packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+                packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_DEAD, STATIC));
                 lifetime[i] = 0.0f;
                 health[i] = 0.0f;
                 if (mass != 0) mass[i] = 0.0f;
@@ -537,6 +551,7 @@ void K_Reactions(
             return;
         }
         lifetime[i] = lt;
+        packed_info[i] = SET_STATE_DIRTY(pi);
     }
 }
 

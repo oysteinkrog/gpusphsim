@@ -21,6 +21,7 @@
  */
 
 #include "common.cuh"
+#include "state_dirty.cuh"
 
 /* ======================================================================
  * Material IDs (must match materials.py)
@@ -175,8 +176,10 @@ void K_SpawnGas(
     // Compute per-spawned-particle mass (conservation of mass)
     float child_mass = src_mass / (float)SPAWN_N;
 
-    // Steam material packed info
-    uint steam_pi = MAKE_PACKED(MAT_STEAM, GAS);
+    // Steam material packed info.  The state-dirty bit (state_dirty.cuh)
+    // makes K_Integrate carry the child's new health, lifetime and mass back
+    // to the unsorted arrays (bd-r5-review-n28.162).
+    uint steam_pi = SET_STATE_DIRTY(MAKE_PACKED(MAT_STEAM, GAS));
 
     // Ring rotation: hashed from the source index and position so repeated
     // spawns do not all line up. The three directions sum to zero.
@@ -256,7 +259,8 @@ void K_SpawnGas(
     // fluid neighbor loop and cannot pollute density sums until compaction.
     // (NOT added back to freelist here -- would race with concurrent reads
     //  from dead_indices. Compaction (US-029) reclaims dead particles.)
-    packed_info[i] = MAKE_PACKED(MAT_DEAD, STATIC);
+    // State-dirty: K_Integrate must carry the zero health and mass back.
+    packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_DEAD, STATIC));
     health[i] = 0.0f;
     mass[i] = 0.0f;
 }

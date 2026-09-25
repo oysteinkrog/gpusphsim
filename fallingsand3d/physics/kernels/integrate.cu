@@ -28,6 +28,7 @@
  */
 
 #include "sph_shared.cuh"
+#include "state_dirty.cuh"
 
 /* ======================================================================
  * Constants (integrate-specific, not in sph_shared.cuh)
@@ -106,10 +107,18 @@ void K_Integrate(
     // K_Integrate, and every substep re-gathers them from the unsorted arrays.
     // Without this scatter, cumulative reaction progress (fire lifetime decay,
     // acid health loss, gas-spawn mass transfer) is wiped each substep. (CRIT-3)
-    // Done unconditionally here so it covers the STATIC / sleeping early-returns. ---
-    if (health_out)   health_out[orig_idx]   = sorted_health[i];
-    if (lifetime_out) lifetime_out[orig_idx] = sorted_lifetime[i];
-    if (mass_out)     mass_out[orig_idx]     = sorted_mass[i];
+    // Only particles those kernels marked with the state-dirty bit are
+    // scattered: every other unsorted copy already holds the gathered value,
+    // and each scattered 4 B store costs a 32 B sector (bd-r5-review-n28.162).
+    // The bit is cleared here; every path below writes pi back to
+    // packed_info_out, so the unsorted packed_info never keeps it.
+    // Done before the branches so it covers the STATIC / sleeping early-returns. ---
+    if (HAS_STATE_DIRTY(pi)) {
+        pi = CLEAR_STATE_DIRTY(pi);
+        if (health_out)   health_out[orig_idx]   = sorted_health[i];
+        if (lifetime_out) lifetime_out[orig_idx] = sorted_lifetime[i];
+        if (mass_out)     mass_out[orig_idx]     = sorted_mass[i];
+    }
 
     // --- Skip STATIC particles ---
     if (behavior == STATIC) {
@@ -177,8 +186,16 @@ void K_Integrate(
             temp += dTdt_sleep * c_sim.dt;
             temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
             temp = fmaxf(T_MIN, fminf(temp, T_MAX));
+            // Position keeps its store: .w carries the density.  The unsorted
+            // velocity is already zero after the first sleeping substep, so
+            // store the zero only while the gathered velocity is not all-zero
+            // bits (the first sleeping substep, or a kick below the wake
+            // threshold from reactions or the blast wave) (bd-r5-review-n28.162).
             position_out[orig_idx] = pos4;
-            velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if ((__float_as_uint(vel4.x) | __float_as_uint(vel4.y)
+                    | __float_as_uint(vel4.z) | __float_as_uint(vel4.w)) != 0u) {
+                velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
             packed_info_out[orig_idx] = pi;  // keep SLEEPING flag set
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
