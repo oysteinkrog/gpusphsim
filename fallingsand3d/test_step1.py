@@ -1745,5 +1745,6 @@ def test_heat_energy_conserved_with_temp_mirror() -> None:
     t_min, t_max = float(temperature.min()), float(temperature.max())
     print(f"  LAVA/WATER via mirror: energy drift {drift:.2e} after 1000 substeps, "
           f"T range [{t_min:.2f}, {t_max:.2f}]")
-    assert t_max < 1499.7 and t_min > 293.2, "no conduction happened"
+    # Interior particles stay put (flat mirror field); the interface must move.
+    assert t_max < 1499.7 - 0.05, "no conduction happened"
     assert drift < 1e-6, f"energy drift {drift:.2e} through the temperature mirror"
