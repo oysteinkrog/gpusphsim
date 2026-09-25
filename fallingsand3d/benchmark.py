@@ -163,7 +163,6 @@ def run_benchmark(
 
         # -- Grid setup (counting sort or gather) --
         sim._frame_counter_d.fill(sim._substep_counter)
-        world._density_initialized = True
 
         sim._run_grid_setup(n)
         timer.mark("grid_setup")
@@ -173,7 +172,6 @@ def run_benchmark(
         compute_step1(
             world.sorted_position[:n], world.sorted_velocity[:n],
             world.sorted_mass[:n],
-            world.sorted_density if hasattr(world, '_density_initialized') else None,
             world.sorted_packed_info[:n], world.sorted_temperature[:n],
             sim._cell_start, sim._cell_end,
             density_out=world.sorted_density,

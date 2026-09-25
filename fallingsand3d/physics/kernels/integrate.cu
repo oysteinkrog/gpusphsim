@@ -487,8 +487,8 @@ void K_Integrate(
 
     // --- Write to UNSORTED arrays ---
     // .w carries this substep's density to the next substep: the reorder gathers it
-    // into sorted_position.w, which simulation.py copies into sorted_density_prev as
-    // step1's density_in.  Writing 1.0 here made every awake neighbour read rho_j = 1.
+    // into sorted_position.w, where K_Step1 reads it as the neighbour density rho_j.
+    // Writing 1.0 here made every awake neighbour read rho_j = 1.
     // K_ComputeColor also reads it for the FLUID render color.
     position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, sorted_density[i]);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);

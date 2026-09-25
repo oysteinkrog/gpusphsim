@@ -1133,19 +1133,14 @@ class Simulation:
         self._run_grid_setup(n)
         mark("sort")
 
-        # Snapshot the previous-substep density (packed into position.w by the last
-        # K_Step1, carried permutation-correctly through the position reorder) into a
-        # dedicated read buffer.  This keeps density_in distinct from density_out
-        # (sorted_density), breaking the __restrict__ aliasing race; the kernel
-        # value-guards any zero entry (frame 1 / fresh spawns) to 1000 (bd-r4fix-uup.14).
-        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
-
-        # Step1: density + strain-rate + heat diffusion + exposure + vorticity + normal
+        # Step1: density + strain-rate + heat diffusion + exposure + vorticity + normal.
+        # K_Step1 reads each neighbour's previous-substep density from
+        # sorted_position.w (K_Integrate writes it, the reorder gathers it), so
+        # WCSPH needs no density_in snapshot (bd-r5-review-n28.163).
         step1.compute_step1(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
             w.sorted_mass[:n],
-            w.sorted_density_prev[:n],
             w.sorted_packed_info[:n],
             w.sorted_temperature[:n],
             self._cell_start,

@@ -236,7 +236,6 @@ def compute_step1(
     position: cupy.ndarray,
     velocity: cupy.ndarray,
     mass: cupy.ndarray,
-    density_in: Optional[cupy.ndarray],
     packed_info: cupy.ndarray,
     temperature_in: cupy.ndarray,
     cell_start: cupy.ndarray,
@@ -261,14 +260,14 @@ def compute_step1(
     Parameters
     ----------
     position : cupy.ndarray, (N, 4) float32
-        Sorted particle positions.
+        Sorted particle positions. .w is read as each neighbour's density
+        rho_j for the m_j/rho_j weights in heat diffusion (the previous
+        substep's density; 0 or less falls back to the rest density), and
+        K_Step1 overwrites .w with this call's density.
     velocity : cupy.ndarray, (N, 4) float32
         Sorted particle velocities (used for strain-rate computation).
     mass : cupy.ndarray, (N,) float32
         Sorted per-particle masses.
-    density_in : cupy.ndarray or None, (N,) float32
-        Density from previous step for m_j/rho_j weighting in strain-rate
-        and heat diffusion. Pass None on first frame (kernel uses rho0=1000 fallback).
     packed_info : cupy.ndarray, (N,) uint32
         Sorted packed_info for behavior class and material ID.
     temperature_in : cupy.ndarray, (N,) float32
@@ -336,8 +335,6 @@ def compute_step1(
     if pressure_out is None:
         pressure_out = cupy.empty(n, dtype=cupy.float32)
 
-    # density_in can be None (first frame) -- pass null pointer
-    density_in_ptr = density_in if density_in is not None else cupy.ndarray(0, dtype=cupy.float32)
     # velocity_h can be None -- pass null pointer (kernel falls back to float4 reads)
     _null = cupy.ndarray(0, dtype=cupy.uint32)
     velocity_h_ptr = velocity_h if velocity_h is not None else _null
@@ -359,7 +356,6 @@ def compute_step1(
             position,
             velocity,
             mass,
-            density_in_ptr,
             packed_info,
             temperature_in,
             cell_start,
