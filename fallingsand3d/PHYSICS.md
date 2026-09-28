@@ -2693,6 +2693,7 @@ Per substep:
      Apply the warm-start correction, then N_div iterations:
      dkappa_v_i = max(div(v*_i), 0) * omega * alpha_i / dt   [unilateral]
      v*_i -= dt * SUM_j m_j * (dkappa_v_i/rho_i + dkappa_v_j/rho_j) * grad_W_ij
+            [fluid j; a STATIC j adds V_j * dkappa_v_i, see 13.3]
      kappa_v_i += dkappa_v_i                                  [warm-start total]
   6. Density solver (Jacobi iteration on pressure, N_dens iterations):
      Initialize p_rho2 from warm-start (previous frame, scaled by 0.5)
@@ -2726,7 +2727,9 @@ every other particle:                 .w = V_j = m_j / max(rho_j, RHO_EPSILON)
 ```
 The four solver loops (ComputeKappaV, CorrectVelocityDiv, ComputePressureAccel,
 DensitySolverUpdate) read the neighbour volume from the position float4 they already
-load, so they no longer load `mass[j]` and `density[j]`. A wall stores its mass because
+load. ComputeKappaV and DensitySolverUpdate load no `mass[j]` or `density[j]`;
+CorrectVelocityDiv and ComputePressureAccel load `mass[j]` for a fluid neighbour inside
+h, for the symmetric pair form (13.3). A wall stores its mass because
 the loops use two divisors for it: the divergence and density-prediction sums use the
 Akinci volume `m_j / rho0_i` (13.3), the pressure and divergence-correction sums use
 `m_j / rho_j` with the wall's own stored density, which those two kernels load only for
@@ -2800,21 +2803,47 @@ Enforces divergence-free velocity field:
 ```
 div_v_i = SUM_j (m_j/rho_j) * (v*_i - v*_j) . grad_W_ij     [> 0 = compressing]
 kappa_v_i = max(div_v_i, 0) * omega * alpha_i / dt      [0 if N_i < 20]
-dv_i = -dt * SUM_j V_j * (kappa_v_i + kappa_v_j) * grad_W_ij,  V_j = m_j/rho_j
+dv_i = -dt * SUM_j c_ij * grad_W_ij
+  fluid j:   c_ij = m_j * (kappa_v_i/rho_i + kappa_v_j/rho_j)
+  STATIC j:  c_ij = V_j * kappa_v_i,  V_j = m_j/rho_j   (kappa_v_j = 0)
 v*_i += dv_i
 ```
 
 kappa_v is never negative, and a positive kappa_v pushes the pair apart.
 
-**Pair form and momentum (bd-r5-review-n28.100, open).** The `V_j * (k_i + k_j)` pair
-term here and in 13.4 gives j the reaction weight `V_i` instead of `V_j`, so linear
-momentum is not conserved where rho_i != rho_j (free surfaces, material interfaces).
-The symmetric form `m_j * (k_i/rho_i + k_j/rho_j)` conserves momentum, but with it
-OIL sinks below WATER in `test_rest_density.py::test_oil_stays_on_water` (OIL COM_y
--0.982 against WATER -0.980 after 3 s; with the current form OIL -0.989 sits above
-WATER -0.994), and the full-support DFSPH WATER cube density drops from 0.931 to
-0.927 rho0. The form `2 m_j (k_i + k_j) / (rho_i + rho_j)` gives the same failures.
-So the current form stays until the OIL/WATER interface is handled.
+**Pair form and momentum (bd-r5-review-n28.100).** Between two non-STATIC particles the
+pair term here and in 13.4 is `m_j * (k_i/rho_i + k_j/rho_j)`. The impulse on i is
+`m_i * m_j * (k_i/rho_i + k_j/rho_j) * grad_W_ij` and the one on j is the same with
+`grad_W_ji = -grad_W_ij`, so the pair conserves linear momentum even where
+rho_i != rho_j (free surfaces, material interfaces). The earlier `V_j * (k_i + k_j)` form
+gave j the reaction weight `V_i`. A STATIC neighbour (wall or MAT_RIGID) keeps
+`V_j * k_i`: it has no kappa of its own, the wall push is the same as before, and the
+MAT_RIGID reaction `+m_i * V_j * k_i * grad_W_ij` still cancels the fluid impulse.
+`k_i/rho_i` is computed once per particle; `m_j` is loaded only for a fluid neighbour
+inside h.
+
+`test_dfsph_pair_momentum.py`: a WATER block touching a MUD block, zero gravity, spawn
+damping off, non-pressure pass and reactions stubbed out, 300 substeps. `|sum m v| /
+sum m|v|` is 2.4e-8 with the symmetric form and 0.107 with the old one. The test also
+checks that the divergence, pressure and speed clamps stay below half their limit, since
+a clamp would break conservation (measured 0.007, 0.090 and 0.268 of the limit).
+`test_rigid_coupling.py::test_fluid_body_momentum_balance[DFSPH]` passes with the
+symmetric form (dp_fluid -0.0457 against a body impulse of +0.0457; the old form gave
+-0.233 against 0.120).
+
+Effects of the change:
+- OIL on WATER in a closed box (half size 0.3, 0.2 m layers) stays stratified with both
+  forms: after 3 s OIL COM_y -0.062, WATER -0.231, no OIL below the WATER COM.
+- In the open 2 m domain the same blocks spread into a puddle one or two particles thick
+  within 3 s. There, every conserving form tried (this one, rest-volume weights, and
+  rest-volume density at material interfaces) leaves more WATER on top of OIL: 40% of
+  OIL has WATER just above it at 3 s and 26% at 9 s, against 14% and 10% with the old
+  form. A layer that thin has no hydrostatic gradient to sort it.
+- An unconfined WATER cube rebounds harder off the domain walls: full-support
+  rho/rho0 at 1 s is 0.927 (old form 0.930), OIL 0.930 (0.941).
+- CorrectVelocityDiv and ComputePressureAccel read 4 B more per in-range fluid pair.
+  `bench_substep.py`, DFSPH, 500K particles, GPU shared: divergence 4.31 to 4.49 ms,
+  density_solve 5.46 to 5.69 ms, substep 13.8 to 14.0-14.2 ms (about 2 percent).
 
 **Important**: The correction uses `kappa/rho` (not `kappa/rho^2`). This is the SPlisHSPlasH
 formulation where alpha already absorbs one factor of 1/rho via the (m_j/rho_j) weighting
@@ -2889,8 +2918,9 @@ field carries information between iterations through the `A*p` feedback term.
 1. **K_DFSPH_ComputePressureAccel**: pressure acceleration from current p/rho^2,
 written as the clamped predicted velocity:
 ```
-a_press_i = -SUM_j V_j * (p_rho2_i + p_rho2_j) * grad_W_ij
-where V_j = m_j / rho_j (from the position.w carrier, 13.1)
+a_press_i = -SUM_j c_ij * grad_W_ij
+  fluid j:   c_ij = m_j * (p_rho2_i/rho_i + p_rho2_j/rho_j)     [symmetric, 13.3]
+  STATIC j:  c_ij = V_j * p_rho2_i,  V_j = m_j / rho_j (carrier, 13.1)
 a_press_i = clamp(a_press_i, h/dt^2)     [velocity change at most h/dt per substep]
 vt_i = clamp(v_i + dt * a_press_i, VELOCITY_LIMIT)   [bd-mzc.33: prevent Jacobi runaway]
 ```
@@ -3060,9 +3090,9 @@ GAS:      a_i = gravity + buoyancy - drag * v_i + viscosity (same as FLUID)
 `sorted_kappa`: the density solver's converged value from the previous
 substep, which Finalize stored times `kappa_carry`; the kernel multiplies by
 `kappa_uncarry = 1/kappa_carry` to get the unscaled value. The solver stores p/rho, not
-p/rho^2: ComputePressureAccel uses `V_j * (p_i + p_j)` with `V_j = m_j/rho_j`,
-which matches `m_j * (p_i/rho_i^2 + p_j/rho_j^2)` when the stored value is
-p/rho. So `p = p_prev * rho` (Pa); `p_prev * rho^2` would be about 4000x too
+p/rho^2: ComputePressureAccel uses `m_j * (p_i/rho_i + p_j/rho_j)` on the
+stored values, which is `m_j * (p_i/rho_i^2 + p_j/rho_j^2)` when the stored
+value is p/rho. So `p = p_prev * rho` (Pa); `p_prev * rho^2` would be about 4000x too
 large and pin eta at mu_max. Tait EOS is not used here, because the density
 solver drives rho to rho0 and Tait pressure would then measure solver error
 instead of load. The floor is the WCSPH step2 one-layer lithostatic pressure
