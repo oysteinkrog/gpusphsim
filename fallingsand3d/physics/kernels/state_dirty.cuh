@@ -4,15 +4,16 @@
  *
  * K_Reactions and K_SpawnGas change health, lifetime and mass in sorted
  * space for a small subset of particles. They set this bit on every
- * particle whose health, lifetime or mass they may have changed. K_Integrate
- * scatters those three arrays back to the unsorted arrays only when the bit
- * is set, and clears it in the packed_info it writes back. Every other
- * particle's unsorted copy already holds the value it was gathered from.
+ * particle whose health, lifetime or mass they may have changed. K_Integrate,
+ * K_PBF_Finalize and K_DFSPH_Finalize scatter those three arrays back to the
+ * unsorted arrays only when the bit is set, and clear it in the packed_info
+ * they write back (bd-r5-review-n28.218 for the PBF and DFSPH kernels).
+ * Every other particle's unsorted copy already holds the value it was
+ * gathered from.
  *
  * The bit is a hint: setting it on a particle whose state did not change
- * only costs the three scattered stores. The PBF and DFSPH finalize kernels
- * scatter the three arrays unconditionally and carry the bit through
- * unchanged; every reader masks packed_info fields, so a set bit is harmless.
+ * only costs the three scattered stores. Every reader masks packed_info
+ * fields, so a set bit is harmless.
  *
  * common.cuh reserves bits [31:21] of packed_info; this is bit 21.
  */

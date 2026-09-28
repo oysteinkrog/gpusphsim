@@ -30,6 +30,7 @@
  */
 
 #include "sph_shared.cuh"
+#include "state_dirty.cuh"
 
 /* ======================================================================
  * PBF Parameters
@@ -881,12 +882,19 @@ void K_PBF_Finalize(
     // Reaction-state carry-back (bd-r4fix-uup.9): K_Reactions/K_SpawnGas mutate
     // health/lifetime/mass in SORTED space every substep; scatter them back to
     // the unsorted arrays or the next substep re-gathers stale values (wiping
-    // fire lifetime decay, acid health loss, gas-spawn mass transfer). None of
-    // these are modified below, so an early unconditional scatter is correct
-    // and also covers the STATIC/sleeping early-return paths.
-    if (health_out)                      health_out[orig_idx]   = health_in[i];
-    if (lifetime_out && sorted_lifetime) lifetime_out[orig_idx] = __ldg(&sorted_lifetime[i]);
-    if (mass_out)                        mass_out[orig_idx]     = mass[i];
+    // fire lifetime decay, acid health loss, gas-spawn mass transfer).
+    // Only particles those kernels marked with the state-dirty bit
+    // (state_dirty.cuh) are scattered: every other unsorted copy already holds
+    // the gathered value (bd-r5-review-n28.218, as K_Integrate). The bit is
+    // cleared here; every path below writes pi to packed_info_out. None of the
+    // three arrays is modified below, so the early scatter also covers the
+    // STATIC/sleeping early-return paths.
+    if (HAS_STATE_DIRTY(pi)) {
+        pi = CLEAR_STATE_DIRTY(pi);
+        if (health_out)                      health_out[orig_idx]   = health_in[i];
+        if (lifetime_out && sorted_lifetime) lifetime_out[orig_idx] = __ldg(&sorted_lifetime[i]);
+        if (mass_out)                        mass_out[orig_idx]     = mass[i];
+    }
 
     float temp = temperature_in[i];
 
