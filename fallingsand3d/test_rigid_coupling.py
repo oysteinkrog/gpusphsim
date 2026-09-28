@@ -30,7 +30,12 @@ so the fluid and the body exchange equal and opposite impulses.
     2 m from the origin gets the same torque as the same scene at the
     origin. Accumulating x_j x F about the world origin and subtracting
     COM x F later fails this: the pair forces cancel, so float32 loses
-    about 2 m * sum |F_pair| * 6e-8 (4 percent in PBF, 2.5e-3 in DFSPH).
+    about 2 m * sum |F_pair| * 6e-8 (5 percent in PBF, 2.5e-3 in DFSPH).
+
+The rotated-inertia check for K_IntegrateRigidBodies is in test_integrate.py.
+
+The kinematic body is not integrated, so rigid_forces still holds the last
+substep's accumulated force when _sim_step returns.
 """
 
 from __future__ import annotations
@@ -540,6 +545,101 @@ def test_rigid_setup_basics():
 
 # ---------------------------------------------------------------------------
 # (f) CUDA graphs with rigid bodies across preset loads (bd-r5-review-n28.190)
+# ---------------------------------------------------------------------------
+
+def _load_preset(sim, load_fn, body_y=None) -> None:
+    """Load a preset the way main.py does.
+
+    body_y moves every body to that height before upload, so the Archimedes
+    boxes start in the water instead of falling for half a second.
+    """
+    world = sim.world
+    sim.reset_scene_objects()
+    load_fn(world)
+    rbm = sim.rigid_body_manager
+    if body_y is not None:
+        for i in range(rbm.num_bodies):
+            rbm._bodies_cpu[i]["position"][1] = body_y
+    rbm.finalize_boundary_data()
+    rbm.upload(sim.get_all_modules())
+    # main.py also calls _invalidate_graphs here; leave it out so the test
+    # shows reset_scene_objects already drops the graphs.
+    sim.notify_scene_changed()
+    sim.reset_spawn_damping()
+
+
+def _run_substeps(sim, count: int) -> None:
+    for _ in range(count):
+        sim._sim_step(sim.world._high_water)
+    cp.cuda.Device().synchronize()
+
+
+def _forces_after_coupling(sim) -> tuple[np.ndarray, np.ndarray]:
+    """One substep split in two: rigid_forces after the solver body, then
+    after K_IntegrateRigidBodies."""
+    n = sim._substep_prologue(sim.world._high_water)
+    sim._run_graph_body(n)
+    cp.cuda.Device().synchronize()
+    mid = sim.rigid_body_manager.rigid_forces.get().copy()
+    sim._substep_epilogue(n)
+    cp.cuda.Device().synchronize()
+    after = sim.rigid_body_manager.rigid_forces.get().copy()
+    return mid, after
+
+
+def test_rigid_graphs_survive_preset_switch():
+    from presets import load_archimedes_pool, load_dam_break
+    from simulation import Simulation
+    from world import World
+
+    world = World(260_000)
+    sim = Simulation(world, dt=0.001, fixed_dt=True)
+    captures = []
+    real_capture = sim._capture_graph
+
+    def counting_capture(n, gather_only):
+        g = real_capture(n, gather_only)
+        captures.append((sim.rigid_body_manager.num_bodies, g is not None))
+        return g
+    sim._capture_graph = counting_capture
+
+    # Boxes (half extent 0.06) sit 3 cm into the water surface at y = -0.2.
+    body_y = -0.2 + 0.06 - 0.03
+
+    def check_archimedes():
+        rbm = sim.rigid_body_manager
+        assert rbm.num_bodies == 3
+        del captures[:]
+        _run_substeps(sim, 12)  # 3 frames of 4 substeps
+        assert sim._graph_full_sort is not None
+        assert sim._graph_rigid_key[0] == 3
+        assert (3, True) in captures, captures
+        mid, after = _forces_after_coupling(sim)
+        f = np.linalg.norm(mid[:3, :3], axis=1)
+        assert np.all(f > 1e-3), mid[:3]
+        assert np.all(after[:3] == 0.0), after[:3]
+        # Graph replay continues after the split substep.
+        _run_substeps(sim, 8)
+        assert sim._graph_full_sort is not None
+        y = rbm.d_rigid_bodies.view(cp.float32).reshape(-1, 24)[:3, 1].get()
+        assert np.all(np.isfinite(y))
+
+    _load_preset(sim, load_archimedes_pool, body_y)
+    check_archimedes()
+
+    _load_preset(sim, load_dam_break)
+    assert sim._graph_full_sort is None  # dropped on preset load
+    del captures[:]
+    _run_substeps(sim, 8)
+    assert sim._graph_full_sort is not None
+    assert sim._graph_rigid_key == (0, False)
+    assert (0, True) in captures, captures
+
+    _load_preset(sim, load_archimedes_pool, body_y)
+    assert sim._graph_full_sort is None
+    check_archimedes()
+
+
 # ---------------------------------------------------------------------------
 # (g) Torque arm 2 m from the origin
 # ---------------------------------------------------------------------------
