@@ -26,7 +26,14 @@
  * no longer matches. A NULL frame_ptr gives stamp 1, which needs the caller
  * to clear the table first (wake.py does that).
  *
- * All kernels operate on UNSORTED arrays (after Integrate writeback).
+ * The kernels run on whichever arrays the solver's last kernel wrote: the
+ * unsorted arrays after a scatter, or the sorted buffers after an in-place
+ * WCSPH integrate. They are order-free, but the sleeper probe's cost is not.
+ * At 1M settled sand it takes 48 us in sorted (cell) order and 237 us in
+ * unsorted spawn order, because the 27 flag reads per thread scatter across
+ * L2 (bd-r5-review-n28.209, follow-up n28.217). The probe stays out of
+ * K_ScatterReorder and K_GatherReorder: they would have to read-modify-write
+ * the unsorted packed_info and check the previous substep's stamp.
  *
  * Constant memory used:
  *   c_grid -- GridParams from common.cuh (for position -> cell mapping)
