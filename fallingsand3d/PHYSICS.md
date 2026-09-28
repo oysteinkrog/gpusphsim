@@ -3870,8 +3870,8 @@ more than 64 neighbours (heavy compression) walks the hash grid in the `_NL`
 kernel instead, so no neighbour is dropped. Only indices are stored: `V_j *
 gradW` would need fp32 (|gradW| is about 1e6 at h = 0.04 and the interior sums
 nearly cancel), and 12 B per entry would triple the memory. ComputeDensityAlpha,
-NonPressureForces and Finalize keep the hash walk. `Simulation.
-dfsph_neighbor_list_enabled = False` turns the list off (and frees it).
+NonPressureForces and Finalize keep the hash walk. Setting
+`Simulation.dfsph_neighbor_list_enabled = False` turns the list off and frees it.
 
 Measured with `bench_substep.py` (Dam Break, DFSPH profile, full sort every
 substep, shared RTX 5070 Ti, fresh CuPy cache, two runs each, medians in ms). The
