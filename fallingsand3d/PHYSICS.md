@@ -4305,12 +4305,11 @@ wrote: every material transition, death, spawned steam child, the source water
 it replaces, non-lethal corrosion and acid health loss, GAS lifetime decay, and
 a DEAD slot whose leftover mass is cleared to 0.
 
-WCSPH `K_Integrate` scatters health, lifetime and mass only when the bit is
-set, and clears it in the packed_info it writes back, so the unsorted
-packed_info never keeps it. Every other particle's unsorted copy already holds
-the value it was gathered from. The PBF and DFSPH finalize kernels still
-scatter the three arrays for every particle and pass the bit through; all
-readers mask packed_info fields, so a set bit has no effect there.
+WCSPH `K_Integrate`, `K_PBF_Finalize` and `K_DFSPH_Finalize` scatter health,
+lifetime and mass only when the bit is set, and clear it in the packed_info
+they write back, so the unsorted packed_info never keeps it. Every other
+particle's unsorted copy already holds the value it was gathered from. All
+readers mask packed_info fields, so a set bit has no effect on them.
 
 In the same kernel, a particle that stays asleep stores its zero velocity only
 when the gathered velocity is not all-zero bits: on its first sleeping substep,
@@ -4325,9 +4324,16 @@ sorted input there. The position store stays,
 because `.w` carries the density.
 
 At 1M particles (dam break, no reactions) the K_Integrate median went from
-0.73 ms to 0.48 ms (bd-r5-review-n28.162).
+0.73 ms to 0.48 ms (bd-r5-review-n28.162). The same gate in the PBF and DFSPH
+finalize kernels (bd-r5-review-n28.218) saves up to about 0.08 ms of a
+1.5 to 1.8 ms finalize at 1M on the same scene: the unsorted order still
+follows the spawn lattice there, so those scattered stores were mostly
+coalesced. Health, lifetime, mass and positions after 300 substeps of Acid
+Rain and Volcano are bitwise equal to the unconditional scatter
+(`test_finalize_state_dirty.py`).
 
-**Source**: `reactions.cu`, `spawn.cu`, `integrate.cu`, `state_dirty.cuh`
+**Source**: `reactions.cu`, `spawn.cu`, `integrate.cu`, `pbf_solver.cu`,
+`dfsph_solver.cu`, `state_dirty.cuh`
 
 ---
 
