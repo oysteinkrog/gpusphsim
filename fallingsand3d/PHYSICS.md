@@ -3481,8 +3481,8 @@ Encoded in `foam_position.w`:
 | Type   | Value | Physics |
 |--------|-------|---------|
 | SPRAY  | 0.0   | Gravity + air drag (ballistic) |
-| FOAM   | 1.0   | Weak gravity + strong horizontal damping |
-| BUBBLE | 2.0   | Buoyancy + gentle drag |
+| FOAM   | 1.0   | Strong horizontal damping; weak gravity in air, buoyancy inside fluid |
+| BUBBLE | 2.0   | Buoyancy + gentle drag; becomes FOAM when it leaves the fluid |
 
 ### 19.3 Generation Criteria (K_FoamGenerate)
 
@@ -3533,19 +3533,37 @@ Lifetime: type-dependent base × random(0.5, 1.5).
 
 ### 19.4 Physics (K_FoamPhysics)
 
-Simple per-particle physics, no neighbor interaction:
+Simple per-particle physics, no neighbor interaction.
+
+In-fluid test: FOAM and BUBBLE read their own cell of the SPH hash grid built this
+substep, `h = spatialHash(calcGridCell(p))`, and count as inside fluid when
+`cell_start[h] < cell_end[h]` (two 4 B reads, no neighbour loop; the foam module
+gets `c_grid` from `Simulation._upload_constants`). Any SPH particle in the cell
+counts, including solids, and a hash collision with a far occupied cell also reads
+as inside. `foam.foam_physics` called without cell tables passes NULL, and the
+kernel then treats every particle as outside for FOAM and never converts BUBBLE.
 
 **SPRAY**: `a = -v * drag + gravity`
 - `drag_coeff = 2.0`
 - Full gravity
 
-**FOAM**: `a = (-vx*2, gravity*0.1, -vz*2)`
+**FOAM**: `a = (-vx*2, ay, -vz*2)`
 - Strong horizontal damping (sits on surface)
-- Weak gravity (10% of full)
+- Outside fluid: `ay = gravity*0.1` (weak gravity, no vertical drag)
+- Inside fluid: `ay = foam_buoyancy - vy*foam_water_drag`, with
+  `foam_buoyancy = 1.5` m/s^2 and `foam_water_drag = 10` 1/s. Terminal rise speed
+  is 0.15 m/s, so foam that leaves the top cell overshoots by about 1 cm under
+  0.1 g and then settles back. FOAM therefore rests in the top occupied cell of
+  the fluid.
 
 **BUBBLE**: `a = -v*drag + (0, buoyancy, 0)`
 - `buoyancy = 15.0` (rises toward surface)
 - Half drag on vertical axis
+- In an empty cell it becomes FOAM (`pos.w = 1`) with `vy = 0` before the step,
+  so bubbles stop at the free surface instead of rising to the world ceiling.
+  Dam Break at 3 s: 22 foam particles at the ceiling and 12 bubbles more than one
+  cell above the local water top, against 7577 and 8844 without the test. The
+  remaining ones sit in cells held by ice or lava, or in colliding hash cells.
 
 Integration: symplectic Euler. World boundary clamp kills particles at floor.
 
