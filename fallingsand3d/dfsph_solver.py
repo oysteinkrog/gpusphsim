@@ -196,19 +196,36 @@ def pack_volume(
     density: cupy.ndarray,
     mass: cupy.ndarray,
     packed_info: cupy.ndarray,
+    shear_rate: "cupy.ndarray | None" = None,
+    p_prev: "cupy.ndarray | None" = None,
+    eta_out: "cupy.ndarray | None" = None,
 ) -> None:
     """Write the volume carrier into position[:, 3] (bd-r5-review-n28.184).
 
     A regular STATIC wall gets its mass, every other particle
     m / max(rho, RHO_EPSILON). The four solver loops read V_j from there
     instead of loading mass and density per neighbour.
+
+    With eta_out set, also write the mu(I) eta of each GRANULAR particle
+    (0 for the rest) for compute_non_pressure_forces(eta_in=...)
+    (bd-r5-review-n28.219). It needs shear_rate from compute_density_alpha
+    and takes p_prev as compute_non_pressure_forces does; pass the same
+    buffers to both.
     """
     n = position.shape[0]
+    if eta_out is not None and shear_rate is None:
+        raise ValueError("eta_out needs shear_rate")
+    _null = np.intp(0)
     module = _get_module()
     kernel = module.get_function("K_DFSPH_PackVolume")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
-    kernel(grid, block, (np.uint32(n), position, density, mass, packed_info))
+    kernel(grid, block, (
+        np.uint32(n), position, density, mass, packed_info,
+        shear_rate if shear_rate is not None else _null,
+        p_prev if p_prev is not None else _null,
+        eta_out if eta_out is not None else _null,
+    ))
 
 
 def compute_non_pressure_forces(
@@ -228,6 +245,7 @@ def compute_non_pressure_forces(
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
     p_prev: "cupy.ndarray | None" = None,
+    eta_in: "cupy.ndarray | None" = None,
 ) -> None:
     """Viscosity, mu(I) friction and gravity into velocity_out.
 
@@ -236,6 +254,11 @@ def compute_non_pressure_forces(
     (w.sorted_kappa). The kernel divides the carry back out, so GRANULAR
     mu(I) friction uses p = p/rho * rho as its confining pressure, floored at
     the one-layer lithostatic pressure. None means floor only.
+
+    eta_in is the per-particle mu(I) eta that pack_volume(eta_out=...) wrote
+    in this substep (bd-r5-review-n28.219). The kernel reads it per GRANULAR
+    neighbour and recomputes from shear_rate and p_prev where it is not above
+    0. None recomputes eta for every pair.
 
     velocity and velocity_out must not alias. The DFSPH substep passes
     sorted_velocity in and sorted_veleval out, and every later DFSPH kernel
@@ -261,6 +284,7 @@ def compute_non_pressure_forces(
         vort_in, norm_in,
         rb_ptr, rf_ptr, rt_ptr,
         pp_ptr,
+        eta_in if eta_in is not None else _null,
     ))
 
 

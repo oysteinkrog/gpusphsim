@@ -454,10 +454,37 @@ void K_DFSPH_ComputeDensityAlpha(
     }
 }
 
+/* mu(I) viscosity eta of GRANULAR particle k (bd-r5-review-n28.92).
+ * The confining pressure is the density solver's own pressure from the
+ * previous substep, not Tait EOS: the solver drives rho to rho0, so Tait
+ * would measure solver error instead of load. The stored p_rho2 is p/rho
+ * (ComputePressureAccel uses m_j * (p_i/rho_i + p_j/rho_j)), so p = p_rho2 * rho.
+ * The floor is the one-layer lithostatic pressure used by WCSPH step2; it
+ * also covers the first substep and woken particles, where p_prev = 0.
+ * p_prev may be NULL (floor only). */
+__device__ __forceinline__ float dfsph_muI_eta(
+    uint k, uint mat_id_k, float rho_k,
+    const float* __restrict__ shear_rate, const float* __restrict__ p_prev
+) {
+    float gamma_dot_k = __ldg(&shear_rate[k]);
+    float p_floor_k = c_materials[mat_id_k].rest_density
+                    * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
+    float p_solver_k = (p_prev != 0)
+                     ? __ldg(&p_prev[k]) * c_dfsph.kappa_uncarry * rho_k : 0.0f;
+    float p_eff_k = fmaxf(p_solver_k, p_floor_k);
+    return compute_muI_eta(gamma_dot_k, p_eff_k, rho_k);
+}
+
 /* ======================================================================
  * K_DFSPH_PackVolume -- write the volume carrier into position.w
  * (see dfsph_volume_carrier). Runs after reactions and spawn, which change
  * mass and material, and before the first solver loop.
+ *
+ * With eta_out set it also writes the mu(I) eta of every GRANULAR particle
+ * (0 for the rest) for K_DFSPH_NonPressureForces (bd-r5-review-n28.219), so
+ * that kernel reads eta_j per GRANULAR pair instead of recomputing mu(I).
+ * This kernel runs after reactions and spawn, so the material, shear rate
+ * and kappa it sees are the ones NonPressureForces sees.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256)
@@ -466,11 +493,21 @@ void K_DFSPH_PackVolume(
     float4*         __restrict__ position,
     const float*    __restrict__ density,
     const float*    __restrict__ mass,
-    const uint*     __restrict__ packed_info
+    const uint*     __restrict__ packed_info,
+    const float*    __restrict__ shear_rate,  // from DensityAlpha; may be NULL when eta_out is NULL
+    const float*    __restrict__ p_prev,      // sorted_kappa (p/rho * kappa_carry), or NULL
+    float*          __restrict__ eta_out      // mu(I) eta (0 for non-GRANULAR), or NULL to skip
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
-    position[i].w = dfsph_volume_carrier(mass[i], density[i], packed_info[i]);
+    uint pi_i = packed_info[i];
+    float rho_i = density[i];
+    position[i].w = dfsph_volume_carrier(mass[i], rho_i, pi_i);
+    if (eta_out) {
+        eta_out[i] = (GET_BEHAVIOR(pi_i) == GRANULAR)
+                   ? dfsph_muI_eta(i, GET_MATERIAL_ID(pi_i), rho_i, shear_rate, p_prev)
+                   : 0.0f;
+    }
 }
 
 /* ======================================================================
@@ -603,7 +640,8 @@ void K_DFSPH_NonPressureForces(
     const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
     float*          __restrict__ d_rigid_torques,  // torque accumulator (NULL if no bodies)
-    const float*    __restrict__ p_prev            // previous substep's p/rho times kappa_carry (sorted_kappa), or NULL
+    const float*    __restrict__ p_prev,           // previous substep's p/rho times kappa_carry (sorted_kappa), or NULL
+    const float*    __restrict__ eta_in            // mu(I) eta per particle from PackVolume (0 for non-GRANULAR), or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -633,23 +671,14 @@ void K_DFSPH_NonPressureForces(
     bool is_gas_i = (behavior_i == GAS);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
 
-    // mu(I) rheology for GRANULAR particles (bd-r5-review-n28.92).
-    // The confining pressure is the density solver's own pressure from the
-    // previous substep, not Tait EOS: the solver drives rho to rho0, so Tait
-    // would measure solver error instead of load. The stored p_rho2 is p/rho
-    // (ComputePressureAccel uses m_j * (p_i/rho_i + p_j/rho_j)), so p = p_rho2 * rho.
-    // The floor is the one-layer lithostatic pressure used by WCSPH step2; it
-    // also covers the first substep and woken particles, where p_prev = 0.
+    // mu(I) rheology for GRANULAR particles (see dfsph_muI_eta).
+    // eta_in comes from K_DFSPH_PackVolume (bd-r5-review-n28.219). A value
+    // that is not above 0 means PackVolume saw the particle as non-GRANULAR,
+    // or eta_in is NULL, so recompute it here, as WCSPH K_Step2 does.
     float eta_i = 0.0f;
-    if (is_granular_i) {
-        float gamma_dot_i = __ldg(&shear_rate[i]);
-        float p_floor_i = c_materials[mat_id_i].rest_density
-                        * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
-        float p_solver_i = (p_prev != 0)
-                         ? __ldg(&p_prev[i]) * c_dfsph.kappa_uncarry * rho_i : 0.0f;
-        float p_eff_i = fmaxf(p_solver_i, p_floor_i);
-        eta_i = compute_muI_eta(gamma_dot_i, p_eff_i, rho_i);
-    }
+    if (is_granular_i && eta_in) eta_i = __ldg(&eta_in[i]);
+    if (is_granular_i && !(eta_i > 0.0f))
+        eta_i = dfsph_muI_eta(i, mat_id_i, rho_i, shear_rate, p_prev);
 
     // GAS skips the DFSPH pressure solvers, so it gets the WCSPH gas EOS
     // pressure inside its own phase here (bd-r5-review-n28.91). The GAS EOS
@@ -780,14 +809,11 @@ void K_DFSPH_NonPressureForces(
                         // eta_j uses j's own stored shear rate and pressure,
                         // exactly as j computes eta_i for itself, so
                         // eta_ij == eta_ji and the pair force is antisymmetric.
-                        float gamma_dot_j = __ldg(&shear_rate[j]);
-                        uint mat_id_j = GET_MATERIAL_ID(pi_j);
-                        float p_floor_j = c_materials[mat_id_j].rest_density
-                                        * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
-                        float p_solver_j = (p_prev != 0)
-                                         ? __ldg(&p_prev[j]) * c_dfsph.kappa_uncarry * rho_j : 0.0f;
-                        float p_eff_j = fmaxf(p_solver_j, p_floor_j);
-                        float eta_j = compute_muI_eta(gamma_dot_j, p_eff_j, rho_j);
+                        // Read from eta_in (bd-r5-review-n28.219); recompute
+                        // when it is not above 0, as for eta_i.
+                        float eta_j = eta_in ? __ldg(&eta_in[j]) : 0.0f;
+                        if (!(eta_j > 0.0f))
+                            eta_j = dfsph_muI_eta(j, GET_MATERIAL_ID(pi_j), rho_j, shear_rate, p_prev);
                         float eta_ij = 2.0f * eta_i * eta_j / (eta_i + eta_j + 1e-8f);
 
                         // Full viscosity with coefficient baked in

@@ -1633,10 +1633,16 @@ class Simulation:
         # Volume carrier into sorted_position.w for the four solver loops
         # (bd-r5-review-n28.184). After reactions and spawn, which change mass
         # and material. The next reorder overwrites .w, so it lives only
-        # inside this substep.
+        # inside this substep. It also writes the GRANULAR mu(I) eta into
+        # sorted_eta for NonPressureForces (bd-r5-review-n28.219); running it
+        # here, after reactions and spawn, keeps eta current for particles
+        # those passes changed.
         dfsph_solver.pack_volume(
             w.sorted_position[:n], w.sorted_density[:n],
             w.sorted_mass[:n], w.sorted_packed_info[:n],
+            shear_rate=w.sorted_shear_rate[:n],
+            p_prev=w.sorted_kappa[:n],
+            eta_out=w.sorted_eta[:n],
         )
 
         # Neighbour list for the solver loops (bd-r5-review-n28.198): built
@@ -1679,6 +1685,7 @@ class Simulation:
             # mu(I) friction reads it as its confining pressure
             # (bd-r5-review-n28.92).
             p_prev=w.sorted_kappa[:n],
+            eta_in=w.sorted_eta[:n],
         )
         mark("non_pressure")
 
