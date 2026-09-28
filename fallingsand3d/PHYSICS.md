@@ -111,6 +111,46 @@ For cubic lattice at spacing `dx = 0.02`, h=0.04:
   (`world.spawn_mass`), so every such material starts at rho/rho0 ≈ 1.01 (see 7.3)
 - STATIC and GAS particles spawn with `m = 0.02`
 
+### 2.4 FLUID EOS input: Shepard blend (WCSPH)
+
+A particle at a free surface has only part of its kernel support filled, so
+the density sum reads low there. K_Step1 also sums the Shepard weight and,
+for FLUID particles only, feeds the EOS a blend of the raw and the
+Shepard-normalised density (bd-r5-review-n28.205):
+```
+S_i       = C_poly6 * SUM_j [ (m_j / rho_j) * (h^2 - |r_ij|^2)^3 ]   (self term included)
+rho_eos_i = max(0.5 * (rho_i + rho_i / max(S_i, 1e-6)), 1.0)
+p_i       = EOS(rho_eos_i)                                          (section 3.1)
+```
+- `rho_j` is the neighbour's `position.w` (last substep's density, or this
+  substep's if that neighbour already finished); the self term uses the
+  particle's own `position.w`.
+- S includes STATIC neighbours (`rho_j = rest_density`) and MAT_RIGID
+  neighbours (`V_b = m_j / RIGID_PSI_RHO0`). Cross-phase GAS neighbours are
+  left out, as they are for density.
+- With full support S is about 1, so `rho_eos = rho`; at a free surface S is
+  about 0.5-0.6 and `rho_eos` lies halfway to the corrected value.
+- Only `pressure` and `p / rho^2` use `rho_eos`. `density_out` and
+  `position.w` keep the raw `rho_i`, so step2 pair weights, heat, and all
+  other readers see the raw density. GRANULAR, GAS and STATIC pressure use the
+  raw density. FLUID never sleeps, so the inactive skip path (section 8.3)
+  never recomputes a FLUID pressure without S.
+- The surface tension (`nc < 25`) test and `surface_tension_gamma` use the
+  neighbour count and normal, which this does not change, and were not retuned.
+
+Measured on a WCSPH WATER column in a closed 0.6 m box (`test_step1_shepard.py`,
+24k particles, 3 s settle at dt 0.5 ms). The reference is the weight of the
+water above each particle, scaled by a slope fitted below 3h depth. The settled
+water is compressed: top layer `rho/rho0` about 1.24-1.28, 2.16 in the
+interior, so the top layer already has positive pressure. Top-2h error, RMS of
+depth-bin means over p_ref at 2h: 0.0185 before, 0.0109 after (the raw EOS on
+the same settled state gives 0.0367). Top 1 cm bin: -31% of p_ref before, -5% to -7%
+after. Interior EOS density differs from the raw density by 0.4% on average
+(single particles up to 2%). The free surface rose 0.3 mm (0.02 of a spacing)
+and interior `rho/rho0` stayed within 0.5%.
+
+**Source**: `step1.cu` (sum_shepard in the neighbour loop, PostCalc pressure)
+
 ---
 
 ## 3. Step 2: Pressure, Viscosity, XSPH
@@ -133,6 +173,7 @@ GAS:      p = k * max(rho - rho_0, 0)
 ```
 
 All FLUID and GRANULAR pressure clamped >= 0 (no tensile pressure).
+For FLUID, `rho` here is the Shepard-blended `rho_eos` of section 2.4.
 
 | Material | rho_0 | k | gamma | EOS | spawn mass |
 |----------|-------|-----|-------|------|-----------|
