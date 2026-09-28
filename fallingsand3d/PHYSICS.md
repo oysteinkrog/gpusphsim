@@ -1547,15 +1547,28 @@ Changes:
 
 ### 10.8 OPTIMIZATION: Counting sort pipeline
 The per-substep grid build is `counting_sort.counting_sort_full` (no physics changes):
-1. **One sort path**: K_CalcHashCS, K_Histogram, a prefix sum
-   (`cupy.cumsum`) and K_ScatterReorder. `sort_perm` maps a
-   sorted slot to its original index. The argsort pipeline (hash_sort,
+1. **One sort path, five launches** (bd-r5-review-n28.189): K_HashHistogram
+   (hash and count per cell), K_ScanReduce and K_ScanDownsweep (our own
+   inclusive prefix sum into `cell_end`), K_ScatterPerm (slot claim, writes
+   `sort_perm` only) and K_GatherReorder (gathers every particle array).
+   `sort_perm` maps a sorted slot to its original index. The argsort pipeline (hash_sort,
    build_grid, fused_reorder, fused_sort_reorder_build) was removed
    (bd-r5-review-n28.153).
 2. **Reorder only what is read**: veleval, shear_rate and similar per-substep
    outputs are not reordered, since K_Step1, K_Step2 and K_Integrate overwrite them.
-3. **One scatter kernel**: K_ScatterReorder claims each particle's sorted slot
-   with an atomic per cell and gathers every particle array in the same pass.
+3. **Perm-only scatter, then gather**: K_ScatterPerm claims each particle's
+   sorted slot with `k = atomicSub(&histogram[hash], 1)`, slot
+   `cell_end[hash] - k`, and stores one uint32 per particle. The atomicSub
+   drains the histogram back to zero, so the next full sort needs no memset
+   and there is no write_offset buffer. Within-cell order is not
+   deterministic. The particle data then moves in K_GatherReorder, which has
+   coalesced stores (the grid-reuse path uses the same kernel). The scan
+   takes nothing from the CuPy memory pool: `cupy.cumsum` took a CUB
+   workspace on every call, and a captured graph kept a raw pointer to it
+   after the pool had taken the block back. Measured at 1M particles, 2^18
+   cells, random positions (shared GPU, 3 runs): full sort as a graph 0.74 to
+   0.78 ms, was 1.92 to 2.04 ms; host time per direct call 80 to 320 us, was
+   700 to 980 us.
 4. **Reactions/spawn always run**: Previously conditionally skipped for non-reactive
    materials; now always included for CUDA graph fixed topology (§10.9).
    Non-reactive threads early-exit with negligible GPU cost.
@@ -1588,8 +1601,9 @@ The per-substep pipeline launches ~14 GPU operations (memsets + kernel calls) wi
 Python→CUDA round-trip overhead for each. CUDA graph capture records ops 3-14 into
 a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
 
-**No split point**: the counting sort uses only kernels, memsets and
-`cupy.cumsum` (CUB), so the whole substep, sort included, is captured. There
+**No split point**: the counting sort uses only its own kernels and makes no
+memory-pool allocation (10.8), so the whole substep, sort included, is
+captured. There
 are two graphs: one with the full counting sort and one with the gather-only
 reorder (grid reuse, see `_capture_graph`).
 
@@ -1686,7 +1700,7 @@ hash = ((uint)cx * 73856093u + (uint)cy * 19349669u + (uint)cz * 83492791u) & TA
   depend on the cell `c`. No difference `d1 - d2` in {-2..2}^3 is 0 mod 2^18,
   2^19 or 2^20, so the 27 cells of every 3x3x3 neighbour stencil land in 27
   distinct buckets and no particle is counted twice. `test_hash_sort.py`
-  checks this on K_CalcHashCS for world edges, faces, interior and negative cells.
+  checks this on K_HashHistogram for world edges, faces, interior and negative cells.
 - Why not XOR: `P ^ (-P)` has the same low 18 bits (0x3FFFE) for all three
   primes, so for a cell with two coordinates at 0 (the first in-world layer,
   since `grid_min = world_min`) offsets (a,-1,-1) and (a,+1,+1) shared a
@@ -3711,7 +3725,7 @@ step1 loop had to be kept in sync with `K_Step1` by hand.
 ### 20.4 Warm-start kappa_v (PERF-008) and per-solver reorder skips
 
 The DFSPH divergence solver's kappa_v is carried through the counting sort
-pipeline (K_ScatterReorder, K_GatherReorder), persisted via K_DFSPH_Finalize
+pipeline (K_GatherReorder, on full sorts and grid reuse), persisted via K_DFSPH_Finalize
 writeback, and warm-started at the beginning of each substep. The stored value is
 the sum of the scaled warm start and every divergence iteration's increment
 (13.3). It is scaled by `dfsph_div_warm_start` (default 0.5), then applied as an
@@ -3754,9 +3768,9 @@ thresholds:
 - **PBF/DFSPH**: (0.15*h)² threshold, max 2 consecutive skipped frames
   (tighter for constraint solver convergence quality)
 
-**Drift anchor (bd-r5-review-n28.54).** On each full sort `K_ScatterReorder`
-writes the sorted position into `sorted_anchor` (float4, N). `K_GatherReorder`
-never writes it, and the sort permutation is frozen between full sorts, so
+**Drift anchor (bd-r5-review-n28.54).** On each full sort `K_GatherReorder`
+also writes the sorted position into `sorted_anchor` (float4, N). A grid-reuse
+gather passes NULL and never writes it, and the sort permutation is frozen between full sorts, so
 `sorted_anchor[i]` stays the sort-time position of the particle in sorted slot
 i. Any change of n or of the particle set forces a full sort, which rewrites
 the anchor. The finalize kernels compute
@@ -3850,7 +3864,7 @@ At the top of `step_frame` the compute stream waits on the newest copy's event
 because the spawned slots jump to the source position without Integrate
 seeing it, so the next frame does a full sort.
 
-**Source**: `counting_sort.cu:K_ScatterReorder` (anchor_out),
+**Source**: `counting_sort.cu:K_GatherReorder` (anchor_out),
 `integrate.cu:K_Integrate`, `pbf_solver.cu:K_PBF_Finalize`,
 `dfsph_solver.cu:K_DFSPH_Finalize` (max_displacement_out, displacement_anchor),
 `world.py` (`sorted_anchor`),
