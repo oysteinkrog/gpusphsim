@@ -1241,8 +1241,9 @@ def test_wcsph_density_in_carries_previous_density(world, sim):
 
 
 def test_dfsph_module_has_only_live_kernels():
-    """bd-r5-review-n28.11: dfsph_solver.cu holds only the 9 live kernels.
-    CorrectDivAndPressureAccel is bd-r5-review-n28.192."""
+    """bd-r5-review-n28.11: dfsph_solver.cu holds only the live kernels.
+    CorrectDivAndPressureAccel is bd-r5-review-n28.192; the neighbour-list
+    builder and the _NL loop variants are bd-r5-review-n28.198."""
     import os
     import re
     import dfsph_solver
@@ -1252,6 +1253,10 @@ def test_dfsph_module_has_only_live_kernels():
         "K_DFSPH_ComputePressureAccel", "K_DFSPH_DensitySolverUpdate",
         "K_DFSPH_PackVolume", "K_DFSPH_Finalize",
         "K_DFSPH_CorrectDivAndPressureAccel",
+        "K_DFSPH_BuildNeighborList",
+        "K_DFSPH_ComputeKappaV_NL", "K_DFSPH_CorrectVelocityDiv_NL",
+        "K_DFSPH_ComputePressureAccel_NL", "K_DFSPH_DensitySolverUpdate_NL",
+        "K_DFSPH_CorrectDivAndPressureAccel_NL",
     }
     cu_path = os.path.join(os.path.dirname(dfsph_solver.__file__),
                            "physics", "kernels", "dfsph_solver.cu")
