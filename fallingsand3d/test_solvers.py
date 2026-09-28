@@ -1566,13 +1566,13 @@ def _stencil_hashes(sim, pos):
     gp = sim._grid_params[0]
     gmin = np.array(gp["grid_min"], dtype=np.float32)
     gdel = np.array(gp["grid_delta"], dtype=np.float32)
-    mask = np.uint64(gp["table_mask"])
+    mask = int(gp["table_mask"])
     cell = np.floor((pos.astype(np.float32) - gmin) * gdel).astype(np.int64)
     offs = np.array([(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1)
                      for c in (-1, 0, 1)], dtype=np.int64)
-    primes = np.array([73856093, 19349669, 83492791], dtype=np.uint64)
-    stencil = (cell[:, None, :] + offs[None, :, :]).astype(np.uint64)
-    return ((stencil * primes).sum(axis=2) & mask).astype(np.uint32)
+    from grid_params import spatial_hash_np
+    stencil = cell[:, None, :] + offs[None, :, :]
+    return spatial_hash_np(stencil, mask).astype(np.uint32)
 
 
 def _pbf_sort_and_predict(sim, world, n):

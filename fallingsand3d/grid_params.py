@@ -133,3 +133,34 @@ def build_grid_params_for_world(
     params[0]["table_size"] = np.uint32(ts)
     params[0]["table_mask"] = np.uint32(tm)
     return params, ts
+
+
+# ---------------------------------------------------------------------------
+# Host copy of spatialHash() in physics/kernels/common.cuh
+# ---------------------------------------------------------------------------
+
+HASH_PRIMES = (73856093, 19349669, 83492791)
+HASH_BLOCK_BITS = 3  # 8x8x8-cell blocks; Morton code of the cell inside the block
+
+
+def _morton_spread3(v: np.ndarray) -> np.ndarray:
+    v = v & 7
+    return (v & 1) | ((v & 2) << 2) | ((v & 4) << 4)
+
+
+def spatial_hash_np(cells, table_mask: int) -> np.ndarray:
+    """Hash integer cells exactly like spatialHash() in common.cuh.
+
+    ``cells`` has shape (..., 3). The low 9 bits are the Morton code of the
+    cell inside its 8x8x8 block; an additive prime hash of the block
+    coordinates (uint32 wrap) is shifted above them, then masked.
+    Returns int64 bucket indices.
+    """
+    c = np.asarray(cells, dtype=np.int64)
+    lo = (_morton_spread3(c[..., 0]) | (_morton_spread3(c[..., 1]) << 1)
+          | (_morton_spread3(c[..., 2]) << 2))
+    b = c >> HASH_BLOCK_BITS  # arithmetic shift, same as int >> on the device
+    hi = (b[..., 0] * HASH_PRIMES[0] + b[..., 1] * HASH_PRIMES[1]
+          + b[..., 2] * HASH_PRIMES[2]) & 0xFFFFFFFF
+    h = (lo + (hi << (3 * HASH_BLOCK_BITS))) & 0xFFFFFFFF
+    return (h & int(table_mask)).astype(np.int64)

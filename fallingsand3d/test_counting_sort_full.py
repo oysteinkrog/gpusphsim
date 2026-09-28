@@ -44,18 +44,16 @@ def _cell(p: np.ndarray) -> np.ndarray:
 
 
 def _hash(c: np.ndarray) -> np.ndarray:
-    """CPU copy of spatialHash() in common.cuh (uint32 wrap, then mask)."""
-    c = c.astype(np.int64)
-    h = (c[..., 0] * 73856093 + c[..., 1] * 19349669
-         + c[..., 2] * 83492791) & 0xFFFFFFFF
-    return (h & MASK).astype(np.int64)
+    """CPU copy of spatialHash() in common.cuh."""
+    from grid_params import spatial_hash_np
+    return spatial_hash_np(c, MASK)
 
 
 def _find_colliding_cells() -> tuple:
     """Return two far-apart cells in the default world [0, 50)^3 with the
-    same table hash. The additive hash is linear, so two cells collide only
-    when their offset d has d.P = 0 mod 2^18; the shortest such offset is
-    (18, 47, 45), so the search needs the whole world."""
+    same table hash. Two cells collide only when they have the same place
+    inside their 8x8x8 block and their blocks share the hash bits above
+    bit 9, so the search needs the whole world."""
     r = np.arange(0, 50)
     cx, cy, cz = np.meshgrid(r, r, r, indexing="ij")
     cells = np.stack([cx.ravel(), cy.ravel(), cz.ravel()], axis=1)

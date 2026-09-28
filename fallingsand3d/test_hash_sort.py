@@ -3,10 +3,14 @@
 Acceptance criteria:
   - K_HashHistogram computes grid cell: cell = int3((pos - grid_min) * grid_delta),
     clamped to valid range via integer wrap + table_mask
-  - Spatial hash = (cx*P1 + cy*P2 + cz*P3) & table_mask (uint32 wrap)
+  - Spatial hash = (morton3(c & 7) + (hash(c >> 3) << 9)) & table_mask:
+    Morton order inside 8x8x8-cell blocks, additive prime hash of the
+    block above bit 9 (bd-r5-review-n28.201)
   - The 27 cells of every 3x3x3 stencil land in 27 distinct buckets,
-    including cells on the world edges (coordinate 0), so no neighbour
-    is scanned twice (bd-r5-review-n28.29)
+    including cells on the world edges (coordinate 0) and on block edges,
+    so no neighbour is scanned twice (bd-r5-review-n28.29)
+  - The 512 cells of an 8x8x8 block fill 512 consecutive buckets, so the
+    sort keeps spatial neighbours together in memory
   - Grid parameters read from __constant__ GridParams c_grid
   - Grid sizing: grid_min=(-1,-1,-1), cell_size=h=0.04,
     grid_delta=(25,25,25), table_size=262144
@@ -38,6 +42,7 @@ from grid_params import (
     TABLE_SIZE,
     TABLE_MASK,
     build_grid_params,
+    spatial_hash_np,
 )
 
 
@@ -74,11 +79,8 @@ _STENCIL = np.array([(dx, dy, dz) for dx in (-1, 0, 1)
 
 
 def _model_hash(cell: np.ndarray, mask: int) -> np.ndarray:
-    """CPU copy of spatialHash(): (cx*P1 + cy*P2 + cz*P3) in uint32, then mask."""
-    c = np.asarray(cell, dtype=np.int64)
-    h = (c[..., 0] * _PRIMES[0] + c[..., 1] * _PRIMES[1]
-         + c[..., 2] * _PRIMES[2]) & 0xFFFFFFFF
-    return (h & mask).astype(np.int64)
+    """CPU copy of spatialHash() (grid_params.spatial_hash_np)."""
+    return spatial_hash_np(cell, mask)
 
 
 def _xor_hash(cell: np.ndarray, mask: int) -> np.ndarray:
@@ -99,8 +101,9 @@ def _stencil_dup_count(hash_fn, cells: np.ndarray, mask: int) -> np.ndarray:
 
 def _stencil_test_cells() -> np.ndarray:
     """Several thousand cells: the default 50^3 world's edges and faces
-    (coordinate 0 and 49), a random interior sample, and cells far outside
-    the world including negative coordinates."""
+    (coordinate 0 and 49), a random interior sample, cells far outside
+    the world including negative coordinates, and cells on the corners
+    of 8x8x8 hash blocks, where a stencil spans 8 blocks."""
     rng = np.random.default_rng(3)
     r = np.arange(50)
     edges = []
@@ -113,7 +116,10 @@ def _stencil_test_cells() -> np.ndarray:
     face += [(a, b, 0) for a in r[::3] for b in r[::3]]
     interior = rng.integers(1, 49, size=(2000, 3))
     wide = rng.integers(-300, 300, size=(2000, 3))
-    return np.concatenate([np.array(edges), np.array(face), interior, wide])
+    ends = np.array([-65, -64, -9, -8, -1, 0, 7, 8, 15, 16, 63, 64, 1023, 1024])
+    bx, by, bz = np.meshgrid(ends, ends, ends, indexing="ij")
+    block = np.stack([bx.ravel(), by.ravel(), bz.ravel()], axis=1)
+    return np.concatenate([np.array(edges), np.array(face), interior, wide, block])
 
 
 def test_grid_constants() -> None:
@@ -165,7 +171,8 @@ def test_known_position() -> None:
 
     # Position (0.02, 0.02, 0.02):
     #   cell = int3(floor((0.02 - (-1)) * 25), ...) = int3(floor(25.5), ...) = (25, 25, 25)
-    #   hash = (25*73856093 + 25*19349669 + 25*83492791) & TABLE_MASK
+    #   in-block cell (1,1,1) -> Morton 7; block (3,3,3)
+    #   hash = (7 + ((3*73856093 + 3*19349669 + 3*83492791) << 9)) & TABLE_MASK
     pos = np.array([[0.02, 0.02, 0.02, 0.0]], dtype=np.float32)
     pos_gpu = cupy.asarray(pos)
 
@@ -175,6 +182,7 @@ def test_known_position() -> None:
     h = int(cupy.asnumpy(hashes)[0])
     ref = int(_host_hash(pos)[0])
     assert h == ref, f"hash = {h}, expected {ref}"
+    assert h == 22023, f"hash = {h}, expected 22023 for cell (25,25,25)"
     assert 0 <= h < TABLE_SIZE, f"hash {h} out of range [0, {TABLE_SIZE})"
     print(f"[OK] Position (0.02, 0.02, 0.02) -> cell (25,25,25) -> hash = {h}")
 
@@ -298,6 +306,30 @@ def test_stencil_buckets_distinct_model() -> None:
     np.testing.assert_array_equal(_stencil_dup_count(_model_hash, edge, TABLE_MASK), 0)
 
 
+def test_hash_block_is_morton_ordered() -> None:
+    """An 8x8x8 block maps onto 512 consecutive buckets in Morton order,
+    and the 8 cells of each aligned 2x2x2 sub-block are 8 consecutive
+    buckets (bd-r5-review-n28.201). This is what keeps a warp's cells
+    spatial neighbours after the sort."""
+    r = np.arange(8)
+    gx, gy, gz = np.meshgrid(r, r, r, indexing="ij")
+    local = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
+    for base in ((0, 0, 0), (8, 16, 24), (-8, -8, -8), (40, 0, -16)):
+        hs = _model_hash(local + np.array(base), TABLE_MASK)
+        span = np.sort(hs)
+        assert span[-1] - span[0] == 511 and len(np.unique(hs)) == 512, base
+        # Morton code of the local triple
+        lo = hs - span[0]
+        m = np.zeros(512, dtype=np.int64)
+        for b in range(3):
+            for a in range(3):
+                m |= ((local[:, a] >> b) & 1) << (3 * b + a)
+        np.testing.assert_array_equal(lo, m)
+    sub = _model_hash(np.array([(x, y, z) for x in (2, 3) for y in (4, 5)
+                                for z in (6, 7)]), TABLE_MASK)
+    assert np.sort(sub)[-1] - np.sort(sub)[0] == 7
+
+
 def test_stencil_buckets_distinct_gpu() -> None:
     """Device hash of the 27 stencil cell centres of each test cell matches
     the model and gives 27 distinct buckets."""
@@ -380,6 +412,7 @@ def main() -> None:
     test_boundary_clamping()
     test_500k_no_errors()
     test_stencil_buckets_distinct_model()
+    test_hash_block_is_morton_ordered()
     test_stencil_buckets_distinct_gpu()
     test_step1_density_on_world_edges_matches_brute_force()
     print("\n=== ALL CHECKS PASSED ===")

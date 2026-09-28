@@ -1191,10 +1191,8 @@ def _park_bucket_loads(max_particles, start, count, table_size, h=H, half=1.0):
     delta = np.float32(1.0 / h)
     cells = np.floor((pos[:, :3].astype(np.float32) - gmin) * delta).astype(np.int64)
     uniq = np.unique(cells, axis=0).shape[0]
-    c = cells.astype(np.uint32)
-    with np.errstate(over="ignore"):
-        hsh = (c[:, 0] * np.uint32(73856093) + c[:, 1] * np.uint32(19349669)
-               + c[:, 2] * np.uint32(83492791)) & np.uint32(table_size - 1)
+    from grid_params import spatial_hash_np
+    hsh = spatial_hash_np(cells, table_size - 1)
     return uniq, int(np.bincount(hsh, minlength=table_size).max())
 
 

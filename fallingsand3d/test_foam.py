@@ -510,9 +510,8 @@ def _host_cell_hash(sim, p: np.ndarray) -> int:
     gmin = np.asarray(g["grid_min"], dtype=np.float32)
     delta = np.asarray(g["grid_delta"], dtype=np.float32)
     c = np.floor((p.astype(np.float32) - gmin) * delta).astype(np.int64)
-    primes = (73856093, 19349669, 83492791)
-    h = sum((int(c[k]) & 0xFFFFFFFF) * primes[k] for k in range(3))
-    return int(h & 0xFFFFFFFF) & int(g["table_mask"])
+    from grid_params import spatial_hash_np
+    return int(spatial_hash_np(c, int(g["table_mask"])))
 
 
 def _cell_tables(sim, occupied_hashes) -> tuple:

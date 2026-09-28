@@ -763,8 +763,8 @@ def _boundary_push(neighbor_packed: int) -> tuple:
     vel = np.array([[0.1, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
     cell = np.floor((pos[0, :3] + 1.0) / float(CELL_SIZE)).astype(np.int64)
     assert np.array_equal(cell, np.floor((pos[1, :3] + 1.0) / float(CELL_SIZE)).astype(np.int64))
-    hsh = int((int(cell[0]) * 73856093 + int(cell[1]) * 19349669
-               + int(cell[2]) * 83492791) & 0xFFFFFFFF) & TABLE_MASK
+    from grid_params import spatial_hash_np
+    hsh = int(spatial_hash_np(cell, TABLE_MASK))
     table = int(gp[0]["table_size"])
     cell_start = np.full(table, 0xFFFFFFFF, dtype=np.uint32)
     cell_end = np.zeros(table, dtype=np.uint32)
@@ -1375,10 +1375,8 @@ def _hash_grid(pos, table_size, cell=H, gmin=-1.0):
     """Sort particles by spatial hash (common.cuh spatialHash) and build
     cell_start / cell_end for a table of table_size buckets."""
     c = np.floor((pos - gmin) / cell).astype(np.int64)
-    hsh = ((c[:, 0].astype(np.uint32) * np.uint32(73856093)
-            + c[:, 1].astype(np.uint32) * np.uint32(19349669)
-            + c[:, 2].astype(np.uint32) * np.uint32(83492791))
-           & np.uint32(table_size - 1))
+    from grid_params import spatial_hash_np
+    hsh = spatial_hash_np(c, table_size - 1).astype(np.uint32)
     order = np.argsort(hsh, kind="stable")
     hs = hsh[order]
     start = np.full(table_size, 0xFFFFFFFF, dtype=np.uint32)
