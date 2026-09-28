@@ -324,7 +324,8 @@ def correct_velocity_div(
     reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
 
     Neighbour volumes come from position[:, 3] (run pack_volume first);
-    density is read only for wall neighbours, mass only for the reaction."""
+    density is read for the own particle and wall neighbours, mass for fluid
+    neighbours (symmetric pair form) and the rigid reaction."""
     n = velocity.shape[0]
     module = _get_module()
     kernel = module.get_function("K_DFSPH_CorrectVelocityDiv")

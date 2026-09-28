@@ -525,7 +525,7 @@ void K_DFSPH_NonPressureForces(
     // The confining pressure is the density solver's own pressure from the
     // previous substep, not Tait EOS: the solver drives rho to rho0, so Tait
     // would measure solver error instead of load. The stored p_rho2 is p/rho
-    // (ComputePressureAccel uses V_j * (p_i + p_j)), so p = p_rho2 * rho.
+    // (ComputePressureAccel uses m_j * (p_i/rho_i + p_j/rho_j)), so p = p_rho2 * rho.
     // The floor is the one-layer lithostatic pressure used by WCSPH step2; it
     // also covers the first substep and woken particles, where p_prev = 0.
     float eta_i = 0.0f;
@@ -952,16 +952,20 @@ void K_DFSPH_ComputeKappaV(
 
 /* ======================================================================
  * K_DFSPH_CorrectVelocityDiv -- Apply divergence correction
- * v*_i -= dt * SUM_j V_j * (kv_i + kv_j) * gradW_ij, V_j = m_j / rho_j
- * from the position.w carrier (dfsph_vol_plain) (kv >= 0). Not momentum-symmetric where rho_i != rho_j: see bd-r5-review-n28.100.
+ * v*_i -= dt * SUM_j c_ij * gradW_ij  (kv >= 0)
+ *   fluid j:  c_ij = m_j * (kv_i/rho_i + kv_j/rho_j)
+ *   STATIC j: c_ij = V_j * kv_i, V_j = m_j / rho_j (dfsph_vol_plain)
+ * The fluid pair term is symmetric in i and j, so the impulses on i and j
+ * cancel and momentum is conserved across density jumps (bd-r5-review-n28.100).
+ * The STATIC term keeps the plain volume: its reaction goes to the rigid body.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_DFSPH_CorrectVelocityDiv(
     uint            numParticles,
     float4*         __restrict__ velocity,        // in-out
-    const float*    __restrict__ density,         // read for wall neighbours only
-    const float*    __restrict__ mass,            // own mass, rigid reaction only
+    const float*    __restrict__ density,         // own density and wall neighbours
+    const float*    __restrict__ mass,            // neighbour mass (fluid pairs) and own mass (rigid reaction)
     const float*    __restrict__ kappa_v,
     const uint*     __restrict__ packed_info,
     const float4*   __restrict__ position,
@@ -989,6 +993,8 @@ void K_DFSPH_CorrectVelocityDiv(
     float h_sq = c_sim.smoothing_length_sq;
     float dt = c_sim.dt;
     float kv_i = kappa_v[i];
+    // kv_i / rho_i is the same for every fluid neighbour, so divide once.
+    float kv_rho_i = kv_i / fmaxf(density[i], RHO_EPSILON);
 
     float3 dv = make_float3(0.0f, 0.0f, 0.0f);
 
@@ -1026,8 +1032,11 @@ void K_DFSPH_CorrectVelocityDiv(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = dfsph_vol_plain(pos4_j.w, pi_j, density, j);
-                    float coeff = V_j * (kv_i + kv_j);
+                    // Fluid: m_j * kv_i/rho_i + V_j * kv_j, V_j * kv_j = m_j * kv_j/rho_j.
+                    // STATIC: V_j * kv_i (kv_j = 0). mass[j] loads only in range.
+                    float coeff = (bj == STATIC)
+                        ? dfsph_vol_plain(pos4_j.w, pi_j, density, j) * kv_i
+                        : __ldg(&mass[j]) * kv_rho_i + pos4_j.w * kv_j;
                     dv.x += coeff * gW.x;
                     dv.y += coeff * gW.y;
                     dv.z += coeff * gW.z;
@@ -1067,8 +1076,11 @@ void K_DFSPH_CorrectVelocityDiv(
  * K_DFSPH_ComputePressureAccel -- Pressure acceleration and predicted velocity
  *
  * Jacobi density solver kernel 1 of 2:
- * a_press_i = -SUM_j V_j * (p_rho2_i + p_rho2_j) * grad_W_ij
- * where V_j = m_j / rho_j (particle volume, from the position.w carrier)
+ * a_press_i = -SUM_j c_ij * grad_W_ij
+ *   fluid j:  c_ij = m_j * (p_rho2_i/rho_i + p_rho2_j/rho_j)
+ *   STATIC j: c_ij = V_j * p_rho2_i, V_j = m_j / rho_j (dfsph_vol_plain)
+ * p_rho2 holds p/rho, so p_rho2/rho = p/rho^2. The fluid pair term is
+ * symmetric in i and j, so pair forces cancel (bd-r5-review-n28.100).
  *
  * Writes the predicted velocity, not a_press (bd-r5-review-n28.184):
  *   vt_i = clamp_v(v_i + dt * clamp_a(a_press_i))
@@ -1088,8 +1100,8 @@ void K_DFSPH_ComputePressureAccel(
     const float*    __restrict__ p_rho2,
     const float4*   velocity,                      // own index only; may alias vt_out
     const float4*   __restrict__ position,
-    const float*    __restrict__ density,          // read for wall neighbours only
-    const float*    __restrict__ mass,             // own mass, rigid reaction only
+    const float*    __restrict__ density,          // own density and wall neighbours
+    const float*    __restrict__ mass,             // neighbour mass (fluid pairs) and own mass (rigid reaction)
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
@@ -1112,6 +1124,8 @@ void K_DFSPH_ComputePressureAccel(
     float4 pos4_i = __ldg(&position[i]);
     float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
     float p_i = p_rho2[i];
+    // p_i / rho_i is the same for every fluid neighbour, so divide once.
+    float p_rho_i = p_i / fmaxf(density[i], RHO_EPSILON);
     // Rigid reaction: only the last a_press is applied (the final call writes
     // the velocity), so the caller passes the rigid buffers on the final call
     // only. The pair adds -V_j * p_i * gW to a_i (p_j = 0 for STATIC), so the
@@ -1159,8 +1173,11 @@ void K_DFSPH_ComputePressureAccel(
                     float rlen = sqrtf(r_sq);
 
                     float3 gW = grad_spiky(r, rlen, h);
-                    float V_j = dfsph_vol_plain(pos4_j.w, pi_j, density, j);
-                    float coeff = -V_j * (p_i + p_j);
+                    // Fluid: m_j * p_i/rho_i + V_j * p_j, V_j * p_j = m_j * p_j/rho_j.
+                    // STATIC: V_j * p_i (p_j = 0). mass[j] loads only in range.
+                    float coeff = (bj == STATIC)
+                        ? -dfsph_vol_plain(pos4_j.w, pi_j, density, j) * p_i
+                        : -(__ldg(&mass[j]) * p_rho_i + pos4_j.w * p_j);
                     a.x += coeff * gW.x;
                     a.y += coeff * gW.y;
                     a.z += coeff * gW.z;
