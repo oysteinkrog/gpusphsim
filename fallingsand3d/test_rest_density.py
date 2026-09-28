@@ -7,7 +7,7 @@ run. Checks:
   (with one global mass of 0.02 it was 0.63 for SAND and 0.39 for LAVA);
 - settled SAND has about 27-35 neighbours inside h, not about 45;
 - a fresh DFSPH LAVA block needs almost no density correction (kappa near 0);
-- an OIL layer on WATER keeps its centre of mass above the water.
+- an OIL layer on WATER in a closed box stays above the water.
 
 Run as a script to print the numbers: python test_rest_density.py
 """
@@ -115,9 +115,12 @@ def test_cube_rests_at_rho0(world, solver, mat_id):
           f"all={r['ratio_all']:.3f}  neighbours={r['nb_full']:.1f}")
     assert r["finite"]
     # 300 DFSPH substeps are 1 s: the unconfined WATER and OIL cubes are
-    # splashing off the domain walls and read 0.94 on this measure. WATER
-    # always had this mass, so that is not a spawn-mass effect.
-    lo = 0.93 if solver == "DFSPH" else 0.95
+    # splashing off the domain walls, so this measure reads below 1. WATER
+    # always had this mass, so that is not a spawn-mass effect. With the
+    # momentum-conserving pair form (bd-r5-review-n28.100) the splash rebounds
+    # harder: WATER 0.927 and OIL 0.930, against 0.930 and 0.941 with the old
+    # V_j (k_i + k_j) form. A wrong spawn mass reads 0.63 or lower.
+    lo = 0.91 if solver == "DFSPH" else 0.95
     assert lo <= r["ratio_full"] <= 1.10, f"rho/rho0 = {r['ratio_full']:.3f}"
     if mat_id in (SAND, LAVA):
         # One global mass compacted these to 45 (DFSPH SAND) and 55-59 (LAVA).
@@ -158,23 +161,39 @@ def test_dfsph_fresh_lava_kappa_near_zero(world):
 
 
 def test_oil_stays_on_water(world):
-    """OIL layered on WATER keeps its centre of mass above the water after 3 s (DFSPH)."""
+    """A 0.2 m OIL layer on a 0.2 m WATER layer stays on top for 3 s (DFSPH).
+
+    The layers fill a closed box (domain half size 0.3), so they keep their
+    thickness. In the default 2 m domain the same blocks spread into a puddle
+    one or two particles thick, where there is no hydrostatic pressure
+    gradient to sort them and the order depends on how the splash sheared
+    them (bd-r5-review-n28.100).
+    """
     _reset(world)
-    world.spawn_cube((-0.3, -0.99, -0.3), (0.3, -0.79, 0.3), WATER, spacing=SPACING)
-    n = world.spawn_cube((-0.3, -0.77, -0.3), (0.3, -0.57, 0.3), OIL, spacing=SPACING)
+    world.spawn_cube((-0.29, -0.29, -0.29), (0.29, -0.09, 0.29), WATER, spacing=SPACING)
+    world.spawn_cube((-0.29, -0.07, -0.29), (0.29, 0.13, 0.29), OIL, spacing=SPACING)
     n = world._high_water
     profile = PROFILES["DFSPH"]
-    s = _make_sim(world, "DFSPH")
+    s = Simulation(world, dt=profile.dt, speed=1.0, fixed_dt=True, max_substeps=1,
+                   world_half_size=0.3)
+    s.set_solver_profile(profile)
+    s._spawn_substep = s._damping_duration
     for _ in range(int(round(3.0 / profile.dt))):
         s._sim_step(n)
     cp.cuda.Device().synchronize()
     pi = world.packed_info[:n].get() & 0xFF
     y = world.position[:n, 1].get()
     assert np.isfinite(y).all()
-    oil_y = float(y[pi == OIL].mean())
-    water_y = float(y[pi == WATER].mean())
-    print(f"  after 3 s: OIL COM_y={oil_y:.3f}, WATER COM_y={water_y:.3f}")
-    assert oil_y > water_y
+    y_oil = y[pi == OIL]
+    y_water = y[pi == WATER]
+    oil_y = float(y_oil.mean())
+    water_y = float(y_water.mean())
+    oil_low = float(np.mean(y_oil < water_y))
+    print(f"  after 3 s: OIL COM_y={oil_y:.3f}, WATER COM_y={water_y:.3f}, "
+          f"OIL below the WATER COM: {oil_low:.3f}")
+    # Measured: OIL -0.062, WATER -0.231, no OIL below the WATER COM.
+    assert oil_y > water_y + 0.1
+    assert oil_low < 0.02
 
 
 if __name__ == "__main__":
