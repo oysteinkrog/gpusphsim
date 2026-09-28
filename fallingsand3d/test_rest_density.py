@@ -118,9 +118,12 @@ def test_cube_rests_at_rho0(world, solver, mat_id):
     # splashing off the domain walls, so this measure reads below 1. WATER
     # always had this mass, so that is not a spawn-mass effect. With the
     # momentum-conserving pair form (bd-r5-review-n28.100) the splash rebounds
-    # harder: WATER 0.927 and OIL 0.930, against 0.930 and 0.941 with the old
-    # V_j (k_i + k_j) form. A wrong spawn mass reads 0.63 or lower.
-    lo = 0.91 if solver == "DFSPH" else 0.95
+    # harder. Since DensityAlpha reads rho_j in the current slot order
+    # (gate fix after bd-r5-review-n28.201) the splash spreads further:
+    # WATER 0.853 and OIL 0.868, against 0.927 and 0.930 when rho_j came from
+    # the previous substep's slot order. The value no longer depends on the
+    # hash layout. A wrong spawn mass reads 0.63 or lower.
+    lo = 0.80 if solver == "DFSPH" else 0.95
     assert lo <= r["ratio_full"] <= 1.10, f"rho/rho0 = {r['ratio_full']:.3f}"
     if mat_id in (SAND, LAVA):
         # One global mass compacted these to 45 (DFSPH SAND) and 55-59 (LAVA).
