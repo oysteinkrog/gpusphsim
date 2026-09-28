@@ -1602,7 +1602,7 @@ The per-substep grid build is `counting_sort.counting_sort_full` (no physics cha
    `cell_end[hash] - k`, and stores one uint32 per particle. The atomicSub
    drains the histogram back to zero, so the next full sort needs no memset
    and there is no write_offset buffer. Within-cell order is not
-   deterministic. The particle data then moves in K_GatherReorder, which has
+   deterministic by default (see item 8). The particle data then moves in K_GatherReorder, which has
    coalesced stores (the grid-reuse path uses the same kernel). The scan
    takes nothing from the CuPy memory pool: `cupy.cumsum` took a CUB
    workspace on every call, and a captured graph kept a raw pointer to it
@@ -1626,6 +1626,23 @@ The per-substep grid build is `counting_sort.counting_sort_full` (no physics cha
    separate cell_end pass or memset. Measured against the two-array layout at
    1M WCSPH particles (shared GPU, 3 A/B runs): step1 2.64 vs 2.72 ms, step2
    4.03 vs 4.38 ms per substep.
+8. **Deterministic within-cell order, for tests and bisects**
+   (bd-r5-review-n28.200): `Simulation.deterministic_sort = True` (off by
+   default) passes a scratch permutation to `counting_sort_full`.
+   K_ScatterPerm then writes its atomic-order permutation there, and
+   K_RankInCell puts each cell in ascending original index into `sort_perm`
+   (rank = number of smaller indices in the cell). `sort_perm` then equals a
+   stable argsort of the hashes, so every SPH sum runs in the same order on
+   every run. It is one extra launch with sum(count^2) work per full sort,
+   stays graph-capturable and allocates nothing per sort. With the mode off
+   the launch list is unchanged.
+   The mode alone does not make a run bit-identical: K_Step1 writes each
+   particle's density to `position.w` in place while neighbours read `.w` as
+   `rho_j`, so `V_j` in the normal, Shepard and heat sums depends on thread
+   timing. With those writes moved to a separate pass, two 200-substep Dam
+   Break runs match bit for bit (0 differing position words); with the
+   current step1 about 5,000 of 315,180 particles differ after 3 substeps
+   (about 90,000 with the atomic order).
 
 **Source**: simulation.py, counting_sort.py/.cu, wake.py/.cu
 
