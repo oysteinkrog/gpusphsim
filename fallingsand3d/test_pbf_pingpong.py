@@ -200,7 +200,8 @@ def _reference_body(sim, world, n, iters):
         w.sorted_packed_info[:n], w.sorted_temperature[:n],
         w.sorted_predicted_position,
     )
-    cp.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
+    # Previous density in this substep's slot order (bd-r5-review-n28.216).
+    cp.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
     pbf_solver.pbf_compute_lambda(
         w.sorted_predicted_position[:n], w.sorted_mass[:n],
         w.sorted_packed_info[:n], sim._cell_start, sim._cell_end,

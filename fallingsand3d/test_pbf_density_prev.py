@@ -16,7 +16,7 @@ deterministic_sort on, so the permutation changes between substeps. The scene
 has a STATIC floor, a falling water block and a sand pile, so the STATIC,
 FLUID, GRANULAR and (when some sand falls asleep) sleeping writebacks in
 K_PBF_Finalize are all covered. The old sleeping writeback kept a stale .w
-and fails this check once sand sleeps (in the last 60 of the 600 substeps).
+and fails this check once sand sleeps.
 """
 
 from __future__ import annotations
