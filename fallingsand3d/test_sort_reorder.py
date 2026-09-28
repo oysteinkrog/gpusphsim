@@ -541,15 +541,12 @@ def _dam_break_positions(deterministic: bool, substeps: int) -> np.ndarray:
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason=(
-    "K_Step1 writes each particle's density to position.w while neighbours "
-    "read .w as rho_j, so the V_j in the normal, Shepard and heat sums "
-    "depends on thread timing. With those writes moved to a separate pass "
-    "this test passes (0 differing words after 200 substeps); remove the "
-    "xfail when step1 is fixed."))
 def test_deterministic_sort_dam_break_bit_identical() -> None:
     """Two 200-substep Dam Break runs with deterministic_sort on end with
-    bit-identical positions (unsorted order, which is the spawn order)."""
+    bit-identical positions (unsorted order, which is the spawn order).
+
+    Needs the K_Step1 density pack outside the kernel (bd-r5-review-n28.215):
+    an in-place position.w write let neighbours read either density."""
     a = _dam_break_positions(True, 200)
     b = _dam_break_positions(True, 200)
     assert a.shape == b.shape
