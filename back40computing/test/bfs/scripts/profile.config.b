@@ -1,3 +1,0 @@
-inst_executed
-fb_subp1_read_sectors
-fb_subp1_write_sectors
