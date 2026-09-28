@@ -139,6 +139,15 @@ __device__ __forceinline__ float pbf_mass(const float* __restrict__ mass, uint j
 /* ======================================================================
  * K_PBF_Predict -- Apply gravity, predict position
  *   x*_i = x_i + dt * (v_i + dt * g)
+ *
+ * Kept as its own kernel on purpose (bd-r5-review-n28.208, WONTFIX). It
+ * re-reads the 40 B/particle that K_ScatterReorder / K_GatherReorder just
+ * wrote, and fusing it into them would save about 0.06 ms at 1M (about 0.5%
+ * of a PBF substep). The reorder kernels are shared by all three solvers, so
+ * the fused body (gravity, GAS drag, Boussinesq lookup, clamp, SDF loop)
+ * would add registers and constant-memory reads to WCSPH and DFSPH too.
+ * Revisit if a PBF-only reorder variant appears, or if per-stage timing
+ * shows Predict above 2% of the substep at 1M.
  * ====================================================================== */
 
 extern "C" __global__ __launch_bounds__(256, 4)
