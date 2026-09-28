@@ -8,6 +8,8 @@
  *   K_DFSPH_ComputeKappaV       -- Divergence correction factor
  *   K_DFSPH_CorrectVelocityDiv  -- Apply divergence correction
  *   K_DFSPH_ComputePressureAccel  -- a_press from p/rho^2, writes vt = v + dt * a_press
+ *   K_DFSPH_CorrectDivAndPressureAccel -- last CorrectVelocityDiv fused with the first
+ *                                 ComputePressureAccel of a substep (one sweep)
  *   K_DFSPH_DensitySolverUpdate   -- Predict density from vt, Jacobi update of p/rho^2
  *   K_DFSPH_Finalize              -- Final position, boundary, writeback
  *
@@ -1210,6 +1212,179 @@ void K_DFSPH_ComputePressureAccel(
         vt.z *= scale;
     }
 
+    vt_out[i] = make_float4(vt.x, vt.y, vt.z, vel4_i.w);
+}
+
+/* ======================================================================
+ * K_DFSPH_CorrectDivAndPressureAccel -- last divergence correction fused
+ * with the first pressure acceleration (bd-r5-review-n28.192)
+ *
+ * The last K_DFSPH_CorrectVelocityDiv of a substep writes only velocity[i],
+ * and the K_DFSPH_ComputePressureAccel that follows reads only its own
+ * velocity[i], never a neighbour's. So one neighbour sweep can accumulate
+ * both sums over the same r, gradW and V_j:
+ *   dv = SUM_j c_div_ij * gradW_ij      (as CorrectVelocityDiv, from kappa_v)
+ *   a  = -SUM_j c_p_ij * gradW_ij       (as ComputePressureAccel, from p_rho2)
+ * then
+ *   v'  = v - clamp(dt * dv, h/dt)      written to velocity
+ *   vt  = clamp_v(v' + dt * clamp_a(a)) written to vt_out
+ * The results equal the two launches in sequence. vt_out may be velocity
+ * (no density iterations): then only vt is written.
+ * STATIC, GAS and sleeping particles keep velocity and write vt = v.
+ * Rigid reaction: the divergence part always adds its reaction (every
+ * correction pass is applied); the pressure part adds its reaction only
+ * when press_reaction != 0 (this is the last pressure call of the substep).
+ * The two parts go to the body in one atomic per pair.
+ * ====================================================================== */
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_CorrectDivAndPressureAccel(
+    uint            numParticles,
+    float4*         velocity,                      // in-out, own index only; may alias vt_out
+    const float*    __restrict__ density,          // own density and wall neighbours
+    const float*    __restrict__ mass,             // neighbour mass (fluid pairs) and own mass (rigid reaction)
+    const float*    __restrict__ kappa_v,
+    const float*    __restrict__ p_rho2,
+    const uint*     __restrict__ packed_info,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float4*         vt_out,                        // predicted velocity; may alias velocity
+    const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,
+    float*          __restrict__ d_rigid_torques,
+    int             press_reaction                 // 1: also add the pressure reaction
+) {
+    uint i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numParticles) return;
+
+    float4 vel4_i = velocity[i];
+    uint pi_i = packed_info[i];
+    int behavior_i = GET_BEHAVIOR(pi_i);
+    if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) {
+        vt_out[i] = vel4_i;
+        return;
+    }
+
+    float4 pos4_i = __ldg(&position[i]);
+    float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
+
+    float h = c_sim.smoothing_length;
+    float h_sq = c_sim.smoothing_length_sq;
+    float dt = c_sim.dt;
+    float kv_i = kappa_v[i];
+    float p_i = p_rho2[i];
+    // Same divisions as the separate kernels (x / rho, not x * (1/rho)), so
+    // the results match them bit for bit.
+    float rho_i = fmaxf(density[i], RHO_EPSILON);
+    float kv_rho_i = kv_i / rho_i;
+    float p_rho_i = p_i / rho_i;
+    float m_i_rigid = (d_rigid_bodies != 0) ? mass[i] : 0.0f;
+    float m_i_press = (press_reaction != 0) ? m_i_rigid : 0.0f;
+
+    float3 dv = make_float3(0.0f, 0.0f, 0.0f);
+    float3 a = make_float3(0.0f, 0.0f, 0.0f);
+
+    int3 cell_i = get_cell(pos_i);
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+
+                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
+                uint start = cell_start[hash_c];
+                uint end_idx = cell_end[hash_c];
+
+                for (uint j = start; j < end_idx; j++) {
+                    if (j == i) continue;
+
+                    // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
+                    float4 pos4_j = __ldg(&position[j]);
+                    uint pi_j = __ldg(&packed_info[j]);
+                    float kv_j = __ldg(&kappa_v[j]);
+                    float p_j = __ldg(&p_rho2[j]);
+
+                    int bj = GET_BEHAVIOR(pi_j);
+                    if (bj == GAS) continue;
+
+                    float3 r = make_float3(
+                        pos_i.x - pos4_j.x,
+                        pos_i.y - pos4_j.y,
+                        pos_i.z - pos4_j.z
+                    );
+                    float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+                    if (r_sq > h_sq || r_sq < 1e-12f) continue;
+
+                    float rlen = sqrtf(r_sq);
+                    float3 gW = grad_spiky(r, rlen, h);
+
+                    float c_div, c_p;
+                    if (bj == STATIC) {
+                        // STATIC carries neither kappa_v nor pressure: V_j * kv_i
+                        // and V_j * p_i with the plain volume.
+                        float V_j = dfsph_vol_plain(pos4_j.w, pi_j, density, j);
+                        c_div = V_j * kv_i;
+                        c_p = -V_j * p_i;
+                    } else {
+                        float m_j = __ldg(&mass[j]);
+                        c_div = m_j * kv_rho_i + pos4_j.w * kv_j;
+                        c_p = -(m_j * p_rho_i + pos4_j.w * p_j);
+                    }
+                    dv.x += c_div * gW.x;
+                    dv.y += c_div * gW.y;
+                    dv.z += c_div * gW.z;
+                    a.x += c_p * gW.x;
+                    a.y += c_p * gW.y;
+                    a.z += c_p * gW.z;
+
+                    if (bj == STATIC && d_rigid_bodies != 0
+                        && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+                        float fs = m_i_rigid * c_div - m_i_press * c_p;
+                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                             pi_j, pos4_j,
+                                             make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
+                    }
+                }
+            }
+        }
+    }
+
+    // Divergence correction, clamped to h/dt as in K_DFSPH_CorrectVelocityDiv.
+    float3 delta_v = make_float3(dt * dv.x, dt * dv.y, dt * dv.z);
+    float max_delta = c_sim.smoothing_length / dt;
+    float delta_sq = delta_v.x * delta_v.x + delta_v.y * delta_v.y + delta_v.z * delta_v.z;
+    if (delta_sq > max_delta * max_delta) {
+        float scale = max_delta / sqrtf(delta_sq);
+        delta_v.x *= scale;
+        delta_v.y *= scale;
+        delta_v.z *= scale;
+    }
+    vel4_i.x -= delta_v.x;
+    vel4_i.y -= delta_v.y;
+    vel4_i.z -= delta_v.z;
+    if (vt_out != velocity) velocity[i] = vel4_i;
+
+    // Pressure acceleration and predicted velocity, clamped as in
+    // K_DFSPH_ComputePressureAccel.
+    float a_sq = a.x * a.x + a.y * a.y + a.z * a.z;
+    float a_press_max = c_sim.smoothing_length / (dt * dt);
+    if (a_sq > a_press_max * a_press_max) {
+        float scale = a_press_max / sqrtf(a_sq);
+        a.x *= scale;
+        a.y *= scale;
+        a.z *= scale;
+    }
+    float3 vt = make_float3(
+        vel4_i.x + dt * a.x,
+        vel4_i.y + dt * a.y,
+        vel4_i.z + dt * a.z
+    );
+    float vt_sq = vt.x * vt.x + vt.y * vt.y + vt.z * vt.z;
+    if (vt_sq > VELOCITY_LIMIT_SQ) {
+        float scale = VELOCITY_LIMIT / sqrtf(vt_sq);
+        vt.x *= scale;
+        vt.y *= scale;
+        vt.z *= scale;
+    }
     vt_out[i] = make_float4(vt.x, vt.y, vt.z, vel4_i.w);
 }
 

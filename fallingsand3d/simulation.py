@@ -1580,19 +1580,27 @@ class Simulation:
         self._ensure_kappa_v_delta()  # no-op here: _sim_step allocated it
         kv_total = w.sorted_kappa_v[:n]
         kv_delta = self._kappa_v_delta[:n]
+        div_iters = self._profile.dfsph_div_iters
+        # The last correction pass is not launched here: it runs fused with
+        # the first pressure sweep below (bd-r5-review-n28.192). fused_kv is
+        # the kappa_v it applies, or None when there is no correction pass.
+        fused_kv = None
         if self._profile.dfsph_div_warm_start > 0.0:
-            dfsph_solver.correct_velocity_div(
-                vel, w.sorted_density[:n],
-                w.sorted_mass[:n], kv_total,
-                w.sorted_packed_info[:n], w.sorted_position[:n],
-                self._cell_start, self._cell_end,
-                **rigid_kw,
-            )
+            if div_iters == 0:
+                fused_kv = kv_total
+            else:
+                dfsph_solver.correct_velocity_div(
+                    vel, w.sorted_density[:n],
+                    w.sorted_mass[:n], kv_total,
+                    w.sorted_packed_info[:n], w.sorted_position[:n],
+                    self._cell_start, self._cell_end,
+                    **rigid_kw,
+                )
         else:
             # Finalize already wrote 0 with a zero carry. This clears values
             # carried from before a switch to a zero warm start.
             kv_total.fill(0)
-        for _ in range(self._profile.dfsph_div_iters):
+        for it in range(div_iters):
             dfsph_solver.compute_kappa_v(
                 vel, w.sorted_alpha_dfsph[:n],
                 w.sorted_packed_info[:n], w.sorted_position[:n],
@@ -1603,6 +1611,9 @@ class Simulation:
                 # WCSPH (PHYSICS.md 13.3, bd-r5-review-n28.71).
                 kappa_v_total=kv_total,
             )
+            if it == div_iters - 1:
+                fused_kv = kv_delta
+                break
             dfsph_solver.correct_velocity_div(
                 vel, w.sorted_density[:n],
                 w.sorted_mass[:n], kv_delta,
@@ -1611,6 +1622,7 @@ class Simulation:
                 **rigid_kw,
             )
 
+        # With a fused last pass, its time is counted in density_solve.
         mark("divergence")
 
         # kappa_v writeback now done in K_DFSPH_Finalize (PERF-008)
@@ -1637,15 +1649,29 @@ class Simulation:
         # Only the last a_press is applied to the fluid, so only the last
         # compute_pressure_accel call adds the rigid reaction.
         dens_iters = self._profile.dfsph_dens_iters
-        # Initial vt from the warm-started p_rho2
-        dfsph_solver.compute_pressure_accel(
-            p_rho2[:n], vel, w.sorted_position[:n],
-            w.sorted_density[:n], w.sorted_mass[:n],
-            w.sorted_packed_info[:n],
-            self._cell_start, self._cell_end,
-            vel if dens_iters == 0 else vt,
-            **(rigid_kw if dens_iters == 0 else {}),
-        )
+        # Initial vt from the warm-started p_rho2. The last divergence
+        # correction shares this neighbour sweep: it writes only vel[i] and
+        # the pressure sum reads only its own vel[i] (bd-r5-review-n28.192).
+        # The p_rho2 zero fill above runs before it.
+        if fused_kv is not None:
+            dfsph_solver.correct_div_and_pressure_accel(
+                vel, w.sorted_density[:n], w.sorted_mass[:n],
+                fused_kv, p_rho2[:n],
+                w.sorted_packed_info[:n], w.sorted_position[:n],
+                self._cell_start, self._cell_end,
+                vel if dens_iters == 0 else vt,
+                **rigid_kw,
+                pressure_reaction=dens_iters == 0,
+            )
+        else:
+            dfsph_solver.compute_pressure_accel(
+                p_rho2[:n], vel, w.sorted_position[:n],
+                w.sorted_density[:n], w.sorted_mass[:n],
+                w.sorted_packed_info[:n],
+                self._cell_start, self._cell_end,
+                vel if dens_iters == 0 else vt,
+                **(rigid_kw if dens_iters == 0 else {}),
+            )
         for it in range(dens_iters):
             last = it == dens_iters - 1
             dfsph_solver.density_solver_update(

@@ -1,9 +1,9 @@
 """DFSPH solver kernel wrapper -- Divergence-Free SPH (Bender & Koschier, SCA 2015).
 
 Compiles physics/kernels/dfsph_solver.cu via CuPy RawModule and provides
-launch functions for the 8 DFSPH kernels: ComputeDensityAlpha, PackVolume,
+launch functions for the 9 DFSPH kernels: ComputeDensityAlpha, PackVolume,
 NonPressureForces, ComputeKappaV, CorrectVelocityDiv, ComputePressureAccel,
-DensitySolverUpdate and Finalize.
+CorrectDivAndPressureAccel (the two fused), DensitySolverUpdate and Finalize.
 
 The solver loops read each neighbour's volume from position.w (the volume
 carrier), so pack_volume must run after compute_density_alpha (and after
@@ -375,6 +375,45 @@ def compute_pressure_accel(
         np.uint32(n), p_rho2, velocity, position, density, mass,
         packed_info, cell_start, cell_end, vt_out,
         rb_ptr, rf_ptr, rt_ptr,
+    ))
+
+
+def correct_div_and_pressure_accel(
+    velocity: cupy.ndarray,
+    density: cupy.ndarray,
+    mass: cupy.ndarray,
+    kappa_v: cupy.ndarray,
+    p_rho2: cupy.ndarray,
+    packed_info: cupy.ndarray,
+    position: cupy.ndarray,
+    cell_start: cupy.ndarray,
+    cell_end: cupy.ndarray,
+    vt_out: cupy.ndarray,
+    d_rigid_bodies: "cupy.ndarray | None" = None,
+    d_rigid_forces: "cupy.ndarray | None" = None,
+    d_rigid_torques: "cupy.ndarray | None" = None,
+    pressure_reaction: bool = False,
+) -> None:
+    """correct_velocity_div(kappa_v) then compute_pressure_accel(p_rho2) in one
+    neighbour sweep (bd-r5-review-n28.192).
+
+    velocity gets the divergence-corrected v', vt_out the predicted velocity
+    from v', exactly as the two calls in sequence. vt_out may be velocity
+    itself (no density iterations follow). With rigid bodies the divergence
+    reaction is always added; the pressure reaction only when
+    pressure_reaction is True (the last pressure call of the substep).
+    Neighbour volumes come from position[:, 3]; run pack_volume first.
+    """
+    n = position.shape[0]
+    module = _get_module()
+    kernel = module.get_function("K_DFSPH_CorrectDivAndPressureAccel")
+    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    block = (BLOCK_SIZE,)
+    rb_ptr, rf_ptr, rt_ptr = _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques)
+    kernel(grid, block, (
+        np.uint32(n), velocity, density, mass, kappa_v, p_rho2,
+        packed_info, position, cell_start, cell_end, vt_out,
+        rb_ptr, rf_ptr, rt_ptr, np.int32(1 if pressure_reaction else 0),
     ))
 
 
