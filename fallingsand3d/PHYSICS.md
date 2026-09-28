@@ -2771,6 +2771,7 @@ Per substep:
   2. Compute density rho_i + precompute alpha_i factor
      (reactions and spawn run here)
      Pack the volume carrier into sorted position.w (see below)
+     Build the solver neighbour list (20.3c)
   3. Compute non-pressure forces: f_visc, f_gravity
   4. Predict velocity: v* = v + dt * a_nonpressure   (gravity + viscosity/rho_i)
   5. Divergence-free solver (warm-started from the previous substep's
@@ -2824,10 +2825,12 @@ is still its fluid density. The next reorder overwrites `.w`, so the carrier liv
 inside the substep; Finalize writes this substep's density into the unsorted
 `position.w` for K_ComputeColor.
 
-Kernels (`dfsph_solver.cu`, 9 in total): ComputeDensityAlpha (step 2), PackVolume (2),
-NonPressureForces (3-4), ComputeKappaV and CorrectVelocityDiv (5),
+Kernels (`dfsph_solver.cu`, 10 plus 5 neighbour-list twins): ComputeDensityAlpha
+(step 2), PackVolume (2), BuildNeighborList (2, 20.3c), NonPressureForces (3-4), ComputeKappaV and CorrectVelocityDiv (5),
 CorrectDivAndPressureAccel (the last pass of 5 fused with the first sweep of 6, 13.4),
-ComputePressureAccel and DensitySolverUpdate (6), Finalize (7-8).
+ComputePressureAccel and DensitySolverUpdate (6), Finalize (7-8). ComputeKappaV,
+CorrectVelocityDiv, CorrectDivAndPressureAccel, ComputePressureAccel and
+DensitySolverUpdate each have an `_NL` twin that reads the neighbour list (20.3c).
 The Jacobi loop on p/rho^2 is the only density solver; the velocity-space density
 solver (ComputeDensityAdv, ComputeKappa, ComputeKappaFromVelocity, CorrectVelocityDens,
 PredictPosition) was removed. Iteration counts N_div and N_dens are host-side loop
@@ -3339,12 +3342,18 @@ memory above 0 B is a spill or a stack array.
 | K_PBF_Finalize | (256, 4) | 64 | 8 B | |
 | K_DFSPH_ComputeDensityAlpha | (256, 3) | 80 | 0 B | (256, 4): 64 regs, 40 B |
 | K_DFSPH_PackVolume | (256) | 14 | 0 B | |
+| K_DFSPH_BuildNeighborList | (256) | 26 | 0 B | |
 | K_DFSPH_NonPressureForces | (256, 4) | 64 | 8 B | |
-| K_DFSPH_ComputeKappaV | (256, 4) | 40 | 0 B | |
-| K_DFSPH_CorrectVelocityDiv | (256, 4) | 56 | 0 B | |
-| K_DFSPH_ComputePressureAccel | (256, 4) | 56 | 0 B | |
-| K_DFSPH_CorrectDivAndPressureAccel | (256, 4) | 62 | 0 B | |
-| K_DFSPH_DensitySolverUpdate | (256, 4) | 43 | 0 B | |
+| K_DFSPH_ComputeKappaV | (256, 4) | 45 | 0 B | |
+| K_DFSPH_ComputeKappaV_NL | (256, 4) | 56 | 0 B | |
+| K_DFSPH_CorrectVelocityDiv | (256, 4) | 61 | 0 B | |
+| K_DFSPH_CorrectVelocityDiv_NL | (256, 4) | 62 | 0 B | |
+| K_DFSPH_ComputePressureAccel | (256, 4) | 62 | 0 B | |
+| K_DFSPH_ComputePressureAccel_NL | (256, 4) | 64 | 0 B | |
+| K_DFSPH_CorrectDivAndPressureAccel | (256, 4) | 60 | 0 B | |
+| K_DFSPH_CorrectDivAndPressureAccel_NL | (256, 4) | 63 | 0 B | |
+| K_DFSPH_DensitySolverUpdate | (256, 4) | 40 | 0 B | |
+| K_DFSPH_DensitySolverUpdate_NL | (256, 4) | 54 | 0 B | |
 | K_DFSPH_Finalize | (256, 4) | 56 | 0 B | |
 
 K_Step1 does not spill at (256, 4), so its GRANULAR strain and FLUID
@@ -3824,13 +3833,69 @@ about 5.1-5.2 ms to 4.6-4.8 ms in uncontended runs (bench_substep.py).
 **Source**: `step1.cu:K_Step1` (`pr2_omega_out`), `step2.cu:K_Step2`
 (`pr2_omega_in`), `world.py` (`sorted_pr2_omega`), `simulation.py:_run_wcsph_body`
 
-### 20.3a No neighbour-list path
+### 20.3a No WCSPH neighbour-list path
 
 Every WCSPH neighbour loop scans the 27 grid cells directly; there are no
 neighbour lists. A neighbour-list variant (`K_Step1_BuildNL`, `K_Step1_NL`,
 `K_Step2_NL` in `neighbor_list.cu`) netted only about 6% at 1M particles
 (`perf_benchmark.md`), so it was retired (bd-r5-review-n28.154). Its copy of the
 step1 loop had to be kept in sync with `K_Step1` by hand.
+
+### 20.3c DFSPH neighbour list (bd-r5-review-n28.198)
+
+The DFSPH solver loops run many sweeps per substep over positions that do not
+change inside the substep: with the DFSPH profile (3 divergence and 4 density
+iterations) that is 15 sweeps (warm-start correction, 3 ComputeKappaV, 2
+CorrectVelocityDiv, the fused sweep, 4 x (DensitySolverUpdate +
+ComputePressureAccel)). Each hash walk loads about 6 candidates per real
+neighbour. `K_DFSPH_BuildNeighborList` walks the 27 cells once per substep,
+right after PackVolume (so after reactions and spawn), and every later kernel in
+the substep leaves position and packed_info alone, so the list stays valid until
+Finalize. It is rebuilt on every substep, sort-skip substeps included.
+
+```
+entry:   every j != i with 1e-12 <= |x_i - x_j|^2 <= h^2 and j not GAS,
+         in the hash walk's cell and slot order; STATIC and sleeping j stay in
+layout:  nl[k * stride + i] (interleaved, uint32 index), stride = max_particles
+count:   nl_count[i] = true neighbour count; 0 for STATIC, GAS, sleeping i
+width:   DFSPH_NL_MAX = 64 entries per particle (256 MB at 1M particles)
+```
+
+The `_NL` twins of ComputeKappaV, CorrectVelocityDiv, ComputePressureAccel,
+CorrectDivAndPressureAccel and DensitySolverUpdate share one templated body with
+the hash kernels (`dfsph_for_each_candidate<NL>`). The pair body keeps its own
+GAS and distance tests, so both paths see the same neighbours in the same order
+and give bit-identical results (`test_dfsph_neighbor_list.py`). A particle with
+more than 64 neighbours (heavy compression) walks the hash grid in the `_NL`
+kernel instead, so no neighbour is dropped. Only indices are stored: `V_j *
+gradW` would need fp32 (|gradW| is about 1e6 at h = 0.04 and the interior sums
+nearly cancel), and 12 B per entry would triple the memory. ComputeDensityAlpha,
+NonPressureForces and Finalize keep the hash walk. `Simulation.
+dfsph_neighbor_list_enabled = False` turns the list off (and frees it).
+
+Measured with `bench_substep.py` (Dam Break, DFSPH profile, full sort every
+substep, shared RTX 5070 Ti, fresh CuPy cache, two runs each, medians in ms). The
+build runs inside the non_pressure stage:
+
+| n | stage | hash walk | list |
+|---|---|---|---|
+| 500K | non_pressure (incl. build) | 0.87 | 1.35 |
+| 500K | divergence | 3.10 | 1.22 |
+| 500K | density_solve | 4.57-4.60 | 1.89 |
+| 500K | total | 10.75-10.81 | 6.54 |
+| 992K | non_pressure (incl. build) | 1.84-1.85 | 2.76-2.77 |
+| 992K | divergence | 6.50-6.55 | 2.43 |
+| 992K | density_solve | 9.60-9.64 | 3.73 |
+| 992K | total | 22.96-23.16 | 13.24-13.31 |
+
+Position checksums with and without the list stay inside the run-to-run spread
+of the hash path, and `eval_solvers.py` gives the same 68/72 with the same four
+non-DFSPH failures either way.
+
+**Source**: `dfsph_solver.cu` (`K_DFSPH_BuildNeighborList`,
+`dfsph_for_each_candidate`, the `*_NL` kernels), `dfsph_solver.py`
+(`alloc_neighbor_list`, `build_neighbor_list`, `neighbor_list=`),
+`simulation.py:_run_dfsph_body`, `_ensure_dfsph_neighbor_list`
 
 ### 20.4 Warm-start kappa_v (PERF-008) and per-solver reorder skips
 
