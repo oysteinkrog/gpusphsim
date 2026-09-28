@@ -862,6 +862,9 @@ class Simulation:
         self.sdf_manager.clear()
         self.rigid_body_manager.reset()
         self.rigid_body_manager.upload(self.get_all_modules())
+        # The next scene may bring back the same body count and particle
+        # count, so do not rely on _rigid_graph_key or n to recapture.
+        self._invalidate_graphs()
 
     def notify_scene_changed(self) -> None:
         """Signal that the particle set was mutated outside the substep loop
@@ -1067,7 +1070,7 @@ class Simulation:
         from materials import GUNPOWDER
         if GUNPOWDER in w._spawned_material_ids:
             # Blast impulse on rigid boundary particles goes to the body
-            # force/torque accumulators (zeroed in the substep prologue).
+            # force/torque accumulators (zeroed at the start of _run_graph_body).
             rbm = self.rigid_body_manager
             has_bodies = rbm.num_bodies > 0
             reactions.compute_blast_wave(
@@ -1135,6 +1138,18 @@ class Simulation:
         (see _maybe_compact_foam), so the captured pointers stay valid.
         """
         foam.increment_counter(self._frame_counter_d)
+        # Zero the rigid force/torque accumulators before the solver adds to
+        # them. Two memset nodes in the graph, so a replay issues no host
+        # launch for them (bd-r5-review-n28.190). K_IntegrateRigidBodies
+        # zeroes a dynamic body's row after reading it, but a kinematic body
+        # keeps its row readable after the substep (bd-r5-review-n28.105), and
+        # the frozen-body path skips the kernel, so the clear stays here.
+        # The body count is part of _rigid_graph_key, so the branch is baked
+        # in safely; the buffers are allocated once.
+        rbm = self.rigid_body_manager
+        if rbm.num_bodies > 0:
+            rbm.rigid_forces.data.memset_async(0x00, rbm.rigid_forces.nbytes)
+            rbm.rigid_torques.data.memset_async(0x00, rbm.rigid_torques.nbytes)
         if self._profile.solver_type == SolverType.PBF:
             self._run_pbf_body(n, mark)
         elif self._profile.solver_type == SolverType.DFSPH:
@@ -1822,10 +1837,11 @@ class Simulation:
             self._invalidate_graphs()
             self._graph_foam_enabled = foam_on
         # Rigid bodies stay in the graph (bd-r5-review-n28.182): the prologue
-        # zeroes the accumulators and moves the boundary block, and the
-        # epilogue integrates the bodies, both outside the graph. The body
-        # buffers are allocated once, so only the state the body bakes in
-        # needs a new capture when it changes.
+        # moves the boundary block and the epilogue integrates the bodies,
+        # both outside the graph; the graph body zeroes the accumulators
+        # (bd-r5-review-n28.190). The body buffers are allocated once, so
+        # only the state the body bakes in needs a new capture when it
+        # changes.
         rigid_key = self._rigid_graph_key()
         if self._graph_rigid_key != rigid_key:
             self._invalidate_graphs()
@@ -1900,8 +1916,9 @@ class Simulation:
         """Per-substep host-side setup shared by _sim_step and _sim_step_timed.
 
         Applies the spawn damping ramp, moves
-        rigid-body boundary particles (may change n), zeroes the rigid force
-        accumulators and advances kinematic SDF objects.  Returns the new n.
+        rigid-body boundary particles (may change n) and advances kinematic
+        SDF objects.  Returns the new n.  The rigid force accumulators are
+        zeroed at the start of _run_graph_body.
         """
         # --- Spawn velocity damping ramp ---
         self._apply_damping_ramp()
@@ -1918,11 +1935,6 @@ class Simulation:
         rbm = self.rigid_body_manager
         if rbm.num_bodies > 0 and rbm.num_boundary_particles > 0:
             n = self._update_rigid_boundary(n)
-
-        # Zero rigid body force/torque accumulators before solver
-        if rbm.num_bodies > 0:
-            rbm.rigid_forces.fill(0)
-            rbm.rigid_torques.fill(0)
 
         # --- Update kinematic SDF objects ---
         if self.sdf_manager._motions:
