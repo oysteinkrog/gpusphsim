@@ -3954,6 +3954,41 @@ seeing it, so the next frame does a full sort.
 `_update_sort_skip_decision` (latch, prediction and threshold logic),
 `spawn.cu:K_SpawnGas` (+inf on spawn)
 
+**In-place writeback (WCSPH, bd-r5-review-n28.196).** Within one frame every
+substep takes the same branch, so on a grid-reuse frame the sort permutation
+is the same for all its substeps. `step_frame` passes `in_place_ok` for every
+substep but the last, and `_plan_substep_writeback` then runs K_Integrate with
+`write_mode` 1: it writes position, velocity, packed_info, sleep counter and
+temperature back to the sorted arrays at slot i, and rewrites the FP16
+velocity and temperature mirrors. The next substep skips K_GatherReorder
+(`_reorder_skip`), since the sorted arrays are already current. Wake runs on
+the sorted arrays on those substeps; it is per particle and order-free. The
+frame's last substep scatters to the unsorted arrays as before (`write_mode`
+2, see 21.5), so the renderer, compaction, snapshots, save and the brush
+always read current unsorted state after `step_frame`. Nothing else changes
+the physics: each substep reads the same sorted values the gather would have
+produced.
+
+K_Integrate reads no neighbour slots on this path (the STATIC push-out needs
+`cell_start`, which WCSPH does not pass), so writing slot i in place has no
+race. The aliased pointers carry no `__restrict__`. In-place writeback is off
+with rigid bodies, because `K_UpdateBoundaryParticles` moves the boundary
+block in the unsorted arrays before each substep and only a gather carries
+that into sorted space. It is off for PBF and DFSPH, whose finalize kernels
+always scatter. Direct `_sim_step` callers keep the default
+`in_place_ok=False`. A reuse frame uses three extra CUDA graph variants,
+keyed by (skip reorder, in place) in `_graph_reuse_variants`.
+
+At 992K particles (WCSPH, zero-gravity block, shared GPU), a reuse substep
+went from 5.10 ms to 4.42 ms in the middle of a frame (no gather, K_Integrate
+0.48 to 0.16 ms), 4.77 ms on the first and 4.73 ms on the last. A 4-substep
+reuse frame on the CUDA graphs went from 22.7 ms to 19.8 ms (median).
+Full-sort substeps are unchanged.
+
+**Source**: `integrate.cu:K_Integrate` (`write_mode`),
+`simulation.py:_plan_substep_writeback`, `_run_grid_setup`,
+`_run_wcsph_body`, `step_frame`
+
 ## 10.13 Micropolar SPH (removed)
 
 The simulation has no micropolar model. Particles carry no angular velocity,
@@ -4117,7 +4152,13 @@ readers mask packed_info fields, so a set bit has no effect there.
 In the same kernel, a particle that stays asleep stores its zero velocity only
 when the gathered velocity is not all-zero bits: on its first sleeping substep,
 or after a kick below the wake threshold. Later sleeping substeps skip the
-store because the unsorted velocity is already zero. The position store stays,
+store because the unsorted velocity is already zero.
+
+On an in-place substep (20.5) K_Integrate leaves the bit set, since health,
+lifetime and mass are already current in sorted space, and the scatter that
+ends the frame carries them out. That scatter (`write_mode` 2) also stores
+every sleeper's zero velocity, because the unsorted copy is older than the
+sorted input there. The position store stays,
 because `.w` carries the density.
 
 At 1M particles (dam break, no reactions) the K_Integrate median went from
