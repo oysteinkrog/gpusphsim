@@ -165,6 +165,10 @@ class Simulation:
         self.compact_threshold = compact_threshold
         # --- CUDA graph capture state ---
         self._sort_perm = cupy.empty(world.max_particles, dtype=cupy.uint32)
+        # Deterministic within-cell sort order, off by default (see the
+        # deterministic_sort property). The scratch permutation exists only
+        # while the mode is on (bd-r5-review-n28.200).
+        self._sort_perm_scratch: Optional[cupy.ndarray] = None
         self._frame_counter_d = cupy.zeros(1, dtype=cupy.uint32)
         # world.foam_enabled the graphs were captured with. The body launches
         # K_FoamPhysics only with foam on, so a toggle drops the graphs.
@@ -1013,6 +1017,11 @@ class Simulation:
             )
             hash_positions = w.predicted_position[:n]
 
+        perm_scratch = self._sort_perm_scratch
+        if perm_scratch is not None and perm_scratch.shape[0] < n:
+            # World.resize grew the pool (host shape check, no sync).
+            perm_scratch = self._sort_perm_scratch = cupy.empty(
+                self.world.max_particles, dtype=cupy.uint32)
         counting_sort.counting_sort_full(
             num_particles=n,
             num_cells=self._table_size,
@@ -1050,6 +1059,7 @@ class Simulation:
             sorted_velocity_h=sorted_velocity_h,
             sorted_temperature_h=sorted_temperature_h,
             sorted_anchor=w.sorted_anchor,
+            perm_scratch=perm_scratch[:n] if perm_scratch is not None else None,
         )
 
     def _run_reactions_spawn(
@@ -1886,6 +1896,32 @@ class Simulation:
         if int(self._sim_params[0]["thermal_enabled"]) != on:
             self._sim_params[0]["thermal_enabled"] = on
             self._upload_sim_params_all()
+
+    @property
+    def deterministic_sort(self) -> bool:
+        """True when every full sort orders each cell by particle index.
+
+        Off by default. The production sort claims slots with an atomic, so
+        the order inside a cell (and so the float summation order of every
+        SPH loop) changes run to run. With this on, two runs from the same
+        state give bit-identical results, which tests and bisects need. It
+        adds one launch per full sort (see counting_sort.K_RankInCell) and
+        works inside the CUDA graphs (bd-r5-review-n28.200).
+        """
+        return self._sort_perm_scratch is not None
+
+    @deterministic_sort.setter
+    def deterministic_sort(self, on: bool) -> None:
+        if bool(on) == self.deterministic_sort:
+            return
+        self._sort_perm_scratch = (
+            cupy.empty(self.world.max_particles, dtype=cupy.uint32) if on else None
+        )
+        # The full-sort graph bakes in the launch list; force a fresh sort
+        # so grid reuse never gathers through a perm from the other mode.
+        self._invalidate_graphs()
+        self._sort_skip_next = False
+        self._last_full_sort_n = -1
 
     def _invalidate_graphs(self) -> None:
         """Invalidate both CUDA graphs (call when constants/solver/grid changes)."""

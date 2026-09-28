@@ -10,6 +10,10 @@
  *                         and drains histogram[] back to zero
  *   5. K_GatherReorder -- gathers every particle array through sort_perm
  *
+ * Deterministic mode (tests and bisects, bd-r5-review-n28.200): K_ScatterPerm
+ * writes a scratch permutation and K_RankInCell orders each cell by original
+ * index into sort_perm before the gather. Six launches, still no allocation.
+ *
  * cell_start / cell_end are the views offsets[:-1] / offsets[1:] of the cell
  * offsets table described next to GridParams in common.cuh. The scan writes
  * the inclusive sum into cell_end only; offsets[0] stays 0, so cell_start is
@@ -159,7 +163,8 @@ void K_ScanDownsweep(
  *
  * k = atomicSub(&histogram[hash], 1) runs from count down to 1 within a
  * cell, so sorted_idx = cell_end[hash] - k covers cell_start .. cell_end - 1
- * exactly once. Within-cell order is non-deterministic (acceptable for SPH).
+ * exactly once. Within-cell order is non-deterministic (acceptable for SPH);
+ * K_RankInCell makes it deterministic for tests.
  * After the kernel every histogram slot is back at zero, which is the
  * pre-condition of the next K_HashHistogram. Nothing reads histogram[]
  * after this kernel.
@@ -178,6 +183,42 @@ void K_ScatterPerm(
     const uint hash = hashes[idx];
     const uint k = atomicSub(&histogram[hash], 1u);
     sort_perm_out[cell_end[hash] - k] = idx;
+}
+
+/* ======================================================================
+ * K_RankInCell -- deterministic within-cell order (test / bisect mode,
+ * bd-r5-review-n28.200).
+ *
+ * K_ScatterPerm leaves each cell's slots in atomic order, which changes run
+ * to run. This kernel reorders every cell by original particle index:
+ * sorted slot s holds v = perm_in[s] in cell hash = hashes[v]; its rank is
+ * the number of indices in that cell smaller than v, so
+ * perm_out[cell_start + rank] = v is a stable counting sort. Indices are
+ * unique, so the ranks within a cell are a permutation of 0 .. count - 1.
+ *
+ * Cost is one pass over the cell per particle (sum of count^2), so it is
+ * meant for tests only; production leaves it off. perm_in and perm_out must
+ * not alias.
+ * ====================================================================== */
+extern "C" __global__
+void K_RankInCell(
+    const uint     numParticles,
+    const uint*   __restrict__ hashes,
+    const uint*   __restrict__ cell_start,     // [num_cells] = offsets
+    const uint*   __restrict__ cell_end,       // [num_cells] = offsets + 1
+    const uint*   __restrict__ perm_in,        // [N] atomic order from K_ScatterPerm
+    uint*         __restrict__ perm_out        // [N] ordered by index in each cell
+) {
+    const uint s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= numParticles) return;
+
+    const uint v = perm_in[s];
+    const uint hash = hashes[v];
+    const uint start = cell_start[hash];
+    const uint end = cell_end[hash];
+    uint rank = 0;
+    for (uint j = start; j < end; ++j) rank += (perm_in[j] < v) ? 1u : 0u;
+    perm_out[start + rank] = v;
 }
 
 /* ======================================================================

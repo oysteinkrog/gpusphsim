@@ -8,6 +8,13 @@ Full sort, five kernel launches (all CUDA-graph-capturable, bd-r5-review-n28.189
                         drain the histogram back to zero
   5. K_GatherReorder -- gather every particle array through sort_perm
 
+Deterministic mode (bd-r5-review-n28.200): pass perm_scratch to
+counting_sort_full. K_ScatterPerm then writes its atomic-order permutation to
+perm_scratch and K_RankInCell orders each cell by original particle index
+into sort_perm, so the same input always gives the same sort_perm. It costs
+one extra launch that does sum(count^2) work per sort, so it is for tests and
+bisects only. It stays graph-capturable and allocation-free.
+
 The scan is our own: cupy.cumsum takes a CUB workspace from the memory pool
 on every call, and inside a CUDA graph capture the instantiated graph would
 keep a raw pointer to a block the pool has already taken back. No step
@@ -242,6 +249,8 @@ def counting_sort_full(
     # Ignored: the micropolar angular velocity was removed (n28.140)
     angular_velocity: "Optional[cupy.ndarray]" = None,
     sorted_angular_velocity: "Optional[cupy.ndarray]" = None,
+    # Deterministic within-cell order (bd-r5-review-n28.200)
+    perm_scratch: "Optional[cupy.ndarray]" = None,
 ) -> None:
     """Run the full counting sort (hash + histogram + prefix sum + scatter + gather).
 
@@ -262,6 +271,12 @@ def counting_sort_full(
     may be None: the kernel then skips that gather and store. kappa and
     kappa_v may be None when their sorted output is None.
 
+    perm_scratch, when given, turns on the deterministic mode: a uint32
+    buffer of at least num_particles entries that must not overlap
+    sort_perm. Each cell's slots are then in ascending original index, so
+    sort_perm depends only on the hashes. None (the default) keeps the
+    atomic, run-to-run varying order inside a cell.
+
     All operations are CUDA-graph-capturable.
     """
     if num_particles == 0:
@@ -280,6 +295,11 @@ def counting_sort_full(
         raise ValueError("histogram / block_sums do not match num_cells")
 
     _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v)
+    if perm_scratch is not None:
+        if perm_scratch.dtype != cupy.uint32 or perm_scratch.shape[0] < num_particles:
+            raise ValueError("perm_scratch must be uint32 with >= num_particles entries")
+        if perm_scratch.data.ptr == sort_perm.data.ptr:
+            raise ValueError("perm_scratch must not alias sort_perm")
 
     module = _get_module()
 
@@ -298,9 +318,16 @@ def counting_sort_full(
     inclusive_scan(num_cells, histogram, block_sums, cell_end)
 
     # 4. Sorted slot per particle -> sort_perm; histogram ends at zero.
+    # Deterministic mode: scatter to perm_scratch, then order each cell by
+    # original index into sort_perm.
+    scatter_out = sort_perm if perm_scratch is None else perm_scratch
     module.get_function("K_ScatterPerm")(grid_p, block_p, (
-        n_u32, hashes, cell_end, histogram, sort_perm,
+        n_u32, hashes, cell_end, histogram, scatter_out,
     ))
+    if perm_scratch is not None:
+        module.get_function("K_RankInCell")(grid_p, block_p, (
+            n_u32, hashes, cell_start, cell_end, perm_scratch, sort_perm,
+        ))
 
     # 5. Gather the particle data through sort_perm, drift anchor included.
     gather_reorder(
