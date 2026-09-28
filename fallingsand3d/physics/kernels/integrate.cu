@@ -1,8 +1,9 @@
 /*
  * integrate.cu -- K_Integrate kernel: symplectic Euler integration,
  * impulse-style SDF box boundaries, GAS buoyancy/drag, velocity clamping,
- * and writeback to UNSORTED arrays via sort_indexes. K_ComputeColor: the
- * per-frame render color.
+ * and writeback to UNSORTED arrays via sort_indexes, or in place to the
+ * sorted arrays on a grid-reuse substep (write_mode, below). K_ComputeColor:
+ * the per-frame render color.
  *
  * Per-particle computation:
  *   1. Compute acceleration: accel = sph_force + gravity + gas_buoyancy
@@ -15,7 +16,8 @@
  *   6. Impulse SDF boundary: 6 planes of box, project out, reflect normal vel
  *      with restitution, apply Coulomb friction to tangential vel
  *   7. Temperature integration: T += dTdt*dt - cool_rate*(T-T_ambient)*dt, clamp [0,5000]
- *   8. Write pos, vel, temperature to UNSORTED arrays via sort_indexes[i]
+ *   8. Write pos, vel, temperature to UNSORTED arrays via sort_indexes[i],
+ *      or in place to sorted slot i (write_mode, below)
  *
  * Render color is not stored here: K_ComputeColor (below) computes it once
  * per frame from the unsorted arrays (bd-r5-review-n28.145).
@@ -56,42 +58,69 @@ __constant__ const RigidBody* c_rigid_bodies;
 
 /* ======================================================================
  * K_Integrate kernel
+ *
+ * write_mode (bd-r5-review-n28.196):
+ *   INTEGRATE_SCATTER (0): write through sort_indexes to the UNSORTED
+ *     arrays. The sorted inputs were gathered from them this substep.
+ *   INTEGRATE_IN_PLACE (1): a grid-reuse substep whose next substep reuses
+ *     the grid too. The *_out pointers are the sorted input arrays
+ *     themselves and each thread writes its own slot i, so the next
+ *     substep reads the sorted arrays with no K_GatherReorder and this
+ *     kernel does no scattered stores. The FP16 velocity and temperature
+ *     mirrors are rewritten here, since no gather rebuilds them. The
+ *     state-dirty bit stays set, so the next scatter still carries health,
+ *     lifetime and mass back. Needs cell_start == NULL: the STATIC push-out
+ *     reads neighbour slots that other threads are rewriting.
+ *   INTEGRATE_SCATTER_AFTER_IN_PLACE (2): as 0, after one or more in-place
+ *     substeps. The unsorted arrays are then older than the sorted inputs,
+ *     so a sleeper's zero velocity is stored even when the input is zero.
+ *
+ * The sorted inputs that mode 1 rewrites and their *_out pointers carry no
+ * __restrict__, since they alias in that mode; each thread loads its own
+ * slot before it stores it.
  * ====================================================================== */
+
+#define INTEGRATE_SCATTER                0u
+#define INTEGRATE_IN_PLACE               1u
+#define INTEGRATE_SCATTER_AFTER_IN_PLACE 2u
 
 extern "C" __global__ __launch_bounds__(256, 4)
 void K_Integrate(
     uint            numParticles,
     // --- Sorted inputs (read) ---
-    const float4*   __restrict__ sorted_position,      // sorted positions
-    const float4*   __restrict__ sorted_velocity,      // sorted velocities
+    const float4*   sorted_position,                   // sorted positions (aliases position_out in mode 1)
+    const float4*   sorted_velocity,                   // sorted velocities (aliases velocity_out in mode 1)
     const float4*   __restrict__ sorted_veleval,       // sorted veleval (vel + eps*xsph_sum), read for awake FLUID only
     const float4*   __restrict__ sorted_sph_force,     // sorted SPH force from Step2
     const float*    __restrict__ sorted_mass,           // sorted per-particle mass
-    const uint*     __restrict__ sorted_packed_info,    // sorted packed_info
-    const float*    __restrict__ sorted_temperature,    // sorted temperature
+    const uint*     sorted_packed_info,                 // sorted packed_info (aliases packed_info_out in mode 1)
+    const float*    sorted_temperature,                 // sorted temperature (aliases temperature_out in mode 1)
     const float*    __restrict__ sorted_health,         // sorted health
     const float*    __restrict__ sorted_lifetime,       // sorted remaining lifetime (seconds)
     const float*    __restrict__ sorted_density,        // sorted density (from Step1)
     const float*    __restrict__ sorted_shear_rate,     // sorted shear rate (from Step1)
     const float*    __restrict__ sorted_dTdt,           // sorted dTdt (heat diffusion from Step1)
-    const unsigned char* __restrict__ sorted_sleep_counter, // sorted sleep counter (uint8)
+    const unsigned char* sorted_sleep_counter,          // sorted sleep counter (uint8, aliases sleep_counter_out in mode 1)
     const uint*     __restrict__ sort_indexes,          // sort_indexes[sorted_i] = original_i
     // --- Grid arrays for STATIC boundary repulsion ---
     const uint*     __restrict__ cell_start,            // grid cell start indices
     const uint*     __restrict__ cell_end,              // grid cell end indices
-    // --- Unsorted outputs (write via sort_indexes) ---
-    float4*         __restrict__ position_out,          // unsorted position
-    float4*         __restrict__ velocity_out,          // unsorted velocity
-    uint*           __restrict__ packed_info_out,       // unsorted packed_info (sleep flag updates)
-    unsigned char*  __restrict__ sleep_counter_out,     // unsorted sleep counter
-    float*          __restrict__ temperature_out,       // unsorted temperature (updated)
+    // --- Outputs: unsorted via sort_indexes, or the sorted inputs in mode 1 ---
+    float4*         position_out,                       // position
+    float4*         velocity_out,                       // velocity
+    uint*           packed_info_out,                    // packed_info (sleep flag updates)
+    unsigned char*  sleep_counter_out,                  // sleep counter
+    float*          temperature_out,                    // temperature (updated)
     float*          __restrict__ health_out,             // unsorted health (reaction state carry-back)
     float*          __restrict__ lifetime_out,           // unsorted lifetime (reaction state carry-back)
     float*          __restrict__ mass_out,               // unsorted mass (spawn/reaction state carry-back)
     uint*           __restrict__ max_displacement_out,   // [1] atomicMax of displacement^2 (float-as-uint)
     const float4*   __restrict__ displacement_anchor, // [N] sorted position at the last full sort, or NULL
     uint*           __restrict__ cell_wake_flags,     // wake stamp table, or NULL (bd-r5-review-n28.166)
-    const uint*     __restrict__ frame_ptr            // per-substep counter for the stamp, or NULL
+    const uint*     __restrict__ frame_ptr,           // per-substep counter for the stamp, or NULL
+    const uint      write_mode,                       // INTEGRATE_* above
+    void*           __restrict__ velocity_h_out,      // mode 1: sorted FP16 velocity mirror, or NULL
+    void*           __restrict__ temperature_h_out    // mode 1: sorted fixed-point temperature, or NULL
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -101,8 +130,9 @@ void K_Integrate(
     int behavior = GET_BEHAVIOR(pi);
     uint mat_id = GET_MATERIAL_ID(pi);
 
-    // Unsorted index for writeback
-    uint orig_idx = sort_indexes[i];
+    // Output slot: the unsorted index, or slot i when writing in place
+    const bool in_place = (write_mode == INTEGRATE_IN_PLACE);
+    const uint orig_idx = in_place ? i : sort_indexes[i];
 
     // --- Carry reaction/spawn state (health, lifetime, mass) back to unsorted.
     // These are mutated by K_Reactions / K_SpawnGas in sorted space but never by
@@ -114,8 +144,10 @@ void K_Integrate(
     // and each scattered 4 B store costs a 32 B sector (bd-r5-review-n28.162).
     // The bit is cleared here; every path below writes pi back to
     // packed_info_out, so the unsorted packed_info never keeps it.
-    // Done before the branches so it covers the STATIC / sleeping early-returns. ---
-    if (HAS_STATE_DIRTY(pi)) {
+    // Done before the branches so it covers the STATIC / sleeping early-returns.
+    // In place the three arrays are already current in sorted space, so the
+    // bit stays set for the scatter that ends the in-place run. ---
+    if (!in_place && HAS_STATE_DIRTY(pi)) {
         pi = CLEAR_STATE_DIRTY(pi);
         if (health_out)   health_out[orig_idx]   = sorted_health[i];
         if (lifetime_out) lifetime_out[orig_idx] = sorted_lifetime[i];
@@ -129,8 +161,7 @@ void K_Integrate(
         // K_UpdateBoundaryParticles wrote, so the unsorted array matches the
         // body for later readers such as wake (bd-r5-review-n28.87).
         float4 pos4 = sorted_position[i];
-        position_out[orig_idx] = pos4;
-        velocity_out[orig_idx] = (mat_id == MAT_RIGID)
+        const float4 vel_store = (mat_id == MAT_RIGID)
             ? sorted_velocity[i]
             : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         float temp = sorted_temperature[i];
@@ -139,9 +170,19 @@ void K_Integrate(
         temp += dTdt * c_sim.dt;
         temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
         temp = fmaxf(T_MIN, fminf(temp, T_MAX));
+        const unsigned char sc_static = sorted_sleep_counter[i];
+        position_out[orig_idx] = pos4;
+        velocity_out[orig_idx] = vel_store;
         packed_info_out[orig_idx] = pi;
-        sleep_counter_out[orig_idx] = sorted_sleep_counter[i];
+        sleep_counter_out[orig_idx] = sc_static;
         temperature_out[orig_idx] = temp;
+        if (in_place) {
+            if (velocity_h_out)
+                store_half4((uint2*)velocity_h_out + i,
+                            make_float4(vel_store.x, vel_store.y, vel_store.z,
+                                        __fdiv_rn(sorted_mass[i], MASS_H_UNIT)));
+            if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + i, temp);
+        }
         return;
     }
 
@@ -194,15 +235,25 @@ void K_Integrate(
             // store the zero only while the gathered velocity is not all-zero
             // bits (the first sleeping substep, or a kick below the wake
             // threshold from reactions or the blast wave) (bd-r5-review-n28.162).
+            // After an in-place run the unsorted copy is older than the
+            // input, so the zero is always stored (bd-r5-review-n28.196).
             position_out[orig_idx] = pos4;
-            if ((__float_as_uint(vel4.x) | __float_as_uint(vel4.y)
-                    | __float_as_uint(vel4.z) | __float_as_uint(vel4.w)) != 0u) {
+            if (write_mode == INTEGRATE_SCATTER_AFTER_IN_PLACE
+                    || (__float_as_uint(vel4.x) | __float_as_uint(vel4.y)
+                        | __float_as_uint(vel4.z) | __float_as_uint(vel4.w)) != 0u) {
                 velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             }
             packed_info_out[orig_idx] = pi;  // keep SLEEPING flag set
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
             temperature_out[orig_idx] = temp;
-                return;
+            if (in_place) {
+                if (velocity_h_out)
+                    store_half4((uint2*)velocity_h_out + i,
+                                make_float4(0.0f, 0.0f, 0.0f,
+                                            __fdiv_rn(sorted_mass[i], MASS_H_UNIT)));
+                if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + i, temp);
+            }
+            return;
         }
         // Wake up: clear sleeping flag, set just_woke flag, reset counter
         pi = CLEAR_SLEEPING(pi);
@@ -495,9 +546,10 @@ void K_Integrate(
     // STATIC is excluded and a sleeper never carries JUST_WOKE.
     wake_mark_own_cell(cell_wake_flags, frame_ptr, pi, behavior, vel_sq_sleep, pos_new);
 
-    // --- Write to UNSORTED arrays ---
+    // --- Write to UNSORTED arrays (or in place, mode 1) ---
     // .w carries this substep's density to the next substep: the reorder gathers it
-    // into sorted_position.w, where K_Step1 reads it as the neighbour density rho_j.
+    // into sorted_position.w (or it is already there in place), where K_Step1
+    // reads it as the neighbour density rho_j.
     // Writing 1.0 here made every awake neighbour read rho_j = 1.
     // K_ComputeColor also reads it for the FLUID render color.
     position_out[orig_idx] = make_float4(pos_new.x, pos_new.y, pos_new.z, sorted_density[i]);
@@ -505,6 +557,13 @@ void K_Integrate(
     packed_info_out[orig_idx] = pi;
     sleep_counter_out[orig_idx] = sc;
     temperature_out[orig_idx] = temp;
+    if (in_place) {
+        if (velocity_h_out)
+            store_half4((uint2*)velocity_h_out + i,
+                        make_float4(vel_new.x, vel_new.y, vel_new.z,
+                                    __fdiv_rn(mass_i, MASS_H_UNIT)));
+        if (temperature_h_out) store_t16((unsigned short*)temperature_h_out + i, temp);
+    }
 }
 
 /* ======================================================================

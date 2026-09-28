@@ -6,7 +6,8 @@ a function to launch K_Integrate which performs:
   - Impulse-style SDF box boundary collisions (restitution + Coulomb friction)
   - GAS buoyancy and drag
   - Velocity magnitude clamping
-  - Writeback to UNSORTED arrays via sort_indexes permutation
+  - Writeback to UNSORTED arrays via sort_indexes permutation, or in place
+    to the sorted arrays on a grid-reuse substep (in_place=True)
 
 and K_ComputeColor, which computes the render color once per frame from the
 unsorted arrays (compute_color below).
@@ -147,6 +148,10 @@ def integrate(
     cell_end: "Optional[cupy.ndarray]" = None,
     cell_wake_flags: "Optional[cupy.ndarray]" = None,
     frame_counter: "Optional[cupy.ndarray]" = None,
+    in_place: bool = False,
+    after_in_place: bool = False,
+    velocity_h_out: "Optional[cupy.ndarray]" = None,
+    temperature_h_out: "Optional[cupy.ndarray]" = None,
 ) -> tuple:
     """Launch K_Integrate and return outputs tuple.
 
@@ -199,6 +204,23 @@ def integrate(
         Per-substep device counter; the stamp is its value + 1. None gives
         stamp 1.
 
+    in_place : bool
+        Write every output to the sorted input arrays at slot i instead of
+        through sort_indexes (bd-r5-review-n28.196). The *_out arguments
+        are ignored and the sorted arrays are returned. Use it only when the
+        next substep reuses the grid, so it reads the sorted arrays with no
+        gather. health, lifetime and mass stay in sorted space with their
+        state-dirty bit set. Needs cell_start None (the STATIC push-out reads
+        neighbour slots).
+    after_in_place : bool
+        The unsorted outputs are older than the sorted inputs because the
+        previous substeps ran in place. Makes the scatter store every
+        sleeper's zero velocity. Ignored with in_place.
+    velocity_h_out, temperature_h_out : cupy.ndarray, optional
+        With in_place, the sorted FP16 velocity (N, 2) uint32 and fixed-point
+        temperature (N,) uint16 mirrors to rewrite, since no gather rebuilds
+        them. None skips that mirror.
+
     sorted_vorticity, sorted_angular_velocity, angular_velocity_out
         Ignored. The micropolar angular velocity had no reader and was
         removed (bd-r5-review-n28.140). The parameters stay only so callers
@@ -227,6 +249,24 @@ def integrate(
         sorted_sleep_counter = cupy.zeros(n, dtype=cupy.uint8)
     if sorted_lifetime is None:
         sorted_lifetime = cupy.zeros(n, dtype=cupy.float32)
+
+    if in_place:
+        if cell_start is not None:
+            raise ValueError("in_place needs cell_start None: the STATIC "
+                             "push-out reads slots other threads rewrite")
+        position_out = sorted_position
+        velocity_out = sorted_velocity
+        packed_info_out = sorted_packed_info
+        sleep_counter_out = sorted_sleep_counter
+        temperature_out = sorted_temperature
+        health_out = lifetime_out = mass_out = None
+        write_mode = 1
+    else:
+        write_mode = 2 if after_in_place else 0
+        velocity_h_out = temperature_h_out = None
+    sort_idx_ptr = sort_indexes if sort_indexes is not None else np.intp(0)
+    if sort_indexes is None and not in_place:
+        raise ValueError("sort_indexes is required unless in_place")
 
     # Allocate outputs if not provided.
     # sort_indexes is a permutation of [0, n), so max index = n-1 and output
@@ -284,7 +324,7 @@ def integrate(
             sorted_shear_rate,
             sorted_dTdt,
             sorted_sleep_counter,
-            sort_indexes,
+            sort_idx_ptr,
             cell_start_ptr,
             cell_end_ptr,
             position_out,
@@ -299,6 +339,9 @@ def integrate(
             anchor_ptr,
             wake_ptr,
             frame_ptr,
+            np.uint32(write_mode),
+            velocity_h_out if velocity_h_out is not None else np.intp(0),
+            temperature_h_out if temperature_h_out is not None else np.intp(0),
         ),
     )
 

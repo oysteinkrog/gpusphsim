@@ -177,6 +177,20 @@ class Simulation:
         self._graph_gather_only = None    # cupy.cuda.Graph for gather-only path
         self._graph_full_sort_n = 0       # n when full-sort graph was captured
         self._graph_gather_only_n = 0     # n when gather-only graph was captured
+        # Grid-reuse variants with an in-place K_Integrate or no reorder
+        # (bd-r5-review-n28.196): (skip_reorder, in_place) -> (graph, n).
+        # (False, False) is _graph_gather_only above.
+        self._graph_reuse_variants: dict = {}
+        # In-place writeback state (bd-r5-review-n28.196). _sorted_is_current:
+        # the last substep ran K_Integrate in place, so the sorted arrays hold
+        # the state and the unsorted arrays are older. It is only ever True
+        # between two substeps of one step_frame, because the frame's last
+        # substep always scatters. _reorder_skip and _integrate_in_place are
+        # this substep's plan (_plan_substep_writeback); each captured graph
+        # bakes in one plan.
+        self._sorted_is_current = False
+        self._reorder_skip = False
+        self._integrate_in_place = False
         # World.buffer_generation the graphs were captured with. compact()
         # swaps array references, which changes the pointers a graph baked in.
         self._graph_buffer_gen = getattr(world, "buffer_generation", 0)
@@ -931,6 +945,16 @@ class Simulation:
         # that a gather-only graph never bakes in a full sort.
         self._last_setup_was_full_sort = not (self._sort_skip_next and not force_sort)
 
+        if self._reorder_skip:
+            # The last substep's K_Integrate wrote the sorted arrays in place,
+            # so they are already current; the unsorted ones are older and
+            # must not be gathered (bd-r5-review-n28.196).
+            if self._last_setup_was_full_sort:
+                raise RuntimeError("in-place writeback left the unsorted "
+                                   "arrays stale before a full sort")
+            self._sort_skipped_count += 1
+            return
+
         if self._sort_skip_next and not force_sort:
             # Grid reuse: just re-gather unsorted -> sorted using old sort_perm
             self._sort_skipped_count += 1
@@ -1266,7 +1290,11 @@ class Simulation:
                 w.sorted_velocity[:n] = result
             mark("ist")
 
-        # Integrate (pass max_displacement for grid reuse tracking)
+        # Integrate (pass max_displacement for grid reuse tracking).
+        # In place when the next substep reuses the grid: the outputs go to
+        # the sorted arrays at slot i and the next substep runs no gather
+        # (bd-r5-review-n28.196). Otherwise scatter to the unsorted arrays.
+        in_place = self._integrate_in_place
         integrate.integrate(
             w.sorted_position[:n],
             w.sorted_velocity[:n],
@@ -1302,16 +1330,22 @@ class Simulation:
             # Enabling it is a separate physics decision (bd-r5-review-n28.166).
             cell_wake_flags=self._cell_wake_flags,
             frame_counter=self._frame_counter_d,
+            in_place=in_place,
+            after_in_place=self._reorder_skip,
+            velocity_h_out=w.sorted_velocity_h if in_place else None,
+            temperature_h_out=w.sorted_temperature_h if in_place else None,
         )
         mark("integrate")
 
         # Wake propagation: integrate wrote the own-cell stamps, so only the
-        # rigid marks and the sleeper probe run (per-substep stamp, no memset)
+        # rigid marks and the sleeper probe run (per-substep stamp, no memset).
+        # Per-particle and order-free, so it runs on whichever arrays
+        # integrate just wrote.
         wake.run_wake_propagation(
-            w.position[:n],
-            w.velocity[:n],
-            w.packed_info[:n],
-            w.sleep_counter[:n],
+            (w.sorted_position if in_place else w.position)[:n],
+            (w.sorted_velocity if in_place else w.velocity)[:n],
+            (w.sorted_packed_info if in_place else w.packed_info)[:n],
+            (w.sorted_sleep_counter if in_place else w.sleep_counter)[:n],
             self._cell_wake_flags,
             num_particles=n,
             frame_counter=self._frame_counter_d,
@@ -1804,6 +1838,52 @@ class Simulation:
         self._graph_gather_only = None
         self._graph_full_sort_n = 0
         self._graph_gather_only_n = 0
+        self._graph_reuse_variants = {}
+
+    def _plan_substep_writeback(self, n: int, in_place_ok: bool) -> None:
+        """Pick this substep's reorder and K_Integrate writeback (host only).
+
+        in_place_ok: step_frame passes True for every substep but the
+        frame's last. A grid-reuse WCSPH substep then runs K_Integrate in
+        place on the sorted arrays, and the next substep skips the gather.
+        The frame's last substep always scatters, so the unsorted arrays
+        are current whenever step_frame returns and every host reader
+        (renderer, compaction, snapshots, save, brush) sees the new state
+        (bd-r5-review-n28.196).
+
+        Off with rigid bodies: K_UpdateBoundaryParticles moves the boundary
+        block in the unsorted arrays before each substep, and only a gather
+        brings that into sorted space. Off for PBF and DFSPH, whose finalize
+        kernels always scatter. Call after _substep_prologue.
+        """
+        reuse = not self._next_setup_is_full_sort(n)
+        if self._sorted_is_current and not reuse:
+            raise RuntimeError("in-place writeback left the unsorted arrays "
+                               "stale before a full sort")
+        self._reorder_skip = reuse and self._sorted_is_current
+        self._integrate_in_place = (
+            in_place_ok and reuse
+            and self._profile.solver_type == SolverType.WCSPH
+            and self.rigid_body_manager.num_bodies == 0)
+
+    def _graph_slot(self, is_gather: bool) -> tuple:
+        """(graph, n) for this substep's plan; see _plan_substep_writeback."""
+        if not is_gather:
+            return self._graph_full_sort, self._graph_full_sort_n
+        variant = (self._reorder_skip, self._integrate_in_place)
+        if variant == (False, False):
+            return self._graph_gather_only, self._graph_gather_only_n
+        return self._graph_reuse_variants.get(variant, (None, 0))
+
+    def _set_graph_slot(self, is_gather: bool, graph, n: int) -> None:
+        if not is_gather:
+            self._graph_full_sort, self._graph_full_sort_n = graph, n
+            return
+        variant = (self._reorder_skip, self._integrate_in_place)
+        if variant == (False, False):
+            self._graph_gather_only, self._graph_gather_only_n = graph, n
+        else:
+            self._graph_reuse_variants[variant] = (graph, n)
 
     def _capture_graph(self, n: int, gather_only: bool) -> cupy.cuda.Graph | None:
         """Capture the graph-body into a CUDA graph for replay.
@@ -1829,19 +1909,22 @@ class Simulation:
         if gather_only:
             assert not self._last_setup_was_full_sort, (
                 "gather-only graph captured a full sort")
-            self._graph_gather_only = graph
-            self._graph_gather_only_n = n
-        else:
-            self._graph_full_sort = graph
-            self._graph_full_sort_n = n
+        # The slot for this substep's plan (gather-only has four variants).
+        self._set_graph_slot(gather_only, graph, n)
         return graph
 
-    def _sim_step(self, n: int, last_substep: bool = True) -> None:
+    def _sim_step(self, n: int, last_substep: bool = True,
+                  in_place_ok: bool = False) -> None:
         """Run one simulation substep on n particles.
 
         last_substep: step_frame passes True only for the frame's last
         substep, so foam generation runs once per frame. Direct callers keep
         the default and generate every substep.
+
+        in_place_ok: step_frame passes True for all but the frame's last
+        substep, so a grid-reuse substep may leave its result in the sorted
+        arrays only (_plan_substep_writeback). Direct callers keep the
+        default, so the unsorted arrays are current after every call.
 
         Pipeline (fully graph-capturable):
           1. Counting sort (or gather-only if sort skipped)
@@ -1853,6 +1936,7 @@ class Simulation:
         """
         n = self._substep_prologue(n)
         self._count_substep_sort(n)
+        self._plan_substep_writeback(n, in_place_ok)
         # compact() swapped the world's arrays: captured graphs point at the
         # old buffers, even when n came back to the same value.
         gen = getattr(self.world, "buffer_generation", 0)
@@ -1874,23 +1958,13 @@ class Simulation:
             self._invalidate_graphs()
             self._graph_rigid_key = rigid_key
 
-        # Select graph based on sort-skip state
+        # Select graph based on sort-skip state and the writeback plan
         is_gather = self._sort_skip_next
-        if is_gather:
-            graph = self._graph_gather_only
-            graph_n = self._graph_gather_only_n
-        else:
-            graph = self._graph_full_sort
-            graph_n = self._graph_full_sort_n
+        graph, graph_n = self._graph_slot(is_gather)
 
         if graph_n != n:
             # n changed — invalidate this path's graph, run directly
-            if is_gather:
-                self._graph_gather_only = None
-                self._graph_gather_only_n = n
-            else:
-                self._graph_full_sort = None
-                self._graph_full_sort_n = n
+            self._set_graph_slot(is_gather, None, n)
             self._run_graph_body(n)
         elif graph is None:
             # n stable but no graph yet — capture then launch
@@ -1910,6 +1984,7 @@ class Simulation:
                 # -1) cannot leave the value stale (bd-r5-review-n28.84).
                 self._last_full_sort_n = n
 
+        self._sorted_is_current = self._integrate_in_place
         self._substep_epilogue(n, last_substep=last_substep)
 
     def _rigid_graph_key(self) -> tuple[int, bool]:
@@ -2075,7 +2150,8 @@ class Simulation:
         # Update count from compaction result (device-to-device copy, no sync)
         w.foam_count[:] = w.foam_alive_count
 
-    def _sim_step_timed(self, n: int, last_substep: bool = True) -> None:
+    def _sim_step_timed(self, n: int, last_substep: bool = True,
+                        in_place_ok: bool = False) -> None:
         """Run one substep with CUDA event timing (bypasses graph capture).
 
         Runs the same prologue, solver body and epilogue as _sim_step, with a
@@ -2094,7 +2170,9 @@ class Simulation:
         mark("start")
         n = self._substep_prologue(n)
         self._count_substep_sort(n)
+        self._plan_substep_writeback(n, in_place_ok)
         self._run_graph_body(n, mark)
+        self._sorted_is_current = self._integrate_in_place
         self._substep_epilogue(n, mark, last_substep=last_substep)
         self._read_deferred_timings()
         # Store this substep's events for reading next substep
@@ -2320,7 +2398,8 @@ class Simulation:
             # readback copies have finished (bd-r5-review-n28.46).
             cupy.cuda.get_current_stream().wait_event(self._readback_done)
         for i in range(sim_steps):
-            step_fn(n, last_substep=(i == sim_steps - 1))
+            last = i == sim_steps - 1
+            step_fn(n, last_substep=last, in_place_ok=not last)
 
         # Foam compaction once per frame, before the readback copies foam_count
         if sim_steps > 0:
