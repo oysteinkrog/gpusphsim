@@ -10,9 +10,8 @@ These tests check:
    in-place run stores the dirty health and every sleeper's zero velocity.
 2. Simulation level: a frame of four reuse substeps with in-place
    writeback leaves the same unsorted state (to float rounding) as four
-   gather substeps, on the
-   direct path and on the captured graphs, and launches one gather instead
-   of four.
+   gather substeps, on the direct path and on the captured graphs, and
+   launches one gather instead of four.
 3. The plan is off for PBF and on the frame's last substep, and step_frame
    never returns with the unsorted arrays stale.
 
@@ -368,3 +367,43 @@ def test_plan_off_for_last_substep_and_pbf(sim):
         sim._profile = prof
         sim._sort_skip_next = False
         sim._integrate_in_place = False
+
+
+def test_step_frame_runs_in_place_and_ends_scattered(sim, monkeypatch):
+    """step_frame passes in_place_ok for all but the last substep: a reuse
+    frame gathers once, and the unsorted arrays are current on return."""
+    import counting_sort
+
+    n = sim.world._high_water
+    sim._sort_skip_next = False
+    sim._sim_step(n)
+    calls = []
+    real = counting_sort.gather_reorder
+    monkeypatch.setattr(
+        counting_sort,
+        "gather_reorder",
+        lambda *a, **k: (calls.append(1), real(*a, **k))[1],
+    )
+    t = [100.0]
+
+    def clock():
+        return t[0]
+
+    old_clock, old_timing = sim._clock, sim.timing_enabled
+    try:
+        sim._clock = clock
+        sim.timing_enabled = True  # direct launches, so the spy sees them
+        sim._last_frame_time = None
+        sim.step_frame()  # first call only starts the clock
+        sim._sort_skip_next = True
+        t[0] += 4.5 * DT
+        steps = sim.step_frame()
+        cp.cuda.Device().synchronize()
+    finally:
+        sim._clock, sim.timing_enabled = old_clock, old_timing
+        sim._sort_skip_next = False
+    assert steps == 4
+    assert len(calls) == 1
+    assert not sim._sorted_is_current
+    pos = sim.world.position[:n].get()
+    assert np.isfinite(pos).all()
