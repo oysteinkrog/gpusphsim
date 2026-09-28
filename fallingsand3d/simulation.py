@@ -1185,6 +1185,8 @@ class Simulation:
             pressure_out=w.sorted_pressure,
             temperature_h=w.sorted_temperature_h,
             pr2_omega_out=w.sorted_pr2_omega,
+            # mu(I) eta per GRANULAR particle for K_Step2 (bd-r5-review-n28.169).
+            eta_out=w.sorted_eta,
             # Inactive refresh cadence (bd-r5-review-n28.159). A full sort
             # reorders the sorted buffers, so every inactive particle must
             # compute that substep. Each CUDA graph bakes in its own branch.
@@ -1220,6 +1222,7 @@ class Simulation:
             d_rigid_forces=rbm.rigid_forces if rbm.num_bodies > 0 else None,
             d_rigid_torques=rbm.rigid_torques if rbm.num_bodies > 0 else None,
             pr2_omega_in=w.sorted_pr2_omega,
+            eta_in=w.sorted_eta,
         )
         mark("step2")
 

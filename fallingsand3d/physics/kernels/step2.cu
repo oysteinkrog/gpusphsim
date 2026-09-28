@@ -218,10 +218,12 @@ void K_Step2(
     float gamma_dot_i = 0.0f;
     float eta_i = 0.0f;
 
-    if (is_granular_i && eta_in) {
-        // Pre-computed by K_Step1 PostCalc (bd-r5-review-n28.169).
-        eta_i = __ldg(&eta_in[index_i]);
-    } else if (is_granular_i) {
+    // Pre-computed by K_Step1 PostCalc (bd-r5-review-n28.169). K_Step1 writes
+    // 0 for a particle that was not GRANULAR then; a reaction between step1
+    // and step2 (LAVA -> GRAVEL, MUD -> WET_SAND) can make it GRANULAR, so a
+    // 0 falls through to the recompute below, which matches the old path.
+    if (is_granular_i && eta_in) eta_i = __ldg(&eta_in[index_i]);
+    if (is_granular_i && !(eta_i > 0.0f)) {
         gamma_dot_i = __ldg(&shear_rate_in[index_i]);
 
         // mu(I) rheology computation for particle i.
@@ -492,10 +494,10 @@ void K_Step2(
                         // eta_j comes from K_Step1 (bd-r5-review-n28.169); without
                         // eta_in it is recomputed here from the tensor-based
                         // shear_rate (less noisy than |dv|/r).
-                        float eta_j;
-                        if (eta_in) {
-                            eta_j = __ldg(&eta_in[index_j]);
-                        } else {
+                        // eta_j = 0 means K_Step1 saw j as non-GRANULAR (a
+                        // reaction converted it since), so recompute it.
+                        float eta_j = eta_in ? __ldg(&eta_in[index_j]) : 0.0f;
+                        if (!(eta_j > 0.0f)) {
                             float gamma_dot_j = __ldg(&shear_rate_in[index_j]);
                             float rho0_j = c_materials[mat_id_j].rest_density;
                             float p_floor_j = rho0_j * fabsf(c_sim.gravity.y) * c_granular.particle_spacing;
