@@ -6,6 +6,11 @@
  *   density_sum += m_j * (h^2 - |r_ij|^2)^3   for all neighbors j within h
  *   density_i = max(1.0, poly6_coeff * density_sum)
  *
+ * FLUID EOS input (bd-r5-review-n28.205), pressure only:
+ *   S_i = poly6_coeff * sum_j (m_j / rho_j) * (h^2 - |r_ij|^2)^3   (self included)
+ *   rho_eos_i = 0.5 * (density_i + density_i / S_i)
+ *   pressure_i = EOS(rho_eos_i); density_out and position.w keep density_i.
+ *
  * Heat diffusion (all particles):
  *   dTdt_i = viscosity_lap_coeff / (rho_i cp_i)
  *            * sum_j k_ij (m_j/rho_j) * (T_j - T_i) * (h - |r_ij|) * heat_boost_ij
@@ -210,6 +215,13 @@ __device__ __forceinline__ void step1_body(
 
     // Density accumulator (variable part of Poly6 kernel)
     float sum_density = 0.0f;
+    // Shepard sum (bd-r5-review-n28.205): sum_j V_j (h^2 - r^2)^3 with
+    // V_j = m_j / rho_j (last substep's density), self term included. Times
+    // poly6_coeff it is about 1 with full support and about 0.5-0.6 at a
+    // free surface. Used only for the FLUID EOS input below.
+    float sum_shepard = 0.0f;
+    float rho_i_prev = (pos4_i.w > 0.0f) ? pos4_i.w
+                                         : fmaxf(c_materials[mat_id_i].rest_density, RHO_EPSILON);
 
     // Heat diffusion accumulator: dTdt
     float sum_dTdt = 0.0f;
@@ -312,8 +324,11 @@ __device__ __forceinline__ void step1_body(
                         float m_dens = (GET_MATERIAL_ID(pi_j) == MAT_RIGID) ? m_j * rigid_dens_scale : m_j;
                         sum_density += m_dens * diff * diff * diff;
 
-                        // --- All non-self computations: heat, exposure, vorticity, strain-rate ---
-                        if (index_j != index_i) {
+                        if (index_j == index_i) {
+                            // Shepard self term: V_i = m_i / rho_i (last substep)
+                            sum_shepard += m_j / rho_i_prev * diff * diff * diff;
+                        } else {
+                            // --- All non-self computations: heat, exposure, vorticity, strain-rate ---
                             uint mat_id_j = GET_MATERIAL_ID(pi_j);
 
                             // Single sqrtf per neighbor (PERF-003)
@@ -337,6 +352,8 @@ __device__ __forceinline__ void step1_body(
                                 float rho_j = pos4_j.w;
                                 // Unset or zero .w (unused slot): use the neighbour's rest density (bd-r5-review-n28.110)
                                 if (rho_j <= 0.0f) rho_j = fmaxf(c_materials[GET_MATERIAL_ID(pi_j)].rest_density, RHO_EPSILON);
+                                float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
+                                sum_shepard += vol_j * diff * diff * diff;
 
                                 if (thermal_on) {
                                     // --- Heat diffusion ---
@@ -364,8 +381,6 @@ __device__ __forceinline__ void step1_body(
                                     float gWx = grad_scalar * r.x;
                                     float gWy = grad_scalar * r.y;
                                     float gWz = grad_scalar * r.z;
-
-                                    float vol_j = m_j / fmaxf(rho_j, RHO_EPSILON);
 
                                     if (is_fluid) {
                                         float4 vel4_j_v = velocity_h ? vel4_j : __ldg(&velocity[index_j]);
@@ -406,8 +421,9 @@ __device__ __forceinline__ void step1_body(
                                 float inv_rlen = 1.0f / rlen;
                                 float h_rlen = h - rlen;
                                 float grad_scalar = c_precalc.spiky_grad_coeff * h_rlen * h_rlen * inv_rlen;
+                                float vol_b = m_j / RIGID_PSI_RHO0;
+                                sum_shepard += vol_b * diff * diff * diff;
                                 if (is_fluid) {
-                                    float vol_b = m_j / RIGID_PSI_RHO0;
                                     normal.x += vol_b * grad_scalar * r.x;
                                     normal.y += vol_b * grad_scalar * r.y;
                                     normal.z += vol_b * grad_scalar * r.z;
@@ -437,7 +453,18 @@ __device__ __forceinline__ void step1_body(
         : fmaxf(density, rho_floor);
 
     // --- PostCalc: pressure (PERF-007) ---
-    pressure_out[index_i] = compute_pressure(density_out[index_i], behavior_i, mat_id_i);
+    // FLUID EOS input (bd-r5-review-n28.205): half raw density, half the
+    // Shepard-normalised density rho / (poly6_coeff * sum_shepard), which
+    // undoes the missing kernel support at a free surface. Only the pressure
+    // uses it; density_out and position.w keep the raw sum, so step2 weights
+    // and every other reader are unchanged. With full support the Shepard sum
+    // is about 1 and the EOS input matches the raw density.
+    float rho_eos = density_out[index_i];
+    if (is_fluid) {
+        float shepard = fmaxf(c_precalc.poly6_coeff * sum_shepard, 1e-6f);
+        rho_eos = fmaxf(0.5f * (density + density / shepard), rho_floor);
+    }
+    pressure_out[index_i] = compute_pressure(rho_eos, behavior_i, mat_id_i);
 
     // --- PostCalc: heat diffusion dTdt ---
     // dTdt = viscosity_lap_coeff * sum_dTdt / (rho_i * cp_i); k_ij is inside sum_dTdt
