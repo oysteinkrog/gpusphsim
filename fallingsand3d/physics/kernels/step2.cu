@@ -112,10 +112,49 @@ __device__ __forceinline__ float cross_pair_visc(
 
 /* ======================================================================
  * K_Step2 kernel
+ *
+ * The body is a template on two host-known switches (bd-r5-review-n28.191):
+ *   HAS_RIGID: compile the MAT_RIGID two-way coupling branch. False means
+ *              d_rigid_bodies is NULL, and MAT_RIGID particles take the
+ *              regular STATIC branch, as the runtime NULL check did before.
+ *   HAS_VORT:  compile the vorticity-confinement eta sum. False is only
+ *              valid when c_granular.vorticity_epsilon == 0.
+ * With both on, the body is the same as the old single kernel. The rigid
+ * branch keeps its per-body sums live across the neighbour loop and made
+ * K_Step2 spill 48 B of local memory at 80 registers; without it the kernel
+ * has no spills. step2.py picks one of the four extern "C" kernels below.
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 3)
-void K_Step2(
+#define K_STEP2_PARAMS \
+    uint            numParticles, \
+    const float4*   __restrict__ position, \
+    const float4*   __restrict__ velocity, \
+    const float*    __restrict__ mass, \
+    const uint*     __restrict__ packed_info, \
+    const float*    __restrict__ shear_rate_in, \
+    const uint*     __restrict__ cell_start, \
+    const uint*     __restrict__ cell_end, \
+    const float4*   __restrict__ vorticity_in, \
+    const float4*   __restrict__ normal_in, \
+    const float*    __restrict__ pressure_in, \
+    float4*         __restrict__ sph_force_out, \
+    float4*         __restrict__ veleval_out, \
+    const void*     __restrict__ velocity_h, \
+    const RigidBody* __restrict__ d_rigid_bodies, \
+    float*          __restrict__ d_rigid_forces, \
+    float*          __restrict__ d_rigid_torques, \
+    const float2*   __restrict__ pr2_omega_in, \
+    const float*    __restrict__ eta_in
+
+#define K_STEP2_ARGS \
+    numParticles, position, velocity, mass, packed_info, shear_rate_in, \
+    cell_start, cell_end, vorticity_in, normal_in, pressure_in, \
+    sph_force_out, veleval_out, velocity_h, d_rigid_bodies, d_rigid_forces, \
+    d_rigid_torques, pr2_omega_in, eta_in
+
+template <bool HAS_RIGID, bool HAS_VORT>
+__device__ __forceinline__
+void step2_body(
     uint            numParticles,
     const float4*   __restrict__ position,      // sorted positions (density packed in .w by K_Step1)
     const float4*   __restrict__ velocity,      // sorted evaluation velocity
@@ -241,7 +280,7 @@ void K_Step2(
     float omega_mag_i = 0.0f;
     float4 vort_i = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     float3 eta_vort = make_float3(0.0f, 0.0f, 0.0f);
-    if (is_fluid_i && c_granular.vorticity_epsilon > 0.0f) {
+    if (HAS_VORT && is_fluid_i && c_granular.vorticity_epsilon > 0.0f) {
         vort_i = __ldg(&vorticity_in[index_i]);
         omega_mag_i = vort_i.w;
         do_vort_eta = (omega_mag_i > 1e-6f);
@@ -343,7 +382,7 @@ void K_Step2(
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         float3 grad_s = grad_spiky_variable(r, rlen, h);
 
-                        if (mat_id_j == MAT_RIGID && d_rigid_bodies != 0) {
+                        if (HAS_RIGID && mat_id_j == MAT_RIGID && d_rigid_bodies != 0) {
                             // --- MAT_RIGID: Akinci pressure mirroring with two-way coupling ---
                             // psi_b = rho0_i * V_b with the fluid's own rest density.
                             // The mass slot holds RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
@@ -613,7 +652,7 @@ void K_Step2(
     f_viscosity.x = f_viscosity.x * visc_s + f_visc_explicit.x;
     f_viscosity.y = f_viscosity.y * visc_s + f_visc_explicit.y;
     f_viscosity.z = f_viscosity.z * visc_s + f_visc_explicit.z;
-    if (rb_pend >= 0) {
+    if (HAS_RIGID && rb_pend >= 0) {
         // Deferred reaction on the first rigid body: the viscous part with the
         // same implicit scale as the fluid side, plus the pressure part
         // -m_i * fs_i * pressure_precalc * rb_fp. Its torque is
@@ -671,3 +710,19 @@ void K_Step2(
         );
     }
 }
+
+/* Launch bounds: (256, 3) caps the variants at 80 registers. The variant
+ * with neither rigid bodies nor vorticity fits 64 registers with no spills,
+ * so it takes (256, 4) for 32 resident warps per SM instead of 24.
+ * Measured counts are in PHYSICS.md section 15. */
+extern "C" __global__ __launch_bounds__(256, 3)
+void K_Step2(K_STEP2_PARAMS) { step2_body<true, true>(K_STEP2_ARGS); }
+
+extern "C" __global__ __launch_bounds__(256, 3)
+void K_Step2_NoRigid(K_STEP2_PARAMS) { step2_body<false, true>(K_STEP2_ARGS); }
+
+extern "C" __global__ __launch_bounds__(256, 3)
+void K_Step2_NoVort(K_STEP2_PARAMS) { step2_body<true, false>(K_STEP2_ARGS); }
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_Step2_NoRigidNoVort(K_STEP2_PARAMS) { step2_body<false, false>(K_STEP2_ARGS); }

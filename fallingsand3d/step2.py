@@ -186,8 +186,12 @@ def upload_granular_params(params: Optional[np.ndarray] = None) -> None:
     Also uploads the same values to K_Step1's module, which computes the
     mu(I) eta that K_Step2 reads as eta_in (bd-r5-review-n28.169).
     """
+    global _vorticity_on
     if params is None:
         params = build_granular_params()
+    # Host-side copy of the switch that picks the K_Step2 variant. params is
+    # a numpy array, so this reads host memory, not the GPU.
+    _vorticity_on = bool(params[0]["vorticity_epsilon"] > 0.0)
     module = _get_module()
     d_ptr = module.get_global("c_granular")  # type: ignore[union-attr]
     cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
@@ -209,6 +213,23 @@ def upload_materials(materials_data: np.ndarray) -> None:
 # ---------------------------------------------------------------------------
 
 BLOCK_SIZE = 256
+
+# True until upload_granular_params sees vorticity_epsilon == 0, so a caller
+# that never uploads keeps the kernel that checks the constant at run time.
+_vorticity_on = True
+
+
+def step2_kernel_name(has_rigid: bool, vorticity_on: bool) -> str:
+    """Name of the K_Step2 variant for these host-known switches.
+
+    The kernels in step2.cu share one body templated on HAS_RIGID and
+    HAS_VORT (bd-r5-review-n28.191). Leaving the rigid branch out removes
+    K_Step2's local-memory spill; leaving out both lets the kernel run at
+    (256, 4) launch bounds with no spill.
+    """
+    if has_rigid:
+        return "K_Step2" if vorticity_on else "K_Step2_NoVort"
+    return "K_Step2_NoRigid" if vorticity_on else "K_Step2_NoRigidNoVort"
 
 
 def compute_pressure(
@@ -304,7 +325,8 @@ def compute_step2(
         veleval_out = cupy.zeros((n, 4), dtype=cupy.float32)
 
     module = _get_module()
-    kernel = module.get_function("K_Step2")  # type: ignore[union-attr]
+    kernel_name = step2_kernel_name(d_rigid_bodies is not None, _vorticity_on)
+    kernel = module.get_function(kernel_name)  # type: ignore[union-attr]
 
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
