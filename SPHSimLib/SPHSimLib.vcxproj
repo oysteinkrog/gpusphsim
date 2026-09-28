@@ -161,7 +161,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <GPUDebugInfo>true</GPUDebugInfo>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
@@ -174,7 +174,7 @@
     <ClCompile>
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -184,13 +184,13 @@
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <CodeGeneration>compute_89,sm_89</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <GPUDebugInfo>true</GPUDebugInfo>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
@@ -208,7 +208,7 @@
     <ClCompile>
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -217,14 +217,14 @@
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <CodeGeneration>compute_89,sm_89</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
       <Arch3>0</Arch3>
@@ -237,7 +237,7 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -246,14 +246,14 @@
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Optimization>O3</Optimization>
       <CodeGeneration>compute_89,sm_89</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|Win32'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
       <Arch3>0</Arch3>
@@ -266,7 +266,7 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -275,14 +275,14 @@
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Optimization>O3</Optimization>
       <CodeGeneration>compute_89,sm_89</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
       <Arch3>0</Arch3>
@@ -299,7 +299,7 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -308,7 +308,7 @@
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Optimization>O3</Optimization>
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <CodeGeneration>compute_89,sm_89</CodeGeneration>
@@ -316,7 +316,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
       <Arch3>0</Arch3>
@@ -333,7 +333,7 @@
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -342,7 +342,7 @@
       <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <CudaCompile>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Optimization>O3</Optimization>
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <CodeGeneration>compute_89,sm_89</CodeGeneration>
@@ -350,7 +350,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='EmuDebug|Win32'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
       <Arch3>0</Arch3>
@@ -362,7 +362,7 @@
     <ClCompile>
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -372,7 +372,7 @@
     </ClCompile>
     <CudaCompile>
       <Runtime>MDd</Runtime>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Emulation>true</Emulation>
       <HostDebugInfo>true</HostDebugInfo>
       <GPUDebugInfo>true</GPUDebugInfo>
@@ -381,7 +381,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='EmuDebug|x64'">
     <Cudart_Build_Rule>
-      <Include>C:\WORK\gpusphsim\back40computing;$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>$(NVSDKCOMPUTE_ROOT)\c\common\inc;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Arch1>89</Arch1>
       <Arch2>89</Arch2>
       <Arch3>0</Arch3>
@@ -397,7 +397,7 @@
     <ClCompile>
       <AdditionalOptions>/MP4 %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;C:\WORK\gpusphsim\back40computing\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DXSDK_DIR)\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -407,7 +407,7 @@
     </ClCompile>
     <CudaCompile>
       <Runtime>MDd</Runtime>
-      <Include>C:\WORK\gpusphsim\back40computing;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
+      <Include>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\include</Include>
       <Emulation>true</Emulation>
       <HostDebugInfo>true</HostDebugInfo>
       <GPUDebugInfo>true</GPUDebugInfo>

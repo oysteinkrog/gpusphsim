@@ -6,10 +6,6 @@
 #include "SimCudaAllocator.h"
 #include "SimCudaHelper.h"
 
-#ifdef SPHSIMLIB_USE_CUDPP_SORT
-#include "cudpp/cudpp.h"
-#endif
-
 #ifdef SPHSIMLIB_USE_THRUST_SORT
 #include <thrust/device_vector.h>
 #include <thrust/sort.h>
@@ -100,15 +96,6 @@ private:
 	SimLib::SimCudaHelper	*mSimCudaHelper;
 
 	GridParams dGridParams;
-
-#ifdef SPHSIMLIB_USE_CUDPP_SORT
-	CUDPPHandle m_sortHandle;
-#endif
-
-#if (defined SPHSIMLIB_USE_B40C_SORT || defined SPHSIMLIB_USE_CUDA_B40C_SORT)
-	void* m_b40c_storage;	
-	void* m_b40c_sorting_enactor;
-#endif
 
 #ifdef SPHSIMLIB_USE_THRUST_SORT
 	thrust::device_ptr<uint>* mThrustKeys;
