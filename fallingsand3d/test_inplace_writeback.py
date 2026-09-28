@@ -11,7 +11,8 @@ These tests check:
 2. Simulation level: a frame of four reuse substeps with in-place
    writeback leaves the same unsorted state (to float rounding) as four
    gather substeps, on the direct path and on the captured graphs, and
-   launches one gather instead of four.
+   launches one gather instead of four. The scene rests on STONE, so the
+   STATIC push reads neighbour slots while other threads write in place.
 3. The plan is off for PBF and on the frame's last substep, and step_frame
    never returns with the unsorted arrays stale.
 
@@ -198,15 +199,6 @@ def test_scatter_after_in_place_stores_sleeper_zero_velocity():
     assert health0[0] == 0.5 and health2[0] == 0.5
 
 
-def test_in_place_rejects_static_pushout():
-    from integrate import integrate
-
-    d = _kernel_inputs()
-    cs = cp.zeros(8, cp.uint32)
-    with pytest.raises(ValueError):
-        integrate(**d, in_place=True, cell_start=cs, cell_end=cs)
-
-
 # ---------------------------------------------------------------------------
 # 2. Simulation level
 # ---------------------------------------------------------------------------
@@ -214,12 +206,20 @@ def test_in_place_rejects_static_pushout():
 
 @pytest.fixture(scope="module")
 def sim():
-    from materials import WATER, SAND
+    from materials import WATER, SAND, STONE
     from simulation import Simulation
     from world import World
 
     w = World(max_particles=40_000)
     w.dead_reserve = 0
+    # Two STONE layers (y -0.93, -0.91) under the water and sand, so the
+    # STATIC push runs on in-place substeps too (bd-r5-review-n28.214).
+    w.spawn_cube(
+        min_corner=(-0.5, -0.94, -0.2),
+        max_corner=(0.4, -0.90, 0.2),
+        material_id=STONE,
+        spacing=0.02,
+    )
     w.spawn_cube(
         min_corner=(-0.5, -0.9, -0.2),
         max_corner=(-0.1, -0.5, 0.2),

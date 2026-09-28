@@ -13,10 +13,8 @@ substeps: no SMOKE particle inside the box.
 
 All three solvers also run rigid_body_boundary (bd-r5-review-n28.123):
 each particle is pushed out of the body's box SDF at its end-of-substep
-pose. That push keeps the smoke out in WCSPH, where the integrate module
-has no c_grid so its static_particle_boundary finds no neighbours
-(bd-r5-review-n28.214), and in PBF, where the box moves 8 mm per substep
-and the gas density solve does not see the body.
+pose. In PBF that push is what keeps the smoke out, since the box moves
+8 mm per substep and the gas density solve does not see the body.
 """
 
 from __future__ import annotations

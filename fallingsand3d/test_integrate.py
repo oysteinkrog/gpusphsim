@@ -2332,6 +2332,55 @@ def test_500k_stress():
 # Main
 # ===========================================================================
 
+def _stone_box_water():
+    """1568 WATER (dx 0.02) in a closed STONE box with 2-layer walls.
+
+    The floor layers sit at y = -0.30 and -0.28, so the floor top is -0.28.
+    Returns (world, sim, n_stone, n).
+    """
+    from simulation import Simulation
+    from world import World
+
+    w = World(6000)
+    w.spawn_cube((-0.19, -0.31, -0.19), (0.19, 0.0, 0.19), STONE, 0.02,
+                 exclude_box=((-0.145, -0.275, -0.145), (0.145, 0.1, 0.145)))
+    n_stone = w._high_water
+    w.spawn_cube((-0.14, -0.26, -0.14), (0.14, -0.10, 0.14), WATER, 0.02)
+    n = w._high_water
+    sim = Simulation(w, dt=1.0 / 1000.0, fixed_dt=True, world_half_size=0.5)
+    return w, sim, n_stone, n
+
+
+STONE_FLOOR_TOP = -0.28
+
+
+def test_wcsph_water_stays_on_stone_floor():
+    """bd-r5-review-n28.214: WCSPH water must not sink through a 2-layer
+    STONE floor. Step2's Akinci term alone let all of it through within 600
+    substeps; K_Integrate's STATIC push (cell arrays and c_grid) stops it."""
+    import integrate as integrate_mod
+
+    w, sim, n_stone, n = _stone_box_water()
+    assert n_stone == 2490 and n - n_stone == 1568
+    y0 = w.position[n_stone:n, 1].get()
+    assert y0.min() > STONE_FLOOR_TOP + 0.02
+    grid = np.zeros(8, dtype=np.uint32)
+    cupy.cuda.runtime.memcpy(grid.ctypes.data,
+                             int(integrate_mod.get_module().get_global("c_grid")),
+                             grid.nbytes, 2)
+    assert grid[7] != 0, "integrate c_grid table_mask is zero"
+
+    for _ in range(600):
+        sim._sim_step(w._high_water)
+    cupy.cuda.Device().synchronize()
+    y = w.position[n_stone:n, 1].get()
+    assert np.isfinite(y).all()
+    below = int(np.count_nonzero(y < STONE_FLOOR_TOP))
+    assert below == 0, f"{below} of {n - n_stone} water particles below the floor top"
+    # The water has fallen onto the floor, not hung in place.
+    assert y.min() < y0.min() - 0.005
+
+
 if __name__ == "__main__":
     tests = [
         test_compilation,
