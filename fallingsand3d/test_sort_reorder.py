@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import cupy
 import numpy as np
+import pytest
 
 from conftest import counting_sort_scene
 from grid_params import NUM_CELLS
@@ -417,6 +418,143 @@ def test_legacy_sort_modules_removed() -> None:
                  "K_ScatterPerm", "K_GatherReorder"):
         head = cu.index(f"void {name}(")
         assert "cell_start" not in cu[head:cu.index(") {", head)], name
+
+
+# ---------------------------------------------------------------------------
+# Deterministic within-cell order (bd-r5-review-n28.200)
+# ---------------------------------------------------------------------------
+
+def _sort_perm_only(pos: "cupy.ndarray", scratch: dict, perm_scratch) -> np.ndarray:
+    """Run counting_sort_full on pos and return (sort_perm, hashes) as numpy."""
+    import counting_sort
+    import grid_params as grid_params_mod
+
+    gp = grid_params_mod.build_grid_params()
+    counting_sort.upload_grid_params(gp)
+    num_cells = int(gp[0]["table_size"])
+    n = int(pos.shape[0])
+    f4 = lambda: cupy.zeros((n, 4), dtype=cupy.float32)
+    f1 = lambda: cupy.zeros(n, dtype=cupy.float32)
+    perm = cupy.zeros(n, dtype=cupy.uint32)
+    hashes = cupy.zeros(n, dtype=cupy.uint32)
+    counting_sort.counting_sort_full(
+        num_particles=n, num_cells=num_cells,
+        histogram=scratch["histogram"], block_sums=scratch["block_sums"],
+        cell_start=scratch["cell_start"], cell_end=scratch["cell_end"],
+        sort_perm=perm, positions=pos, hashes=hashes,
+        position=pos, velocity=f4(), mass=f1(),
+        packed_info=cupy.zeros(n, dtype=cupy.uint32), temperature=f1(),
+        health=f1(), lifetime=f1(), sleep_counter=cupy.zeros(n, dtype=cupy.uint8),
+        kappa=None, kappa_v=None,
+        sorted_position=f4(), sorted_velocity=f4(), sorted_mass=f1(),
+        sorted_packed_info=cupy.zeros(n, dtype=cupy.uint32),
+        sorted_temperature=f1(), sorted_health=f1(), sorted_lifetime=f1(),
+        sorted_sleep_counter=cupy.zeros(n, dtype=cupy.uint8),
+        sorted_kappa=None, sorted_kappa_v=None,
+        perm_scratch=perm_scratch,
+    )
+    return cupy.asnumpy(perm).astype(np.int64), cupy.asnumpy(hashes).astype(np.int64)
+
+
+def test_deterministic_sort_perm_is_stable() -> None:
+    """With perm_scratch, sort_perm is the stable sort of the hashes.
+
+    Dense input (about 30 particles per cell) so the atomic order inside a
+    cell would differ between runs. Two sorts of the same input must give the
+    same sort_perm, equal to a stable argsort of the hashes.
+    """
+    import counting_sort
+    import grid_params as grid_params_mod
+
+    n = 60_000
+    pos = cupy.asarray(_random_positions(n, 0.25, 7))
+    num_cells = int(grid_params_mod.build_grid_params()[0]["table_size"])
+    scratch = counting_sort.allocate_scratch(num_cells, n)
+    perm_scratch = cupy.zeros(n, dtype=cupy.uint32)
+
+    perm_a, hashes = _sort_perm_only(pos, scratch, perm_scratch)
+    perm_b, _ = _sort_perm_only(pos, scratch, perm_scratch)
+    assert np.array_equal(np.sort(perm_a), np.arange(n))
+    assert np.array_equal(perm_a, perm_b), "deterministic sort_perm changed between runs"
+    assert np.array_equal(perm_a, np.argsort(hashes, kind="stable")), (
+        "deterministic sort_perm is not the stable sort of the hashes"
+    )
+
+    # The default mode still gives a valid bucket order.
+    perm_c, _ = _sort_perm_only(pos, scratch, None)
+    assert np.array_equal(np.sort(perm_c), np.arange(n))
+    assert np.all(np.diff(hashes[perm_c]) >= 0)
+
+
+def test_deterministic_sort_rejects_aliased_scratch() -> None:
+    """perm_scratch may not be sort_perm itself (K_RankInCell reads and writes)."""
+    import counting_sort
+    import grid_params as grid_params_mod
+
+    n = 8
+    num_cells = int(grid_params_mod.build_grid_params()[0]["table_size"])
+    scratch = counting_sort.allocate_scratch(num_cells, n)
+    pos = cupy.zeros((n, 4), dtype=cupy.float32)
+    perm = cupy.zeros(n, dtype=cupy.uint32)
+    z4 = cupy.zeros((n, 4), dtype=cupy.float32)
+    z1 = cupy.zeros(n, dtype=cupy.float32)
+    zu = cupy.zeros(n, dtype=cupy.uint32)
+    zb = cupy.zeros(n, dtype=cupy.uint8)
+    try:
+        counting_sort.counting_sort_full(
+            num_particles=n, num_cells=num_cells,
+            histogram=scratch["histogram"], block_sums=scratch["block_sums"],
+            cell_start=scratch["cell_start"], cell_end=scratch["cell_end"],
+            sort_perm=perm, positions=pos, hashes=zu.copy(),
+            position=pos, velocity=z4, mass=z1, packed_info=zu, temperature=z1,
+            health=z1, lifetime=z1, sleep_counter=zb, kappa=None, kappa_v=None,
+            sorted_position=z4.copy(), sorted_velocity=z4.copy(),
+            sorted_mass=z1.copy(), sorted_packed_info=zu.copy(),
+            sorted_temperature=z1.copy(), sorted_health=z1.copy(),
+            sorted_lifetime=z1.copy(), sorted_sleep_counter=zb.copy(),
+            sorted_kappa=None, sorted_kappa_v=None,
+            perm_scratch=perm,
+        )
+    except ValueError:
+        return
+    raise AssertionError("aliased perm_scratch was accepted")
+
+
+def _dam_break_positions(deterministic: bool, substeps: int) -> np.ndarray:
+    from presets import PRESETS
+    from simulation import Simulation
+
+    world = World(max_particles=400_000)
+    sim = Simulation(world, dt=0.001, speed=1.0, accuracy=0.4,
+                     fixed_dt=True, max_substeps=20)
+    try:
+        sim.deterministic_sort = deterministic
+        PRESETS["Dam Break"](world)
+        sim.notify_scene_changed()
+        n = world._high_water
+        for _ in range(substeps):
+            sim._sim_step(n)
+        cupy.cuda.Device().synchronize()
+        return cupy.asnumpy(world.position[:n]).copy()
+    finally:
+        sim.close()
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason=(
+    "K_Step1 writes each particle's density to position.w while neighbours "
+    "read .w as rho_j, so the V_j in the normal, Shepard and heat sums "
+    "depends on thread timing. With those writes moved to a separate pass "
+    "this test passes (0 differing words after 200 substeps); remove the "
+    "xfail when step1 is fixed."))
+def test_deterministic_sort_dam_break_bit_identical() -> None:
+    """Two 200-substep Dam Break runs with deterministic_sort on end with
+    bit-identical positions (unsorted order, which is the spawn order)."""
+    a = _dam_break_positions(True, 200)
+    b = _dam_break_positions(True, 200)
+    assert a.shape == b.shape
+    diff = int(np.count_nonzero(a.view(np.uint32) != b.view(np.uint32)))
+    assert diff == 0, f"{diff} position words differ between runs"
 
 
 def main() -> None:
