@@ -560,6 +560,18 @@ void K_DFSPH_NonPressureForces(
         do_vort_eta = (omega_mag_i > 1e-6f);
     }
 
+    // Akinci 2013 curvature surface tension (FLUID only, bd-r5-review-n28.125):
+    // the same pair term as WCSPH step2, summed in the viscosity loop below.
+    bool st_on = (behavior_i == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f);
+    float3 f_st_pair = make_float3(0.0f, 0.0f, 0.0f);
+    float3 n_i_st = make_float3(0.0f, 0.0f, 0.0f);
+    float rho0_i_st = c_materials[mat_id_i].rest_density;
+    float m_i_st = __ldg(&mass[i]);
+    if (st_on) {
+        float4 n4_i = __ldg(&normal_in[i]);
+        n_i_st = make_float3(n4_i.x, n4_i.y, n4_i.z);
+    }
+
     // Compute viscosity + vorticity eta via neighbor loop
     int3 cell_i = get_cell(pos_i);
     for (int dz = -1; dz <= 1; dz++) {
@@ -724,6 +736,19 @@ void K_DFSPH_NonPressureForces(
                         f_visc.y += (vel_j.y - vel_i.y) * visc_factor;
                         f_visc.z += (vel_j.z - vel_i.z) * visc_factor;
                     }
+
+                    // Akinci curvature pair term, FLUID-FLUID only, as in step2.cu:
+                    //   a_i += gamma K_ij h m_ij / m_i (n_i - n_j).
+                    // Antisymmetric, so the pair adds no net momentum.
+                    if (st_on && behavior_j == FLUID) {
+                        float4 n4_j = __ldg(&normal_in[j]);
+                        float rho0_j = c_materials[GET_MATERIAL_ID(pi_j)].rest_density;
+                        float K_ij = (rho0_i_st + rho0_j) / fmaxf(rho_i + rho_j, RHO_EPSILON);
+                        float c_curv = K_ij * h * 2.0f * m_j / fmaxf(m_i_st + m_j, 1e-12f);
+                        f_st_pair.x += c_curv * (n_i_st.x - n4_j.x);
+                        f_st_pair.y += c_curv * (n_i_st.y - n4_j.y);
+                        f_st_pair.z += c_curv * (n_i_st.z - n4_j.z);
+                    }
                 }
             }
         }
@@ -782,20 +807,14 @@ void K_DFSPH_NonPressureForces(
         }
     }
 
-    // Akinci surface tension (FLUID only, surface particles)
-    // +gamma * norm_i coheres fluid (inward force toward interior, §10.16)
-    if (behavior_i == FLUID && normal_in != 0 && c_granular.surface_tension_gamma > 0.0f) {
-        float4 norm_i = __ldg(&normal_in[i]);
-        float nc_i = norm_i.w;  // neighbor count
-        if (nc_i < 25.0f) {
-            float gamma = c_granular.surface_tension_gamma;
-            float n_mag = sqrtf(norm_i.x*norm_i.x + norm_i.y*norm_i.y + norm_i.z*norm_i.z);
-            if (n_mag > 0.01f) {
-                accel.x += +gamma * norm_i.x;
-                accel.y += +gamma * norm_i.y;
-                accel.z += +gamma * norm_i.z;
-            }
-        }
+    // Akinci curvature surface tension (FLUID only, pair sum from the loop
+    // above). It carries force_scale, so the same gamma gives the same accel
+    // as WCSPH step2, whose final fs_i multiply scales it.
+    if (st_on) {
+        float g_fs = c_granular.surface_tension_gamma * c_granular.force_scale;
+        accel.x += g_fs * f_st_pair.x;
+        accel.y += g_fs * f_st_pair.y;
+        accel.z += g_fs * f_st_pair.z;
     }
 
     // Accel clamp
