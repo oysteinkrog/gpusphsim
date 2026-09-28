@@ -1,7 +1,8 @@
 """Shepard-blended EOS density in K_Step1 (bd-r5-review-n28.205).
 
 A resting WCSPH WATER column fills a closed 0.6 m box (world_half_size 0.3)
-and settles for SETTLE_S seconds. Readback happens once, after the run.
+and settles for SETTLE_S seconds. Readback happens after the run, at
+SNAPSHOTS states SNAP_GAP_S apart, and the errors below are their means.
 
 Hydrostatic reference: force balance fixes the pressure at depth to the
 weight of the water above it, p_ref = s * M_above, where M_above is the
@@ -56,6 +57,8 @@ HALF = 0.3
 SETTLE_S = 3.0
 BIN = 0.01
 CELL = 0.05
+SNAPSHOTS = 5
+SNAP_GAP_S = 0.1
 
 
 def run_column(settle_s=SETTLE_S, top_y=HALF - 0.01):
@@ -72,8 +75,25 @@ def run_column(settle_s=SETTLE_S, top_y=HALF - 0.01):
     s._upload_dt(dt)
     for _ in range(int(round(settle_s / dt))):
         s._sim_step(n)
-    cp.cuda.Device().synchronize()
+    # The settled WCSPH column still sloshes (v_rms about 0.17 m/s), so one
+    # snapshot's top-bin means swing by 2-3x between runs. Score the mean
+    # over SNAPSHOTS states SNAP_GAP_S apart.
+    snaps = []
+    for k in range(SNAPSHOTS):
+        if k:
+            for _ in range(int(round(SNAP_GAP_S / dt))):
+                s._sim_step(n)
+        cp.cuda.Device().synchronize()
+        snaps.append(_measure(w, n, dt))
+    r = dict(snaps[-1])
+    for key in ("err_blend", "err_raw", "err_bins_blend", "err_bins_raw"):
+        r[key + "_snaps"] = [q[key] for q in snaps]
+        r[key] = float(np.mean(r[key + "_snaps"]))
+    return r
 
+
+def _measure(w, n, dt):
+    """Depth profile and top-2h errors of the current sorted state."""
     pi = w.sorted_packed_info[:n].get()
     sel = (pi & 0xFF) == WATER
     pos = w.sorted_position[:n, :3].get()[sel]
@@ -162,7 +182,8 @@ def _print(r):
     print("  depth[m]  p_out      p_rawEOS   p_ref      rho/rho0  count")
     for d, pb, pr, pf, rr, c in r["bins"]:
         print(f"  {d:.3f}    {pb:9.1f}  {pr:9.1f}  {pf:9.1f}  {rr:.3f}    {c}")
-    print(f"  top-2h error / p_ref(2h), bin means: pressure_out={r['err_bins_blend']:.4f} "
+    print(f"  top-2h error / p_ref(2h), mean of {len(r['err_bins_blend_snaps'])} snapshots, "
+          f"bin means: pressure_out={r['err_bins_blend']:.4f} "
           f"raw EOS={r['err_bins_raw']:.4f}; per particle: pressure_out={r['err_blend']:.4f} "
           f"raw EOS={r['err_raw']:.4f}")
     print(f"  interior rho/rho0={r['interior_rho_ratio']:.4f} "
