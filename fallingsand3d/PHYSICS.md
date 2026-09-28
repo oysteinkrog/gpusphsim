@@ -4238,10 +4238,18 @@ F_pressure = -m_i * (p_i/rho_i² + p_i/rho_0²) * psi_b * grad_W(r_i - r_b)
 
 The second term uses rest density rho_0 (not rho_b) because boundary particles have no meaningful density of their own. This mirrors the fluid's own pressure onto the boundary. Here `psi_b = rho0_i * V_b` as in 22.3, and the viscous coupling below uses the same `psi_b` (WCSPH `boundary_visc_factor`, DFSPH `K_DFSPH_NonPressureForces`).
 
-**Viscous coupling**: Boundary velocity computed from rigid body state:
+**Viscous coupling**: the boundary velocity is
 ```
 v_b = v_body + omega × (r_b - COM)
 ```
+`K_UpdateBoundaryParticles` writes it into the boundary particle's velocity
+each substep and the sort carries it into `sorted_velocity` and its FP16
+mirror, so K_Step2 and K_DFSPH_NonPressureForces read it as the neighbour's
+velocity `v_j` and load only the body `position` (the torque arm) per pair
+(bd-r5-review-n28.195). K_Step2 reads `v_j` from the FP16 mirror and pairs it
+with the mirrored `v_i` (FP16 pairing rule, Section 3.3); DFSPH uses FP32 for
+both. Measured with a spinning, moving kinematic box: the sorted FP32 velocity
+matches the recomputed `v_b` to 7e-8 m/s, the FP16 mirror to 2.4e-4 m/s.
 The viscous acceleration on i uses the boundary form of Section 3.3
 (`boundary_visc_factor` in `step2.cu`): FLUID/GAS divide by rho_i, GRANULAR
 divides by rho_i * rho0_i with mu0.
@@ -4268,6 +4276,14 @@ sum_j (x_j - COM) x F_j = sum_j ((x_i - COM) - r_j) x F_j = (x_i - COM) x F_p
 A pair on any other body is written at once with `atomic_accumulate3`. A second
 register sum of torque as well spilled K_Step2 (local memory 40 to 88 B) and
 cost 0.8 ms per substep at 1M particles, so there is none.
+
+Torque is summed about the COM, not about the world origin with `COM x F`
+subtracted later. The pair forces on a body are large and cancel, so the
+float32 error of an origin sum scales with `|COM| * sum |F_pair|`, not
+`|COM| * |F|`. For a box spun at 1 rad/s 2 m from the origin, an origin sum
+was off by 5e-2 (PBF), 2.5e-3 (DFSPH) and 5e-5 (WCSPH) on the first substep;
+the COM sum matches the same scene at the origin to 1.1e-3, 3e-5 and 4e-6
+(`test_rigid_coupling.py::test_offset_spinning_box_torque`).
 
 **Source**: `step2.cu:K_Step2` (WCSPH), `dfsph_solver.cu:K_DFSPH_NonPressureForces` (DFSPH viscous part)
 
