@@ -567,9 +567,10 @@ void K_Reactions(
  * STATIC targets get no velocity write: integrate zeroes STATIC velocity
  * and K_UpdateBoundaryParticles rewrites rigid boundary velocity from the
  * body state, so the kick would vanish. A MAT_RIGID boundary particle
- * instead adds the force F = m_j * dv / dt (and torque r_b x F, with
- * r_b = x_j - COM) to its body's accumulators, which K_IntegrateRigidBodies
- * reads this substep. Blasts are rare, so plain atomicAdd is used.
+ * instead adds the force F = m_j * dv / dt and its torque about the world
+ * origin, x_j x F, to its body's accumulators. K_IntegrateRigidBodies reads
+ * them this substep and subtracts COM x F to get the torque about the body
+ * centre (bd-r5-review-n28.195). Blasts are rare, so plain atomicAdd is used.
  * ====================================================================== */
 
 #define BLAST_SPEED 15.0f
@@ -586,9 +587,9 @@ void K_BlastWave(
     float           h,                              // smoothing length
     float4*         __restrict__ predicted_position, // PBF x* (atomicAdd dt*dv); NULL otherwise
     const float*    __restrict__ sorted_mass,       // particle mass (read for MAT_RIGID targets)
-    const RigidBody* __restrict__ d_rigid_bodies,   // body state (NULL if no bodies)
+    const RigidBody* __restrict__ d_rigid_bodies,   // body state (NULL if no bodies); only gates the rigid reaction
     float*          __restrict__ d_rigid_forces,    // force accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques    // torque accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques    // torque about the world origin [MAX_RIGID_BODIES * 4] (NULL if no bodies)
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -651,14 +652,10 @@ void K_BlastWave(
                             if (body_id >= MAX_RIGID_BODIES) continue;
                             float s = sorted_mass[j] / c_sim.dt;
                             float3 F = make_float3(s * dv.x, s * dv.y, s * dv.z);
-                            float4 com = d_rigid_bodies[body_id].position;
-                            float3 r_b = make_float3(pos_j4.x - com.x,
-                                                     pos_j4.y - com.y,
-                                                     pos_j4.z - com.z);
                             float3 tau = make_float3(
-                                r_b.y * F.z - r_b.z * F.y,
-                                r_b.z * F.x - r_b.x * F.z,
-                                r_b.x * F.y - r_b.y * F.x);
+                                pos_j4.y * F.z - pos_j4.z * F.y,
+                                pos_j4.z * F.x - pos_j4.x * F.z,
+                                pos_j4.x * F.y - pos_j4.y * F.x);
                             atomicAdd(&d_rigid_forces[body_id * 4 + 0], F.x);
                             atomicAdd(&d_rigid_forces[body_id * 4 + 1], F.y);
                             atomicAdd(&d_rigid_forces[body_id * 4 + 2], F.z);

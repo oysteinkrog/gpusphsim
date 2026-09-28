@@ -115,8 +115,9 @@ __device__ __forceinline__ float cross_pair_visc(
  *
  * The body is a template on two host-known switches (bd-r5-review-n28.191):
  *   HAS_RIGID: compile the MAT_RIGID two-way coupling branch. False means
- *              d_rigid_bodies is NULL, and MAT_RIGID particles take the
- *              regular STATIC branch, as the runtime NULL check did before.
+ *              there are no bodies (d_rigid_forces is NULL), and MAT_RIGID
+ *              particles take the regular STATIC branch, as the runtime NULL
+ *              check did before.
  *   HAS_VORT:  compile the vorticity-confinement eta sum. False is only
  *              valid when c_granular.vorticity_epsilon == 0.
  * With both on, the body is the same as the old single kernel. The rigid
@@ -140,7 +141,6 @@ __device__ __forceinline__ float cross_pair_visc(
     float4*         __restrict__ sph_force_out, \
     float4*         __restrict__ veleval_out, \
     const void*     __restrict__ velocity_h, \
-    const RigidBody* __restrict__ d_rigid_bodies, \
     float*          __restrict__ d_rigid_forces, \
     float*          __restrict__ d_rigid_torques, \
     const float2*   __restrict__ pr2_omega_in, \
@@ -149,7 +149,7 @@ __device__ __forceinline__ float cross_pair_visc(
 #define K_STEP2_ARGS \
     numParticles, position, velocity, mass, packed_info, shear_rate_in, \
     cell_start, cell_end, vorticity_in, normal_in, pressure_in, \
-    sph_force_out, veleval_out, velocity_h, d_rigid_bodies, d_rigid_forces, \
+    sph_force_out, veleval_out, velocity_h, d_rigid_forces, \
     d_rigid_torques, pr2_omega_in, eta_in
 
 template <bool HAS_RIGID, bool HAS_VORT>
@@ -169,9 +169,8 @@ void step2_body(
     float4*         __restrict__ sph_force_out,  // output: accumulated SPH force
     float4*         __restrict__ veleval_out,    // output: XSPH-corrected veleval
     const void*     __restrict__ velocity_h,     // FP16 velocity for neighbor reads (OPT-4.3), may be NULL
-    const RigidBody* __restrict__ d_rigid_bodies, // rigid body state array (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,  // force accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques, // torque accumulator [MAX_RIGID_BODIES * 4] (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques, // torque about the world origin [MAX_RIGID_BODIES * 4] (NULL if no bodies)
     const float2*   __restrict__ pr2_omega_in,  // (p / rho^2, |omega|) from K_Step1 for FLUID neighbours, may be NULL
     const float*    __restrict__ eta_in         // mu(I) eta per particle from K_Step1 (0 for non-GRANULAR), may be NULL
 ) {
@@ -201,7 +200,8 @@ void step2_body(
     // the FP16 mirror, so pair differences (v_j - v_i) must take v_i from the
     // same mirror. Otherwise co-moving particles see fp16(v) - v != 0, a
     // lattice-snapping viscous force. The FP32 vel_i stays for veleval output
-    // and for boundary terms, whose other side is FP32.
+    // and for regular STATIC boundary terms, whose other side is 0. MAT_RIGID
+    // terms read the boundary velocity from the mirror and pair it with this.
     float3 vel_i_pair = vel_i;
     if (velocity_h) {
         float4 vh_i = load_half4((const uint2*)velocity_h + index_i);
@@ -229,7 +229,9 @@ void step2_body(
     float3 rb_tv   = make_float3(0.0f, 0.0f, 0.0f);
     // Sum of the Akinci pressure terms F_on_fluid from that first body. Each
     // term is radial (along r = x_i - x_j), so the body's torque from it is
-    // (x_i - COM) x F exactly and needs no separate sum (bd-r5-review-n28.182).
+    // x_i x F exactly and needs no separate sum (bd-r5-review-n28.182).
+    // Torques here are about the world origin; K_IntegrateRigidBodies
+    // subtracts COM x F (bd-r5-review-n28.195).
     float3 rb_fp   = make_float3(0.0f, 0.0f, 0.0f);
 
     float h    = c_sim.smoothing_length;
@@ -382,7 +384,7 @@ void step2_body(
                         uint mat_id_j = GET_MATERIAL_ID(pi_j);
                         float3 grad_s = grad_spiky_variable(r, rlen, h);
 
-                        if (HAS_RIGID && mat_id_j == MAT_RIGID && d_rigid_bodies != 0) {
+                        if (HAS_RIGID && mat_id_j == MAT_RIGID && d_rigid_forces != 0) {
                             // --- MAT_RIGID: Akinci pressure mirroring with two-way coupling ---
                             // psi_b = rho0_i * V_b with the fluid's own rest density.
                             // The mass slot holds RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
@@ -402,29 +404,19 @@ void step2_body(
                             f_pressure.y += F_on_fluid.y;
                             f_pressure.z += F_on_fluid.z;
 
-                            // Viscous coupling: boundary velocity from rigid body
+                            // Viscous coupling. vel_j is already the boundary
+                            // velocity v_body + omega x r_b: K_UpdateBoundaryParticles
+                            // writes it and the sort carries it into both velocity
+                            // arrays (bd-r5-review-n28.195). vel_j may come from the
+                            // FP16 mirror, so v_i does too (pairing rule above).
                             int body_id = GET_BODY_ID(pi_j);
-                            float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
-                            float4 rb_linvel = __ldg(&d_rigid_bodies[body_id].lin_vel);
-                            float4 rb_angvel = __ldg(&d_rigid_bodies[body_id].ang_vel);
-                            float3 r_b = make_float3(
-                                pos4_j.x - rb_pos.x,
-                                pos4_j.y - rb_pos.y,
-                                pos4_j.z - rb_pos.z
-                            );
-                            // v_boundary = v_body + cross(omega, r_b)
-                            float3 vel_boundary = make_float3(
-                                rb_linvel.x + (rb_angvel.y * r_b.z - rb_angvel.z * r_b.y),
-                                rb_linvel.y + (rb_angvel.z * r_b.x - rb_angvel.x * r_b.z),
-                                rb_linvel.z + (rb_angvel.x * r_b.y - rb_angvel.y * r_b.x)
-                            );
                             float lap_v_b = lap_visc_variable(rlen, h);
                             float visc_factor_b = boundary_visc_factor(
                                 is_granular_i, mat_id_i, psi_b, lap_v_b, rho_i);
                             float3 F_visc = make_float3(
-                                (vel_boundary.x - vel_i.x) * visc_factor_b,
-                                (vel_boundary.y - vel_i.y) * visc_factor_b,
-                                (vel_boundary.z - vel_i.z) * visc_factor_b
+                                (vel_j.x - vel_i_pair.x) * visc_factor_b,
+                                (vel_j.y - vel_i_pair.y) * visc_factor_b,
+                                (vel_j.z - vel_i_pair.z) * visc_factor_b
                             );
                             // Viscous reaction: the first body goes into the
                             // implicit sum and its reaction is emitted after the
@@ -441,9 +433,9 @@ void step2_body(
                                 rb_fv.x += F_visc.x;
                                 rb_fv.y += F_visc.y;
                                 rb_fv.z += F_visc.z;
-                                rb_tv.x += r_b.y * F_visc.z - r_b.z * F_visc.y;
-                                rb_tv.y += r_b.z * F_visc.x - r_b.x * F_visc.z;
-                                rb_tv.z += r_b.x * F_visc.y - r_b.y * F_visc.x;
+                                rb_tv.x += pos4_j.y * F_visc.z - pos4_j.z * F_visc.y;
+                                rb_tv.y += pos4_j.z * F_visc.x - pos4_j.x * F_visc.z;
+                                rb_tv.z += pos4_j.x * F_visc.y - pos4_j.y * F_visc.x;
                             } else {
                                 f_visc_explicit.x += F_visc.x;
                                 f_visc_explicit.y += F_visc.y;
@@ -477,11 +469,11 @@ void step2_body(
                             );
                             // Newton's 3rd law: reaction force on body = -m_i * a_on_fluid
                             float3 F_on_body = make_float3(-m_i * a_on_fluid.x, -m_i * a_on_fluid.y, -m_i * a_on_fluid.z);
-                            // Torque = cross(r_b, F_on_body) where r_b = boundary_pos - COM
+                            // Torque about the world origin: x_j x F_on_body
                             float3 tau = make_float3(
-                                r_b.y * F_on_body.z - r_b.z * F_on_body.y,
-                                r_b.z * F_on_body.x - r_b.x * F_on_body.z,
-                                r_b.x * F_on_body.y - r_b.y * F_on_body.x
+                                pos4_j.y * F_on_body.z - pos4_j.z * F_on_body.y,
+                                pos4_j.z * F_on_body.x - pos4_j.x * F_on_body.z,
+                                pos4_j.x * F_on_body.y - pos4_j.y * F_on_body.x
                             );
                             atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
                             atomic_accumulate3(d_rigid_torques, tau, body_id);
@@ -655,13 +647,12 @@ void step2_body(
     if (HAS_RIGID && rb_pend >= 0) {
         // Deferred reaction on the first rigid body: the viscous part with the
         // same implicit scale as the fluid side, plus the pressure part
-        // -m_i * fs_i * pressure_precalc * rb_fp. Its torque is
-        // (x_i - COM) x F_p, since every summed term is parallel to x_i - x_j.
+        // -m_i * fs_i * pressure_precalc * rb_fp. Its torque about the
+        // origin is x_i x F_p, since every summed term is parallel to x_i - x_j.
         float k_rb = -m_i * fs_i * visc_s;
         float k_p  = -m_i * fs_i * c_precalc.pressure_precalc;
         float3 F_p = make_float3(k_p * rb_fp.x, k_p * rb_fp.y, k_p * rb_fp.z);
-        float4 com = __ldg(&d_rigid_bodies[rb_pend].position);
-        float3 d_i = make_float3(pos_i.x - com.x, pos_i.y - com.y, pos_i.z - com.z);
+        float3 d_i = pos_i;
         atomic_accumulate3(d_rigid_forces,
             make_float3(k_rb * rb_fv.x + F_p.x, k_rb * rb_fv.y + F_p.y,
                         k_rb * rb_fv.z + F_p.z), rb_pend);

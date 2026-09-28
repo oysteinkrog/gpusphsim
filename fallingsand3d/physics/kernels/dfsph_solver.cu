@@ -61,21 +61,20 @@ __device__ __forceinline__ float dfsph_vol_plain(float w_j, uint pi_j,
     return dfsph_is_wall(pi_j) ? w_j / fmaxf(__ldg(&density[j]), RHO_EPSILON) : w_j;
 }
 
-/* Add F_on_body and its torque about the body centre to the accumulators of
- * the body that owns boundary particle j. */
+/* Add F_on_body and its torque about the world origin, x_j x F_on_body, to
+ * the accumulators of the body that owns boundary particle j.
+ * K_IntegrateRigidBodies subtracts COM x F to get the torque about the body
+ * centre, so no body state is read here (bd-r5-review-n28.195). */
 __device__ inline void dfsph_rigid_reaction(
-    const RigidBody* __restrict__ d_rigid_bodies,
     float* __restrict__ d_rigid_forces,
     float* __restrict__ d_rigid_torques,
     uint pi_j, float4 pos4_j, float3 F_on_body
 ) {
     int body_id = GET_BODY_ID(pi_j);
-    float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
-    float3 r_b = make_float3(pos4_j.x - rb_pos.x, pos4_j.y - rb_pos.y, pos4_j.z - rb_pos.z);
     float3 tau = make_float3(
-        r_b.y * F_on_body.z - r_b.z * F_on_body.y,
-        r_b.z * F_on_body.x - r_b.x * F_on_body.z,
-        r_b.x * F_on_body.y - r_b.y * F_on_body.x
+        pos4_j.y * F_on_body.z - pos4_j.z * F_on_body.y,
+        pos4_j.z * F_on_body.x - pos4_j.x * F_on_body.z,
+        pos4_j.x * F_on_body.y - pos4_j.y * F_on_body.x
     );
     atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
     atomic_accumulate3(d_rigid_torques, tau, body_id);
@@ -517,6 +516,8 @@ void K_DFSPH_NonPressureForces(
     float dt = c_sim.dt;
 
     float3 f_visc = make_float3(0.0f, 0.0f, 0.0f);
+    // Own mass for the rigid-body reaction (loop-invariant).
+    float m_i_rigid = (d_rigid_bodies != 0) ? __ldg(&mass[i]) : 0.0f;
     bool is_granular_i = (behavior_i == GRANULAR);
     bool is_gas_i = (behavior_i == GAS);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
@@ -614,19 +615,11 @@ void K_DFSPH_NonPressureForces(
                                    : c_materials[mat_id_i].base_viscosity * c_precalc.viscosity_lap_coeff;
 
                         if (mat_id_j == MAT_RIGID && d_rigid_bodies != 0) {
-                            // MAT_RIGID: viscous coupling with body velocity
-                            int body_id = GET_BODY_ID(pi_j);
-                            float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
-                            float4 rb_linvel = __ldg(&d_rigid_bodies[body_id].lin_vel);
-                            float4 rb_angvel = __ldg(&d_rigid_bodies[body_id].ang_vel);
-                            float3 r_b = make_float3(
-                                pos4_j.x - rb_pos.x, pos4_j.y - rb_pos.y, pos4_j.z - rb_pos.z
-                            );
-                            float3 vel_boundary = make_float3(
-                                rb_linvel.x + (rb_angvel.y * r_b.z - rb_angvel.z * r_b.y),
-                                rb_linvel.y + (rb_angvel.z * r_b.x - rb_angvel.x * r_b.z),
-                                rb_linvel.z + (rb_angvel.x * r_b.y - rb_angvel.y * r_b.x)
-                            );
+                            // MAT_RIGID: viscous coupling with the body surface
+                            // velocity v_body + omega x r_b, which
+                            // K_UpdateBoundaryParticles stores in the sorted
+                            // velocity of the boundary particle (bd-r5-review-n28.195).
+                            float3 vel_boundary = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
                             // psi_b = rho0_i * V_b; the mass slot holds
                             // RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
                             float psi_b = m_j * (__fdiv_rn(c_materials[mat_id_i].rest_density, RIGID_PSI_RHO0));
@@ -645,20 +638,14 @@ void K_DFSPH_NonPressureForces(
                             // Newton's 3rd law: reaction force on body = -a_visc * m_i
                             //   = -(F_visc / rho_i) * m_i.
                             // Missing the /rho_i would overscale by ~rho_i (~1000-2500x for water).
-                            float m_i = __ldg(&mass[i]);
                             float inv_rho = 1.0f / fmaxf(rho_i, RHO_EPSILON);
                             float3 F_on_body = make_float3(
-                                -(F_visc.x * inv_rho) * m_i,
-                                -(F_visc.y * inv_rho) * m_i,
-                                -(F_visc.z * inv_rho) * m_i
+                                -(F_visc.x * inv_rho) * m_i_rigid,
+                                -(F_visc.y * inv_rho) * m_i_rigid,
+                                -(F_visc.z * inv_rho) * m_i_rigid
                             );
-                            float3 tau = make_float3(
-                                r_b.y * F_on_body.z - r_b.z * F_on_body.y,
-                                r_b.z * F_on_body.x - r_b.x * F_on_body.z,
-                                r_b.x * F_on_body.y - r_b.y * F_on_body.x
-                            );
-                            atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
-                            atomic_accumulate3(d_rigid_torques, tau, body_id);
+                            dfsph_rigid_reaction(d_rigid_forces, d_rigid_torques,
+                                                 pi_j, pos4_j, F_on_body);
                         } else {
                             // Regular STATIC: friction drag toward zero
                             float visc_factor = mu_b * m_j * lap_v / fmaxf(rho_i, RHO_EPSILON);
@@ -1044,7 +1031,7 @@ void K_DFSPH_CorrectVelocityDiv(
                     if (bj == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = m_i_rigid * coeff;
-                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                        dfsph_rigid_reaction(d_rigid_forces, d_rigid_torques,
                                              pi_j, pos4_j,
                                              make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }
@@ -1185,7 +1172,7 @@ void K_DFSPH_ComputePressureAccel(
                     if (bj == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = -m_i_rigid * coeff;
-                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                        dfsph_rigid_reaction(d_rigid_forces, d_rigid_torques,
                                              pi_j, pos4_j,
                                              make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }

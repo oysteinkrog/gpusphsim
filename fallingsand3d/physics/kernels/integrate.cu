@@ -588,9 +588,25 @@ __device__ inline float rigid_support_distance(const RigidBody& body, float3 n) 
  *
  * Zeroes force/torque accumulators after reading.
  *
+ * The coupling kernels accumulate torque about the world origin,
+ * tau0 = sum x_j x F_j, so they need no body state (bd-r5-review-n28.195).
+ * This kernel converts it to the torque about the centre of mass,
+ * tau = tau0 - COM x F_total, with the COM the fluid saw (the position
+ * before this step) and the unclamped F_total. The cancellation error is
+ * about |COM| * |F| * 6e-8, 6e-6 of |r_b x F| for |COM| <= 10 m.
+ *
  * Kinematic bodies skip forces, damping and clamps but still move by
- * their stored lin_vel / ang_vel.
+ * their stored lin_vel / ang_vel. Their accumulators are kept, with the
+ * torque converted in place, so the fluid reaction stays readable.
  * ====================================================================== */
+
+/* tau0 - com x F: origin torque to torque about com. */
+__device__ __forceinline__ float3 torque_about_com(float3 tau0, float3 com, float3 F) {
+    return make_float3(
+        tau0.x - (com.y * F.z - com.z * F.y),
+        tau0.y - (com.z * F.x - com.x * F.z),
+        tau0.z - (com.x * F.y - com.y * F.x));
+}
 
 extern "C" __global__
 void K_IntegrateRigidBodies(
@@ -621,6 +637,15 @@ void K_IntegrateRigidBodies(
     // clears them. (bd-r5-review-n28.105)
     if (is_kinematic || inv_mass <= 0.0f) {
         float3 pos_k = make_float3(body.position.x, body.position.y, body.position.z);
+        float3 tau_k = torque_about_com(
+            make_float3(d_rigid_torques[bid * 4 + 0], d_rigid_torques[bid * 4 + 1],
+                        d_rigid_torques[bid * 4 + 2]),
+            pos_k,
+            make_float3(d_rigid_forces[bid * 4 + 0], d_rigid_forces[bid * 4 + 1],
+                        d_rigid_forces[bid * 4 + 2]));
+        d_rigid_torques[bid * 4 + 0] = tau_k.x;
+        d_rigid_torques[bid * 4 + 1] = tau_k.y;
+        d_rigid_torques[bid * 4 + 2] = tau_k.z;
         float4 q_k = body.rotation;
         rigid_integrate_pose(pos_k, q_k,
             make_float3(body.lin_vel.x, body.lin_vel.y, body.lin_vel.z),
@@ -638,11 +663,13 @@ void K_IntegrateRigidBodies(
         d_rigid_forces[bid * 4 + 1],
         d_rigid_forces[bid * 4 + 2]
     );
-    float3 tau = make_float3(
-        d_rigid_torques[bid * 4 + 0],
-        d_rigid_torques[bid * 4 + 1],
-        d_rigid_torques[bid * 4 + 2]
-    );
+    // Accumulated about the world origin; convert with the unclamped F.
+    float3 tau = torque_about_com(
+        make_float3(d_rigid_torques[bid * 4 + 0],
+                    d_rigid_torques[bid * 4 + 1],
+                    d_rigid_torques[bid * 4 + 2]),
+        make_float3(body.position.x, body.position.y, body.position.z),
+        F);
 
     // --- Zero accumulators ---
     d_rigid_forces[bid * 4 + 0] = 0.0f;

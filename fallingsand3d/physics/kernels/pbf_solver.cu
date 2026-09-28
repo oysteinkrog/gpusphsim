@@ -90,21 +90,20 @@ __device__ inline void pbf_box_boundary(
     pbf_box_wall(pos.z, vel.z, vel.x, vel.y, wmax.z, +1.0f, restitution, mu_wall);
 }
 
-/* Add F_on_body and its torque about the body centre to the accumulators of
- * the body that owns boundary particle j. */
+/* Add F_on_body and its torque about the world origin, x_j x F_on_body, to
+ * the accumulators of the body that owns boundary particle j.
+ * K_IntegrateRigidBodies subtracts COM x F to get the torque about the body
+ * centre, so no body state is read here (bd-r5-review-n28.195). */
 __device__ inline void pbf_rigid_reaction(
-    const RigidBody* __restrict__ d_rigid_bodies,
     float* __restrict__ d_rigid_forces,
     float* __restrict__ d_rigid_torques,
     uint pi_j, float4 pos4_j, float3 F_on_body
 ) {
     int body_id = GET_BODY_ID(pi_j);
-    float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
-    float3 r_b = make_float3(pos4_j.x - rb_pos.x, pos4_j.y - rb_pos.y, pos4_j.z - rb_pos.z);
     float3 tau = make_float3(
-        r_b.y * F_on_body.z - r_b.z * F_on_body.y,
-        r_b.z * F_on_body.x - r_b.x * F_on_body.z,
-        r_b.x * F_on_body.y - r_b.y * F_on_body.x
+        pos4_j.y * F_on_body.z - pos4_j.z * F_on_body.y,
+        pos4_j.z * F_on_body.x - pos4_j.x * F_on_body.z,
+        pos4_j.x * F_on_body.y - pos4_j.y * F_on_body.x
     );
     atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
     atomic_accumulate3(d_rigid_torques, tau, body_id);
@@ -726,7 +725,7 @@ void K_PBF_ComputeDelta(
                     if (bj_delta == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = -rigid_scale * coeff;
-                        pbf_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                        pbf_rigid_reaction(d_rigid_forces, d_rigid_torques,
                                            pi_j, pos4_j,
                                            make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }
@@ -791,7 +790,7 @@ void K_PBF_Finalize(
     const float4*   __restrict__ pressure_normal_in, // density gradient normal for GRANULAR friction, or NULL
     const RigidBody* __restrict__ d_rigid_bodies,    // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,     // XSPH drag reaction on the body (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques,    // torque of that reaction about the body centre
+    float*          __restrict__ d_rigid_torques,    // torque of that reaction about the world origin
     const float*    __restrict__ sorted_lifetime,    // reaction-mutated lifetime (sorted), or NULL
     float*          __restrict__ health_out,         // unsorted health writeback, or NULL
     float*          __restrict__ lifetime_out,       // unsorted lifetime writeback, or NULL
@@ -1069,7 +1068,7 @@ void K_PBF_Finalize(
                             xsph.x += dvf.x;
                             xsph.y += dvf.y;
                             xsph.z += dvf.z;
-                            pbf_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                            pbf_rigid_reaction(d_rigid_forces, d_rigid_torques,
                                                pi_j, pred4_j,
                                                make_float3(drag_scale * dvf.x,
                                                            drag_scale * dvf.y,
