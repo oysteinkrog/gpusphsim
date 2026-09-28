@@ -739,6 +739,8 @@ def test_load_rebuilds_rigid_bodies_into_empty_session(tmp_path, monkeypatch) ->
         sim._sim_step(world._high_water)
     saved_bodies = rbm.download_bodies()
     saved_params = [rbm.build_params(i) for i in range(3)]
+    saved_bd = rbm.boundary_data.get()
+    saved_bid = rbm.boundary_body_id.get()
 
     sl.save_scene(world, sim, _stub_camera(), "pool")
     with np.load(str(tmp_path / "pool.fs3d"), allow_pickle=False) as z:
@@ -753,6 +755,14 @@ def test_load_rebuilds_rigid_bodies_into_empty_session(tmp_path, monkeypatch) ->
     assert rbm.num_bodies == 3
     assert rbm.num_boundary_particles == nb
     assert [rbm.build_params(i) for i in range(3)] == saved_params
+    # bd-r5-review-n28.183: boundary records come back as one float4 per
+    # particle plus an int32 body id, bitwise equal to the saved session.
+    assert rbm.boundary_data.shape == (nb, 4)
+    assert rbm.boundary_data.dtype == np.float32
+    np.testing.assert_array_equal(rbm.boundary_data.get(), saved_bd)
+    assert rbm.boundary_body_id.dtype == np.int32
+    np.testing.assert_array_equal(rbm.boundary_body_id.get(), saved_bid)
+    assert set(np.unique(saved_bid).tolist()) == {0, 1, 2}
     loaded = rbm.download_bodies()
     for key in ("position", "rotation", "lin_vel", "ang_vel",
                 "half_extents", "inertia_inv"):

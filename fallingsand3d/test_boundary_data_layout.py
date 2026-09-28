@@ -1,9 +1,10 @@
 """K_UpdateBoundaryParticles reads boundary_data correctly (bd-r5-review-n28.183).
 
-The kernel loads each boundary record's (x_local, y_local, z_local, psi) as
-one float4 and the body id as one float. These GPU tests check its output
-against a float64 NumPy reference for two rotating, moving bodies, and that
-the dead normal columns are no longer uploaded.
+boundary_data holds one float4 per boundary particle, (x_local, y_local,
+z_local, psi), and boundary_body_id holds the parent body index as int32.
+The kernel does one 16 B load plus one 4 B load per particle. These GPU tests
+check its output against a float64 NumPy reference for two rotating, moving
+bodies, and check the layout of the two arrays.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def _run_kernel(rbm, offset=7):
     vel = cp.zeros((m, 4), dtype=cp.float32)
     mass = cp.zeros(m, dtype=cp.float32)
     integrate.update_boundary_particles(
-        rbm.boundary_data, rbm.d_rigid_bodies, pos, vel, mass,
+        rbm.boundary_data, rbm.boundary_body_id, rbm.d_rigid_bodies, pos, vel, mass,
         offset=offset, num_boundary=nb)
     cp.cuda.Device().synchronize()
     return pos.get(), vel.get(), mass.get()
@@ -73,12 +74,13 @@ def test_boundary_positions_velocities_and_psi_match_reference():
     pos, vel, mass = _run_kernel(rbm, offset)
     nb = rbm.num_boundary_particles
     bd = rbm.boundary_data.get().astype(np.float64)
+    bid = rbm.boundary_body_id.get()
     bodies = rbm._bodies_cpu
 
     ref_pos = np.zeros((nb, 3))
     ref_vel = np.zeros((nb, 3))
     for i in range(nb):
-        b = bodies[int(round(bd[i, 4]))]
+        b = bodies[int(bid[i])]
         r = _quat_rotate(b["rotation"].astype(np.float64), bd[i, :3])
         ref_pos[i] = b["position"][:3] + r
         ref_vel[i] = b["lin_vel"][:3] + np.cross(b["ang_vel"][:3].astype(np.float64), r)
@@ -95,14 +97,27 @@ def test_boundary_positions_velocities_and_psi_match_reference():
     assert not mass[:offset].any() and not mass[offset + nb:].any()
 
 
-def test_boundary_data_has_no_normals():
-    """Columns 5-7 used to hold surface normals that no kernel read."""
+def test_boundary_data_is_float4_plus_int32_body_id():
+    """One (x, y, z, psi) float4 per particle; no normals or padding."""
     rbm = _make_manager()
-    bd = rbm.boundary_data.get()
-    assert bd.shape == (rbm.num_boundary_particles, 8)
+    nb = rbm.num_boundary_particles
+    bd = rbm.boundary_data
+    assert bd.shape == (nb, 4)
     assert bd.dtype == np.float32
-    assert np.all(bd[:, 5:8] == 0.0)
-    ids = bd[:, 4]
-    assert set(np.unique(ids).tolist()) == {0.0, 1.0}
+    assert bd.flags.c_contiguous
+    ids = rbm.boundary_body_id.get()
+    assert ids.shape == (nb,)
+    assert ids.dtype == np.int32
+    assert set(np.unique(ids).tolist()) == {0, 1}
     # Records are grouped by body, in body order.
-    assert np.all(np.diff(ids) >= 0.0)
+    assert np.all(np.diff(ids) >= 0)
+    assert np.all(bd.get()[:, 3] > 0.0)  # psi
+
+
+def test_reset_clears_body_ids():
+    rbm = _make_manager()
+    rbm.reset()
+    assert rbm.boundary_data is None
+    assert rbm.boundary_body_id is None
+    rbm.finalize_boundary_data()
+    assert rbm.boundary_body_id is None

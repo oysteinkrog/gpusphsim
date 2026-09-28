@@ -57,8 +57,9 @@ def _check_block(world, rbm) -> None:
     assert off + nb <= world._high_water
     packed = world.packed_info[off:off + nb].get()
     bd = rbm.boundary_data.get()
+    bid = rbm.boundary_body_id.get()
     assert np.all((packed & 0xFF) == MAT_RIGID)
-    assert np.array_equal((packed >> 13) & 0xFF, bd[:, 4].astype(np.uint32))
+    assert np.array_equal((packed >> 13) & 0xFF, bid.astype(np.uint32))
     np.testing.assert_allclose(world.mass[off:off + nb].get(), bd[:, 3], rtol=0, atol=0)
     # Exactly one block: no other MAT_RIGID slot in the live range.
     all_mat = world.packed_info[:world._high_water].get() & 0xFF
