@@ -2753,8 +2753,9 @@ is still its fluid density. The next reorder overwrites `.w`, so the carrier liv
 inside the substep; Finalize writes this substep's density into the unsorted
 `position.w` for K_ComputeColor.
 
-Kernels (`dfsph_solver.cu`, 8 in total): ComputeDensityAlpha (step 2), PackVolume (2),
+Kernels (`dfsph_solver.cu`, 9 in total): ComputeDensityAlpha (step 2), PackVolume (2),
 NonPressureForces (3-4), ComputeKappaV and CorrectVelocityDiv (5),
+CorrectDivAndPressureAccel (the last pass of 5 fused with the first sweep of 6, 13.4),
 ComputePressureAccel and DensitySolverUpdate (6), Finalize (7-8).
 The Jacobi loop on p/rho^2 is the only density solver; the velocity-space density
 solver (ComputeDensityAdv, ComputeKappa, ComputeKappaFromVelocity, CorrectVelocityDens,
@@ -2893,7 +2894,8 @@ percent of FLUID over 1 s as the flow thins, and the splash ends with 46 percent
 The density solver (13.4) is not gated.
 
 Iterations: 3 (Stable) or 2 (Fast). Each iteration requires two neighbor passes (compute
-kappa_v, then correct velocity). On a settling 36K block at the Stable profile the
+kappa_v, then correct velocity); the last correction shares its pass with the first
+pressure sweep of the density solver (13.4). On a settling 36K block at the Stable profile the
 positive divergence drops by 72 to 81 percent per substep (warm start plus 3 iterations).
 Jacobi removes local modes fast but the block-wide mode slowly: 8 iterations reach 91
 percent and 16 reach 94 percent.
@@ -2943,6 +2945,24 @@ STATIC, GAS and sleeping particles write `vt_i = v_i`. `vt` goes to
 buffer instead, which applies the converged pressure. Each thread reads and writes only
 its own velocity, so the in-place write is safe. With `dens_iters = 0` the initial call
 is the last one.
+
+**Fused first sweep (bd-r5-review-n28.192):** the initial call runs as
+K_DFSPH_CorrectDivAndPressureAccel together with the last divergence correction (13.3):
+the last warm-start pass when `div_iters = 0`, else the last iteration's increment.
+CorrectVelocityDiv writes only `v_i` and ComputePressureAccel reads only its own `v_i`,
+so one neighbour sweep accumulates both sums over the same `r`, `grad_W` and `V_j`:
+```
+v'_i = v_i - clamp(dt * SUM_j c_div_ij * grad_W_ij, h/dt)    [written to the velocity]
+vt_i = clamp(v'_i + dt * clamp(a_press_i, h/dt^2), VELOCITY_LIMIT)
+```
+The result equals the two kernels in sequence
+(`test_dfsph_fused_div_accel.py`). Its divergence rigid reaction is always added, the
+pressure one only when `dens_iters = 0`; both go to the body in one atomic per pair.
+With no divergence pass at all (warm start 0 and `div_iters = 0`) the host launches
+plain ComputePressureAccel. 62 registers at (256, 4). This removes one sweep and one
+launch per substep: at 1M particles (dam break, RTX 5070 Ti shared with other jobs)
+the divergence stage went from 10.15 to 8.39-8.46 ms and the substep from 33.96 to
+32.31-32.39 ms, with density_solve unchanged at 12.97 ms.
 
 2. **K_DFSPH_DensitySolverUpdate**: predict density from `vt`, Jacobi-update pressure:
 ```
@@ -3252,6 +3272,7 @@ memory above 0 B is a spill or a stack array.
 | K_DFSPH_ComputeKappaV | (256, 4) | 40 | 0 B | |
 | K_DFSPH_CorrectVelocityDiv | (256, 4) | 56 | 0 B | |
 | K_DFSPH_ComputePressureAccel | (256, 4) | 56 | 0 B | |
+| K_DFSPH_CorrectDivAndPressureAccel | (256, 4) | 62 | 0 B | |
 | K_DFSPH_DensitySolverUpdate | (256, 4) | 43 | 0 B | |
 | K_DFSPH_Finalize | (256, 4) | 56 | 0 B | |
 
@@ -4299,8 +4320,8 @@ row uses `m_b` without the `rho0_i` scale.
 | Solver | Kernel | Push on fluid i from b | Force on body |
 |---|---|---|---|
 | PBF | `K_PBF_ComputeDelta`, every iteration | `dx_i += (m_b/rho0_i) * (2*lambda_i + s_corr) * gW` | `F = -m_i * dx_ib / dt^2` |
-| DFSPH divergence | `K_DFSPH_CorrectVelocityDiv`, every pass incl. warm start | `dv_i = -dt * V_b * kv_i * gW` | `F = +m_i * V_b * kv_i * gW` |
-| DFSPH density | `K_DFSPH_ComputePressureAccel`, final call only | `a_i += -V_b * p_i * gW` (p = p_rho2) | `F = +m_i * V_b * p_i * gW` |
+| DFSPH divergence | `K_DFSPH_CorrectVelocityDiv` (last pass in `K_DFSPH_CorrectDivAndPressureAccel`), every pass incl. warm start | `dv_i = -dt * V_b * kv_i * gW` | `F = +m_i * V_b * kv_i * gW` |
+| DFSPH density | `K_DFSPH_ComputePressureAccel` (first call in `K_DFSPH_CorrectDivAndPressureAccel`), final call only | `a_i += -V_b * p_i * gW` (p = p_rho2) | `F = +m_i * V_b * p_i * gW` |
 
 The PBF position correction over a substep is an impulse `m_i * dx / dt` and a
 force `m_i * dx / dt^2`, summed over the iterations. The DFSPH density solver
