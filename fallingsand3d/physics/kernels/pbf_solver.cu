@@ -898,9 +898,12 @@ void K_PBF_Finalize(
 
     float temp = temperature_in[i];
 
-    // STATIC: just write through
+    // STATIC: write through. Every writeback stores this substep's density in
+    // .w: the next substep's density_in snapshot reads sorted_position.w
+    // after the reorder has gathered it into the new slot order.
     if (behavior == STATIC) {
         float4 pos4 = original_pos[i];
+        pos4.w = density[i];
         float dTdt = dTdt_in[i];
         temp += dTdt * c_sim.dt;
         temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
@@ -936,7 +939,7 @@ void K_PBF_Finalize(
             temp += dTdt * dt;
             temp -= COOL_RATE * (temp - T_AMBIENT) * dt;
             temp = fmaxf(T_MIN, fminf(temp, T_MAX));
-            position_out[orig_idx] = orig4;
+            position_out[orig_idx] = make_float4(orig.x, orig.y, orig.z, density[i]);
             velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             packed_info_out[orig_idx] = pi;
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
@@ -1386,7 +1389,8 @@ void K_PBF_Finalize(
 
     // Writeback (unsorted). .w carries this substep's density for
     // K_ComputeColor, which runs once per frame on the unsorted arrays
-    // (bd-r5-review-n28.145). No PBF kernel reads position.w.
+    // (bd-r5-review-n28.145), and the next substep's density_in snapshot
+    // (bd-r5-review-n28.216).
     position_out[orig_idx] = make_float4(final_pos.x, final_pos.y, final_pos.z, density[i]);
     velocity_out[orig_idx] = make_float4(vel_new.x, vel_new.y, vel_new.z, 0.0f);
     packed_info_out[orig_idx] = pi;

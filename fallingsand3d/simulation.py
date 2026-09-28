@@ -1431,8 +1431,13 @@ class Simulation:
 
         # Snapshot previous-substep density into a dedicated read buffer so density_in
         # is not aliased with the density_out target (sorted_density); the kernel
-        # value-guards zero entries to 1000 (bd-r4fix-uup.14).
-        cupy.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
+        # value-guards zero entries to the neighbour's rest density (bd-r4fix-uup.14).
+        # Read it from sorted_position.w, as WCSPH and DFSPH do: K_PBF_Finalize
+        # writes each particle's density into the unsorted position.w and the
+        # reorder gathers it into this substep's slot order. sorted_density is
+        # still in the previous substep's slot order, so after a re-sort it gave
+        # each slot another particle's density (bd-r5-review-n28.216).
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
 
         # 2. Initial density + lambda + heat diffusion + exposure (first call only).
         # Mass comes from predicted.w (K_PBF_Predict wrote it). The pressure
