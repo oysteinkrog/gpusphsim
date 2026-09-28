@@ -46,7 +46,7 @@ _null: Optional[cupy.ndarray] = None
 def _null_arg() -> cupy.ndarray:
     global _null
     if _null is None:
-        _null = _null_arg()
+        _null = cupy.ndarray(0, dtype=cupy.uint32)
     return _null
 
 BLOCK_SIZE = 256
@@ -369,7 +369,7 @@ def gather_reorder(
     block = (BLOCK_SIZE,)
 
     _check_optional_pairs(kappa, sorted_kappa, kappa_v, sorted_kappa_v)
-    _null = cupy.ndarray(0, dtype=cupy.uint32)
+    _null = _null_arg()
 
     k_gather = module.get_function("K_GatherReorder")
     k_gather(grid, block, (
