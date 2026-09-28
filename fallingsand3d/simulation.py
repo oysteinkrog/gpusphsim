@@ -1357,7 +1357,8 @@ class Simulation:
         # Wake propagation: integrate wrote the own-cell stamps, so only the
         # rigid marks and the sleeper probe run (per-substep stamp, no memset).
         # Per-particle and order-free, so it runs on whichever arrays
-        # integrate just wrote.
+        # integrate just wrote. After a scatter the probe walks the unsorted
+        # arrays through the same sort_perm, in cell order (bd-r5-review-n28.217).
         wake.run_wake_propagation(
             (w.sorted_position if in_place else w.position)[:n],
             (w.sorted_velocity if in_place else w.velocity)[:n],
@@ -1367,6 +1368,7 @@ class Simulation:
             num_particles=n,
             frame_counter=self._frame_counter_d,
             mark=False,  # K_Integrate wrote the own-cell stamps
+            sort_perm=None if in_place else self._sort_perm[:n],
             **self._wake_rigid_kwargs(),
         )
         mark("wake")
@@ -1537,6 +1539,8 @@ class Simulation:
             num_particles=n,
             frame_counter=self._frame_counter_d,
             mark=False,  # finalize wrote the own-cell stamps
+            # Probe in cell order through the scatter's permutation (bd-r5-review-n28.217)
+            sort_perm=self._sort_perm[:n],
             **self._wake_rigid_kwargs(),
         )
         mark("wake")
@@ -1848,6 +1852,8 @@ class Simulation:
             num_particles=n,
             frame_counter=self._frame_counter_d,
             mark=False,  # finalize wrote the own-cell stamps
+            # Probe in cell order through the scatter's permutation (bd-r5-review-n28.217)
+            sort_perm=self._sort_perm[:n],
             **self._wake_rigid_kwargs(),
         )
         mark("wake")

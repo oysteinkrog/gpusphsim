@@ -211,6 +211,7 @@ def wake_sleepers_and_clear_just_woke(
     cell_wake_flags: cupy.ndarray,
     num_particles: Optional[int] = None,
     frame_counter: Optional[cupy.ndarray] = None,
+    sort_perm: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_WakeSleepersAndClearJustWoke (Phase 2+3 fused).
 
@@ -232,6 +233,11 @@ def wake_sleepers_and_clear_just_woke(
         Number of active particles. Defaults to position.shape[0].
     frame_counter : cupy.ndarray, (1,) uint32, optional
         Per-substep device counter (see mark_wake_cells).
+    sort_perm : cupy.ndarray, (>= n,) uint32, optional
+        Sorted slot -> particle index, a permutation of [0, n). Thread i
+        then works on particle sort_perm[i], so the 27-cell probe walks in
+        cell order (237 us -> about 50 us at 1M settled sand,
+        bd-r5-review-n28.217). The result is the same as without it.
     """
     n = num_particles if num_particles is not None else position.shape[0]
     if n == 0:
@@ -239,6 +245,7 @@ def wake_sleepers_and_clear_just_woke(
 
     module = _get_module()
     kernel = module.get_function("K_WakeSleepersAndClearJustWoke")
+    perm_arg = sort_perm if sort_perm is not None else _NULL
 
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
@@ -246,7 +253,7 @@ def wake_sleepers_and_clear_just_woke(
     kernel(
         grid, block,
         (np.uint32(n), position, packed_info, sleep_counter, cell_wake_flags,
-         _frame_arg(frame_counter)),
+         _frame_arg(frame_counter), perm_arg),
     )
 
 
@@ -261,6 +268,7 @@ def run_wake_propagation(
     num_bodies: int = 0,
     frame_counter: Optional[cupy.ndarray] = None,
     mark: bool = True,
+    sort_perm: Optional[cupy.ndarray] = None,
 ) -> None:
     """Run the 2-phase wake propagation pipeline.
 
@@ -300,6 +308,11 @@ def run_wake_propagation(
         solvers pass False, so K_MarkWakeCells only runs for direct callers
         such as the unit tests. Needs frame_counter, since clearing the
         table would erase those stamps.
+    sort_perm : cupy.ndarray, optional
+        Sorted slot -> particle permutation of [0, n), the one the solver
+        just scattered with. Runs the sleeper probe in cell order (see
+        wake_sleepers_and_clear_just_woke). Pass None when the arrays are
+        already in sorted order.
     """
     if not mark and frame_counter is None:
         raise ValueError("mark=False needs frame_counter: the table clear "
@@ -325,5 +338,5 @@ def run_wake_propagation(
     # Phase 2+3 fused: wake sleepers + clear JUST_WOKE flag
     wake_sleepers_and_clear_just_woke(
         position, packed_info, sleep_counter, cell_wake_flags, n,
-        frame_counter=frame_counter,
+        frame_counter=frame_counter, sort_perm=sort_perm,
     )

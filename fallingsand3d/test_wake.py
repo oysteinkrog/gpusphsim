@@ -851,3 +851,46 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_sleeper_probe_through_sort_perm_matches_direct() -> None:
+    """With sort_perm the probe walks particles in permuted order and must
+    give exactly the same packed_info and sleep_counter as the direct walk
+    (bd-r5-review-n28.217)."""
+    setup_params()
+    rng = np.random.default_rng(217)
+    n = 200_000
+    pos_h = np.zeros((n, 4), dtype=np.float32)
+    pos_h[:, :3] = rng.uniform(-0.9, 0.9, (n, 3))
+    pos = cupy.asarray(pos_h)
+
+    sleeping = SET_SLEEPING(MAKE_PACKED(SAND, GRANULAR))
+    woke_sleeping = SET_JUST_WOKE(sleeping)
+    states = np.array([sleeping, woke_sleeping, MAKE_PACKED(SAND, GRANULAR),
+                       SET_JUST_WOKE(MAKE_PACKED(WATER, FLUID))], dtype=np.uint32)
+    pi0 = cupy.asarray(states[rng.choice(4, n, p=[0.85, 0.03, 0.07, 0.05])])
+    sc0 = cupy.full(n, 77, dtype=cupy.uint8)
+
+    # Stamp about 2% of the cells with this substep's stamp, the rest stale.
+    frame = cupy.array([500], dtype=cupy.uint32)
+    flags_h = np.full(NUM_CELLS, 3, dtype=np.uint32)
+    flags_h[rng.random(NUM_CELLS) < 0.02] = 501
+    flags = cupy.asarray(flags_h)
+
+    pi_a, sc_a = pi0.copy(), sc0.copy()
+    wake_sleepers_and_clear_just_woke(pos, pi_a, sc_a, flags, num_particles=n,
+                                      frame_counter=frame)
+
+    # Permutation longer than n, sliced like simulation.py passes _sort_perm[:n]
+    perm = cupy.asarray(np.concatenate(
+        [rng.permutation(n), np.full(64, 0xFFFFFFFF)]).astype(np.uint32))
+    pi_b, sc_b = pi0.copy(), sc0.copy()
+    run_wake_propagation(pos, cupy.zeros_like(pos), pi_b, sc_b, flags,
+                         num_particles=n, frame_counter=frame, mark=False,
+                         sort_perm=perm[:n])
+
+    woke = int(cupy.count_nonzero((pi0 & 0x400) != (pi_a & 0x400)))
+    assert woke > 1000, f"test must wake some sleepers, woke {woke}"
+    assert int(cupy.count_nonzero(pi_a != pi_b)) == 0
+    assert int(cupy.count_nonzero(sc_a != sc_b)) == 0
+    assert int(cupy.count_nonzero(pi_b & 0x1000)) == 0, "JUST_WOKE left set"

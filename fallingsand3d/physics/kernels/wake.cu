@@ -29,11 +29,15 @@
  * The kernels run on whichever arrays the solver's last kernel wrote: the
  * unsorted arrays after a scatter, or the sorted buffers after an in-place
  * WCSPH integrate. They are order-free, but the sleeper probe's cost is not.
- * At 1M settled sand it takes 48 us in sorted (cell) order and 237 us in
- * unsorted spawn order, because the 27 flag reads per thread scatter across
- * L2 (bd-r5-review-n28.209, follow-up n28.217). The probe stays out of
- * K_ScatterReorder and K_GatherReorder: they would have to read-modify-write
- * the unsorted packed_info and check the previous substep's stamp.
+ * At 1M settled sand the probe takes 48 us in sorted (cell) order and 237 us
+ * in unsorted spawn order, because the 27 flag reads per thread scatter
+ * across L2 (bd-r5-review-n28.209). After a scatter the solvers therefore
+ * pass the sort permutation: thread i handles particle orig = sort_perm[i],
+ * so a warp probes neighbouring cells, and it reads and writes the unsorted
+ * packed_info, position and sleep_counter at orig (bd-r5-review-n28.217).
+ * The probe stays out of K_ScatterReorder and K_GatherReorder: they would
+ * have to read-modify-write the unsorted packed_info and check the previous
+ * substep's stamp.
  *
  * Constant memory used:
  *   c_grid -- GridParams from common.cuh (for position -> cell mapping)
@@ -152,19 +156,23 @@ void K_MarkWakeCellsRigid(
  *   - Wake sleeping particles with a stamped cell among their 27 cells
  *   - Clear JUST_WOKE flag from all particles
  * Both iterate all particles and modify packed_info; no data dependency.
+ * With sort_perm (non-NULL, a permutation of [0, numParticles)) thread i
+ * works on particle sort_perm[i], so the probe walks in cell order.
  * ====================================================================== */
 
 extern "C" __global__
 void K_WakeSleepersAndClearJustWoke(
     uint          numParticles,
-    const float4* __restrict__ position,       // unsorted positions
-    uint*         __restrict__ packed_info,     // unsorted packed_info (read+write)
-    unsigned char* __restrict__ sleep_counter,  // unsorted sleep counter (write)
+    const float4* __restrict__ position,       // positions (indexed by particle)
+    uint*         __restrict__ packed_info,     // packed_info (read+write)
+    unsigned char* __restrict__ sleep_counter,  // sleep counter (write)
     const uint*   __restrict__ cell_wake_flags, // table_size uint32 stamps
-    const uint*   __restrict__ frame_ptr        // per-substep counter (or NULL)
+    const uint*   __restrict__ frame_ptr,       // per-substep counter (or NULL)
+    const uint*   __restrict__ sort_perm        // sorted slot -> particle (or NULL)
 ) {
-    uint i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numParticles) return;
+    uint t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= numParticles) return;
+    uint i = (sort_perm != NULL) ? __ldg(&sort_perm[t]) : t;
 
     uint pi = packed_info[i];
     uint new_pi = pi;
