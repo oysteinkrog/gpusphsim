@@ -4327,6 +4327,8 @@ After integration, `K_RigidBodyCollisions` performs simple push-apart:
 
 **Body vs body**: Bounding sphere (`|half_extents|`) overlap test. Push apart weighted by inverse mass. Velocity reflection along contact normal.
 
+The kernel runs one thread per body in a single block. It first copies all bodies into shared memory and syncs, and every read of another body comes from that copy, so each body-body contact sees the pre-step state of both bodies even though each thread writes its own body back to global memory (bd-r5-review-n28.131). Each thread still applies its own contacts one after another to its own velocity, so a body with several contacts does not see a strictly pairwise-symmetric result.
+
 **Source**: `integrate.cu:K_RigidBodyCollisions`
 
 ### 22.9 Boundary Particle State Sync
