@@ -3208,18 +3208,78 @@ Code: `boussinesq_accel(temp, beta)` in `sph_shared.cuh`.
 
 ## 15. Kernel Launch Bounds
 
-All heavy kernels use `__launch_bounds__(256, 4)`:
-- Block size: 256 threads
-- Minimum blocks per SM: 4 (targets ~67% occupancy)
-- Previous setting was `(256, 2)` which only targeted 33% occupancy
+Heavy kernels use a 256-thread block with `__launch_bounds__(256, B)`. B is the
+minimum number of resident blocks per SM the compiler must allow, so it caps
+registers per thread: B = 4 caps at 64 registers (32 warps per SM), B = 3 at 80
+(24 warps). A lower cap raises occupancy but can spill to local memory, and a
+spill in a neighbour loop costs more than the lost occupancy.
 
-This forces the compiler to use fewer registers per thread, enabling more concurrent
-blocks per SM. The tradeoff is potential register spilling, but for memory-bound kernels
-(Step1/Step2/Integrate) the increased occupancy hides memory latency better.
+### 15.1 Measured register and local-memory counts
 
-Affected kernels: K_Step1, K_Step2, K_Integrate, all K_PBF_* (5), all K_DFSPH_* (13).
+Measured on sm_120 (RTX 5070 Ti, PTX JIT, `--use_fast_math`) with CuPy kernel
+attributes `num_regs` and `local_size_bytes` (bd-r5-review-n28.191). Local
+memory above 0 B is a spill or a stack array.
 
-**Source**: all .cu files in physics/kernels/
+| Kernel | Bounds | Regs | Local | Other bounds tried |
+|---|---|---|---|---|
+| K_Step1 | (256, 4) | 64 | 0 B | (256, 3): 69 regs, 0 B |
+| K_Step2 (rigid, vorticity) | (256, 3) | 80 | 48 B | (256, 4): 64 regs, 112 B |
+| K_Step2_NoRigid | (256, 3) | 80 | 0 B | (256, 4): 64 regs, 24 B |
+| K_Step2_NoVort | (256, 3) | 80 | 24 B | (256, 4): 64 regs, 80 B |
+| K_Step2_NoRigidNoVort | (256, 4) | 64 | 0 B | (256, 3): 72 regs, 0 B |
+| K_ComputePressure | (256) | 12 | 0 B | |
+| K_PBF_Predict | (256, 4) | 29 | 0 B | |
+| K_PBF_ComputeLambda | (256, 3) | 80 | 0 B | (256, 4): 64 regs, 16 B |
+| K_PBF_ComputeDelta | (256, 4) | 53 | 0 B | |
+| K_PBF_Finalize | (256, 4) | 64 | 8 B | |
+| K_DFSPH_ComputeDensityAlpha | (256, 3) | 80 | 0 B | (256, 4): 64 regs, 40 B |
+| K_DFSPH_PackVolume | (256) | 14 | 0 B | |
+| K_DFSPH_NonPressureForces | (256, 4) | 64 | 8 B | |
+| K_DFSPH_ComputeKappaV | (256, 4) | 40 | 0 B | |
+| K_DFSPH_CorrectVelocityDiv | (256, 4) | 56 | 0 B | |
+| K_DFSPH_ComputePressureAccel | (256, 4) | 56 | 0 B | |
+| K_DFSPH_DensitySolverUpdate | (256, 4) | 43 | 0 B | |
+| K_DFSPH_Finalize | (256, 4) | 56 | 0 B | |
+
+K_Step1 does not spill at (256, 4), so its GRANULAR strain and FLUID
+omega/normal accumulators stay separate. K_PBF_ComputeLambda and
+K_DFSPH_ComputeDensityAlpha stay at (256, 3), because (256, 4) makes them spill.
+
+### 15.2 K_Step2 variants
+
+K_Step2's body is a template on two host-known switches, compiled into four
+`extern "C"` kernels:
+
+- `HAS_RIGID`: the MAT_RIGID two-way coupling branch. Its per-body sums stay
+  live across the whole neighbour loop, which is what spills. Without it a
+  MAT_RIGID particle takes the regular STATIC branch, the same as the runtime
+  `d_rigid_bodies != NULL` check does.
+- `HAS_VORT`: the vorticity-confinement eta sum. Off only when
+  `vorticity_epsilon == 0`.
+
+`step2.step2_kernel_name` picks the kernel: rigid bodies on when
+`d_rigid_bodies` is passed, vorticity on unless the last
+`step2.upload_granular_params` had `vorticity_epsilon == 0` (host-side value,
+no GPU read). The live WCSPH profile has vorticity on (epsilon 0.05), so a
+scene without rigid bodies runs K_Step2_NoRigid.
+
+1M-particle WCSPH dam break (992,319 particles), dt 1 ms, full sort every
+substep, shared GPU so timings are noisy:
+
+| Measurement | K_Step2 (old path) | K_Step2_NoRigid |
+|---|---|---|
+| step2 stage, bench_substep median (2 runs each) | 3.85, 4.06 ms | 2.62, 2.56 ms |
+| whole substep, bench_substep median | 7.19, 7.33 ms | 5.84, 5.80 ms |
+| kernel alone, same inputs, interleaved | 3.89 ms | 2.55 ms |
+
+With `vorticity_epsilon = 0` on the same inputs: K_Step2 3.62 ms, NoRigid
+2.31 ms, NoVort 3.44 ms, NoRigidNoVort 1.82 ms. On the dam break every variant
+gives bit-identical output to K_Step2. On a mixed FLUID, GRANULAR, GAS and
+STATIC scene K_Step2_NoRigid's force differs by at most 3e-7 (largest value
+1.2) from float rounding (`test_step2_variants.py`).
+
+**Source**: `physics/kernels/step2.cu` (step2_body and the four kernels),
+`step2.py:step2_kernel_name`, all .cu files in physics/kernels/ for the bounds.
 
 ---
 
