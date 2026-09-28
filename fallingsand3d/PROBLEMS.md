@@ -1,20 +1,22 @@
-# Known Problems & Improvement Opportunities — fallingsand3d
+# Known Problems and Improvement Opportunities: fallingsand3d
 
-Compiled from multi-model review (Gemini 3.1 Pro, GPT 5.2 Pro, Claude) of
+Compiled from multi-model reviews (Gemini 3.1 Pro, GPT 5.2 Pro, Claude) of
 all physics kernels, material parameters, solver profiles, reaction system,
-and scene presets. 8 independent AI reviews across 2 rounds.
+and scene presets: 8 AI reviews across 2 rounds in February 2026, then the
+round-5 codebase review of 2026-09-24 (beads `bd-r5-review-n28.*`).
 
-Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2 refuted).
+Last updated 2026-09-28. Total: 57 items (47 fixed, 2 confirmed, 3 investigate,
+2 deferred, 3 refuted), plus 3 architectural notes in section F.
 
 ---
 
 ## Status Key
 
-- **FIXED** — Code change applied and committed
-- **CONFIRMED** — Verified as real issue, fix planned
-- **INVESTIGATE** — Needs testing to confirm impact
-- **DEFERRED** — Known limitation, acceptable for now
-- **REFUTED** — Claim was incorrect after code verification
+- **FIXED**: code change applied and committed
+- **CONFIRMED**: verified as a real issue, fix planned
+- **INVESTIGATE**: needs testing to confirm impact
+- **DEFERRED**: known limitation, acceptable for now
+- **REFUTED**: the claim was wrong after code verification
 
 ---
 
@@ -52,10 +54,14 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 - **File:** `sph_shared.cuh:132`
 - **Fix:** Capped density ratio at 10.0 to prevent NaN/Inf from powf
 
-### A7. Documented: PBF s_corr_n hardcoded to 4
-- **File:** `pbf_solver.cu:465`
-- **Status:** DEFERRED — s_corr is disabled (k=0) at h=0.04, no practical impact
-- **Note:** `c_pbf.s_corr_n` parameter exists but kernel uses hardcoded n=4
+### A7. DEFERRED: PBF s_corr_n hardcoded to 4
+- **File:** `pbf_solver.cu` K_PBF_ComputeDelta (artificial pressure block)
+- **Status:** DEFERRED. s_corr is off in every profile (`pbf_s_corr_k = 0.0`), and
+  `pbf_solver.py` then uploads `W_dq = 0`, so the kernel skips the s_corr branch.
+  No practical impact at h = 0.04.
+- **Note:** `c_pbf.s_corr_n` is uploaded from `SolverProfile.pbf_s_corr_n`, but the
+  kernel computes `ratio^4` and never reads it. A profile that sets s_corr_n to a
+  value other than 4 would be silently ignored.
 
 ### A8. FIXED: Legacy DFSPH kernels deleted
 - **Files:** `dfsph_solver.cu`, `dfsph_solver.py`
@@ -67,17 +73,17 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 
 ### B1. FIXED: Density scaling inconsistent across materials
 - **File:** `materials.py`
-- **Severity:** CRITICAL — breaks buoyancy behavior
-- **Problem:** Water uses rest_density=2500 (2.5x real-world for force_scale convention) but several materials use real-world densities, creating wrong buoyancy ratios.
+- **Severity:** CRITICAL (breaks buoyancy behavior)
+- **Problem:** Water uses rest_density=2500 (2.5x real-world for force_scale convention) but several materials used real-world densities, creating wrong buoyancy ratios.
 
-| Material | Current | Should Be | Ratio vs Water (current) | Ratio vs Water (correct) |
-|----------|---------|-----------|--------------------------|--------------------------|
-| WATER    | 2500    | 2500      | 1.00                     | 1.00                     |
-| OIL      | 2500    | 2000-2200 | 1.00 (won't float!)      | 0.80-0.88                |
-| LAVA     | 2500    | 6500-7000 | 1.00 (won't sink!)       | 2.60-2.80                |
-| SAND     | 2500    | 3500-4500 | 1.00                     | 1.40-1.80                |
-| ICE      | 917     | 2300      | 0.37 (rockets out!)      | 0.92                     |
-| WOOD     | 600     | 1250-1500 | 0.24 (rockets out!)      | 0.50-0.60                |
+| Material | Was | Should Be | Ratio vs Water (was) | Ratio vs Water (correct) |
+|----------|-----|-----------|----------------------|--------------------------|
+| WATER    | 2500 | 2500      | 1.00                 | 1.00                     |
+| OIL      | 2500 | 2000-2200 | 1.00 (won't float)   | 0.80-0.88                |
+| LAVA     | 2500 | 6500-7000 | 1.00 (won't sink)    | 2.60-2.80                |
+| SAND     | 2500 | 3500-4500 | 1.00                 | 1.40-1.80                |
+| ICE      | 917  | 2300      | 0.37 (rockets out)   | 0.92                     |
+| WOOD     | 600  | 1250-1500 | 0.24 (rockets out)   | 0.50-0.60                |
 
 - **Fix:** rest densities now follow the "Should Be" column. Particle mass follows
   them too: FLUID and GRANULAR particles spawn with `0.02 * rest_density / 2500`
@@ -88,27 +94,28 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 
 ### B2. FIXED: LAVA EOS stiffness too low
 - **File:** `materials.py`
-- **Problem:** LAVA k=30 vs WATER k=500 — lava is 16x more compressible, collapses under own weight
+- **Problem:** LAVA k=30 vs WATER k=500. Lava was 16x more compressible and collapsed under its own weight.
 - **Suggested:** k=1500-2000
 
 ### B3. FIXED: ICE/WOOD EOS stiffness too low
-- **Problem:** k=15 for both — behaves like jello if they become dynamic particles
+- **Problem:** k=15 for both. They behave like jello if they become dynamic particles.
 - **Suggested:** k=1000
 
 ### B4. FIXED: Metal thermal conductivity retuned
-- **File:** `materials.py` — METAL thermal_conductivity=50
+- **File:** `materials.py` (METAL thermal_conductivity=50)
 - **Problem:** May violate thermal CFL with explicit Euler integration
 - **Suggested:** 5-10
 
 ### B5. INVESTIGATE: Fire heat capacity too high
-- **File:** `materials.py` — FIRE heat_capacity=1000
-- **Problem:** Fire retains heat too long, doesn't dump energy dramatically
+- **File:** `materials.py` (FIRE heat_capacity=1000, unchanged)
+- **Problem:** Fire retains heat too long and does not dump energy dramatically
 - **Suggested:** 100
 
-### B6. CONFIRMED: Viscosity units comment misleading
-- **File:** `common.cuh:38`
+### B6. FIXED: Viscosity units comment misleading
+- **File:** `common.cuh` (MaterialProps.base_viscosity)
 - **Was:** `// Pa*s`
-- **Fix:** Updated to describe actual per-solver convention
+- **Fix:** The comment now describes the per-solver convention (dynamic viscosity mu
+  for FLUID/GAS, used as `mu*m_j*lap/(rho_i*rho_j)` in WCSPH and DFSPH).
 - **Commit:** d4727ba
 
 ---
@@ -122,19 +129,25 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 
 ### C2. FIXED: Acceleration clamp too restrictive
 - **File:** `simulation.py` (accel_max in SimParams)
-- **Problem:** accel_max=30 m/s^2 (~3G) mutes collision splashes and explosive interactions
+- **Problem:** accel_max=30 m/s^2 (about 3 g) mutes collision splashes and explosive interactions
 - **Suggested:** 150-300 m/s^2 (velocity_limit=10 already prevents escape)
 
 ### C3. INVESTIGATE: DFSPH timestep overly conservative
 - **File:** `solver_profiles.py`
-- **Problem:** dt=1/300 (5 substeps/frame) — DFSPH is implicit, designed for larger dt
-- **Suggested:** dt=1/120-1/150 (2 substeps/frame), saving significant GPU budget
+- **Problem:** The Stable DFSPH profile runs dt=1/300. DFSPH is implicit and designed for larger dt.
+- **Suggested:** dt=1/120-1/150 (2 substeps/frame), saving GPU budget
 - **Risk:** May need more density iterations to compensate
+- **Current state:** bd-r5-review-n28.37 (commits 9ae8ec5, 731a2ae, 06053cf) cut the
+  Stable profile to 3 div + 4 density iterations at dt = 1/300 (5400 neighbour
+  sweeps per simulated second, was 10200) and set the Fast profile to 2 + 3 at
+  dt = 1/200. dt = 1/120 and 1/150 were in the sweep plan, but no result for them
+  is recorded, so the question stays open.
 
 ### C4. INVESTIGATE: PBF iteration count insufficient for deep columns
 - **File:** `solver_profiles.py`
-- **Problem:** 6 iterations at dt=1/120 can't propagate corrections through 100-particle columns
+- **Problem:** 6 iterations (Stable) or 4 (Fast) at dt=1/120 may not propagate corrections through 100-particle columns
 - **Suggested:** 8-10 iterations for stable profile
+- **Current state:** no deep-column measurement exists yet.
 
 ---
 
@@ -142,27 +155,38 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 
 ### D1. FIXED: Steam/water phase transition flickering
 - **File:** `reactions.cu:45-46`
-- **Problem:** STEAM_CONDENSE_TEMP=373 and WATER_BOIL_TEMP=373 — zero hysteresis. Particles at boundary temperature flicker between FLUID/GAS, causing pressure spikes.
+- **Problem:** STEAM_CONDENSE_TEMP=373 and WATER_BOIL_TEMP=373 gave zero hysteresis. Particles at the boundary temperature flickered between FLUID and GAS, causing pressure spikes.
 - **Fix:** Lower STEAM_CONDENSE_TEMP to 360 (13K hysteresis band)
 
 ### D2. FIXED: Missing melting reactions
 - **File:** `reactions.cu`
-- **Problem:** Stone/sand heat up from lava contact but never melt — breaks sandbox immersion
-- **Fix:** Add STONE→LAVA at temp>1500K, SAND→LAVA at temp>1700K
+- **Problem:** Stone/sand heat up from lava contact but never melt
+- **Fix:** Add STONE to LAVA at temp>1500K, SAND to LAVA at temp>1700K
 
 ### D3. FIXED: Fire vanishes instead of becoming smoke
 - **File:** `reactions.cu:243`
-- **Problem:** MAT_FIRE lifetime expiry → MAT_DEAD (invisible). Combustion should leave a trail.
-- **Fix:** Fire → MAT_SMOKE with lifetime=2.0s
+- **Problem:** MAT_FIRE lifetime expiry went to MAT_DEAD (invisible). Combustion should leave a trail.
+- **Fix:** Fire becomes MAT_SMOKE with a new lifetime (see J8)
 
-### D4. INVESTIGATE: Heat exchange values too high
+### D4. REFUTED for condensed materials: Heat exchange values too high
 - **File:** `materials.py` _INTERACTION_PAIRS
-- **Problem:** heat_exchange up to 60 (LAVA+ICE). At dt~0.008s with multiple neighbors, can overshoot 100% per substep causing temperature oscillation.
-- **Suggested caps:** LAVA+ICE: 30, WATER+LAVA: 25, LAVA+OIL: 25, LAVA+GUNPOWDER: 25
+- **Claim was:** heat_exchange up to 60 (LAVA+ICE) can overshoot 100% of the
+  temperature gap per substep and make temperatures oscillate.
+- **Actual:** the heat term is `dTdt_i = [45/(pi h^6)] / (rho_i cp_i) * SUM_j k_ij
+  (m_j/rho_j) (T_j - T_i) (h - r) * heat_boost` (PHYSICS.md 9.1). Upper bound for a
+  particle whose whole support (spacing 0.02, h = 0.04, SUM (h - r) = 0.303 m) is the
+  other material, with m_j/rho_j = 0.02^3 and the longest substep (PBF, 1/120 s):
+  LAVA next to METAL (heat_exchange 30) moves 0.26 of the gap per substep, METAL
+  next to LAVA 0.19, ICE next to LAVA (60) 0.15, LAVA next to ICE 0.11, every other
+  condensed pair under 0.08. All are well under 1, so there is no overshoot. METAL
+  and ICE are STATIC with mass 0.02, so their real m_j/rho_j is smaller and the true
+  numbers are lower still.
+- **GAS pairs:** GAS with non-GAS neighbours uses a per-pair cap of half the gap
+  (bd-r5-review-n28.94, PHYSICS.md 9.1 "Cross-phase pairs").
 
 ### D5. FIXED: Explosion speed too low
 - **File:** `reactions.cu:57`
-- **Problem:** EXPLOSION_SPEED=5.0 gets dampened by viscosity+pressure solver to a soft "puff"
+- **Problem:** EXPLOSION_SPEED=5.0 was damped by viscosity and the pressure solver to a soft "puff"
 - **Suggested:** 25-30 m/s for visually dramatic explosions
 
 ### D6. FIXED: Missing interactions
@@ -170,29 +194,36 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 - **Fix:** Add `(DIRT, WATER, 0.5, 5.0)` and `(LAVA, SAND, 0.0, 25.0)` to interaction pairs
 
 ### D7. FIXED: Acid not consumed during reactions
-- **Problem:** A single acid particle corrodes unlimited stone — no mass loss mechanism
-- **Potential fix:** Deplete acid health proportional to damage dealt
+- **Problem:** A single acid particle corroded unlimited stone, with no mass loss mechanism
+- **Fix:** Acid health drops by `exposure_corrode * dt * 0.5` while it corrodes (`reactions.cu`, acid consumption block)
 
 ---
 
-## E. World & Preset Issues (from Gemini 3.1 Pro review, 2026-02-28)
+## E. World and Preset Issues (from Gemini 3.1 Pro review, 2026-02-28)
 
 ### E1. FIXED: Gravity too high for "miniature world" feel
 - **Problem:** g=9.81 in a 2m cube: objects fall top-to-bottom in 0.63s, feels frantic/small
-- **Suggested:** g=3.0-4.0 — splashes linger, avalanches feel massive
-- **Impact:** Single biggest change for "world in a box" aesthetic
+- **Suggested:** g=3.0-4.0, so splashes linger and avalanches feel massive
 
-### E2. CONFIRMED: Presets underutilize particle budget
-- **Problem:** Most presets spawn ~130K of 500K capacity — looks sparse
+### E2. FIXED: Presets underutilize particle budget
+- **Problem:** Most presets spawned about 130K of 500K capacity and looked sparse
 - **Suggested:** Flagship presets should target 300K+ particles (leave 150K for reactions)
+- **Fix:** f9a28d0 (2026-03-08) made Sand Castle, Dam Break, Volcano, Waterfall and
+  Erosion denser. Lattice upper bounds per preset (before exclude and shape filters):
+  Sand Castle 381K, Dam Break 336K, Lava Lamp 296K, Multi-Fluid 277K, Volcano 202K.
+  Small demo scenes (SDF Hourglass 6K, Acid Rain 19K plus its spawner) stay small by
+  design.
 
-### E3. INVESTIGATE: No initial velocity support for spawned blocks
-- **Problem:** All spawned material starts at rest — limits dramatic openings
-- **Suggested:** Add initial_velocity parameter to spawn_cube
+### E3. FIXED: No initial velocity support for spawned blocks
+- **Problem:** All spawned material started at rest, which limits dramatic openings
+- **Fix:** f9a28d0 added `velocity=` to `World.spawn_cube` and `spawn_sphere`. Presets
+  use it: Dam Break, Waterfall, Erosion, Submarine, Canyon and Whirlpool.
 
-### E4. INVESTIGATE: No internal terrain features
-- **Problem:** Flat invisible walls cause fluids to settle into boring uniform pools
-- **Suggested:** Use STATIC materials (stone/metal) to build ramps, pedestals, channels
+### E4. FIXED: No internal terrain features
+- **Problem:** Flat invisible walls made fluids settle into uniform pools
+- **Fix:** f9a28d0 added STATIC terrain helpers (`spawn_ramp`, `spawn_bowl`,
+  `spawn_wall_with_gap`, `spawn_cylinder_shell`) and the Canyon, Whirlpool and
+  Avalanche Ramp presets. SDF presets add ledges, cylinders and boxes.
 
 ---
 
@@ -206,13 +237,13 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 
 ### F2. WCSPH viscosity lacks 1/rho_i division
 - WCSPH step2 doesn't divide viscosity by rho_i (unlike DFSPH)
-- Uses force_scale=0.02 instead — different convention, tuned separately
+- Uses force_scale=0.02 instead, a different convention tuned separately
 - "Pa*s" unit label was misleading (fixed in d4727ba)
 
 ### F3. PBF Tait EOS used for mu(I) instead of lithostatic pressure
 - Drucker-Prager I-number uses Tait pressure, not lithostatic (rho*g*h)
 - Makes I artificially large, pushing mu(I) toward mu_2/mu_max everywhere
-- Acceptable for game physics — full lithostatic would need column height estimation
+- Acceptable for game physics. Full lithostatic pressure would need column height estimation.
 
 ---
 
@@ -220,25 +251,24 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 
 ### G1. FIXED: Heat diffusion missing rho*cp divisor
 - **File:** `step1.cu:87,294`, `integrate.cu:311`
-- **Severity:** HIGH — units are wrong in the dimensional chain
+- **Severity:** HIGH (units were wrong in the dimensional chain)
 - **Problem:** Physical heat equation is `dT/dt = (k / (rho * cp)) * lap(T)`.
-  Code uses `dTdt = kappa * visc_lap_coeff * SUM...` where kappa is `thermal_conductivity`
-  (W/(m*K)), giving dTdt in W/m^3 not K/s. The `heat_capacity` field is completely unused.
-- **Impact:** `thermal_conductivity` values (0.02-2.0) happen to work as thermal diffusivity
-  (m^2/s). But METAL at k=50 gives thermal CFL = 260 (wildly unstable with explicit Euler).
-  Adding the proper `1/(rho*cp)` divisor would give METAL effective diffusivity = 4.4e-5,
-  CFL = 0.00023 (stable). This also fixes B4 automatically.
-- **Fix:** Either (A) divide by `density * cp_i` in step1 postcalc, or (B) rename field
-  to `thermal_diffusivity` and remove `heat_capacity`.
+  Code used `dTdt = kappa * visc_lap_coeff * SUM...` where kappa is `thermal_conductivity`
+  (W/(m*K)), giving dTdt in W/m^3 not K/s. The `heat_capacity` field was unused.
+- **Impact:** `thermal_conductivity` values (0.02-2.0) happened to work as thermal diffusivity
+  (m^2/s). But METAL at k=50 gave thermal CFL = 260 (wildly unstable with explicit Euler).
+  Adding the proper `1/(rho*cp)` divisor gives METAL effective diffusivity = 4.4e-5,
+  CFL = 0.00023 (stable). This also fixed B4.
+- **Fix:** Divide by `density * cp_i` in the step1 heat term (PHYSICS.md 9.1).
 
 ### G2. FIXED: GRANULAR mu(I) missing 1/rho_i division (WCSPH only)
 - **File:** `sph_shared.cuh:154-162`, `step2.cu:209-213`
 - **Severity:** MEDIUM
-- **Problem:** `compute_muI_eta()` returns Pa*s (dynamic viscosity) but WCSPH step2 divides by
-  `rho_j` only (kinematic form), not `rho_i * rho_j` (dynamic form). Off by factor ~rho_i
-  (~2500). Masked by `mu_max=10000` clamp dominating the result.
-- **Note:** DFSPH correctly applies `1/rho_i` at `dfsph_solver.cu:441`. This is WCSPH-specific.
-- **Fix:** Either make mu(I) return kinematic viscosity (divide by rho), or add /rho_i in step2.
+- **Problem:** `compute_muI_eta()` returns Pa*s (dynamic viscosity) but WCSPH step2 divided by
+  `rho_j` only (kinematic form), not `rho_i * rho_j` (dynamic form). Off by a factor of about rho_i
+  (about 2500). Masked by the `mu_max=10000` clamp dominating the result.
+- **Note:** DFSPH correctly applies `1/rho_i` at `dfsph_solver.cu:441`. This was WCSPH-specific.
+- **Fix:** Add /rho_i in step2.
 
 ### G3. FIXED: Vorticity confinement gradient uses |omega_j| not (|omega_j| - |omega_i|)
 - **File:** `step2.cu:277`
@@ -254,13 +284,20 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
   (eps 0.10). Confinement injects no measurable net angular momentum.
   `test_vorticity_confinement.py` guards the KE result.
 
-### G4. Documented: Surface tension is not Akinci model (naming)
-- **File:** `step2.cu:298-315`
-- **Severity:** LOW (documentation only)
-- **Problem:** Code applies `-gamma * normal_i` where normal is SPH gradient of color field.
-  This is a surface normal cohesion force, not the full Akinci model (which includes curvature
-  weighting and density factors). Resolution-dependent.
-- **Note:** PHYSICS.md already partially acknowledges this.
+### G4. CONFIRMED: Surface tension is a one-body push, not the Akinci model
+- **File:** `step2.cu` (K_Step2 surface tension block), `dfsph_solver.cu` NonPressureForces
+- **Severity:** MEDIUM
+- **Bead:** bd-r5-review-n28.125 (open)
+- **Problem:** Code applies `gamma * normal_i` to surface particles (neighbour count
+  below 25), where the normal is the SPH gradient of the color field. There is no
+  cohesion pair term, no curvature term and no reaction on the neighbours, so it
+  does not conserve momentum and is resolution-dependent. DFSPH applies it without
+  force_scale, so its push is 50x the WCSPH one. At gamma 1 a 2.5:1 zero-g WCSPH
+  water block compresses by 12% and gets longer, not rounder.
+- **Tried:** two pairwise Akinci attempts landed and were reverted (reverts 0c694e5
+  and 4352c79). Any cohesion strong enough to round the block raised density by 20%
+  or more against the soft force_scale=0.02 WCSPH pressure, and step2 at 1M
+  particles rose from 3.5 to 5.9 ms. The bead comments list the design options.
 
 ---
 
@@ -269,42 +306,44 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 ### H1. FIXED: DFSPH STATIC density not forced to rest_density
 - **File:** `dfsph_solver.cu:246` (K_DFSPH_ComputeDensityAlpha)
 - **Severity:** HIGH
-- **Problem:** PBF correctly forces `density_out[i] = rest_density` for STATIC. DFSPH has no
-  STATIC override — writes raw Poly6 density (~0.5*rho0 due to truncated neighborhood). Since
-  DFSPH uses `V_j = m_j/rho_j` everywhere, this doubles effective STATIC volume, causing
+- **Problem:** PBF correctly forces `density_out[i] = rest_density` for STATIC. DFSPH had no
+  STATIC override and wrote raw Poly6 density (about 0.5*rho0 due to the truncated neighborhood). Since
+  DFSPH uses `V_j = m_j/rho_j` everywhere, this doubled effective STATIC volume, causing
   excess boundary repulsion.
-- **Fix:** After Poly6 density at line 246, override: `if (STATIC) density_out[i] = rest_density`
+- **Fix:** After Poly6 density, override: `if (STATIC) density_out[i] = rest_density`
 
 ### H2. FIXED: PBF XSPH coefficient exceeds stability for viscous materials
 - **File:** `pbf_solver.cu:753`
-- **Severity:** HIGH — causes LAVA to explode in PBF
+- **Severity:** HIGH (caused LAVA to explode in PBF)
 - **Problem:** XSPH coefficient = `xsph_c * base_viscosity`. For LAVA (base_viscosity=100),
   c_xsph = 0.05 * 100 = 5.0. XSPH requires c in [0, 0.5] for stability. At c=5.0, velocity
-  correction is 5x the difference — particles reverse direction and oscillate explosively.
+  correction is 5x the difference, so particles reverse direction and oscillate explosively.
 - **Fix:** Clamp: `c_xsph = fminf(xsph_c * base_viscosity, 0.5f)`
 
 ### H3. FIXED: PBF Drucker-Prager friction uses absolute velocity
 - **File:** `pbf_solver.cu:668`
 - **Severity:** MEDIUM (Galilean invariance violation)
-- **Problem:** Friction decomposes absolute `vel_new` along pressure normal. For free-falling
+- **Problem:** Friction decomposed absolute `vel_new` along the pressure normal. For free-falling
   sand, `v_dot_n` can be large from rigid-body motion, causing artificial internal friction.
-  Expansion guard (`v_dot_n > 0`) partially mitigates for vertical free-fall.
+  Expansion guard (`v_dot_n > 0`) partially mitigated vertical free-fall.
 - **Fix:** Apply friction to velocity correction `(vel_new - v_predicted)` instead.
 
 ---
 
-## I. Integration & Pipeline Issues (from Gemini 3.1 Pro cross-review, 2026-02-28)
+## I. Integration and Pipeline Issues (from Gemini 3.1 Pro cross-review, 2026-02-28)
 
-### I1. INVESTIGATE: XSPH position update uses pre-integration velocity
-- **File:** `integrate.cu:258-271`
-- **Severity:** HIGH (if confirmed — needs code verification)
-- **Problem:** FLUID position uses `veleval_xsph` from step2 (computed from old velocity).
-  The newly integrated `vel_new` (with this substep's forces) is only written to the velocity
-  buffer, not used for position advection. This creates a one-substep lag.
-- **Note:** This may be intentional (Euler vs symplectic Euler convention). Needs verification
-  against the actual code path and whether `veleval_xsph` already includes force contributions.
+### I1. FIXED: XSPH position update uses pre-integration velocity
+- **File:** `integrate.cu` (K_Integrate advection)
+- **Severity:** HIGH
+- **Problem:** FLUID position used `veleval_xsph` from step2, built from the old velocity,
+  so positions advanced with v_n while velocity advanced to v_{n+1}. That is forward
+  Euler in position, not the symplectic Euler the header and PHYSICS.md 4 claimed.
+  The velocity clamp, spawn damping, GAS drag and boundary impulses reached the FLUID
+  position one substep late.
+- **Fix (bd-r5-review-n28.44, 5cd6485 6f3c6ff c8d78c7):** `advect_vel = vel_new`, plus the
+  XSPH correction `veleval - vel` for FLUID.
 
-### I2. FIXED: Advection CFL missing — PBF particles can tunnel
+### I2. FIXED: Advection CFL missing, PBF particles can tunnel
 - **File:** `simulation.py`
 - **Severity:** HIGH for PBF
 - **Problem:** With velocity_limit=10 and PBF dt=1/120, particles travel 0.083m = 2.08*h per
@@ -330,15 +369,15 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
   now matches the sort-every-substep run (328179.85 vs 328179.31; it was 326174.88).
 - **Follow-up:** coherent flow still loses reuse. Computing the cell of particle i from
   `anchor[i]` in step1/step2 (Verlet style, one extra 16 B read per kernel) would let pure
-  translation keep the grid. Rigid boundary particles do not feed the tracker yet
-  (bd-r5-review-n28.65).
+  translation keep the grid. Rigid boundary particles feed the tracker since
+  bd-r5-review-n28.65.
 
 ### I4. FIXED: Frame counter increments per substep, not per frame
 - **File:** `simulation.py:984`
 - **Severity:** MEDIUM
-- **Problem:** `_frame_counter += 1` inside `_sim_step()` (per substep). WCSPH runs ~40
-  substeps/frame, so foam compaction (`% 8`) fires every 0.2 frames, particle compaction
-  (`% 60`) fires every 1.5 frames — much more often than intended.
+- **Problem:** `_frame_counter += 1` inside `_sim_step()` (per substep). WCSPH runs about 40
+  substeps/frame, so foam compaction (`% 8`) fired every 0.2 frames and particle compaction
+  (`% 60`) every 1.5 frames, much more often than intended.
 - **Fix:** `_frame_counter` increments once per frame in `step_frame()`. The foam
   compaction gate was still checked inside the per-substep foam step, so every substep of
   every 8th frame compacted. Compaction now runs from `step_frame()` after the substep loop,
@@ -348,57 +387,61 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
 ### I5. FIXED: Boundary clamp can create r=0 with STATIC particles
 - **File:** `sph_shared.cuh:187-273`
 - **Severity:** MEDIUM
-- **Problem:** `sdf_box_boundary` clamps to exact `world_min/max`. If STATIC particles sit at
-  those coordinates, distance=0 → division by zero in `grad_spiky`. In practice, STATIC
-  particles are placed at spacing=0.02 from wall (safe), but fragile.
+- **Problem:** `sdf_box_boundary` clamped to exact `world_min/max`. If STATIC particles sit at
+  those coordinates, distance=0 gives a division by zero in `grad_spiky`. In practice STATIC
+  particles are placed at spacing=0.02 from the wall (safe), but fragile.
 - **Fix:** Add small margin: `world_min + 1e-4f`
 
 ---
 
 ## J. Reaction System Issues (from GPT 5.2 Pro cross-review, 2026-02-28)
 
-### J1. FIXED: Corrosion and wetness share one accumulator — water dies from acid
+### J1. FIXED: Corrosion and wetness share one accumulator, water dies from acid
 - **File:** `reactions.cu:222-236`
 - **Severity:** CRITICAL
-- **Problem:** `exposure_corrode` drives both sand wetting AND health damage. WATER is not
-  excluded from the damage path. The `(WATER, ACID, 0.05, 5.0)` interaction causes water
-  particles near acid to accumulate corrode exposure, draining health → MAT_DEAD.
-  Acid literally dissolves water into nothing.
-- **Fix:** Either split into `exposure_wet` / `exposure_corrode`, or whitelist only corrodible
-  materials (STONE, METAL, WOOD, DIRT, GRAVEL) in the damage block.
+- **Problem:** `exposure_corrode` drives both sand wetting AND health damage. WATER was not
+  excluded from the damage path. The `(WATER, ACID, 0.05, 5.0)` interaction made water
+  particles near acid accumulate corrode exposure and drain health to MAT_DEAD.
+- **Fix:** Only whitelisted materials take acid damage (`CORRODIBLE_MATS`: STONE, METAL,
+  WOOD, GRAVEL, OIL, GUNPOWDER), and WATER/ACID is heat-only (rate 0).
 
 ### J2. FIXED: Drying temperature acceleration is mathematically inverted
 - **File:** `reactions.cu:211-218`
 - **Severity:** HIGH
 - **Problem:** Drying threshold: `exp_corrode < THRESHOLD / (1 + 0.01 * max(temp-293, 0))`.
-  As temperature rises, RHS decreases → harder to satisfy → hotter = dries SLOWER (inverted).
+  As temperature rises, the right side decreases, so hotter material dried SLOWER (inverted).
 - **Fix:** Change to multiplication: `exp_corrode < THRESHOLD * (1 + 0.01 * max(temp-293, 0))`
 
 ### J3. FIXED: WATER missing from REACTIVE_MATERIAL_IDS
 - **File:** `materials.py:344-347`
 - **Severity:** HIGH
-- **Problem:** `REACTIVE_MATERIAL_IDS` gates reaction kernel dispatch. WATER is absent, so in
-  a water-only scene, pre-heated water can never boil into steam.
+- **Problem:** `REACTIVE_MATERIAL_IDS` gates reaction kernel dispatch. WATER was absent, so in
+  a water-only scene, pre-heated water could never boil into steam.
 - **Fix:** Add WATER to the set.
 
 ### J4. FIXED: No latent heat at phase transitions
 - **File:** `reactions.cu` (K_Reactions phase transitions)
 - **Severity:** HIGH
 - **Problem:** Phase transitions copied temperature unchanged. ICE at 280K became WATER at
-  280K, but cp doubles (2090→4186), so internal energy jumped 2x. Combustion hard-sets 1200K
+  280K, but cp doubles (2090 to 4186), so internal energy jumped 2x. Combustion hard-sets 1200K
   regardless.
-- **Fix (bd-r5-review-n28.64):** ICE→WATER, STONE/SAND→LAVA and LAVA→STONE now set the
+- **Fix (bd-r5-review-n28.64):** ICE to WATER, STONE/SAND to LAVA and LAVA to STONE now set the
   temperature to the threshold (273K for ICE, `c_materials[mat].temp_melt` otherwise). The
-  excess is treated as consumed latent heat. STEAM→WATER and combustion are unchanged.
+  excess is treated as consumed latent heat. STEAM to WATER and combustion are unchanged.
 - **Decision:** No per-particle latent-energy accumulator (4 B per particle). A real melt
   plateau is not worth the memory and bandwidth in a sandbox; the clamp gives a visible melt
   front at no cost.
 
-### J5. INVESTIGATE: Acid+mud interaction defined but cannot fire (dead code)
-- **File:** `materials.py:413`, `reactions.cu:223`
+### J5. CONFIRMED: Acid+mud interaction cannot corrode mud
+- **File:** `materials.py` (`(MUD, ACID, 0.05, 3.0)`, commented "acid corrodes mud"),
+  `reactions.cu` (`CORRODIBLE_MATS` whitelist)
 - **Severity:** MEDIUM
-- **Problem:** `(MUD, ACID, 0.05, 3.0)` interaction exists but MUD is excluded from the
-  corrosion health-damage path. The reaction_rate feeds the wetting state machine, not damage.
+- **Problem:** MUD is not in `CORRODIBLE_MATS`, so MUD never loses health to acid. The pair's
+  reaction_rate only adds to MUD's `exposure_corrode`, which MUD reads as wetness: acid
+  neighbours slow MUD drying back to WET_SAND. The pair is symmetric, so ACID next to MUD
+  is consumed (acid consumption block) while the mud is untouched.
+- **Fix options:** add MUD to the whitelist (acid then dissolves mud), or set the pair to
+  rate 0 (heat only) and fix the comment. No bead yet.
 
 ### J6. FIXED: Reaction thresholds duplicated and disagree
 - **File:** `reactions.cu:44` vs `materials.py:243`
@@ -407,36 +450,87 @@ Last updated 2026-02-28. Total: 48 items (35 fixed, 6 investigate, 5 deferred, 2
   materials.py. Conceptually the same threshold, differs by 100K.
 - **Fix:** Read from `c_materials[].temp_melt` instead of hardcoded #define.
 
-### J7. REFUTED: Water boiling spawn flag — source IS killed
-- **File:** `reactions.cu:139-144`, `spawn.cu:168-170`
-- **Severity:** N/A — not a bug
+### J7. REFUTED: Water boiling spawn flag, source IS killed
+- **File:** `reactions.cu` (boil sets the spawn flag), `spawn.cu` K_SpawnGas
+- **Severity:** N/A (not a bug)
 - **Claim was:** Boiling water sets SPAWN flag but water particle persists, risking mass increase.
-- **Actual:** `K_SpawnGas` (`spawn.cu:168-170`) explicitly kills the source particle:
-  `packed_info[i] = MAKE_PACKED(MAT_DEAD, FLUID); health[i] = 0.0f; mass[i] = 0.0f;`
-  Mass is conserved across the boiling transition.
+- **Actual:** `K_SpawnGas` explicitly kills the source particle:
+  `packed_info[i] = SET_STATE_DIRTY(MAKE_PACKED(MAT_DEAD, STATIC)); health[i] = 0.0f; mass[i] = 0.0f;`
+  STATIC keeps the dead slot out of the fluid neighbour loop until compaction. Mass is
+  conserved across the boiling transition.
 
-### J8. PARTIALLY REFUTED: Steam DOES get lifetime; smoke status unclear
-- **File:** `spawn.cu:148`, `reactions.cu:238-254`
-- **Severity:** LOW (reduced from MEDIUM)
+### J8. FIXED: Steam and smoke get a lifetime
+- **File:** `spawn.cu` K_SpawnGas, `reactions.cu` (GAS lifetime decay, fire extinguish)
+- **Severity:** LOW
 - **Claim was:** STEAM/SMOKE created without setting lifetime, accumulate indefinitely.
-- **Actual (STEAM):** `spawn.cu:148` sets `lifetime[slot] = SPAWN_LIFETIME` (5.0s). STEAM
-  correctly decays via the GAS lifetime path. REFUTED for STEAM.
-- **Actual (SMOKE):** Combustion transitions (WOOD/OIL/GUNPOWDER → FIRE) set lifetime for FIRE,
-  but the FIRE→SMOKE transition path needs verification. If SMOKE inherits FIRE's remaining
-  lifetime, it will also decay. Needs code tracing.
-- **Note:** GAS decay condition `lt > 0.0f` (reactions.cu:240) is confirmed correct.
+- **Actual (STEAM):** K_SpawnGas sets `lifetime[slot] = SPAWN_LIFETIME` (12.0 s).
+- **Actual (SMOKE):** FIRE whose lifetime runs out becomes SMOKE with `lifetime = 3.0 s` and
+  temperature capped at 500 K. FIRE put out by water becomes SMOKE with
+  `EXTINGUISHED_SMOKE_LIFETIME` (1.0 s) at 373 K (bd-r5-review-n28.73). Expired SMOKE and
+  STEAM go to MAT_DEAD with zero mass.
 
-### J9. INVESTIGATE: Interaction matrix only ~20% populated
-- **File:** `materials.py:372-414`
-- **Severity:** MEDIUM
-- **Problem:** 32/153 unique pairs have explicit interactions. All others default to zero
-  heat_exchange — most materials are perfect insulators to each other. Some temperature
-  thresholds are unreachable (e.g., GRAVEL can't be heated by anything except self-conduction).
-- **Suggested:** Derive baseline heat exchange from `thermal_conductivity` for unpaired materials.
+### J9. REFUTED: Interaction matrix sparsity makes materials insulators
+- **File:** `materials.py` (_INTERACTION_PAIRS, 36 pairs), `step1.cu` heat term
+- **Claim was:** Unpaired materials default to zero heat_exchange, so most materials are
+  perfect insulators to each other, and thresholds such as GRAVEL melting are unreachable.
+- **Actual:** conduction runs for every pair through `k_ij`, the harmonic mean of the two
+  conductivities (bd-r5-review-n28.67). `heat_exchange` only boosts it:
+  `heat_boost = max(1, heat_exchange)`, so an unpaired pair conducts at boost 1.
+  GRAVEL heats from LAVA (and has a LAVA+GRAVEL pair). What stays pair-only is
+  `exposure_heat`, which drives WOOD, OIL and GUNPOWDER ignition.
 
-### J10. Documented: Behavior-class transitions in sorted arrays
-- **File:** `reactions.cu:125-137, 158-171`
+### J10. DEFERRED: Behavior-class transitions in sorted arrays
+- **File:** `reactions.cu` (K_Reactions)
 - **Severity:** MEDIUM (risk)
-- **Problem:** Reactions change behavior class in-place (ICE/STATIC→WATER/FLUID) on sorted
-  arrays between Step1 and Step2. Safe only if downstream kernels branch per-particle (they do).
-  Should be documented as an invariant.
+- **Problem:** Reactions change behavior class in place (for example ICE/STATIC to WATER/FLUID)
+  on sorted arrays between Step1 and Step2. Safe only if downstream kernels branch per
+  particle (they do). This is an invariant to keep, not a bug.
+
+---
+
+## K. Round-5 Review Findings (2026-09-24)
+
+Items from the round-5 review that belong on this list. All are fixed; the bead
+holds the full analysis.
+
+### K1. FIXED: WCSPH neighbour density read as 1.0
+- **Bead:** bd-r5-review-n28.21 (d2b75f2), then bd-r5-review-n28.163
+- **Problem:** K_Integrate wrote `position.w = 1.0` for every awake particle, so from
+  substep 2 on step1 read `rho_j = 1.0` for every awake neighbour through `density_in`.
+- **Fix:** K_Integrate carries the step1 density in `position.w`; step1 now reads `rho_j`
+  from `position.w` and `density_in` is gone for WCSPH.
+
+### K2. FIXED: Rigid boundary particles written at a moving offset
+- **Bead:** bd-r5-review-n28.22 (d1b16ae e31593e 7bf0eca ebd12ce)
+- **Problem:** K_UpdateBoundaryParticles used `offset = world._high_water`, which brush spawn
+  and compaction move, so body data landed in slots owned by other particles.
+- **Fix:** The boundary block sits inside `_high_water` at `rbm.boundary_offset`, and
+  compaction tracks it.
+
+### K3. FIXED: load_scene tripped the rigid injection assert
+- **Bead:** bd-r5-review-n28.22 (same commits as K2)
+- **Problem:** save_load never reset the RigidBodyManager, so re-injection after a scene load
+  hit `assert not self._boundary_particles_injected` and the sim loop died.
+- **Fix:** One flag, `rbm.boundary_injected`, with `reset()` and `mark_for_reinjection()`;
+  load_scene marks for reinjection.
+
+### K4. FIXED: Dead particles kept their mass
+- **Beads:** bd-r5-review-n28.23 (039e4f3 d89669a 68f0535), bd-r5-review-n28.34
+  (f56e8b9 5e43266 8c76478 c089001)
+- **Problem:** Acid-consumed and expired-gas particles, and brush-killed particles, became
+  MAT_DEAD with their mass intact and kept acting as boundary mass until compaction.
+- **Fix:** Every death path writes `MAKE_PACKED(MAT_DEAD, STATIC)` with zero mass; boundary
+  loops skip MAT_DEAD (PHYSICS.md 10.20).
+
+### K5. FIXED: The Timing panel ran a drifted copy of the WCSPH substep
+- **Bead:** bd-r5-review-n28.2 (0a91045 6015fb8)
+- **Problem:** `_sim_step_timed` was a hand-copied pipeline that skipped the STATIC boundary,
+  surface velocity smoothing, the blast wave and the SDF kinematics update.
+- **Fix:** The timed path runs the shared substep body with per-stage marks.
+
+### K6. FIXED: Rigid particles had position.w = 0
+- **Bead:** bd-r5-review-n28.66 (05610b0); bd-r5-review-n28.102 was closed as its duplicate
+- **Problem:** Rigid boundary particles kept `.w = 0`, and step2 still summed them into the
+  vorticity-confinement direction.
+- **Fix:** K_Step1, K_UpdateBoundaryParticles and the injection write `.w = 2500`
+  (`RIGID_PSI_RHO0`), and the step2 eta sum uses FLUID neighbours only.
