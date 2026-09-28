@@ -13,6 +13,8 @@ Checks:
 - Lean with density_out None leaves the density array untouched and still
   writes the same lambda.
 - The full variant refuses density_out None.
+- One _run_pbf_body substep at 4 and 5 iterations is bitwise the same as
+  with the old iteration call (full kernel, density every iteration).
 """
 
 import numpy as np
@@ -71,13 +73,15 @@ def _cloud(sim, world, seed=5):
     return n
 
 
-def _launch_full_no_extras(w, sim, n, mass, dens, lam, pn):
+def _launch_full_no_extras(w, sim, n, mass, dens, lam, pn, pred=None):
     """The old iteration call: the full kernel with every extra pointer NULL."""
+    if pred is None:
+        pred = w.sorted_predicted_position[:n]
     k = pbf_solver._get_module().get_function("K_PBF_ComputeLambda")
     null = np.intp(0)
     bs = pbf_solver.BLOCK_SIZE
     k(((n + bs - 1) // bs,), (bs,), (
-        np.uint32(n), w.sorted_predicted_position[:n],
+        np.uint32(n), pred,
         mass if mass is not None else null,
         w.sorted_packed_info[:n], sim._cell_start, sim._cell_end,
         dens, lam, pn,
@@ -147,3 +151,46 @@ def test_full_needs_density_out(world, sim):
             exposure_heat_out=w.sorted_exposure_heat,
             exposure_corrode_out=w.sorted_exposure_corrode,
         )
+
+
+@pytest.mark.parametrize("iters", [4, 5])
+def test_body_matches_full_kernel_pipeline(world, sim, monkeypatch, iters):
+    """One _run_pbf_body substep equals the same substep with the old
+    iteration call (full kernel, density written every iteration)."""
+    import dataclasses
+
+    sim.set_solver_profile(dataclasses.replace(PROFILES["PBF"], pbf_iterations=iters))
+    sim._spawn_substep = sim._damping_duration
+    n = _cloud(sim, world)
+    w = world
+    dens0 = w.sorted_density[:n].copy()
+    monkeypatch.setattr(sim, "_run_grid_setup", lambda *a, **k: None)
+    monkeypatch.setattr(sim, "_run_reactions_spawn", lambda *a, **k: None)
+
+    real = pbf_solver.pbf_compute_lambda
+    calls = []
+
+    def old_call(pred, mass, pi, cs, ce, dens, lam, pn=None, **extras):
+        if extras:
+            return real(pred, mass, pi, cs, ce, dens, lam, pn, **extras)
+        calls.append(dens is None)
+        _launch_full_no_extras(w, sim, pred.shape[0], mass, w.sorted_density, lam,
+                               pn if pn is not None else np.intp(0), pred=pred)
+
+    monkeypatch.setattr(pbf_solver, "pbf_compute_lambda", old_call)
+    sim._run_pbf_body(n)
+    cp.cuda.Device().synchronize()
+    ref_pos = cp.asnumpy(w.position[:n])
+    ref_vel = cp.asnumpy(w.velocity[:n])
+    ref_dens = cp.asnumpy(w.sorted_density[:n])
+    # iterations 1..N-1 use the lean call; all but the last skip density
+    assert calls == [True] * (iters - 2) + [False]
+
+    monkeypatch.setattr(pbf_solver, "pbf_compute_lambda", real)
+    cp.copyto(w.sorted_density[:n], dens0)
+    sim._run_pbf_body(n)
+    cp.cuda.Device().synchronize()
+    np.testing.assert_array_equal(cp.asnumpy(w.position[:n]), ref_pos)
+    np.testing.assert_array_equal(cp.asnumpy(w.velocity[:n]), ref_vel)
+    np.testing.assert_array_equal(cp.asnumpy(w.sorted_density[:n]), ref_dens)
+    assert np.abs(ref_vel[:, :3]).max() > 0.05
