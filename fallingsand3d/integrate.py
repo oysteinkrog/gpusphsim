@@ -434,6 +434,7 @@ def rigid_body_collisions(
 
 def update_boundary_particles(
     boundary_data: cupy.ndarray,
+    boundary_body_id: cupy.ndarray,
     d_rigid_bodies: cupy.ndarray,
     position_out: cupy.ndarray,
     velocity_out: cupy.ndarray,
@@ -451,9 +452,11 @@ def update_boundary_particles(
 
     Parameters
     ----------
-    boundary_data : cupy.ndarray, (N, 8) float32
-        Combined boundary data: (x_local, y_local, z_local, psi, body_id, 0, 0, 0).
-        The kernel reads each row as two float4s, so it must be C-contiguous.
+    boundary_data : cupy.ndarray, (N, 4) float32
+        Combined boundary records (x_local, y_local, z_local, psi). The kernel
+        reads each row as one float4, so it must be C-contiguous.
+    boundary_body_id : cupy.ndarray, (N,) int32
+        Parent rigid body index of each boundary particle.
     d_rigid_bodies : cupy.ndarray
         GPU array of RigidBody structs.
     position_out : cupy.ndarray, (M, 4) float32
@@ -495,6 +498,7 @@ def update_boundary_particles(
         (grid,), (block,),
         (
             boundary_data,
+            boundary_body_id,
             d_rigid_bodies,
             position_out,
             velocity_out,

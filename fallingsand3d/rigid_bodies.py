@@ -474,15 +474,17 @@ class RigidBodyManager:
     Force/torque accumulators are global memory float arrays sized for
     MAX_RIGID_BODIES * 4 floats (xyz + padding). Zero-cleared each substep.
 
-    Boundary particle data is stored as a combined CuPy array with columns:
-    (x_local, y_local, z_local, psi, body_id, nx, ny, nz)
+    Boundary particle data is stored as two combined CuPy arrays:
+    boundary_data (N, 4) float32 rows (x_local, y_local, z_local, psi), and
+    boundary_body_id (N,) int32 with each row's parent body index.
     """
 
     def __init__(self, max_bodies: int = MAX_RIGID_BODIES) -> None:
         self.max_bodies = max_bodies
         self._bodies_cpu = np.zeros(max_bodies, dtype=RIGID_BODY_DTYPE)
         self._num_bodies = 0
-        self._boundary_data_list = []  # per-body boundary data before combining
+        self._boundary_data_list = []  # per-body (M, 4) boundary records before combining
+        self._boundary_body_id_list = []  # per-body (M,) int32 body ids
         # Per-body constructor arguments, so a save file can rebuild the same
         # bodies and boundary samples (bd-r5-review-n28.57).
         self._build_params: list[dict] = []
@@ -493,9 +495,11 @@ class RigidBodyManager:
         self.rigid_forces = cupy.zeros((max_bodies, 4), dtype=cupy.float32)
         self.rigid_torques = cupy.zeros((max_bodies, 4), dtype=cupy.float32)
 
-        # Combined boundary particle data (set after all bodies added)
-        # Columns: x_local, y_local, z_local, psi, body_id, 0, 0, 0 (padding)
-        self.boundary_data = None  # cupy (N, 8) float32
+        # Combined boundary particle data (set after all bodies added).
+        # boundary_data rows: (x_local, y_local, z_local, psi), one float4 each.
+        # boundary_body_id: parent body index of each row.
+        self.boundary_data = None  # cupy (N, 4) float32
+        self.boundary_body_id = None  # cupy (N,) int32
         # Grid-reuse drift anchor (bd-r5-review-n28.65): each boundary
         # particle's position at the last full sort, written by
         # K_UpdateBoundaryParticles. boundary_anchor_valid is False until a
@@ -611,16 +615,15 @@ class RigidBodyManager:
         psi = compute_boundary_volumes(positions, smoothing_length, rho0)
         psi_cpu = psi.get()
 
-        # Build boundary data: (x, y, z, psi, body_id, 0, 0, 0). The kernel
-        # reads the row as two float4s: (x, y, z, psi) and the body id.
-        # Columns 5-7 are zero padding; no kernel uses surface normals.
+        # Build boundary records: (x, y, z, psi), one float4 each, plus the
+        # body id in its own int32 array. No kernel uses surface normals.
         N = len(positions)
-        data = np.zeros((N, 8), dtype=np.float32)
+        data = np.zeros((N, 4), dtype=np.float32)
         data[:, 0:3] = positions
         data[:, 3] = psi_cpu
-        data[:, 4] = float(idx)
 
         self._boundary_data_list.append(data)
+        self._boundary_body_id_list.append(np.full(N, idx, dtype=np.int32))
         return idx
 
     def finalize_boundary_data(self) -> None:
@@ -628,12 +631,15 @@ class RigidBodyManager:
         self.boundary_anchor_valid = False
         if not self._boundary_data_list:
             self.boundary_data = None
+            self.boundary_body_id = None
             self.boundary_anchor = None
             self.num_boundary_particles = 0
             self._set_reserved_tail(0)
             return
         combined = np.concatenate(self._boundary_data_list, axis=0)
         self.boundary_data = cupy.asarray(combined)
+        self.boundary_body_id = cupy.asarray(
+            np.concatenate(self._boundary_body_id_list))
         self.num_boundary_particles = len(combined)
         self.boundary_anchor = cupy.zeros((len(combined), 4), dtype=cupy.float32)
         # Keep room for the block until inject_boundary_particles() puts it
@@ -830,8 +836,9 @@ class RigidBodyManager:
             self.boundary_dropped = True
             return n_fluid
 
-        # boundary_data columns: x_local, y_local, z_local, psi, body_id, 0, 0, 0
-        bd = self.boundary_data  # cupy (N, 8)
+        # boundary_data rows: (x_local, y_local, z_local, psi)
+        bd = self.boundary_data  # cupy (N, 4)
+        bid = self.boundary_body_id  # cupy (N,) int32
 
         # For each body, transform local positions to world space
         # Simple approach: iterate bodies on CPU, batch-transform on GPU
@@ -844,7 +851,7 @@ class RigidBodyManager:
             # Find particles for this body.
             # One-time sync on preset load — acceptable per CLAUDE.md because
             # inject_boundary_particles() is called once, not per-substep.
-            mask = bd[:, 4] == float(body_idx)
+            mask = bid == body_idx
             local_pos = bd[mask, :3]  # (M, 3)  -- masked fancy-index: GPU sync here
             psi = bd[mask, 3]
             M = len(psi)  # len() on masked CuPy result: GPU sync here
@@ -918,9 +925,11 @@ class RigidBodyManager:
         self._num_bodies = 0
         self._bodies_cpu[:] = 0
         self._boundary_data_list = []
+        self._boundary_body_id_list = []
         self._build_params = []
         self.num_boundary_particles = 0
         self.boundary_data = None
+        self.boundary_body_id = None
         self.boundary_anchor = None
         self.boundary_anchor_valid = False
         self.d_rigid_bodies.fill(0)

@@ -822,6 +822,7 @@ class Simulation:
                 self._disp_cleared_for_sort = True
             integrate.update_boundary_particles(
                 rbm.boundary_data,
+                rbm.boundary_body_id,
                 rbm.d_rigid_bodies,
                 w.position,
                 w.velocity,

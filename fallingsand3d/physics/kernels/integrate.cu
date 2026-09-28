@@ -916,11 +916,10 @@ void K_RigidBodyCollisions(
  *
  * Runs AFTER K_IntegrateRigidBodies, BEFORE hash/sort for next substep.
  *
- * boundary_data layout: 8 floats (32 B) per boundary particle, read as two
- * float4s. float4 0 = (x_local, y_local, z_local, psi); float4 1 =
- * (body_id as float, 0, 0, 0). Only float4 0 and the body id are loaded.
- * Columns 5-7 are zero padding (they held unused surface normals before
- * bd-r5-review-n28.183).
+ * Boundary record layout (bd-r5-review-n28.183): boundary_data holds one
+ * float4 (16 B) per boundary particle, (x_local, y_local, z_local, psi),
+ * read with one 16 B load. boundary_body_id holds the parent body index as
+ * one int32 per particle. Surface normals are not stored: no kernel uses them.
  *
  * Grid-reuse drift (bd-r5-review-n28.65): boundary particles are STATIC, so
  * K_Integrate and the PBF/DFSPH finalize kernels never record their motion.
@@ -937,7 +936,8 @@ void K_RigidBodyCollisions(
 
 extern "C" __global__
 void K_UpdateBoundaryParticles(
-    const float4*   __restrict__ boundary_data,  // (N, 8) floats = 2 float4 per record, see header
+    const float4*   __restrict__ boundary_data,  // [N] (x_local, y_local, z_local, psi)
+    const int*      __restrict__ boundary_body_id, // [N] parent body index
     const RigidBody* __restrict__ d_rigid_bodies,
     float4*         __restrict__ position_out,    // main unsorted position array
     float4*         __restrict__ velocity_out,    // main unsorted velocity array
@@ -952,11 +952,11 @@ void K_UpdateBoundaryParticles(
     if (i >= N) return;
 
     // One 16 B load for (x_local, y_local, z_local, psi), one 4 B load for
-    // the body id (first float of the record's second float4).
-    const float4 rec = __ldg(&boundary_data[2 * i]);
+    // the body id.
+    const float4 rec = __ldg(&boundary_data[i]);
     float3 r_local = make_float3(rec.x, rec.y, rec.z);
     float psi = rec.w;
-    int bid = (int)(__ldg(reinterpret_cast<const float*>(&boundary_data[2 * i + 1])) + 0.5f);
+    const int bid = __ldg(&boundary_body_id[i]);
 
     // Read only the four body fields used here (64 of the 96 B struct).
     const RigidBody* bp = &d_rigid_bodies[bid];
