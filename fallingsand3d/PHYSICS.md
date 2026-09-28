@@ -716,12 +716,18 @@ particle from its own `gamma_dot`, pressure, density and material (5.2 to 5.4), 
 writes it to `eta_out` (`world.sorted_eta`, 0 for non-GRANULAR). K_Step2 reads
 `eta_i` and each `eta_j` from `eta_in` (4 B per GRANULAR pair) and does only the
 harmonic mean per pair. The inputs are the ones Step2 used, so the forces match the
-per-pair path exactly. When `eta_in` is NULL, K_Step2 recomputes eta per pair from
+per-pair path exactly. The WCSPH substep in `simulation.py` passes `world.sorted_eta`
+as both. When `eta_in` is NULL, K_Step2 recomputes eta per pair from
 `shear_rate_in`. `step2.upload_granular_params` also uploads `c_granular` to the step1
 module for this (bd-r5-review-n28.169). A particle whose material turns GRANULAR in
-the reactions pass between Step1 and Step2 has eta 0 for that one substep.
-Measured on a resting sand block, WCSPH: K_Step2 1.23 to 1.16 ms at 381K particles
-and 9.92 to 8.83 ms at 921K; K_Step1 time unchanged.
+the reactions pass between Step1 and Step2 (LAVA to GRAVEL, MUD to WET_SAND) carries
+eta 0, and K_Step2 recomputes eta from `shear_rate_in` for any GRANULAR particle whose
+carried eta is not above 0, so it gets the same value as the per-pair path.
+A GRANULAR to GRANULAR change in that pass (SAND to WET_SAND) keeps the eta of the old
+material's `mu_s` for that one substep.
+Measured on a resting sand block, WCSPH, K_Step2 per-pair eta to carried eta:
+0.88 to 0.81 ms at 340K particles and 2.11 to 1.97 ms at 830K (shared GPU);
+K_Step1 time unchanged.
 DFSPH NonPressureForces still computes eta per pair.
 
 **Source**: `step1.cu` (PostCalc eta), `step2.cu` (mu(I) eta_i, GRANULAR pair force)
