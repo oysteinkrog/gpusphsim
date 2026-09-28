@@ -272,8 +272,8 @@ def compute_step1(
     position : cupy.ndarray, (N, 4) float32
         Sorted particle positions. .w is read as each neighbour's density
         rho_j for the m_j/rho_j weights in heat diffusion (the previous
-        substep's density; 0 or less falls back to the rest density), and
-        K_Step1 overwrites .w with this call's density.
+        substep's density; 0 or less falls back to the rest density). After
+        the kernel, compute_step1 copies this call's density into .w.
     velocity : cupy.ndarray, (N, 4) float32
         Sorted particle velocities (used for strain-rate computation).
     mass : cupy.ndarray, (N,) float32
@@ -386,5 +386,10 @@ def compute_step1(
             np.uint32(1 if force_refresh else 0),
         ),
     )
+    # Pack the density into position.w after the kernel, not inside it:
+    # K_Step1 reads every neighbour's .w as rho_j, so an in-place write gave
+    # a mix of last-substep and this-substep densities that depended on
+    # thread timing (bd-r5-review-n28.215). No allocation, graph-capturable.
+    cupy.copyto(position[:, 3], density_out[:n])
 
     return density_out, shear_rate_out, dTdt_out, exposure_heat_out, exposure_corrode_out, pressure_out

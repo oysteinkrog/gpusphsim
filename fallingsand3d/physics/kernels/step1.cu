@@ -140,7 +140,6 @@ __device__ __forceinline__ void step1_body(
         exposure_corrode_out[index_i] = 0.0f;
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        position[index_i].w = RIGID_PSI_RHO0;  // pack the placeholder density like other particles
         if (pr2_omega_out) pr2_omega_out[index_i] = make_float2(0.0f, 0.0f);
         return;
     }
@@ -160,7 +159,6 @@ __device__ __forceinline__ void step1_body(
         exposure_corrode_out[index_i] = 0.0f;
         vorticity_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         normal_out[index_i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        position[index_i].w = rho_dead;
         if (pr2_omega_out) pr2_omega_out[index_i] = make_float2(p_dead / (rho_dead * rho_dead), 0.0f);
         return;
     }
@@ -182,7 +180,6 @@ __device__ __forceinline__ void step1_body(
             // |omega| is 0 for every inactive particle (vorticity is FLUID only).
             pr2_omega_out[index_i] = make_float2(p_c / (rho_c * rho_c), 0.0f);
         }
-        if (pos4_i.w != rho_c) position[index_i].w = rho_c;
         return;
     }
 
@@ -533,8 +530,10 @@ __device__ __forceinline__ void step1_body(
         if (eta_out) eta_out[index_i] = 0.0f;
     }
 
-    // Pack density into position.w for Step2 neighbor reads (PERF-004)
-    position[index_i].w = density_out[index_i];
+    // position.w is not written here: neighbours read it as rho_j, so an
+    // in-place write made their sums depend on thread timing
+    // (bd-r5-review-n28.215). compute_step1 copies density_out into .w
+    // after the kernel, for K_Step2 and the next substep.
 }
 
 // One kernel for both cases: c_sim.thermal_enabled is uniform across the
