@@ -473,6 +473,113 @@ void K_DFSPH_PackVolume(
 }
 
 /* ======================================================================
+ * DFSPH neighbour list (bd-r5-review-n28.198)
+ *
+ * The solver loops (ComputeKappaV, CorrectVelocityDiv, ComputePressureAccel,
+ * CorrectDivAndPressureAccel, DensitySolverUpdate) all read the same sorted
+ * positions for the whole substep, so K_DFSPH_BuildNeighborList finds each
+ * particle's neighbours once and the _NL kernel variants read the list
+ * instead of walking the 27 hash cells again.
+ *
+ * Layout: interleaved, nl[k * nl_stride + i] is neighbour k of particle i, so
+ * a warp reading entry k of 32 consecutive particles reads 32 consecutive
+ * words. nl_count[i] is the true neighbour count, which can exceed
+ * DFSPH_NL_MAX under compression; the list then holds only the first
+ * DFSPH_NL_MAX and the _NL kernel falls back to the hash walk for that
+ * particle, so no neighbour is ever dropped.
+ *
+ * An entry is every j != i with 1e-12 <= |x_i - x_j|^2 <= h^2 that is not
+ * GAS, in the same cell and slot order as the hash walk. Sleeping and STATIC
+ * neighbours stay in. The loop bodies keep their own GAS and distance tests,
+ * so each _NL kernel sees the same neighbours in the same order as its hash
+ * twin and gives bit-identical sums. Only indices are stored: storing
+ * V_j * gradW would need fp32 anyway (|gradW| ~ 1e6 at h = 0.04, and the
+ * interior sums nearly cancel).
+ *
+ * STATIC, GAS and sleeping particles return before their neighbour loop in
+ * every solver kernel, so the builder writes count 0 for them.
+ * ====================================================================== */
+
+#define DFSPH_NL_MAX 64u
+
+/* Call f(j) for each neighbour candidate j of particle i: the list entries
+ * when NL and the list holds all of them, else every j != i in the 27 cells
+ * around pos_i. f does its own GAS and distance tests. */
+template <bool NL, class F>
+__device__ __forceinline__ void dfsph_for_each_candidate(
+    uint i, float3 pos_i,
+    const uint* __restrict__ cell_start, const uint* __restrict__ cell_end,
+    const uint* __restrict__ nl, const uint* __restrict__ nl_count, uint nl_stride,
+    F& f
+) {
+    if (NL) {
+        uint cnt = __ldg(&nl_count[i]);
+        if (cnt <= DFSPH_NL_MAX) {
+            for (uint k = 0; k < cnt; k++) f(__ldg(&nl[k * nl_stride + i]));
+            return;
+        }
+    }
+    int3 cell_i = get_cell(pos_i);
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
+                uint start = cell_start[hash_c];
+                uint end_idx = cell_end[hash_c];
+                for (uint j = start; j < end_idx; j++) {
+                    if (j == i) continue;
+                    f(j);
+                }
+            }
+        }
+    }
+}
+
+extern "C" __global__ __launch_bounds__(256)
+void K_DFSPH_BuildNeighborList(
+    uint            numParticles,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ packed_info,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    uint*           __restrict__ nl,          // [DFSPH_NL_MAX * nl_stride]
+    uint*           __restrict__ nl_count,    // [numParticles]
+    uint            nl_stride                 // >= numParticles
+) {
+    uint i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numParticles) return;
+
+    uint pi_i = packed_info[i];
+    int behavior_i = GET_BEHAVIOR(pi_i);
+    if (behavior_i == STATIC || behavior_i == GAS || IS_SLEEPING(pi_i)) {
+        nl_count[i] = 0;
+        return;
+    }
+
+    float4 pos4_i = __ldg(&position[i]);
+    float3 pos_i = make_float3(pos4_i.x, pos4_i.y, pos4_i.z);
+    float h_sq = c_sim.smoothing_length_sq;
+    uint cnt = 0;
+
+    auto visit = [&](uint j) {
+        float4 pos4_j = __ldg(&position[j]);
+        uint pi_j = __ldg(&packed_info[j]);
+        if (GET_BEHAVIOR(pi_j) == GAS) return;
+        float3 r = make_float3(
+            pos_i.x - pos4_j.x,
+            pos_i.y - pos4_j.y,
+            pos_i.z - pos4_j.z
+        );
+        float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+        if (r_sq > h_sq || r_sq < 1e-12f) return;
+        if (cnt < DFSPH_NL_MAX) nl[cnt * nl_stride + i] = j;
+        cnt++;
+    };
+    dfsph_for_each_candidate<false>(i, pos_i, cell_start, cell_end, 0, 0, 0, visit);
+    nl_count[i] = cnt;
+}
+
+/* ======================================================================
  * K_DFSPH_NonPressureForces -- Viscosity + gravity -> velocity update
  * v*_i = v_i + dt * (gravity + viscosity)
  * ====================================================================== */
@@ -842,8 +949,8 @@ void K_DFSPH_NonPressureForces(
 
 #define DFSPH_DIV_MIN_NEIGHBORS 20.0f
 
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_DFSPH_ComputeKappaV(
+template <bool NL>
+__device__ __forceinline__ void dfsph_kappa_v_impl(
     uint            numParticles,
     const float4*   __restrict__ velocity,
     const float*    __restrict__ alpha,
@@ -853,7 +960,10 @@ void K_DFSPH_ComputeKappaV(
     const uint*     __restrict__ cell_end,
     float*          __restrict__ kappa_v_out,    // this iteration's increment
     const float4*   __restrict__ normal_in,    // (n_x,n_y,n_z, neighbor_count) from DensityAlpha, or NULL
-    float*          __restrict__ kappa_v_total // running sum for the warm start (in-out), or NULL
+    float*          __restrict__ kappa_v_total,  // running sum for the warm start (in-out), or NULL
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -880,45 +990,34 @@ void K_DFSPH_ComputeKappaV(
     // Akinci wall volume divisor (dfsph_vol_rho); floor at 1 for DEAD
     float rho0_vol_i = fmaxf(c_materials[GET_MATERIAL_ID(pi_i)].rest_density, 1.0f);
 
-    int3 cell_i = get_cell(pos_i);
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+    auto visit = [&](uint j) {
 
-                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
-                uint start = cell_start[hash_c];
-                uint end_idx = cell_end[hash_c];
+        // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
+        float4 pos4_j = __ldg(&position[j]);
+        uint pi_j = __ldg(&packed_info[j]);
+        float4 vel4_j = __ldg(&velocity[j]);
 
-                for (uint j = start; j < end_idx; j++) {
-                    if (j == i) continue;
+        int bj = GET_BEHAVIOR(pi_j);
+        if (bj == GAS) return;
 
-                    // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
-                    float4 pos4_j = __ldg(&position[j]);
-                    uint pi_j = __ldg(&packed_info[j]);
-                    float4 vel4_j = __ldg(&velocity[j]);
+        float3 r = make_float3(
+            pos_i.x - pos4_j.x,
+            pos_i.y - pos4_j.y,
+            pos_i.z - pos4_j.z
+        );
+        float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+        if (r_sq > h_sq || r_sq < 1e-12f) return;
 
-                    int bj = GET_BEHAVIOR(pi_j);
-                    if (bj == GAS) continue;
+        float rlen = sqrtf(r_sq);
 
-                    float3 r = make_float3(
-                        pos_i.x - pos4_j.x,
-                        pos_i.y - pos4_j.y,
-                        pos_i.z - pos4_j.z
-                    );
-                    float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
-                    if (r_sq > h_sq || r_sq < 1e-12f) continue;
-
-                    float rlen = sqrtf(r_sq);
-
-                    float3 gW = grad_spiky(r, rlen, h);
-                    float dv_dot_gW = (vel_i.x - vel4_j.x) * gW.x
-                                    + (vel_i.y - vel4_j.y) * gW.y
-                                    + (vel_i.z - vel4_j.z) * gW.z;
-                    div_v += dfsph_vol_akinci(pos4_j.w, pi_j, rho0_vol_i) * dv_dot_gW;
-                }
-            }
-        }
-    }
+        float3 gW = grad_spiky(r, rlen, h);
+        float dv_dot_gW = (vel_i.x - vel4_j.x) * gW.x
+                        + (vel_i.y - vel4_j.y) * gW.y
+                        + (vel_i.z - vel4_j.z) * gW.z;
+        div_v += dfsph_vol_akinci(pos4_j.w, pi_j, rho0_vol_i) * dv_dot_gW;
+    };
+    dfsph_for_each_candidate<NL>(i, pos_i, cell_start, cell_end,
+                                 nl, nl_count, nl_stride, visit);
 
     float alpha_i = alpha[i];
     // DFSPH: kv = (1/dt) * div_v * alpha
@@ -941,6 +1040,41 @@ void K_DFSPH_ComputeKappaV(
     if (kappa_v_total != 0) kappa_v_total[i] += dkv;
 }
 
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_ComputeKappaV(
+    uint            numParticles,
+    const float4*   __restrict__ velocity,
+    const float*    __restrict__ alpha,
+    const uint*     __restrict__ packed_info,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float*          __restrict__ kappa_v_out,    // this iteration's increment
+    const float4*   __restrict__ normal_in,    // (n_x,n_y,n_z, neighbor_count) from DensityAlpha, or NULL
+    float*          __restrict__ kappa_v_total // running sum for the warm start (in-out), or NULL
+) {
+    dfsph_kappa_v_impl<false>(numParticles, velocity, alpha, packed_info, position, cell_start, cell_end, kappa_v_out, normal_in, kappa_v_total, 0, 0, 0);
+}
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_ComputeKappaV_NL(
+    uint            numParticles,
+    const float4*   __restrict__ velocity,
+    const float*    __restrict__ alpha,
+    const uint*     __restrict__ packed_info,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float*          __restrict__ kappa_v_out,    // this iteration's increment
+    const float4*   __restrict__ normal_in,    // (n_x,n_y,n_z, neighbor_count) from DensityAlpha, or NULL
+    float*          __restrict__ kappa_v_total,  // running sum for the warm start (in-out), or NULL
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
+) {
+    dfsph_kappa_v_impl<true>(numParticles, velocity, alpha, packed_info, position, cell_start, cell_end, kappa_v_out, normal_in, kappa_v_total, nl, nl_count, nl_stride);
+}
+
 /* ======================================================================
  * K_DFSPH_CorrectVelocityDiv -- Apply divergence correction
  * v*_i -= dt * SUM_j c_ij * gradW_ij  (kv >= 0)
@@ -951,8 +1085,8 @@ void K_DFSPH_ComputeKappaV(
  * The STATIC term keeps the plain volume: its reaction goes to the rigid body.
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_DFSPH_CorrectVelocityDiv(
+template <bool NL>
+__device__ __forceinline__ void dfsph_correct_div_impl(
     uint            numParticles,
     float4*         __restrict__ velocity,        // in-out
     const float*    __restrict__ density,         // own density and wall neighbours
@@ -964,7 +1098,10 @@ void K_DFSPH_CorrectVelocityDiv(
     const uint*     __restrict__ cell_end,
     const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
-    float*          __restrict__ d_rigid_torques   // torque accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques,  // torque accumulator (NULL if no bodies)
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -989,60 +1126,49 @@ void K_DFSPH_CorrectVelocityDiv(
 
     float3 dv = make_float3(0.0f, 0.0f, 0.0f);
 
-    int3 cell_i = get_cell(pos_i);
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+    auto visit = [&](uint j) {
 
-                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
-                uint start = cell_start[hash_c];
-                uint end_idx = cell_end[hash_c];
+        // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
+        float4 pos4_j = __ldg(&position[j]);
+        uint pi_j = __ldg(&packed_info[j]);
+        float kv_j = __ldg(&kappa_v[j]);
 
-                for (uint j = start; j < end_idx; j++) {
-                    if (j == i) continue;
+        int bj = GET_BEHAVIOR(pi_j);
+        if (bj == GAS) return;
+        // STATIC never carries a divergence factor, whatever the
+        // buffer holds (warm start of a fresh slot).
+        if (bj == STATIC) kv_j = 0.0f;
 
-                    // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
-                    float4 pos4_j = __ldg(&position[j]);
-                    uint pi_j = __ldg(&packed_info[j]);
-                    float kv_j = __ldg(&kappa_v[j]);
+        float3 r = make_float3(
+            pos_i.x - pos4_j.x,
+            pos_i.y - pos4_j.y,
+            pos_i.z - pos4_j.z
+        );
+        float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+        if (r_sq > h_sq || r_sq < 1e-12f) return;
 
-                    int bj = GET_BEHAVIOR(pi_j);
-                    if (bj == GAS) continue;
-                    // STATIC never carries a divergence factor, whatever the
-                    // buffer holds (warm start of a fresh slot).
-                    if (bj == STATIC) kv_j = 0.0f;
+        float rlen = sqrtf(r_sq);
 
-                    float3 r = make_float3(
-                        pos_i.x - pos4_j.x,
-                        pos_i.y - pos4_j.y,
-                        pos_i.z - pos4_j.z
-                    );
-                    float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
-                    if (r_sq > h_sq || r_sq < 1e-12f) continue;
+        float3 gW = grad_spiky(r, rlen, h);
+        // Fluid: m_j * kv_i/rho_i + V_j * kv_j, V_j * kv_j = m_j * kv_j/rho_j.
+        // STATIC: V_j * kv_i (kv_j = 0). mass[j] loads only in range.
+        float coeff = (bj == STATIC)
+            ? dfsph_vol_plain(pos4_j.w, pi_j, density, j) * kv_i
+            : __ldg(&mass[j]) * kv_rho_i + pos4_j.w * kv_j;
+        dv.x += coeff * gW.x;
+        dv.y += coeff * gW.y;
+        dv.z += coeff * gW.z;
 
-                    float rlen = sqrtf(r_sq);
-
-                    float3 gW = grad_spiky(r, rlen, h);
-                    // Fluid: m_j * kv_i/rho_i + V_j * kv_j, V_j * kv_j = m_j * kv_j/rho_j.
-                    // STATIC: V_j * kv_i (kv_j = 0). mass[j] loads only in range.
-                    float coeff = (bj == STATIC)
-                        ? dfsph_vol_plain(pos4_j.w, pi_j, density, j) * kv_i
-                        : __ldg(&mass[j]) * kv_rho_i + pos4_j.w * kv_j;
-                    dv.x += coeff * gW.x;
-                    dv.y += coeff * gW.y;
-                    dv.z += coeff * gW.z;
-
-                    if (bj == STATIC && d_rigid_bodies != 0
-                        && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
-                        float fs = m_i_rigid * coeff;
-                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
-                                             pi_j, pos4_j,
-                                             make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
-                    }
-                }
-            }
+        if (bj == STATIC && d_rigid_bodies != 0
+            && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+            float fs = m_i_rigid * coeff;
+            dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                 pi_j, pos4_j,
+                                 make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
         }
-    }
+    };
+    dfsph_for_each_candidate<NL>(i, pos_i, cell_start, cell_end,
+                                 nl, nl_count, nl_stride, visit);
 
     // Apply velocity correction: delta_v = -dt * dv
     // Clamp |delta_v| to h/dt (one cell per step) to prevent grid-skipping
@@ -1061,6 +1187,45 @@ void K_DFSPH_CorrectVelocityDiv(
     vel4.y -= delta_v.y;
     vel4.z -= delta_v.z;
     velocity[i] = vel4;
+}
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_CorrectVelocityDiv(
+    uint            numParticles,
+    float4*         __restrict__ velocity,        // in-out
+    const float*    __restrict__ density,         // own density and wall neighbours
+    const float*    __restrict__ mass,            // neighbour mass (fluid pairs) and own mass (rigid reaction)
+    const float*    __restrict__ kappa_v,
+    const uint*     __restrict__ packed_info,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques   // torque accumulator (NULL if no bodies)
+) {
+    dfsph_correct_div_impl<false>(numParticles, velocity, density, mass, kappa_v, packed_info, position, cell_start, cell_end, d_rigid_bodies, d_rigid_forces, d_rigid_torques, 0, 0, 0);
+}
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_CorrectVelocityDiv_NL(
+    uint            numParticles,
+    float4*         __restrict__ velocity,        // in-out
+    const float*    __restrict__ density,         // own density and wall neighbours
+    const float*    __restrict__ mass,            // neighbour mass (fluid pairs) and own mass (rigid reaction)
+    const float*    __restrict__ kappa_v,
+    const uint*     __restrict__ packed_info,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,   // force accumulator (NULL if no bodies)
+    float*          __restrict__ d_rigid_torques,  // torque accumulator (NULL if no bodies)
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
+) {
+    dfsph_correct_div_impl<true>(numParticles, velocity, density, mass, kappa_v, packed_info, position, cell_start, cell_end, d_rigid_bodies, d_rigid_forces, d_rigid_torques, nl, nl_count, nl_stride);
 }
 
 /* ======================================================================
@@ -1085,8 +1250,8 @@ void K_DFSPH_CorrectVelocityDiv(
  * STATIC, GAS and sleeping particles write vt = v unchanged.
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_DFSPH_ComputePressureAccel(
+template <bool NL>
+__device__ __forceinline__ void dfsph_pressure_accel_impl(
     uint            numParticles,
     const float*    __restrict__ p_rho2,
     const float4*   velocity,                      // own index only; may alias vt_out
@@ -1099,7 +1264,10 @@ void K_DFSPH_ComputePressureAccel(
     float4*         vt_out,                        // predicted velocity; may alias velocity
     const RigidBody* __restrict__ d_rigid_bodies,  // non-NULL only on the final call (see below)
     float*          __restrict__ d_rigid_forces,
-    float*          __restrict__ d_rigid_torques
+    float*          __restrict__ d_rigid_torques,
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -1129,61 +1297,50 @@ void K_DFSPH_ComputePressureAccel(
 
     float3 a = make_float3(0.0f, 0.0f, 0.0f);
 
-    int3 cell_i = get_cell(pos_i);
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+    auto visit = [&](uint j) {
 
-                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
-                uint start = cell_start[hash_c];
-                uint end_idx = cell_end[hash_c];
+        // Speculative ILP: issue all loads before distance check (OPT-4.2).
+        // pos4_j.w is the volume carrier.
+        float4 pos4_j = __ldg(&position[j]);
+        uint pi_j = __ldg(&packed_info[j]);
+        float p_j = __ldg(&p_rho2[j]);
 
-                for (uint j = start; j < end_idx; j++) {
-                    if (j == i) continue;
+        int bj = GET_BEHAVIOR(pi_j);
+        if (bj == GAS) return;
+        // STATIC never carries pressure, whatever the buffer
+        // holds (warm start of a fresh slot).
+        if (bj == STATIC) p_j = 0.0f;
 
-                    // Speculative ILP: issue all loads before distance check (OPT-4.2).
-                    // pos4_j.w is the volume carrier.
-                    float4 pos4_j = __ldg(&position[j]);
-                    uint pi_j = __ldg(&packed_info[j]);
-                    float p_j = __ldg(&p_rho2[j]);
+        float3 r = make_float3(
+            pos_i.x - pos4_j.x,
+            pos_i.y - pos4_j.y,
+            pos_i.z - pos4_j.z
+        );
+        float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+        if (r_sq > h_sq || r_sq < 1e-12f) return;
 
-                    int bj = GET_BEHAVIOR(pi_j);
-                    if (bj == GAS) continue;
-                    // STATIC never carries pressure, whatever the buffer
-                    // holds (warm start of a fresh slot).
-                    if (bj == STATIC) p_j = 0.0f;
+        float rlen = sqrtf(r_sq);
 
-                    float3 r = make_float3(
-                        pos_i.x - pos4_j.x,
-                        pos_i.y - pos4_j.y,
-                        pos_i.z - pos4_j.z
-                    );
-                    float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
-                    if (r_sq > h_sq || r_sq < 1e-12f) continue;
+        float3 gW = grad_spiky(r, rlen, h);
+        // Fluid: m_j * p_i/rho_i + V_j * p_j, V_j * p_j = m_j * p_j/rho_j.
+        // STATIC: V_j * p_i (p_j = 0). mass[j] loads only in range.
+        float coeff = (bj == STATIC)
+            ? -dfsph_vol_plain(pos4_j.w, pi_j, density, j) * p_i
+            : -(__ldg(&mass[j]) * p_rho_i + pos4_j.w * p_j);
+        a.x += coeff * gW.x;
+        a.y += coeff * gW.y;
+        a.z += coeff * gW.z;
 
-                    float rlen = sqrtf(r_sq);
-
-                    float3 gW = grad_spiky(r, rlen, h);
-                    // Fluid: m_j * p_i/rho_i + V_j * p_j, V_j * p_j = m_j * p_j/rho_j.
-                    // STATIC: V_j * p_i (p_j = 0). mass[j] loads only in range.
-                    float coeff = (bj == STATIC)
-                        ? -dfsph_vol_plain(pos4_j.w, pi_j, density, j) * p_i
-                        : -(__ldg(&mass[j]) * p_rho_i + pos4_j.w * p_j);
-                    a.x += coeff * gW.x;
-                    a.y += coeff * gW.y;
-                    a.z += coeff * gW.z;
-
-                    if (bj == STATIC && d_rigid_bodies != 0
-                        && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
-                        float fs = -m_i_rigid * coeff;
-                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
-                                             pi_j, pos4_j,
-                                             make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
-                    }
-                }
-            }
+        if (bj == STATIC && d_rigid_bodies != 0
+            && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+            float fs = -m_i_rigid * coeff;
+            dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                 pi_j, pos4_j,
+                                 make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
         }
-    }
+    };
+    dfsph_for_each_candidate<NL>(i, pos_i, cell_start, cell_end,
+                                 nl, nl_count, nl_stride, visit);
 
     // Clamp pressure acceleration: limit velocity change to h/dt per substep.
     // Prevents single-particle oscillation from Jacobi overcorrection.
@@ -1215,6 +1372,47 @@ void K_DFSPH_ComputePressureAccel(
     vt_out[i] = make_float4(vt.x, vt.y, vt.z, vel4_i.w);
 }
 
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_ComputePressureAccel(
+    uint            numParticles,
+    const float*    __restrict__ p_rho2,
+    const float4*   velocity,                      // own index only; may alias vt_out
+    const float4*   __restrict__ position,
+    const float*    __restrict__ density,          // own density and wall neighbours
+    const float*    __restrict__ mass,             // neighbour mass (fluid pairs) and own mass (rigid reaction)
+    const uint*     __restrict__ packed_info,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float4*         vt_out,                        // predicted velocity; may alias velocity
+    const RigidBody* __restrict__ d_rigid_bodies,  // non-NULL only on the final call (see below)
+    float*          __restrict__ d_rigid_forces,
+    float*          __restrict__ d_rigid_torques
+) {
+    dfsph_pressure_accel_impl<false>(numParticles, p_rho2, velocity, position, density, mass, packed_info, cell_start, cell_end, vt_out, d_rigid_bodies, d_rigid_forces, d_rigid_torques, 0, 0, 0);
+}
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_ComputePressureAccel_NL(
+    uint            numParticles,
+    const float*    __restrict__ p_rho2,
+    const float4*   velocity,                      // own index only; may alias vt_out
+    const float4*   __restrict__ position,
+    const float*    __restrict__ density,          // own density and wall neighbours
+    const float*    __restrict__ mass,             // neighbour mass (fluid pairs) and own mass (rigid reaction)
+    const uint*     __restrict__ packed_info,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float4*         vt_out,                        // predicted velocity; may alias velocity
+    const RigidBody* __restrict__ d_rigid_bodies,  // non-NULL only on the final call (see below)
+    float*          __restrict__ d_rigid_forces,
+    float*          __restrict__ d_rigid_torques,
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
+) {
+    dfsph_pressure_accel_impl<true>(numParticles, p_rho2, velocity, position, density, mass, packed_info, cell_start, cell_end, vt_out, d_rigid_bodies, d_rigid_forces, d_rigid_torques, nl, nl_count, nl_stride);
+}
+
 /* ======================================================================
  * K_DFSPH_CorrectDivAndPressureAccel -- last divergence correction fused
  * with the first pressure acceleration (bd-r5-review-n28.192)
@@ -1237,8 +1435,8 @@ void K_DFSPH_ComputePressureAccel(
  * The two parts go to the body in one atomic per pair.
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_DFSPH_CorrectDivAndPressureAccel(
+template <bool NL>
+__device__ __forceinline__ void dfsph_div_and_pressure_impl(
     uint            numParticles,
     float4*         velocity,                      // in-out, own index only; may alias vt_out
     const float*    __restrict__ density,          // own density and wall neighbours
@@ -1253,7 +1451,10 @@ void K_DFSPH_CorrectDivAndPressureAccel(
     const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
     float*          __restrict__ d_rigid_forces,
     float*          __restrict__ d_rigid_torques,
-    int             press_reaction                 // 1: also add the pressure reaction
+    int             press_reaction,  // 1: also add the pressure reaction
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -1285,68 +1486,57 @@ void K_DFSPH_CorrectDivAndPressureAccel(
     float3 dv = make_float3(0.0f, 0.0f, 0.0f);
     float3 a = make_float3(0.0f, 0.0f, 0.0f);
 
-    int3 cell_i = get_cell(pos_i);
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+    auto visit = [&](uint j) {
 
-                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
-                uint start = cell_start[hash_c];
-                uint end_idx = cell_end[hash_c];
+        // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
+        float4 pos4_j = __ldg(&position[j]);
+        uint pi_j = __ldg(&packed_info[j]);
+        float kv_j = __ldg(&kappa_v[j]);
+        float p_j = __ldg(&p_rho2[j]);
 
-                for (uint j = start; j < end_idx; j++) {
-                    if (j == i) continue;
+        int bj = GET_BEHAVIOR(pi_j);
+        if (bj == GAS) return;
 
-                    // Speculative ILP (OPT-4.2). pos4_j.w is the volume carrier.
-                    float4 pos4_j = __ldg(&position[j]);
-                    uint pi_j = __ldg(&packed_info[j]);
-                    float kv_j = __ldg(&kappa_v[j]);
-                    float p_j = __ldg(&p_rho2[j]);
+        float3 r = make_float3(
+            pos_i.x - pos4_j.x,
+            pos_i.y - pos4_j.y,
+            pos_i.z - pos4_j.z
+        );
+        float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+        if (r_sq > h_sq || r_sq < 1e-12f) return;
 
-                    int bj = GET_BEHAVIOR(pi_j);
-                    if (bj == GAS) continue;
+        float rlen = sqrtf(r_sq);
+        float3 gW = grad_spiky(r, rlen, h);
 
-                    float3 r = make_float3(
-                        pos_i.x - pos4_j.x,
-                        pos_i.y - pos4_j.y,
-                        pos_i.z - pos4_j.z
-                    );
-                    float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
-                    if (r_sq > h_sq || r_sq < 1e-12f) continue;
-
-                    float rlen = sqrtf(r_sq);
-                    float3 gW = grad_spiky(r, rlen, h);
-
-                    float c_div, c_p;
-                    if (bj == STATIC) {
-                        // STATIC carries neither kappa_v nor pressure: V_j * kv_i
-                        // and V_j * p_i with the plain volume.
-                        float V_j = dfsph_vol_plain(pos4_j.w, pi_j, density, j);
-                        c_div = V_j * kv_i;
-                        c_p = -V_j * p_i;
-                    } else {
-                        float m_j = __ldg(&mass[j]);
-                        c_div = m_j * kv_rho_i + pos4_j.w * kv_j;
-                        c_p = -(m_j * p_rho_i + pos4_j.w * p_j);
-                    }
-                    dv.x += c_div * gW.x;
-                    dv.y += c_div * gW.y;
-                    dv.z += c_div * gW.z;
-                    a.x += c_p * gW.x;
-                    a.y += c_p * gW.y;
-                    a.z += c_p * gW.z;
-
-                    if (bj == STATIC && d_rigid_bodies != 0
-                        && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
-                        float fs = m_i_rigid * c_div - m_i_press * c_p;
-                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
-                                             pi_j, pos4_j,
-                                             make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
-                    }
-                }
-            }
+        float c_div, c_p;
+        if (bj == STATIC) {
+            // STATIC carries neither kappa_v nor pressure: V_j * kv_i
+            // and V_j * p_i with the plain volume.
+            float V_j = dfsph_vol_plain(pos4_j.w, pi_j, density, j);
+            c_div = V_j * kv_i;
+            c_p = -V_j * p_i;
+        } else {
+            float m_j = __ldg(&mass[j]);
+            c_div = m_j * kv_rho_i + pos4_j.w * kv_j;
+            c_p = -(m_j * p_rho_i + pos4_j.w * p_j);
         }
-    }
+        dv.x += c_div * gW.x;
+        dv.y += c_div * gW.y;
+        dv.z += c_div * gW.z;
+        a.x += c_p * gW.x;
+        a.y += c_p * gW.y;
+        a.z += c_p * gW.z;
+
+        if (bj == STATIC && d_rigid_bodies != 0
+            && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
+            float fs = m_i_rigid * c_div - m_i_press * c_p;
+            dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
+                                 pi_j, pos4_j,
+                                 make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
+        }
+    };
+    dfsph_for_each_candidate<NL>(i, pos_i, cell_start, cell_end,
+                                 nl, nl_count, nl_stride, visit);
 
     // Divergence correction, clamped to h/dt as in K_DFSPH_CorrectVelocityDiv.
     float3 delta_v = make_float3(dt * dv.x, dt * dv.y, dt * dv.z);
@@ -1388,6 +1578,51 @@ void K_DFSPH_CorrectDivAndPressureAccel(
     vt_out[i] = make_float4(vt.x, vt.y, vt.z, vel4_i.w);
 }
 
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_CorrectDivAndPressureAccel(
+    uint            numParticles,
+    float4*         velocity,                      // in-out, own index only; may alias vt_out
+    const float*    __restrict__ density,          // own density and wall neighbours
+    const float*    __restrict__ mass,             // neighbour mass (fluid pairs) and own mass (rigid reaction)
+    const float*    __restrict__ kappa_v,
+    const float*    __restrict__ p_rho2,
+    const uint*     __restrict__ packed_info,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float4*         vt_out,                        // predicted velocity; may alias velocity
+    const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,
+    float*          __restrict__ d_rigid_torques,
+    int             press_reaction                 // 1: also add the pressure reaction
+) {
+    dfsph_div_and_pressure_impl<false>(numParticles, velocity, density, mass, kappa_v, p_rho2, packed_info, position, cell_start, cell_end, vt_out, d_rigid_bodies, d_rigid_forces, d_rigid_torques, press_reaction, 0, 0, 0);
+}
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_CorrectDivAndPressureAccel_NL(
+    uint            numParticles,
+    float4*         velocity,                      // in-out, own index only; may alias vt_out
+    const float*    __restrict__ density,          // own density and wall neighbours
+    const float*    __restrict__ mass,             // neighbour mass (fluid pairs) and own mass (rigid reaction)
+    const float*    __restrict__ kappa_v,
+    const float*    __restrict__ p_rho2,
+    const uint*     __restrict__ packed_info,
+    const float4*   __restrict__ position,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float4*         vt_out,                        // predicted velocity; may alias velocity
+    const RigidBody* __restrict__ d_rigid_bodies,  // rigid body state (NULL if no bodies)
+    float*          __restrict__ d_rigid_forces,
+    float*          __restrict__ d_rigid_torques,
+    int             press_reaction,  // 1: also add the pressure reaction
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
+) {
+    dfsph_div_and_pressure_impl<true>(numParticles, velocity, density, mass, kappa_v, p_rho2, packed_info, position, cell_start, cell_end, vt_out, d_rigid_bodies, d_rigid_forces, d_rigid_torques, press_reaction, nl, nl_count, nl_stride);
+}
+
 /* ======================================================================
  * K_DFSPH_DensitySolverUpdate -- Jacobi update for density pressure
  *
@@ -1404,8 +1639,8 @@ void K_DFSPH_CorrectDivAndPressureAccel(
  * which accounts for the effect of current pressure on neighbors.
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 4)
-void K_DFSPH_DensitySolverUpdate(
+template <bool NL>
+__device__ __forceinline__ void dfsph_density_update_impl(
     uint            numParticles,
     const float4*   __restrict__ vt,             // predicted velocity v + dt * a_press, clamped
     const float4*   __restrict__ position,
@@ -1414,7 +1649,10 @@ void K_DFSPH_DensitySolverUpdate(
     const uint*     __restrict__ packed_info,
     const uint*     __restrict__ cell_start,
     const uint*     __restrict__ cell_end,
-    float*          __restrict__ p_rho2          // in/out
+    float*          __restrict__ p_rho2,  // in/out
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
@@ -1440,46 +1678,35 @@ void K_DFSPH_DensitySolverUpdate(
     // Compute density rate-of-change from total velocity
     float drho = 0.0f;
 
-    int3 cell_i = get_cell(pos_i);
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+    auto visit = [&](uint j) {
 
-                uint hash_c = spatialHash(cell_i.x + dx, cell_i.y + dy, cell_i.z + dz);
-                uint start = cell_start[hash_c];
-                uint end_idx = cell_end[hash_c];
+        // Speculative ILP: issue all loads before distance check (OPT-4.2).
+        // pos4_j.w is the volume carrier.
+        float4 pos4_j = __ldg(&position[j]);
+        uint pi_j = __ldg(&packed_info[j]);
+        float4 vt_j = __ldg(&vt[j]);
 
-                for (uint j = start; j < end_idx; j++) {
-                    if (j == i) continue;
+        int bj = GET_BEHAVIOR(pi_j);
+        if (bj == GAS) return;
 
-                    // Speculative ILP: issue all loads before distance check (OPT-4.2).
-                    // pos4_j.w is the volume carrier.
-                    float4 pos4_j = __ldg(&position[j]);
-                    uint pi_j = __ldg(&packed_info[j]);
-                    float4 vt_j = __ldg(&vt[j]);
+        float3 r = make_float3(
+            pos_i.x - pos4_j.x,
+            pos_i.y - pos4_j.y,
+            pos_i.z - pos4_j.z
+        );
+        float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
+        if (r_sq > h_sq || r_sq < 1e-12f) return;
 
-                    int bj = GET_BEHAVIOR(pi_j);
-                    if (bj == GAS) continue;
+        float rlen = sqrtf(r_sq);
 
-                    float3 r = make_float3(
-                        pos_i.x - pos4_j.x,
-                        pos_i.y - pos4_j.y,
-                        pos_i.z - pos4_j.z
-                    );
-                    float r_sq = r.x * r.x + r.y * r.y + r.z * r.z;
-                    if (r_sq > h_sq || r_sq < 1e-12f) continue;
-
-                    float rlen = sqrtf(r_sq);
-
-                    float3 gW = grad_spiky(r, rlen, h);
-                    float dv_dot_gW = (vt_i.x - vt_j.x) * gW.x
-                                    + (vt_i.y - vt_j.y) * gW.y
-                                    + (vt_i.z - vt_j.z) * gW.z;
-                    drho += dfsph_vol_akinci(pos4_j.w, pi_j, rho0) * dv_dot_gW;
-                }
-            }
-        }
-    }
+        float3 gW = grad_spiky(r, rlen, h);
+        float dv_dot_gW = (vt_i.x - vt_j.x) * gW.x
+                        + (vt_i.y - vt_j.y) * gW.y
+                        + (vt_i.z - vt_j.z) * gW.z;
+        drho += dfsph_vol_akinci(pos4_j.w, pi_j, rho0) * dv_dot_gW;
+    };
+    dfsph_for_each_candidate<NL>(i, pos_i, cell_start, cell_end,
+                                 nl, nl_count, nl_stride, visit);
 
     // Predicted density ratio (normalized to rest density).
     // drho is volume weighted (SUM V_j (vt_i - vt_j) . gradW, units 1/s), so it
@@ -1498,6 +1725,39 @@ void K_DFSPH_DensitySolverUpdate(
     float old_p = p_rho2[i];
     float new_p = old_p + c_dfsph.omega * residual * alpha_i / (dt * dt);
     p_rho2[i] = fmaxf(new_p, 0.0f);
+}
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_DensitySolverUpdate(
+    uint            numParticles,
+    const float4*   __restrict__ vt,             // predicted velocity v + dt * a_press, clamped
+    const float4*   __restrict__ position,
+    const float*    __restrict__ density,        // own density only
+    const float*    __restrict__ alpha,
+    const uint*     __restrict__ packed_info,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float*          __restrict__ p_rho2          // in/out
+) {
+    dfsph_density_update_impl<false>(numParticles, vt, position, density, alpha, packed_info, cell_start, cell_end, p_rho2, 0, 0, 0);
+}
+
+extern "C" __global__ __launch_bounds__(256, 4)
+void K_DFSPH_DensitySolverUpdate_NL(
+    uint            numParticles,
+    const float4*   __restrict__ vt,             // predicted velocity v + dt * a_press, clamped
+    const float4*   __restrict__ position,
+    const float*    __restrict__ density,        // own density only
+    const float*    __restrict__ alpha,
+    const uint*     __restrict__ packed_info,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float*          __restrict__ p_rho2,  // in/out
+    const uint*     __restrict__ nl,          // neighbour list (K_DFSPH_BuildNeighborList)
+    const uint*     __restrict__ nl_count,
+    uint            nl_stride
+) {
+    dfsph_density_update_impl<true>(numParticles, vt, position, density, alpha, packed_info, cell_start, cell_end, p_rho2, nl, nl_count, nl_stride);
 }
 
 /* ======================================================================

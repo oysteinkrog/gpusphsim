@@ -1530,6 +1530,39 @@ class Simulation:
         if buf is None or buf.shape[0] != n:
             self._kappa_v_delta = cupy.zeros(n, dtype=cupy.float32)
 
+    # DFSPH solver loops read a per-substep neighbour list instead of walking
+    # the hash grid in every sweep (bd-r5-review-n28.198). False keeps the
+    # hash walk; results are the same either way.
+    _dfsph_nl_enabled = True
+    _dfsph_nl = None
+
+    @property
+    def dfsph_neighbor_list_enabled(self) -> bool:
+        return self._dfsph_nl_enabled
+
+    @dfsph_neighbor_list_enabled.setter
+    def dfsph_neighbor_list_enabled(self, value: bool) -> None:
+        # Captured graphs bake the kernel choice, so recapture on a change.
+        if bool(value) != self._dfsph_nl_enabled:
+            self._dfsph_nl_enabled = bool(value)
+            self._invalidate_graphs()
+
+    def _ensure_dfsph_neighbor_list(self) -> None:
+        """Allocate the DFSPH neighbour list for world.max_particles.
+
+        Called outside the graph body so a capture never allocates. The list
+        takes dfsph_solver.NL_MAX * 4 bytes per particle (256 MB at 1M); it is
+        freed when the list is turned off. Host-only, no device sync.
+        """
+        import dfsph_solver
+        if not self._dfsph_nl_enabled:
+            self._dfsph_nl = None
+            return
+        cap = self.world.max_particles
+        if self._dfsph_nl is None or self._dfsph_nl[2] != cap:
+            self._dfsph_nl = None  # free the old list before the new one
+            self._dfsph_nl = dfsph_solver.alloc_neighbor_list(cap)
+
     def _run_dfsph_body(self, n: int, mark: StageMark = _no_mark) -> None:
         """DFSPH pipeline: Grid -> DensityAlpha -> NonPressure -> DivSolve -> PredictPos -> DensAdv -> DensSolve -> Finalize.
 
@@ -1573,6 +1606,18 @@ class Simulation:
             w.sorted_position[:n], w.sorted_density[:n],
             w.sorted_mass[:n], w.sorted_packed_info[:n],
         )
+
+        # Neighbour list for the solver loops (bd-r5-review-n28.198): built
+        # once here, after pack_volume, reactions and spawn, since no later
+        # kernel in this substep moves a particle or changes packed_info.
+        # It is rebuilt every substep, sort-skip substeps included.
+        nlkw = {}
+        if self._dfsph_nl is not None:
+            dfsph_solver.build_neighbor_list(
+                w.sorted_position[:n], w.sorted_packed_info[:n],
+                self._cell_start, self._cell_end, self._dfsph_nl,
+            )
+            nlkw = {"neighbor_list": self._dfsph_nl}
 
         # 3. Non-pressure forces (viscosity, gravity, mu(I), vorticity confinement, surface tension)
         rbm = self.rigid_body_manager
@@ -1632,6 +1677,7 @@ class Simulation:
                     w.sorted_packed_info[:n], w.sorted_position[:n],
                     self._cell_start, self._cell_end,
                     **rigid_kw,
+                    **nlkw,
                 )
         else:
             # Finalize already wrote 0 with a zero carry. This clears values
@@ -1647,6 +1693,7 @@ class Simulation:
                 # free-falling droplet spreads 23 to 57 percent more than
                 # WCSPH (PHYSICS.md 13.3, bd-r5-review-n28.71).
                 kappa_v_total=kv_total,
+                **nlkw,
             )
             if it == div_iters - 1:
                 fused_kv = kv_delta
@@ -1657,6 +1704,7 @@ class Simulation:
                 w.sorted_packed_info[:n], w.sorted_position[:n],
                 self._cell_start, self._cell_end,
                 **rigid_kw,
+                **nlkw,
             )
 
         # With a fused last pass, its time is counted in density_solve.
@@ -1699,6 +1747,7 @@ class Simulation:
                 vel if dens_iters == 0 else vt,
                 **rigid_kw,
                 pressure_reaction=dens_iters == 0,
+                **nlkw,
             )
         else:
             dfsph_solver.compute_pressure_accel(
@@ -1708,6 +1757,7 @@ class Simulation:
                 self._cell_start, self._cell_end,
                 vel if dens_iters == 0 else vt,
                 **(rigid_kw if dens_iters == 0 else {}),
+                **nlkw,
             )
         for it in range(dens_iters):
             last = it == dens_iters - 1
@@ -1716,6 +1766,7 @@ class Simulation:
                 w.sorted_alpha_dfsph[:n], w.sorted_packed_info[:n],
                 self._cell_start, self._cell_end,
                 p_rho2,
+                **nlkw,
             )
             dfsph_solver.compute_pressure_accel(
                 p_rho2[:n], vel, w.sorted_position[:n],
@@ -1724,6 +1775,7 @@ class Simulation:
                 self._cell_start, self._cell_end,
                 vel if last else vt,
                 **(rigid_kw if last else {}),
+                **nlkw,
             )
         mark("density_solve")
 
@@ -2035,6 +2087,7 @@ class Simulation:
             self.world.ensure_ist_scratch(self._IST_MAX_PARTICLES)
         if self._profile.solver_type == SolverType.DFSPH:
             self._ensure_kappa_v_delta()
+            self._ensure_dfsph_neighbor_list()
 
         # --- Rigid body: update boundary particles in unsorted arrays ---
         rbm = self.rigid_body_manager

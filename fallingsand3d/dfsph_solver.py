@@ -274,6 +274,56 @@ def _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques):
     )
 
 
+# Neighbour list for the solver loops (bd-r5-review-n28.198). Must match
+# DFSPH_NL_MAX in dfsph_solver.cu.
+NL_MAX = 64
+
+
+def alloc_neighbor_list(capacity: int) -> tuple:
+    """Allocate (nl, nl_count, stride) for up to capacity particles.
+
+    nl is interleaved, entry k of particle i at nl[k * stride + i], so it
+    takes NL_MAX * 4 bytes per particle (256 MB at 1M). Allocate once, outside
+    graph capture; stride stays fixed so a captured graph stays valid."""
+    nl = cupy.empty(NL_MAX * capacity, dtype=cupy.uint32)
+    nl_count = cupy.zeros(capacity, dtype=cupy.uint32)
+    return (nl, nl_count, int(capacity))
+
+
+def build_neighbor_list(
+    position: cupy.ndarray,
+    packed_info: cupy.ndarray,
+    cell_start: cupy.ndarray,
+    cell_end: cupy.ndarray,
+    neighbor_list: tuple,
+) -> None:
+    """Fill neighbor_list (from alloc_neighbor_list) for the first
+    position.shape[0] particles. Run after pack_volume and after anything
+    that changes position or packed_info in the substep; the list is valid
+    until the next grid setup. Pass it as neighbor_list= to compute_kappa_v,
+    correct_velocity_div, compute_pressure_accel,
+    correct_div_and_pressure_accel and density_solver_update."""
+    n = position.shape[0]
+    nl, nl_count, stride = neighbor_list
+    if n > stride:
+        raise ValueError(f"neighbor list holds {stride} particles, got {n}")
+    module = _get_module()
+    kernel = module.get_function("K_DFSPH_BuildNeighborList")
+    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    block = (BLOCK_SIZE,)
+    kernel(grid, block, (
+        np.uint32(n), position, packed_info, cell_start, cell_end,
+        nl, nl_count, np.uint32(stride),
+    ))
+
+
+def _nl_args(neighbor_list: "tuple | None") -> tuple:
+    if neighbor_list is None:
+        return ()
+    nl, nl_count, stride = neighbor_list
+    return (nl, nl_count, np.uint32(stride))
+
+
 def compute_kappa_v(
     velocity: cupy.ndarray,
     alpha: cupy.ndarray,
@@ -284,6 +334,7 @@ def compute_kappa_v(
     kappa_v_out: cupy.ndarray,
     normal_in: "cupy.ndarray | None" = None,
     kappa_v_total: "cupy.ndarray | None" = None,
+    neighbor_list: "tuple | None" = None,
 ) -> None:
     """kappa_v_out gets this iteration's increment (what correct_velocity_div applies).
     kappa_v_total, when given, is the running sum across iterations and gets the
@@ -295,7 +346,8 @@ def compute_kappa_v(
     Neighbour volumes come from position[:, 3]; run pack_volume first."""
     n = velocity.shape[0]
     module = _get_module()
-    kernel = module.get_function("K_DFSPH_ComputeKappaV")
+    kernel = module.get_function(
+        "K_DFSPH_ComputeKappaV_NL" if neighbor_list is not None else "K_DFSPH_ComputeKappaV")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     norm_in = normal_in if normal_in is not None else np.intp(0)
@@ -304,7 +356,7 @@ def compute_kappa_v(
         np.uint32(n), velocity, alpha,
         packed_info, position, cell_start, cell_end,
         kappa_v_out, norm_in, kv_total,
-    ))
+    ) + _nl_args(neighbor_list))
 
 
 def correct_velocity_div(
@@ -319,6 +371,7 @@ def correct_velocity_div(
     d_rigid_bodies: "cupy.ndarray | None" = None,
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
+    neighbor_list: "tuple | None" = None,
 ) -> None:
     """Apply the divergence correction. With rigid bodies, also adds the
     reaction of each fluid-rigid pair to d_rigid_forces / d_rigid_torques.
@@ -328,7 +381,8 @@ def correct_velocity_div(
     neighbours (symmetric pair form) and the rigid reaction."""
     n = velocity.shape[0]
     module = _get_module()
-    kernel = module.get_function("K_DFSPH_CorrectVelocityDiv")
+    kernel = module.get_function(
+        "K_DFSPH_CorrectVelocityDiv_NL" if neighbor_list is not None else "K_DFSPH_CorrectVelocityDiv")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     rb_ptr, rf_ptr, rt_ptr = _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques)
@@ -336,7 +390,7 @@ def correct_velocity_div(
         np.uint32(n), velocity, density, mass, kappa_v,
         packed_info, position, cell_start, cell_end,
         rb_ptr, rf_ptr, rt_ptr,
-    ))
+    ) + _nl_args(neighbor_list))
 
 
 def compute_pressure_accel(
@@ -352,6 +406,7 @@ def compute_pressure_accel(
     d_rigid_bodies: "cupy.ndarray | None" = None,
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
+    neighbor_list: "tuple | None" = None,
 ) -> None:
     """Pressure acceleration from p/rho, written as the predicted velocity.
 
@@ -367,7 +422,8 @@ def compute_pressure_accel(
     """
     n = position.shape[0]
     module = _get_module()
-    kernel = module.get_function("K_DFSPH_ComputePressureAccel")
+    kernel = module.get_function(
+        "K_DFSPH_ComputePressureAccel_NL" if neighbor_list is not None else "K_DFSPH_ComputePressureAccel")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     rb_ptr, rf_ptr, rt_ptr = _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques)
@@ -375,7 +431,7 @@ def compute_pressure_accel(
         np.uint32(n), p_rho2, velocity, position, density, mass,
         packed_info, cell_start, cell_end, vt_out,
         rb_ptr, rf_ptr, rt_ptr,
-    ))
+    ) + _nl_args(neighbor_list))
 
 
 def correct_div_and_pressure_accel(
@@ -393,6 +449,7 @@ def correct_div_and_pressure_accel(
     d_rigid_forces: "cupy.ndarray | None" = None,
     d_rigid_torques: "cupy.ndarray | None" = None,
     pressure_reaction: bool = False,
+    neighbor_list: "tuple | None" = None,
 ) -> None:
     """correct_velocity_div(kappa_v) then compute_pressure_accel(p_rho2) in one
     neighbour sweep (bd-r5-review-n28.192).
@@ -406,7 +463,8 @@ def correct_div_and_pressure_accel(
     """
     n = position.shape[0]
     module = _get_module()
-    kernel = module.get_function("K_DFSPH_CorrectDivAndPressureAccel")
+    kernel = module.get_function(
+        "K_DFSPH_CorrectDivAndPressureAccel_NL" if neighbor_list is not None else "K_DFSPH_CorrectDivAndPressureAccel")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     rb_ptr, rf_ptr, rt_ptr = _rigid_ptrs(d_rigid_bodies, d_rigid_forces, d_rigid_torques)
@@ -414,7 +472,7 @@ def correct_div_and_pressure_accel(
         np.uint32(n), velocity, density, mass, kappa_v, p_rho2,
         packed_info, position, cell_start, cell_end, vt_out,
         rb_ptr, rf_ptr, rt_ptr, np.int32(1 if pressure_reaction else 0),
-    ))
+    ) + _nl_args(neighbor_list))
 
 
 def density_solver_update(
@@ -426,6 +484,7 @@ def density_solver_update(
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
     p_rho2: cupy.ndarray,
+    neighbor_list: "tuple | None" = None,
 ) -> None:
     """Jacobi update: predict density from vt, update p_rho2.
 
@@ -435,13 +494,14 @@ def density_solver_update(
     """
     n = vt.shape[0]
     module = _get_module()
-    kernel = module.get_function("K_DFSPH_DensitySolverUpdate")
+    kernel = module.get_function(
+        "K_DFSPH_DensitySolverUpdate_NL" if neighbor_list is not None else "K_DFSPH_DensitySolverUpdate")
     grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     block = (BLOCK_SIZE,)
     kernel(grid, block, (
         np.uint32(n), vt, position, density,
         alpha, packed_info, cell_start, cell_end, p_rho2,
-    ))
+    ) + _nl_args(neighbor_list))
 
 
 def finalize(
