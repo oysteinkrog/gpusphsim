@@ -65,10 +65,18 @@ def _unsorted_at_sorted(arr, perm):
     return arr[perm]
 
 
+# One substep for the kappa checks: the lattice cube starts just above rho0
+# (2524 vs 2500), so the first substep has kappa > 0 on 1300 of 2160
+# particles. The free cube then expands and kappa is 0 by substep 5. The
+# one-body DFSPH surface tension used to hold it compressed; the pair form
+# (bd-r5-review-n28.125) does not.
+KAPPA_SUBSTEPS = 1
+
+
 def test_finalize_writes_scaled_warm_start(world):
     w = world
     profile = PROFILES["DFSPH"]
-    s, n = _run(w, profile)
+    s, n = _run(w, profile, substeps=KAPPA_SUBSTEPS)
     perm = s._sort_perm[:n].get()
     kappa = _unsorted_at_sorted(w.kappa[:n].get(), perm)
     kappa_v = _unsorted_at_sorted(w.kappa_v[:n].get(), perm)
@@ -85,7 +93,7 @@ def test_zero_warm_start_carries_unscaled_kappa_and_zero_kappa_v(world):
     w = world
     profile = dataclasses.replace(PROFILES["DFSPH"], dfsph_warm_start=0.0,
                                   dfsph_div_warm_start=0.0)
-    s, n = _run(w, profile)
+    s, n = _run(w, profile, substeps=KAPPA_SUBSTEPS)
     perm = s._sort_perm[:n].get()
     kappa = _unsorted_at_sorted(w.kappa[:n].get(), perm)
     kappa_v = w.kappa_v[:n].get()
