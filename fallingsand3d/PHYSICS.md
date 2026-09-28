@@ -4283,7 +4283,7 @@ tau_body += (x_j - x_COM) x (m_j * dv / dt)
 
 This is the impulse `m_j * dv` spread over one substep, so the body gains the
 momentum a particle of that mass would have gained. The accumulators are zeroed
-in the substep prologue, step2 adds the fluid forces to them, and
+at the start of the solver body (`_run_graph_body`), step2 adds the fluid forces to them, and
 `K_IntegrateRigidBodies` applies the sum at the end of the same substep. Blasts
 are rare, so the kernel uses plain `atomicAdd` without warp reduction. All three
 solvers pass the rigid buffers when bodies exist; with no bodies they pass NULL
@@ -4339,8 +4339,8 @@ the fluid coupling use `lin_vel` as the surface velocity, so the body now moves
 at the velocity the fluid sees. A kinematic body with `lin_vel = (1, 0, 0)`
 moves 1 m in 1 s (`test_integrate.py::test_kinematic_body_moves_with_its_velocity`).
 The force and torque accumulators are not cleared by the kernel for a kinematic
-body, so the fluid reaction stays readable until the next substep prologue
-clears them. Rigid-rigid collision still skips kinematic bodies as movers.
+body, so the fluid reaction stays readable until the next substep's solver
+body clears them. Rigid-rigid collision still skips kinematic bodies as movers.
 
 **Box inverse inertia (bd-mzc.24)**: For a box with half-extents `(hx, hy, hz)` and mass `m`,
 the body-frame principal moments use divisor **3** (not 12):
@@ -4457,4 +4457,4 @@ the flag.
 | Force accumulation | Per-particle register sum in K_Step2, per-pair atomicAdd in PBF/DFSPH | See 22.6: a register sum spills or slows the PBF/DFSPH kernels |
 | SDF vs boundary | Both coexist | SDF for collision, boundary particles for pressure/viscosity |
 | Quaternion convention | (x,y,z,w) where w=scalar | Matches CUDA float4 layout |
-| CUDA graph | On with bodies present | Accumulator zeroing and body integration run outside the graph; `_rigid_graph_key` drops the graphs when the body count or the boundary drift clear changes (bd-r5-review-n28.182) |
+| CUDA graph | On with bodies present | The accumulators are zeroed by two memset nodes at the start of the graph body; boundary moves and body integration run outside the graph. `_rigid_graph_key` drops the graphs when the body count or the boundary drift clear changes (bd-r5-review-n28.182), and `reset_scene_objects` and preset load drop them on every scene change (bd-r5-review-n28.190) |
