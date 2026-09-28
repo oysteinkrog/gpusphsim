@@ -304,11 +304,6 @@ def compute_step2(
         (N,) float32 mu(I) eta written by K_Step1 (its eta_out) this substep.
         GRANULAR pairs then read eta_j (4 B) instead of recomputing mu(I)
         per pair. If None, the kernel recomputes eta from shear_rate.
-    d_rigid_bodies, d_rigid_forces, d_rigid_torques : cupy.ndarray, optional
-        Pass all three when there are rigid bodies, or none. d_rigid_bodies
-        is not read by the kernel; it selects the rigid kernel variant. The
-        torque accumulator gets torque about the world origin, which
-        K_IntegrateRigidBodies converts to torque about the COM.
 
     Returns
     -------
@@ -343,10 +338,9 @@ def compute_step2(
     if pressure_in is None:
         pressure_in = cupy.zeros(n, dtype=cupy.float32)
 
-    # Rigid body accumulators: pass null if no bodies. d_rigid_bodies only
-    # picks the kernel: the coupling branch reads the boundary velocity from
-    # the sorted velocity and needs no body state (bd-r5-review-n28.195).
+    # Rigid body pointers: pass null if no bodies
     _null = cupy.ndarray(0, dtype=cupy.float32)
+    rb_ptr = d_rigid_bodies if d_rigid_bodies is not None else _null
     rf_ptr = d_rigid_forces if d_rigid_forces is not None else _null
     rt_ptr = d_rigid_torques if d_rigid_torques is not None else _null
     pk_ptr = pr2_omega_in if pr2_omega_in is not None else _null
@@ -370,6 +364,7 @@ def compute_step2(
             sph_force_out,
             veleval_out,
             velocity_h_ptr,
+            rb_ptr,
             rf_ptr,
             rt_ptr,
             pk_ptr,

@@ -241,9 +241,9 @@ extern "C" __global__ void test_aa3(float* out) {
 #
 # K_Step2 sums a fluid particle's pressure reaction on the first body it
 # touches in registers and writes it once after the loop, with the torque
-# x_i x F. Pairs on any other body keep per-pair atomics. The reference
-# build (-DSTEP2_RIGID_PER_PAIR_REFERENCE) writes every pair at once, with
-# the torque x_j x F. Both are about the world origin (bd-r5-review-n28.195).
+# (x_i - COM) x F. Pairs on any other body keep per-pair atomics. The
+# reference build (-DSTEP2_RIGID_PER_PAIR_REFERENCE) writes every pair at
+# once, with the torque (x_j - COM) x F, as before the change.
 #
 # Scene: two kinematic 12 cm boxes 4 cm apart in a water block, so the fluid
 # in the gap touches both bodies. Each K_Step2 launch in the substep is also

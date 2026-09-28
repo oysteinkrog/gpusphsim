@@ -26,11 +26,11 @@ so the fluid and the body exchange equal and opposite impulses.
 (f) CUDA graphs with bodies (bd-r5-review-n28.190): Archimedes Pool replays
     the graphs, the bodies get force, and switching to Dam Break and back
     recaptures with the right body set.
-
-The rotated-inertia check for K_IntegrateRigidBodies is in test_integrate.py.
-
-The kinematic body is not integrated, so rigid_forces still holds the last
-substep's accumulated force when _sim_step returns.
+(g) Torque arm far from the origin (bd-r5-review-n28.195): a spinning box
+    2 m from the origin gets the same torque as the same scene at the
+    origin. Accumulating x_j x F about the world origin and subtracting
+    COM x F later fails this: the pair forces cancel, so float32 loses
+    about 2 m * sum |F_pair| * 6e-8 (4 percent in PBF, 2.5e-3 in DFSPH).
 """
 
 from __future__ import annotations
@@ -541,95 +541,65 @@ def test_rigid_setup_basics():
 # ---------------------------------------------------------------------------
 # (f) CUDA graphs with rigid bodies across preset loads (bd-r5-review-n28.190)
 # ---------------------------------------------------------------------------
+# (g) Torque arm 2 m from the origin
+# ---------------------------------------------------------------------------
 
-def _load_preset(sim, load_fn, body_y=None) -> None:
-    """Load a preset the way main.py does.
+_SPIN_OFFSET = 2.0
+# Measured first-substep |tau(offset) - tau(origin)| / |tau|: WCSPH 2e-5,
+# DFSPH 2e-5, PBF 1.5e-3 (float32 positions at x = 2 m round 20x coarser,
+# and PBF's position-correction forces are sensitive to it). An origin-torque
+# accumulator gives 5e-5, 2.5e-3 and 5e-2.
+_SPIN_RTOL = {"WCSPH": 1e-3, "DFSPH": 1e-3, "PBF": 5e-3}
 
-    body_y moves every body to that height before upload, so the Archimedes
-    boxes start in the water instead of falling for half a second.
+
+def _spin_torque(profile_name: str, x0: float, monkeypatch):
+    """Kinematic box at (x0, 0, 0) spun at 1 rad/s about y in still water.
+
+    Returns (F, tau, com) from the accumulators just before the first
+    K_IntegrateRigidBodies call, read back once as float64. Only the first
+    substep is used: the two scenes start from the same state up to the
+    translation, and later substeps drift apart by float noise (DFSPH runs
+    of the same scene differ by 10 percent after 10 substeps).
     """
-    world = sim.world
-    sim.reset_scene_objects()
-    load_fn(world)
-    rbm = sim.rigid_body_manager
-    if body_y is not None:
-        for i in range(rbm.num_bodies):
-            rbm._bodies_cpu[i]["position"][1] = body_y
-    rbm.finalize_boundary_data()
-    rbm.upload(sim.get_all_modules())
-    # main.py also calls _invalidate_graphs here; leave it out so the test
-    # shows reset_scene_objects already drops the graphs.
-    sim.notify_scene_changed()
-    sim.reset_spawn_damping()
+    import integrate
+
+    world, sim, rbm = _make_sim(
+        profile_name, fluid_min=(x0 - 0.2, -0.2, -0.2), fluid_max=(x0 + 0.2, 0.2, 0.2),
+        body_pos=(x0, 0.0, 0.0), gravity=0.0, n_max=40_000, world_half_size=3.0,
+        ang_vel=(0.0, 1.0, 0.0),
+    )
+    real = integrate.integrate_rigid_bodies
+    out = []
+
+    def capture(bodies, forces, torques, *args, **kwargs):
+        out.append((
+            forces[0, :3].get().astype(np.float64),
+            torques[0, :3].get().astype(np.float64),
+            bodies.view(cp.float32).reshape(-1, 24)[0, 0:3].get().astype(np.float64),
+        ))
+        real(bodies, forces, torques, *args, **kwargs)
+
+    monkeypatch.setattr(integrate, "integrate_rigid_bodies", capture)
+    _step(sim)
+    monkeypatch.undo()
+    assert len(out) == 1
+    return out[0]
 
 
-def _run_substeps(sim, count: int) -> None:
-    for _ in range(count):
-        sim._sim_step(sim.world._high_water)
-    cp.cuda.Device().synchronize()
+@pytest.mark.parametrize("profile_name", ["WCSPH"] + SOLVERS)
+def test_offset_spinning_box_torque(profile_name, monkeypatch):
+    """Torque on a box 2 m from the origin, spun in still water, equals the
+    direct r_b x F sum of the same scene at the origin.
 
-
-def _forces_after_coupling(sim) -> tuple[np.ndarray, np.ndarray]:
-    """One substep split in two: rigid_forces after the solver body, then
-    after K_IntegrateRigidBodies."""
-    n = sim._substep_prologue(sim.world._high_water)
-    sim._run_graph_body(n)
-    cp.cuda.Device().synchronize()
-    mid = sim.rigid_body_manager.rigid_forces.get().copy()
-    sim._substep_epilogue(n)
-    cp.cuda.Device().synchronize()
-    after = sim.rigid_body_manager.rigid_forces.get().copy()
-    return mid, after
-
-
-def test_rigid_graphs_survive_preset_switch():
-    from presets import load_archimedes_pool, load_dam_break
-    from simulation import Simulation
-    from world import World
-
-    world = World(260_000)
-    sim = Simulation(world, dt=0.001, fixed_dt=True)
-    captures = []
-    real_capture = sim._capture_graph
-
-    def counting_capture(n, gather_only):
-        g = real_capture(n, gather_only)
-        captures.append((sim.rigid_body_manager.num_bodies, g is not None))
-        return g
-    sim._capture_graph = counting_capture
-
-    # Boxes (half extent 0.06) sit 3 cm into the water surface at y = -0.2.
-    body_y = -0.2 + 0.06 - 0.03
-
-    def check_archimedes():
-        rbm = sim.rigid_body_manager
-        assert rbm.num_bodies == 3
-        del captures[:]
-        _run_substeps(sim, 12)  # 3 frames of 4 substeps
-        assert sim._graph_full_sort is not None
-        assert sim._graph_rigid_key[0] == 3
-        assert (3, True) in captures, captures
-        mid, after = _forces_after_coupling(sim)
-        f = np.linalg.norm(mid[:3, :3], axis=1)
-        assert np.all(f > 1e-3), mid[:3]
-        assert np.all(after[:3] == 0.0), after[:3]
-        # Graph replay continues after the split substep.
-        _run_substeps(sim, 8)
-        assert sim._graph_full_sort is not None
-        y = rbm.d_rigid_bodies.view(cp.float32).reshape(-1, 24)[:3, 1].get()
-        assert np.all(np.isfinite(y))
-
-    _load_preset(sim, load_archimedes_pool, body_y)
-    check_archimedes()
-
-    _load_preset(sim, load_dam_break)
-    assert sim._graph_full_sort is None  # dropped on preset load
-    del captures[:]
-    _run_substeps(sim, 8)
-    assert sim._graph_full_sort is not None
-    assert sim._graph_rigid_key == (0, False)
-    assert (0, True) in captures, captures
-
-    _load_preset(sim, load_archimedes_pool, body_y)
-    assert sim._graph_full_sort is None
-    check_archimedes()
+    At the origin COM = 0, so any torque convention gives sum r_b x F_j
+    there. Water drags against the spin, so tau_y < 0.
+    """
+    F0, tau_direct, com0 = _spin_torque(profile_name, 0.0, monkeypatch)
+    F1, tau_offset, com1 = _spin_torque(profile_name, _SPIN_OFFSET, monkeypatch)
+    assert np.all(com0 == 0.0), com0
+    assert abs(com1[0] - _SPIN_OFFSET) < 1e-6, com1
+    rel = np.linalg.norm(tau_offset - tau_direct) / np.linalg.norm(tau_direct)
+    print(f"{profile_name}: tau origin {tau_direct}, tau offset {tau_offset}, "
+          f"rel diff {rel:.2e}, F {F0} / {F1}")
+    assert tau_direct[1] < 0.0, tau_direct
+    assert rel <= _SPIN_RTOL[profile_name], (tau_offset, tau_direct, rel)

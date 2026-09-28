@@ -61,20 +61,21 @@ __device__ __forceinline__ float dfsph_vol_plain(float w_j, uint pi_j,
     return dfsph_is_wall(pi_j) ? w_j / fmaxf(__ldg(&density[j]), RHO_EPSILON) : w_j;
 }
 
-/* Add F_on_body and its torque about the world origin, x_j x F_on_body, to
- * the accumulators of the body that owns boundary particle j.
- * K_IntegrateRigidBodies subtracts COM x F to get the torque about the body
- * centre, so no body state is read here (bd-r5-review-n28.195). */
+/* Add F_on_body and its torque about the body centre to the accumulators of
+ * the body that owns boundary particle j. */
 __device__ inline void dfsph_rigid_reaction(
+    const RigidBody* __restrict__ d_rigid_bodies,
     float* __restrict__ d_rigid_forces,
     float* __restrict__ d_rigid_torques,
     uint pi_j, float4 pos4_j, float3 F_on_body
 ) {
     int body_id = GET_BODY_ID(pi_j);
+    float4 rb_pos = __ldg(&d_rigid_bodies[body_id].position);
+    float3 r_b = make_float3(pos4_j.x - rb_pos.x, pos4_j.y - rb_pos.y, pos4_j.z - rb_pos.z);
     float3 tau = make_float3(
-        pos4_j.y * F_on_body.z - pos4_j.z * F_on_body.y,
-        pos4_j.z * F_on_body.x - pos4_j.x * F_on_body.z,
-        pos4_j.x * F_on_body.y - pos4_j.y * F_on_body.x
+        r_b.y * F_on_body.z - r_b.z * F_on_body.y,
+        r_b.z * F_on_body.x - r_b.x * F_on_body.z,
+        r_b.x * F_on_body.y - r_b.y * F_on_body.x
     );
     atomic_accumulate3(d_rigid_forces, F_on_body, body_id);
     atomic_accumulate3(d_rigid_torques, tau, body_id);
@@ -619,6 +620,7 @@ void K_DFSPH_NonPressureForces(
                             // velocity v_body + omega x r_b, which
                             // K_UpdateBoundaryParticles stores in the sorted
                             // velocity of the boundary particle (bd-r5-review-n28.195).
+                            // dfsph_rigid_reaction reads the COM for the torque arm.
                             float3 vel_boundary = make_float3(vel4_j.x, vel4_j.y, vel4_j.z);
                             // psi_b = rho0_i * V_b; the mass slot holds
                             // RIGID_PSI_RHO0 * V_b (bd-r5-review-n28.77).
@@ -644,7 +646,7 @@ void K_DFSPH_NonPressureForces(
                                 -(F_visc.y * inv_rho) * m_i_rigid,
                                 -(F_visc.z * inv_rho) * m_i_rigid
                             );
-                            dfsph_rigid_reaction(d_rigid_forces, d_rigid_torques,
+                            dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
                                                  pi_j, pos4_j, F_on_body);
                         } else {
                             // Regular STATIC: friction drag toward zero
@@ -1031,7 +1033,7 @@ void K_DFSPH_CorrectVelocityDiv(
                     if (bj == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = m_i_rigid * coeff;
-                        dfsph_rigid_reaction(d_rigid_forces, d_rigid_torques,
+                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
                                              pi_j, pos4_j,
                                              make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }
@@ -1172,7 +1174,7 @@ void K_DFSPH_ComputePressureAccel(
                     if (bj == STATIC && d_rigid_bodies != 0
                         && GET_MATERIAL_ID(pi_j) == MAT_RIGID) {
                         float fs = -m_i_rigid * coeff;
-                        dfsph_rigid_reaction(d_rigid_forces, d_rigid_torques,
+                        dfsph_rigid_reaction(d_rigid_bodies, d_rigid_forces, d_rigid_torques,
                                              pi_j, pos4_j,
                                              make_float3(fs * gW.x, fs * gW.y, fs * gW.z));
                     }

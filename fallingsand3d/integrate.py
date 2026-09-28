@@ -373,10 +373,7 @@ def integrate_rigid_bodies(
     d_rigid_forces : cupy.ndarray, (MAX_RIGID_BODIES, 4) float32
         Accumulated forces from fluid coupling.
     d_rigid_torques : cupy.ndarray, (MAX_RIGID_BODIES, 4) float32
-        Accumulated torques from fluid coupling, about the world origin.
-        The kernel converts them to torque about each body's COM
-        (tau0 - COM x F). For kinematic bodies the converted torque is
-        written back and the accumulators are not zeroed.
+        Accumulated torques from fluid coupling.
     num_bodies : int
         Number of active rigid bodies.
     dt : float

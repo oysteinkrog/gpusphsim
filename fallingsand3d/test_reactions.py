@@ -1457,12 +1457,8 @@ def test_blast_wave_pushes_rigid_body_not_static_wall():
     assert abs(f[body_id, 1]) < 0.05 * f[body_id, 0]
     assert abs(f[body_id, 2]) < 1e-3 * f[body_id, 0]
     assert np.all(f[np.arange(8) != body_id] == 0.0)
-    # The kernel accumulates torque about the world origin; K_IntegrateRigidBodies
-    # subtracts COM x F (bd-r5-review-n28.195). Symmetric about the COM axis:
-    # the torque about the COM cancels to ~0 about z.
-    tq_com = tq[body_id, :3].astype(np.float64) - np.cross(
-        com.astype(np.float64), f[body_id, :3].astype(np.float64))
-    assert abs(tq_com[2]) < 1e-3 * f[body_id, 0] * 0.1, tq_com
+    # Symmetric about the COM axis: torque about z cancels to ~0.
+    assert abs(tq[body_id, 2]) < 1e-3 * f[body_id, 0] * 0.1
     # Upper bound: m * 15 / dt per particle.
     assert f[body_id, 0] < 3 * 0.02 * 15.0 / dt
 
