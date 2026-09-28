@@ -3,7 +3,9 @@
  *
  * Kernels:
  *   K_PBF_Predict       -- Apply gravity, predict position
- *   K_PBF_ComputeLambda -- Density + Lagrange multiplier
+ *   K_PBF_ComputeLambda -- Density + Lagrange multiplier, plus heat, exposure,
+ *                          vorticity and normals (first call of the substep)
+ *   K_PBF_ComputeLambdaLean -- Density + Lagrange multiplier only (later calls)
  *   K_PBF_ComputeDelta  -- Position correction, applied and clamped into the
  *                          other predicted-position buffer (ping-pong)
  *   K_PBF_Finalize      -- Velocity update, XSPH, friction, sleep, writeback
@@ -217,6 +219,10 @@ void K_PBF_Predict(
     predicted_out[i] = make_float4(pred.x, pred.y, pred.z, m_i);
 }
 
+#ifndef LAMBDA_LEAN_MIN_BLOCKS
+#define LAMBDA_LEAN_MIN_BLOCKS 6
+#endif
+
 /* ======================================================================
  * K_PBF_ComputeLambda -- Density + Lagrange multiplier
  *   rho_i = SUM_j m_j W(x*_ij)
@@ -224,8 +230,14 @@ void K_PBF_Predict(
  *   lambda_i = -C_i / (SUM_j |grad_pj C_i|^2 + epsilon)
  * ====================================================================== */
 
-extern "C" __global__ __launch_bounds__(256, 3)
-void K_PBF_ComputeLambda(
+/* Shared body of K_PBF_ComputeLambda (EXTRAS = true) and
+ * K_PBF_ComputeLambdaLean (EXTRAS = false, bd-r5-review-n28.197). The lean
+ * variant compiles out heat, exposure, vorticity and normals, so the solver
+ * iterations do not pay their registers. It writes density_out only when it
+ * is not NULL (the last call of the substep, the one Finalize reads). The math
+ * of density, lambda and the pressure normal is the same in both. */
+template <bool EXTRAS>
+__device__ __forceinline__ void pbf_compute_lambda_body(
     uint            numParticles,
     const float4*   __restrict__ predicted_pos,
     const float*    __restrict__ mass,              // NULL: mass from predicted_pos.w
@@ -247,14 +259,16 @@ void K_PBF_ComputeLambda(
 ) {
     uint i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numParticles) return;
+    // Full always writes density; Lean only when given (last call).
+    const bool write_density = EXTRAS || (density_out != 0);
 
     uint pi_i = packed_info[i];
     int behavior_i = GET_BEHAVIOR(pi_i);
     uint mat_id_i = GET_MATERIAL_ID(pi_i);
     bool is_gas_i = (behavior_i == GAS);
 
-    bool do_heat = (dTdt_out != 0);
-    bool do_vort = (vorticity_out != 0) && (behavior_i == FLUID);
+    bool do_heat = EXTRAS && (dTdt_out != 0);
+    bool do_vort = EXTRAS && (vorticity_out != 0) && (behavior_i == FLUID);
 
     // STATIC/GAS early return: skip density/lambda/gradient when no heat/exposure needed.
     // When do_heat is true (first call), STATIC particles still need exposure from
@@ -268,7 +282,7 @@ void K_PBF_ComputeLambda(
         // GAS also keeps its lambda slot, which holds the p/rho^2 term the first
         // call wrote for the gas pressure delta (bd-r5-review-n28.91).
         if (behavior_i == STATIC) {
-            density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
+            if (write_density) density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
             lambda_out[i] = 0.0f;
         }
         if (pressure_normal_out != 0) pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -321,7 +335,7 @@ void K_PBF_ComputeLambda(
     }
 
     // Surface normal accumulator (FLUID only)
-    bool do_normal = (behavior_i == FLUID && normal_out != 0);
+    bool do_normal = EXTRAS && (behavior_i == FLUID && normal_out != 0);
     float3 normal = make_float3(0.0f, 0.0f, 0.0f);
     float neighbor_count = 0.0f;
 
@@ -473,7 +487,7 @@ void K_PBF_ComputeLambda(
 
     float rho = c_precalc.poly6_coeff * sum_density;
     rho = fmaxf(rho, is_gas_i ? RHO_EPSILON : 1.0f);
-    density_out[i] = rho;
+    if (write_density) density_out[i] = rho;
 
     // Heat diffusion + exposure output
     if (do_heat) {
@@ -493,12 +507,12 @@ void K_PBF_ComputeLambda(
     if (do_vort) {
         float omega_mag = sqrtf(omega.x * omega.x + omega.y * omega.y + omega.z * omega.z);
         vorticity_out[i] = make_float4(omega.x, omega.y, omega.z, omega_mag);
-    } else if (vorticity_out != 0) {
+    } else if (EXTRAS && vorticity_out != 0) {
         vorticity_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
     // Surface normal output (FLUID: n + neighbor_count, others: zero)
-    if (normal_out != 0) {
+    if (EXTRAS && normal_out != 0) {
         if (do_normal) {
             normal_out[i] = make_float4(normal.x, normal.y, normal.z, neighbor_count);
         } else {
@@ -533,10 +547,10 @@ void K_PBF_ComputeLambda(
     // between GAS pairs (bd-r5-review-n28.91). Later iterations keep it.
     if (behavior_i == STATIC || behavior_i == GAS) {
         if (behavior_i == STATIC) {
-            density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
+            if (write_density) density_out[i] = fmaxf(c_materials[mat_id_i].rest_density, 1.0f);
             lambda_out[i] = 0.0f;
         } else {
-            density_out[i] = rho;
+            if (write_density) density_out[i] = rho;
             lambda_out[i] = compute_pressure(rho, GAS, mat_id_i) / (rho * rho);
         }
         if (pressure_normal_out != 0) pressure_normal_out[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -559,6 +573,51 @@ void K_PBF_ComputeLambda(
                 + sum_grad_sq + c_pbf.relaxation;
 
     lambda_out[i] = -C_i / denom;
+}
+
+extern "C" __global__ __launch_bounds__(256, 3)
+void K_PBF_ComputeLambda(
+    uint            numParticles,
+    const float4*   __restrict__ predicted_pos,
+    const float*    __restrict__ mass,
+    const uint*     __restrict__ packed_info,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float*          __restrict__ density_out,
+    float*          __restrict__ lambda_out,
+    float4*         __restrict__ pressure_normal_out,
+    const float*    __restrict__ temperature_in,
+    const float*    __restrict__ density_in,
+    float*          __restrict__ dTdt_out,
+    float*          __restrict__ exposure_heat_out,
+    float*          __restrict__ exposure_corrode_out,
+    const float4*   __restrict__ velocity_in,
+    float4*         __restrict__ vorticity_out,
+    float4*         __restrict__ normal_out
+) {
+    pbf_compute_lambda_body<true>(
+        numParticles, predicted_pos, mass, packed_info, cell_start, cell_end,
+        density_out, lambda_out, pressure_normal_out,
+        temperature_in, density_in, dTdt_out, exposure_heat_out,
+        exposure_corrode_out, velocity_in, vorticity_out, normal_out);
+}
+
+extern "C" __global__ __launch_bounds__(256, LAMBDA_LEAN_MIN_BLOCKS)
+void K_PBF_ComputeLambdaLean(
+    uint            numParticles,
+    const float4*   __restrict__ predicted_pos,
+    const float*    __restrict__ mass,              // NULL: mass from predicted_pos.w
+    const uint*     __restrict__ packed_info,
+    const uint*     __restrict__ cell_start,
+    const uint*     __restrict__ cell_end,
+    float*          __restrict__ density_out,       // NULL except on the last call
+    float*          __restrict__ lambda_out,
+    float4*         __restrict__ pressure_normal_out // NULL except on the last call
+) {
+    pbf_compute_lambda_body<false>(
+        numParticles, predicted_pos, mass, packed_info, cell_start, cell_end,
+        density_out, lambda_out, pressure_normal_out,
+        0, 0, 0, 0, 0, 0, 0, 0);
 }
 
 /* ======================================================================
