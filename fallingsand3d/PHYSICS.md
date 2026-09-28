@@ -2358,6 +2358,19 @@ into `.w` for the later passes. Only the last lambda call of the substep writes
 the GRANULAR pressure normal, the one Finalize reads. The result is bitwise the
 same as the old delta-then-apply pipeline (checked at 4 and 5 iterations).
 
+**Full and lean lambda kernels.** `K_PBF_ComputeLambda` and
+`K_PBF_ComputeLambdaLean` share one body, templated on `EXTRAS`
+(bd-r5-review-n28.197). The first call of the substep uses the full kernel: it
+also does heat diffusion, exposure, vorticity and surface normals. Iterations
+1 to N-1 use the lean kernel, which compiles those out (39 registers instead of
+80, no spills, `__launch_bounds__(256, 6)`). The lean call writes density and
+the pressure normal only on the last iteration, the ones Finalize reads.
+Density, lambda and the pressure normal use the same math in both, so a
+substep is bitwise the same as with the full kernel every iteration
+(`test_pbf_lambda_lean.py`). At 992K particles and 6 iterations the
+iteration stage drops from 11.26 to 8.50 ms and the substep from 15.12 to
+12.84 ms (median of 3 interleaved runs, shared GPU).
+
 **Grid from predicted positions.** Steps 1 and 2 run in this order on a full
 sort: `_run_grid_setup` runs `K_PBF_Predict` on the unsorted arrays into
 `world.predicted_position` and hashes that, so the cell table is bucketed by
