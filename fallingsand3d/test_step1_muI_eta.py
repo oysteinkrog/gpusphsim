@@ -17,7 +17,7 @@ import pytest
 import cupy as cp
 import step1
 import step2
-from materials import SAND, STONE, WATER, GRANULAR
+from materials import SAND, STONE, WATER, WET_SAND, GRANULAR
 from simulation import Simulation
 from solver_profiles import PROFILES
 from world import World
@@ -132,3 +132,64 @@ def test_step1_eta_matches_per_pair_muI():
         checks += 1
 
     assert checks == SUBSTEPS // CHECK_EVERY
+
+
+def _sand_water_sim():
+    world = World(max_particles=40_000)
+    n_s = world.spawn_cube((-0.2, -0.9, -0.2), (0.2, -0.3, 0.2), SAND, spacing=SPACING)
+    n_w = world.spawn_cube((0.21, -0.9, -0.1), (0.5, -0.3, 0.1), WATER, spacing=SPACING)
+    assert min(n_s, n_w) > 0
+    sim = Simulation(
+        world, dt=0.001, speed=1.0, accuracy=0.4, fixed_dt=True, max_substeps=1
+    )
+    sim.set_solver_profile(PROFILES["WCSPH"])
+    sim._spawn_substep = sim._damping_duration
+    return world, sim
+
+
+@pytest.mark.gpu
+def test_eta_fallback_for_particle_made_granular_after_step1():
+    """A reaction between step1 and step2 can turn a FLUID particle GRANULAR
+    (LAVA -> GRAVEL, MUD -> WET_SAND). K_Step1 wrote eta = 0 for it, so K_Step2
+    must recompute eta from shear_rate and match the per-pair path."""
+    world, sim = _sand_water_sim()
+    for _ in range(20):
+        sim._sort_skip_next = False
+        sim._sim_step(world._high_water)
+    n = world._high_water
+    s1 = _run_step1(sim, n)
+
+    # Emulate the reaction: every WATER particle becomes WET_SAND (GRANULAR).
+    pi = world.sorted_packed_info[:n]
+    saved = pi.copy()
+    is_water = (pi & 0xFF) == WATER
+    converted = int(cp.count_nonzero(is_water))
+    assert converted > 0
+    new_pi = (pi & ~cp.uint32(0x3FF)) | cp.uint32(WET_SAND) | cp.uint32(GRANULAR << 8)
+    world.sorted_packed_info[:n] = cp.where(is_water, new_pi, pi)
+    try:
+        assert np.all(cp.asnumpy(s1["eta_out"][is_water]) == 0.0)
+        f_new, v_new = _run_step2(sim, n, s1, use_eta=True)
+        f_old, v_old = _run_step2(sim, n, s1, use_eta=False)
+    finally:
+        world.sorted_packed_info[:n] = saved
+    assert np.all(np.isfinite(f_new))
+    _assert_close(f_new, f_old, "sph_force after FLUID -> GRANULAR conversion")
+    _assert_close(v_new, v_old, "veleval after FLUID -> GRANULAR conversion")
+
+
+@pytest.mark.gpu
+def test_live_wcsph_substep_writes_sorted_eta():
+    """simulation.py passes world.sorted_eta to K_Step1 and K_Step2, so a
+    plain _sim_step leaves eta > 0 on GRANULAR and 0 elsewhere."""
+    world, sim = _sand_water_sim()
+    world.sorted_eta.fill(-1.0)
+    sim._sort_skip_next = False
+    sim._sim_step(world._high_water)
+    n = world._high_water
+    eta = cp.asnumpy(world.sorted_eta[:n])
+    behavior = (cp.asnumpy(world.sorted_packed_info[:n]) >> 8) & 0x3
+    gran = behavior == GRANULAR
+    assert gran.sum() > 0
+    assert np.all(eta[gran] > 0.0)
+    assert np.all(eta[~gran] == 0.0)
