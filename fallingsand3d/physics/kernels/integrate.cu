@@ -767,10 +767,20 @@ void K_RigidBodyCollisions(
     RigidBody*  __restrict__ d_rigid_bodies,
     int         num_bodies
 ) {
-    int bid = threadIdx.x;
-    if (bid >= num_bodies) return;
+    // Stage every body in shared memory before any thread reads another
+    // body. Threads write their own updated body straight to global memory
+    // at the end, so without this copy one thread could read a body that
+    // another thread has already moved (bd-r5-review-n28.131). All reads
+    // below come from s_bodies, so the write-back needs no second barrier.
+    __shared__ RigidBody s_bodies[MAX_RIGID_BODIES];
 
-    RigidBody body = d_rigid_bodies[bid];
+    int bid = threadIdx.x;
+    int n = min(num_bodies, MAX_RIGID_BODIES);
+    if (bid < n) s_bodies[bid] = d_rigid_bodies[bid];
+    __syncthreads();
+    if (bid >= n) return;
+
+    RigidBody body = s_bodies[bid];
 
     // Skip kinematic bodies
     int is_kinematic = __float_as_int(body.inertia_inv.w);
@@ -836,10 +846,10 @@ void K_RigidBodyCollisions(
     }
 
     // --- 2. Body vs other dynamic bodies (bounding sphere) ---
-    for (int other = 0; other < num_bodies; other++) {
+    for (int other = 0; other < n; other++) {
         if (other == bid) continue;
 
-        RigidBody ob = d_rigid_bodies[other];
+        const RigidBody& ob = s_bodies[other];
         int ob_kinematic = __float_as_int(ob.inertia_inv.w);
         float ob_inv_mass = ob.position.w;
 
