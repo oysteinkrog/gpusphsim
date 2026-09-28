@@ -1597,7 +1597,13 @@ class Simulation:
         # is not the same buffer as the density_out target (sorted_density).  The old
         # in-place aliasing was a __restrict__ read/write race; the kernel value-guards
         # any zero entry (frame 1 / fresh spawns) to 1000 (bd-r4fix-uup.14).
-        cupy.copyto(w.sorted_density_prev[:n], w.sorted_density[:n])
+        # Read it from sorted_position.w, as WCSPH does: K_DFSPH_Finalize writes
+        # each particle's density into the unsorted position.w and the reorder
+        # gathers it into this substep's slot order. sorted_density is still in
+        # the previous substep's slot order, so after a re-sort it gave each
+        # slot another particle's density. PackVolume overwrites .w only after
+        # this copy.
+        cupy.copyto(w.sorted_density_prev[:n], w.sorted_position[:n, 3])
         dfsph_solver.compute_density_alpha(
             w.sorted_position[:n], w.sorted_velocity[:n],
             w.sorted_mass[:n],

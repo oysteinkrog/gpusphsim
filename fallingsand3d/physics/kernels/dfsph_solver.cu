@@ -1825,9 +1825,12 @@ void K_DFSPH_Finalize(
 
     float temp = sorted_temperature[i];
 
-    // STATIC: write through
+    // STATIC: write through. sorted_position.w holds the volume carrier
+    // (K_DFSPH_PackVolume); every writeback stores the density in .w, which
+    // the next substep's density_in snapshot reads.
     if (behavior == STATIC) {
         float4 pos4 = sorted_position[i];
+        pos4.w = sorted_density[i];
         float dTdt = sorted_dTdt[i];
         temp += dTdt * c_sim.dt;
         temp -= COOL_RATE * (temp - T_AMBIENT) * c_sim.dt;
@@ -1860,7 +1863,7 @@ void K_DFSPH_Finalize(
             temp += dTdt * dt;
             temp -= COOL_RATE * (temp - T_AMBIENT) * dt;
             temp = fmaxf(T_MIN, fminf(temp, T_MAX));
-            position_out[orig_idx] = pos4;
+            position_out[orig_idx] = make_float4(pos.x, pos.y, pos.z, sorted_density[i]);
             velocity_out[orig_idx] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             packed_info_out[orig_idx] = pi;
             sleep_counter_out[orig_idx] = (sc < 255) ? sc : (unsigned char)255;
