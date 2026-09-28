@@ -2012,6 +2012,69 @@ def test_body_body_restitution():
           f"e=1: vx_a={vx_a:.4f}, vx_b={vx_b:.4f})")
 
 
+def test_body_body_collisions_read_pre_step_state():
+    """bd-r5-review-n28.131: body-body contacts must read every body's pre-step state.
+
+    K_RigidBodyCollisions stages all bodies in shared memory before any
+    thread writes its own body back. Eight equal-mass bodies in an
+    overlapping row give seven contacts in one launch. If every thread reads
+    the pre-step state, each pair impulse is equal and opposite, so total
+    momentum is conserved and repeated runs give identical bytes. The
+    restitution case is also rerun 100 times and must not change.
+    """
+    from integrate import rigid_body_collisions
+    from rigid_bodies import RIGID_BODY_DTYPE, MAX_RIGID_BODIES
+    import numpy as np
+
+    radius = 0.3
+    bounding_r = radius * 1.7320508
+    spacing = 2.0 * bounding_r - 0.02
+
+    bodies = np.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+    rng = np.random.default_rng(131)
+    for i in range(MAX_RIGID_BODIES):
+        vx = float(rng.uniform(-2.0, 2.0))
+        bodies[i]["position"] = [i * spacing, 5.0, 0.0, 1.0]
+        bodies[i]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+        bodies[i]["lin_vel"] = [vx, 0.0, 0.0, 0.5]
+        bodies[i]["half_extents"] = [radius, radius, radius, 0.0]
+        bodies[i]["inertia_inv"] = [1.0, 1.0, 1.0, 0.0]
+
+    def run_once(src, n):
+        d_bodies = cupy.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+        cupy.cuda.runtime.memcpy(
+            int(d_bodies.data.ptr), src.ctypes.data, src.nbytes, 1,
+        )
+        rigid_body_collisions(d_bodies, n)
+        cupy.cuda.Device().synchronize()
+        return d_bodies.get()
+
+    ref = run_once(bodies, MAX_RIGID_BODIES)
+    p_before = float(bodies["lin_vel"][:, 0].astype(np.float64).sum())
+    p_after = float(ref["lin_vel"][:, 0].astype(np.float64).sum())
+    assert abs(p_after - p_before) < 1e-4, (
+        f"momentum not conserved across body-body contacts: {p_before:.6f} -> {p_after:.6f}"
+    )
+    assert not np.array_equal(ref["lin_vel"], bodies["lin_vel"]), "no contact happened"
+
+    for k in range(100):
+        out = run_once(bodies, MAX_RIGID_BODIES)
+        assert out.tobytes() == ref.tobytes(), f"run {k} differs from run 0"
+
+    # Two-body restitution case from test_body_body_restitution, 100 runs.
+    pair = np.zeros(MAX_RIGID_BODIES, dtype=RIGID_BODY_DTYPE)
+    for i, (x, vx) in enumerate([(0.0, 1.0), (2.0 * bounding_r - 0.01, -1.0)]):
+        pair[i]["position"] = [x, 0.0, 0.0, 1.0]
+        pair[i]["rotation"] = [0.0, 0.0, 0.0, 1.0]
+        pair[i]["lin_vel"] = [vx, 0.0, 0.0, 1.0]
+        pair[i]["half_extents"] = [radius, radius, radius, 0.0]
+        pair[i]["inertia_inv"] = [1.0, 1.0, 1.0, 0.0]
+    pair_ref = run_once(pair, 2)
+    assert pair_ref[0]["lin_vel"][0] < -0.9 and pair_ref[1]["lin_vel"][0] > 0.9
+    for k in range(100):
+        assert run_once(pair, 2).tobytes() == pair_ref.tobytes(), f"pair run {k} differs"
+
+
 def test_kinematic_body_moves_with_its_velocity():
     """A kinematic body integrates its pose from lin_vel / ang_vel.
 
