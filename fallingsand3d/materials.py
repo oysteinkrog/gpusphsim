@@ -1,6 +1,6 @@
 """Material property table and interaction matrix for multi-material SPH.
 
-Defines 16 materials (IDs 0-15) as Python dataclasses, a 32x32 interaction
+Defines 19 materials (IDs 0-18, NUM_DEFINED) as Python dataclasses, a 32x32 interaction
 matrix, and an upload_to_gpu() function that copies both tables to CUDA
 constant memory via CuPy RawModule symbol lookup.
 

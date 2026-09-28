@@ -37,7 +37,6 @@ class SolverProfile:
     pbf_friction_ratio: float = 0.50  # velocity-space tan(phi_f) for PBF granular DP yield
     pbf_friction_cohesion: float = 0.0  # position-space cohesion for PBF granular (meters)
     pbf_neg_c_scale: float = 0.05  # scale factor for negative constraint (surface cohesion)
-    pbf_warm_start: float = 0.5    # warm start factor for lambda (0.5 = carry 50% from prev frame)
     # DFSPH params. Defaults are the Stable "DFSPH" profile values
     # (bd-r5-review-n28.37), so a custom SolverProfile(solver_type=DFSPH) runs
     # the tuned configuration. dt is shared with WCSPH and is not changed here.

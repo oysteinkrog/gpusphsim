@@ -347,6 +347,17 @@ __constant__ int c_num_sdf_objects;
  *
  * Half4 is stored as 8 bytes (4 x FP16). Loaded as uint2 (one 64-bit load)
  * and converted to float4 via __half2float. Computation stays FP32.
+ *
+ * Array type rule (PHYSICS.md 10.8): FP16 or fixed point is allowed only for
+ * neighbour-read copies that the sort rebuilds every substep from an FP32
+ * master (sorted_velocity_h, sorted_temperature_h). State that a kernel
+ * updates in place stays FP32: position, velocity, temperature, kappa,
+ * kappa_v. Many per-substep updates are smaller than the FP16 half-ulp
+ * (2.4e-4 relative). Example: ambient cooling moves T by
+ * COOL_RATE * dt = 6.7e-5 of (T - T_AMBIENT) per substep at dt = 1/300 s.
+ * An FP16 store would round such updates away, so the state stalls with
+ * no crash or NaN. To cut reorder bandwidth, skip fields a solver does not
+ * read (NULL outputs in K_GatherReorder), do not shrink them.
  * ====================================================================== */
 
 #include <cuda_fp16.h>

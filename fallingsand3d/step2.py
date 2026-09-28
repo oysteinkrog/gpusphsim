@@ -21,11 +21,24 @@ stores it; K_Step2 reads it from pressure_in.
   - p = max(p_raw, 0) for both
 - GAS: p = k_gas * max(rho - rho0, 0) with gamma=1
 
-Force accumulation
-------------------
-- Pressure force: pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable
-- Viscosity force: viscosity_precalc * m_j * (v_j - v_i) / rho_j * lap_visc_variable
-- XSPH (FLUID only): epsilon * sum(m_j / rho_avg * (v_j - v_i) * W_poly6)
+Force accumulation (step2.cu:step2_body)
+---------------------------------------
+- Pressure: pressure_precalc * m_j * (p_i/rho_i^2 + p_j/rho_j^2) * grad_spiky_variable.
+  FLUID-GRANULAR pairs are rescaled so both sides use the same force_scale.
+- Viscosity, all in the dynamic form mu_ij * lap_coeff * m_j * lap_visc / (rho_i * rho_j) * (v_j - v_i):
+  - FLUID/GAS pairs: mu_ij = harmonic mean of the two materials' base_viscosity.
+  - GRANULAR pairs: mu(I) eta_ij = harmonic mean of eta_i and eta_j
+    (eta from K_Step1, see the mu(I) notes in step2.cu).
+  - FLUID-GRANULAR pairs: harmonic mean of the FLUID and GRANULAR values.
+- Regular STATIC neighbours (Akinci boundary): pressure mirrors particle i,
+  m_j * 2 * p_i / rho_i^2, and viscous drag uses v_j = 0.
+- MAT_RIGID neighbours: pressure psi_b * (p_i / rho_i^2 + p_i / rho0^2) with
+  psi_b = m_j * rho0 / RIGID_PSI_RHO0, viscous drag against the body surface
+  velocity, and the reaction force and torque go to the body (two-way coupling).
+- XSPH (FLUID only, FLUID neighbours only): epsilon * sum(m_j / rho_avg * (v_j - v_i) * W_poly6),
+  written as veleval = v + epsilon * xsph_sum.
+- Output: sph_force = fs_i * (pressure + viscosity + vorticity confinement +
+  surface tension), with fs_i = 1 for GRANULAR and force_scale for FLUID/GAS.
 """
 
 from __future__ import annotations
