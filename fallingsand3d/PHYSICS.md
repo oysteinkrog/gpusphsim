@@ -122,8 +122,8 @@ S_i       = C_poly6 * SUM_j [ (m_j / rho_j) * (h^2 - |r_ij|^2)^3 ]   (self term 
 rho_eos_i = max(0.5 * (rho_i + rho_i / max(S_i, 1e-6)), 1.0)
 p_i       = EOS(rho_eos_i)                                          (section 3.1)
 ```
-- `rho_j` is the neighbour's `position.w` (last substep's density, or this
-  substep's if that neighbour already finished); the self term uses the
+- `rho_j` is the neighbour's `position.w`, last substep's density (K_Step1
+  does not write `.w` in the kernel, see 20.1); the self term uses the
   particle's own `position.w`.
 - S includes STATIC neighbours (`rho_j = rest_density`) and MAT_RIGID
   neighbours (`V_b = m_j / RIGID_PSI_RHO0`). Cross-phase GAS neighbours are
@@ -1636,13 +1636,12 @@ The per-substep grid build is `counting_sort.counting_sort_full` (no physics cha
    every run. It is one extra launch with sum(count^2) work per full sort,
    stays graph-capturable and allocates nothing per sort. With the mode off
    the launch list is unchanged.
-   The mode alone does not make a run bit-identical: K_Step1 writes each
-   particle's density to `position.w` in place while neighbours read `.w` as
-   `rho_j`, so `V_j` in the normal, Shepard and heat sums depends on thread
-   timing. With those writes moved to a separate pass, two 200-substep Dam
-   Break runs match bit for bit (0 differing position words); with the
-   current step1 about 5,000 of 315,180 particles differ after 3 substeps
-   (about 90,000 with the atomic order).
+   With the mode on, two 200-substep Dam Break runs match bit for bit (0
+   differing position words, `test_deterministic_sort_dam_break_bit_identical`).
+   This needs the K_Step1 density pack outside the kernel (20.1,
+   bd-r5-review-n28.215): an in-place `position.w` write let a neighbour read
+   either density, and about 5,000 of 315,180 particles then differed after 3
+   substeps (about 90,000 with the atomic order).
 
 **Source**: simulation.py, counting_sort.py/.cu, wake.py/.cu
 
@@ -3778,13 +3777,15 @@ density of neighbour j. The heat, vorticity, normal and strain-rate weights
 `m_j / rho_j` use it; `.w <= 0` falls back to the neighbour's `rest_density`. There is
 no `density_in` buffer and no per-substep copy into `sorted_density_prev` for WCSPH.
 
-K_Step1 writes `.w` for particle i in the same launch, so a neighbour whose thread has
-already finished gives this substep's density instead of the previous one. Both are the
-same particle's density one substep apart, and only `.w` changes, so `.xyz` is never
-torn. The sort order within a cell already varies between runs, so WCSPH was not bitwise
-reproducible before this either. A test that needs an exact `rho_j` must put the
-density that K_Step1 will write into `.w` first (one warm-up call), because any other
-starting `.w` is read as either value.
+K_Step1 does not write `.w` itself. `compute_step1` copies `density_out` into
+`sorted_position.w` right after the launch (`cupy.copyto`, no allocation,
+graph-capturable), so every neighbour in K_Step1 reads the previous substep's density
+and K_Step2 reads this substep's. Until bd-r5-review-n28.215 the kernel wrote `.w` in
+place, so a neighbour whose thread had finished gave this substep's density instead.
+Since the Shepard blend (2.4) puts `V_j = m_j / rho_j` into the FLUID pressure, that
+race reached the forces: two runs of the WCSPH offset spinning-box scene
+(`test_offset_spinning_box_torque`) differed by 1e-3 to 3e-3 in torque, against 5e-6
+with the separate pack. The copy costs about 0.045 ms per substep at 1M particles.
 
 Measured at 992K particles (dam break, full sort every substep, shared GPU, two runs
 each): step1 2.62 ms before, 2.32 ms after; whole substep 8.88 ms before, 8.58 ms
@@ -3792,7 +3793,8 @@ after. In a 250K dam break after 400 substeps, KE and mean density error of thre
 1e-6 m jittered starts overlap before and after (KE 6516 to 6517 vs 6514 to 6517,
 error 0.4119 to 0.4122 vs 0.4113 to 0.4120).
 
-**Source**: `step1.cu:K_Step1` (end of kernel, `rho_j = pos4_j.w` in the loop),
+**Source**: `step1.cu:K_Step1` (`rho_j = pos4_j.w` in the loop), `step1.py:compute_step1`
+(the `.w` pack),
 `step2.cu:K_Step2` (reads `pos4_j.w`), `simulation.py:_run_wcsph_body`
 
 ### 20.2 Speculative ILP (OPT-4.2)
