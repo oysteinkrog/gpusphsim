@@ -42,8 +42,14 @@ def test_reset_scene_objects_clears_sdf_and_rigid_state():
         def get_all_modules(self):
             return []
 
+        def _invalidate_graphs(self):
+            log.append("sim._invalidate_graphs")
+
     Simulation.reset_scene_objects(_FakeSim())
-    assert log == ["sdf.clear", "rbm.reset", "rbm.upload"]
+    # The graphs are dropped last so a new scene with the same body count
+    # and particle count still recaptures (bd-r5-review-n28.190).
+    assert log == ["sdf.clear", "rbm.reset", "rbm.upload",
+                   "sim._invalidate_graphs"]
 
 
 def test_all_scene_reset_paths_use_the_shared_helper():
