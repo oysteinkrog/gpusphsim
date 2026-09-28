@@ -1454,11 +1454,14 @@ class Simulation:
             dst = pred_bufs[(i + 1) % 2]
             last = i == num_iters - 1
             if i > 0:
+                # Lean variant (no heat, vorticity or normals). Only the last
+                # call writes density and the pressure normal: Finalize reads
+                # those, and nothing reads them between iterations.
                 pbf_solver.pbf_compute_lambda(
                     src[:n], None,
                     w.sorted_packed_info[:n],
                     self._cell_start, self._cell_end,
-                    w.sorted_density, w.sorted_lambda_pbf,
+                    w.sorted_density if last else None, w.sorted_lambda_pbf,
                     w.sorted_pressure_normal if last else None,
                 )
 

@@ -198,7 +198,7 @@ def pbf_compute_lambda(
     packed_info: cupy.ndarray,
     cell_start: cupy.ndarray,
     cell_end: cupy.ndarray,
-    density_out: cupy.ndarray,
+    density_out: "cupy.ndarray | None",
     lambda_out: cupy.ndarray,
     pressure_normal_out: "cupy.ndarray | None" = None,
     # Optional heat diffusion + exposure (pass on first call only)
@@ -215,12 +215,31 @@ def pbf_compute_lambda(
 
     pressure_normal_out is written only when given; pass it on the last call
     of the substep, the one K_PBF_Finalize reads.
+
+    With none of the heat, vorticity or normal arguments this launches
+    K_PBF_ComputeLambdaLean (39 registers instead of 80, bd-r5-review-n28.197),
+    and density_out may then be None: the solver iterations before the last
+    one skip the density write, since only the last is read.
     """
     n = predicted_pos.shape[0]
     # NULL pointers for optional params
     _null = np.intp(0)
     m_ptr = mass if mass is not None else _null
     pn_out = pressure_normal_out if pressure_normal_out is not None else _null
+    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    block = (BLOCK_SIZE,)
+    extras = (temperature_in, density_in, dTdt_out, exposure_heat_out,
+              exposure_corrode_out, velocity_in, vorticity_out, normal_out)
+    if all(a is None for a in extras):
+        d_out = density_out if density_out is not None else _null
+        kernel = _get_module().get_function("K_PBF_ComputeLambdaLean")
+        kernel(grid, block, (
+            np.uint32(n), predicted_pos, m_ptr, packed_info,
+            cell_start, cell_end, d_out, lambda_out, pn_out,
+        ))
+        return
+    if density_out is None:
+        raise ValueError("pbf_compute_lambda: the full variant needs density_out")
     t_in = temperature_in if temperature_in is not None else _null
     d_in = density_in if density_in is not None else _null
     dt_out = dTdt_out if dTdt_out is not None else _null
@@ -229,10 +248,7 @@ def pbf_compute_lambda(
     vel_in = velocity_in if velocity_in is not None else _null
     vort_out = vorticity_out if vorticity_out is not None else _null
     norm_out = normal_out if normal_out is not None else _null
-    module = _get_module()
-    kernel = module.get_function("K_PBF_ComputeLambda")
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-    block = (BLOCK_SIZE,)
+    kernel = _get_module().get_function("K_PBF_ComputeLambda")
     kernel(grid, block, (
         np.uint32(n), predicted_pos, m_ptr, packed_info,
         cell_start, cell_end, density_out, lambda_out,
