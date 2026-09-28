@@ -1507,9 +1507,8 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
    penetration, not a sum over neighbours, so a particle over a flat floor
    moves at most `min_dist - y`. Velocity is reflected with restitution along
    `n` only, and only when moving into the wall. A particle resting one
-   spacing from the wall is not touched. Called from PBF Finalize and DFSPH
-   Finalize, and from WCSPH `K_Integrate` when it is given the cell arrays
-   (see the known gap below). (bd-r5-review-n28.43)
+   spacing from the wall is not touched. Called from PBF Finalize, DFSPH
+   Finalize and WCSPH `K_Integrate` (see WCSPH below). (bd-r5-review-n28.43)
    MAT_RIGID particles push only GAS: FLUID and GRANULAR get their rigid
    response from the solver's Akinci coupling, but gas density ignores the
    body, so without the push gas would cross the body surface
@@ -1545,13 +1544,22 @@ Fluids passed through stone walls in presets like Volcano and Waterfall.
    Finalize of a water, sand and smoke drop on STONE with the fold switched
    off: max difference 6e-8 m, 8e-7 m/s.
 
-   Known gap: the push does not run in WCSPH. The integrate module has
-   `c_grid` (added for the wake mark, bd-r5-review-n28.166), but the WCSPH
-   body passes no `cell_start`/`cell_end` to `K_Integrate`, which skips the
-   scan. Before the `c_grid` upload the scan hit hash bucket 0 only, so this
-   keeps WCSPH physics as it was. Passing the cell arrays turns the push on
-   and costs about 0.16 ms per substep at 1M (Dam Break, integrate 0.48 to
-   0.65 ms).
+   WCSPH (bd-r5-review-n28.214): `K_Integrate` runs the separate 27-cell
+   scan for every non-STATIC particle, with `c_grid` in the integrate module
+   (bd-r5-review-n28.166) and the WCSPH body passing `cell_start`/`cell_end`.
+   Step2's Akinci term alone does not hold water on a 2-layer STONE floor:
+   in the closed STONE box above (1568 WATER, dt 1 ms) all 1568 particles
+   were below the floor top after 600 substeps. With the push, none are
+   after 1250 substeps, and grid reuse holds (80% of frames in the second
+   half of a 10 s run, the 4-in-5 cap). The push also runs on in-place
+   substeps (bd-r5-review-n28.196): it reads position only from STATIC
+   slots, which `K_Integrate` rewrites unchanged, and only the behavior and
+   material bits of packed_info, which it never changes.
+   Cost at 1M (Dam Break, no STONE, `bench_substep.py --grid-reuse`, shared
+   GPU, 2 interleaved runs each): integrate median 0.21 to 0.44 ms, substep
+   total 3.30 to 3.53 ms (+7%), sort skip rate 68% in both.
+   `test_integrate.py::test_wcsph_water_stays_on_stone_floor` checks the
+   floor.
 
 Additional FLUID boundary improvements (unchanged):
 - **XSPH position advection for FLUID**: Smooths compression artifacts.
@@ -2099,7 +2107,7 @@ up `+curl(v)`, see §16.1.
 - **No rigid-rigid stacking**: Single push-apart pass per substep; deep piles of bodies may interpenetrate.
 - **Max 8 dynamic bodies, 16 SDF objects**: Hardcoded limits in constant memory (`MAX_RIGID_BODIES`, `MAX_SDF_OBJECTS`).
 - **No body-frame friction/rolling**: Only linear velocity is reflected in collision; angular velocity is not affected by rigid-rigid contacts.
-- **Gas against bodies** (bd-r5-review-n28.101): GAS is kept out of a body by the `static_particle_boundary` push (all solvers) plus, in WCSPH, the step2 Akinci term. `test_gas_rigid.py` drops a 12 cm, 50 kg box at 1 m/s through an ambient-temperature SMOKE block for 0.2 s. DFSPH: no smoke inside the box at any check. WCSPH: 216 inside, because the push is dead there until the integrate module gets `c_grid` (10.6, bd-r5-review-n28.214); with `c_grid` uploaded by hand it is 0 inside and the box slows from 1.0 to 0.86 m/s (0.998 m/s with no smoke in its path), and peak gas pressure under the box is about 30000 against 3600 at rest. PBF: up to about 90 inside, because at dt 1/120 the box moves 8 mm per substep, the PBF gas density solve does not see the body, and one push per substep lags behind.
+- **Gas against bodies** (bd-r5-review-n28.101): GAS is kept out of a body by the `static_particle_boundary` push (all solvers) plus, in WCSPH, the step2 Akinci term. `test_gas_rigid.py` drops a 12 cm, 50 kg box at 1 m/s through an ambient-temperature SMOKE block for 0.2 s. DFSPH: no smoke inside the box at any check. WCSPH: 0 inside with the push on (10.6, bd-r5-review-n28.214); the box slows from 1.0 to 0.86 m/s (0.998 m/s with no smoke in its path), and peak gas pressure under the box is about 30000 against 3600 at rest. PBF: up to about 90 inside, because at dt 1/120 the box moves 8 mm per substep, the PBF gas density solve does not see the body, and one push per substep lags behind.
 
 ---
 
