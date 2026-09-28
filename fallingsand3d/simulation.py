@@ -185,6 +185,13 @@ class Simulation:
         # (bd-r5-review-n28.196): (skip_reorder, in_place) -> (graph, n).
         # (False, False) is _graph_gather_only above.
         self._graph_reuse_variants: dict = {}
+        # Stable-n capture gate (bd-r5-review-n28.204). step_frame records
+        # the frame-start n and allows a capture only when it matches the
+        # previous frame's, so a frame that painted or spawned particles runs
+        # direct launches and never instantiates a graph it would drop on the
+        # next frame. Direct _sim_step callers keep the default True.
+        self._prev_frame_n = -1
+        self._graph_capture_ok = True
         # In-place writeback state (bd-r5-review-n28.196). _sorted_is_current:
         # the last substep ran K_Integrate in place, so the sorted arrays hold
         # the state and the unsorted arrays are older. It is only ever True
@@ -2057,6 +2064,10 @@ class Simulation:
             # n changed — invalidate this path's graph, run directly
             self._set_graph_slot(is_gather, None, n)
             self._run_graph_body(n)
+        elif graph is None and not self._graph_capture_ok:
+            # n changed since the previous frame: run directly and capture
+            # on the first frame with a stable n (bd-r5-review-n28.204).
+            self._run_graph_body(n)
         elif graph is None:
             # n stable but no graph yet — capture then launch
             g = self._capture_graph(n, gather_only=is_gather)
@@ -2454,7 +2465,12 @@ class Simulation:
             return 0
 
         n = self.world._high_water
+        # Capture graphs only once n has held for a frame, so a painted or
+        # spawning frame never pays a throwaway instantiate (n28.204).
+        self._graph_capture_ok = n == self._prev_frame_n
+        self._prev_frame_n = n
         if n == 0:
+            self._graph_capture_ok = True
             self._last_substeps = 0
             return 0
 
@@ -2492,6 +2508,7 @@ class Simulation:
         for i in range(sim_steps):
             last = i == sim_steps - 1
             step_fn(n, last_substep=last, in_place_ok=not last)
+        self._graph_capture_ok = True
 
         # Foam compaction once per frame, before the readback copies foam_count
         if sim_steps > 0:
