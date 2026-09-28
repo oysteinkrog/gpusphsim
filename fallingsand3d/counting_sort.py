@@ -37,6 +37,18 @@ import numpy as np
 
 _module: Optional[object] = None
 
+# Zero-length stand-in for a skipped (None) kernel argument; the kernel sees
+# a NULL pointer. Made once so a sort never calls the pool allocator, even
+# for a size-0 request (bd-r5-review-n28.189).
+_null: Optional[cupy.ndarray] = None
+
+
+def _null_arg() -> cupy.ndarray:
+    global _null
+    if _null is None:
+        _null = _null_arg()
+    return _null
+
 BLOCK_SIZE = 256
 
 # Must match SCAN_THREADS * SCAN_ITEMS and SCAN_THREADS in counting_sort.cu.
