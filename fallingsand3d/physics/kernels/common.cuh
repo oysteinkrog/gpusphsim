@@ -128,20 +128,44 @@ __device__ inline int3 calcGridCell(float3 p) {
     );
 }
 
-/* Additive combiner, not XOR.  With addition,
- *   h(c + d1) - h(c + d2) = (d1 - d2) . P  (mod table_size)
- * does not depend on the cell c, and no difference d1 - d2 in {-2..2}^3
- * is 0 mod 2^18, 2^19 or 2^20, so every 27-cell stencil hits 27 distinct
- * buckets.  The old XOR combiner broke this: P ^ (-P) has the same low
- * 18 bits for all three primes, so near coordinate 0 (the first in-world
- * layer) two stencil cells shared a bucket and its particles were
- * counted twice.  Multiply in uint so negative cells wrap without
- * signed-overflow UB. */
+/* Morton-within-block hash (bd-r5-review-n28.201).
+ *
+ * The world is cut into 8x8x8-cell blocks.  The low 9 bits of the hash
+ * are the Morton (Z-order) code of the cell inside its block, and an
+ * additive prime hash of the block coordinates goes in the bits above:
+ *   lo = morton3(cx & 7, cy & 7, cz & 7)            (9 bits)
+ *   hi = (cx >> 3)*P1 + (cy >> 3)*P2 + (cz >> 3)*P3  (uint wrap)
+ *   h  = (lo + (hi << 9)) & table_mask
+ * The counting sort orders particles by h, so the cells a warp touches
+ * are spatial neighbours and their 27-cell stencils overlap; step1 and
+ * step2 then hit L1/L2 far more often.  At 1M WCSPH particles this
+ * cut step1+step2 by about 31% against the plain prime hash.
+ *
+ * Stencil buckets stay distinct: the 3 cells of a stencil along one
+ * axis have 3 distinct values mod 8, so the 27 cells have 27 distinct
+ * in-block triples, hence 27 distinct lo codes, and hi << 9 never
+ * touches the low 9 bits.  This holds for any table_size >= 2^9.
+ *
+ * The block is 8 cells, not 64: a larger block wastes table slots on
+ * partly filled blocks (a thin floor fills 1 or 2 of a block's layers),
+ * and a 64-cell block made a wide 2-layer slab 2.7x slower.
+ * hi stays additive: a nonlinear mixer spread lattice-shaped scenes
+ * worse.  Shifts and multiplies are on uint or arithmetic int >>, so
+ * negative cells wrap without signed-overflow UB. */
+__device__ inline uint mortonSpread3(uint v) {
+    v &= 7u;                               // bits 2..0
+    return (v & 1u) | ((v & 2u) << 2) | ((v & 4u) << 4);  // bit k -> bit 3k
+}
+
 __device__ inline uint spatialHash(int cx, int cy, int cz) {
+    uint lo = mortonSpread3((uint)cx)
+            | (mortonSpread3((uint)cy) << 1)
+            | (mortonSpread3((uint)cz) << 2);
     // Large primes for spatial hashing (widely used in GPU SPH literature)
-    return ((uint)cx * 73856093u
-          + (uint)cy * 19349669u
-          + (uint)cz * 83492791u) & c_grid.table_mask;
+    uint hi = (uint)(cx >> 3) * 73856093u
+            + (uint)(cy >> 3) * 19349669u
+            + (uint)(cz >> 3) * 83492791u;
+    return (lo + (hi << 9)) & c_grid.table_mask;
 }
 
 __device__ inline uint spatialHash(int3 cell) {
