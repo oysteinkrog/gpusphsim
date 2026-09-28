@@ -2038,9 +2038,18 @@ Each item names its bead (`bd-r4fix-uup.N`).
     for awake particles, so from the second substep every awake neighbour had
     `rho_j = 1` and every `m_j / rho_j` term in step1 was about 1000 to 2500
     times too large. `test_wcsph_density_in_carries_previous_density` covers it.
-  - PBF and DFSPH fill it from `sorted_density`. This removes the race, but the
-    values are still in the previous sort order after a full re-sort. The
-    effect is bounded noise in the weighting, not a blow-up.
+  - DFSPH fills it from `sorted_position.w` before `K_DFSPH_PackVolume`
+    overwrites `.w`. Every `K_DFSPH_Finalize` writeback (STATIC and sleeping
+    GRANULAR included) stores the particle's density in the unsorted
+    `position.w`, and the reorder gathers it, so the values match the current
+    sort order. Until the gate fix after bd-r5-review-n28.201 it copied
+    `sorted_density`, which is still in the previous substep's slot order, so
+    after a re-sort each moved slot read another particle's density. The Morton
+    hash (10.12) moves more slots per re-sort, and a still zero-g DFSPH block
+    then spread about 2.4 times faster (`test_dfsph_still_water_never_sleeps`:
+    vmax 3.0 to 4.4 m/s at 2 s, 1.5 m/s with the fix).
+  - PBF fills it from `sorted_density`. This removes the race, but the values
+    are still in the previous sort order after a full re-sort.
   - Every read site (K_Step1, K_DFSPH_ComputeDensityAlpha,
     K_PBF_ComputeLambda; same-phase and cross-phase heat, and the PBF
     vorticity/normal sum) replaces a value `<= 0` with the
@@ -2845,8 +2854,10 @@ Akinci volume `m_j / rho0_i` (13.3), the pressure and divergence-correction sums
 a wall neighbour. The volumes are the same as before the carrier, except
 for a particle that a reaction turned into a wall in this substep, whose stored density
 is still its fluid density. The next reorder overwrites `.w`, so the carrier lives only
-inside the substep; Finalize writes this substep's density into the unsorted
-`position.w` for K_ComputeColor.
+inside the substep. Finalize writes this substep's density into the unsorted
+`position.w` on every writeback path (STATIC and sleeping GRANULAR included), for
+K_ComputeColor and for the next substep's `density_in` snapshot (10.17b, density
+buffer lifecycle).
 
 Kernels (`dfsph_solver.cu`, 10 plus 5 neighbour-list twins): ComputeDensityAlpha
 (step 2), PackVolume (2), BuildNeighborList (2, 20.3c), NonPressureForces (3-4), ComputeKappaV and CorrectVelocityDiv (5),
