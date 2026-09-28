@@ -210,8 +210,9 @@ def integrate(
         are ignored and the sorted arrays are returned. Use it only when the
         next substep reuses the grid, so it reads the sorted arrays with no
         gather. health, lifetime and mass stay in sorted space with their
-        state-dirty bit set. Needs cell_start None (the STATIC push-out reads
-        neighbour slots).
+        state-dirty bit set. The STATIC push-out may run: it reads only
+        STATIC slots, which K_Integrate rewrites with the same position,
+        and behavior and material bits, which it never changes.
     after_in_place : bool
         The unsorted outputs are older than the sorted inputs because the
         previous substeps ran in place. Makes the scatter store every
@@ -251,9 +252,6 @@ def integrate(
         sorted_lifetime = cupy.zeros(n, dtype=cupy.float32)
 
     if in_place:
-        if cell_start is not None:
-            raise ValueError("in_place needs cell_start None: the STATIC "
-                             "push-out reads slots other threads rewrite")
         position_out = sorted_position
         velocity_out = sorted_velocity
         packed_info_out = sorted_packed_info

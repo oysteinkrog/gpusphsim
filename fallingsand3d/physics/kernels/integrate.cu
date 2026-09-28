@@ -69,8 +69,10 @@ __constant__ const RigidBody* c_rigid_bodies;
  *     kernel does no scattered stores. The FP16 velocity and temperature
  *     mirrors are rewritten here, since no gather rebuilds them. The
  *     state-dirty bit stays set, so the next scatter still carries health,
- *     lifetime and mass back. Needs cell_start == NULL: the STATIC push-out
- *     reads neighbour slots that other threads are rewriting.
+ *     lifetime and mass back. The STATIC push-out is safe here: it reads
+ *     position only from STATIC slots, which are rewritten unchanged, and
+ *     only the behavior and material bits of packed_info, which no
+ *     thread changes.
  *   INTEGRATE_SCATTER_AFTER_IN_PLACE (2): as 0, after one or more in-place
  *     substeps. The unsorted arrays are then older than the sorted inputs,
  *     so a sleeper's zero velocity is stored even when the input is zero.
