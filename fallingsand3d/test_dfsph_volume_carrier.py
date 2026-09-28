@@ -4,7 +4,8 @@
   for a regular STATIC wall.
 - K_DFSPH_ComputePressureAccel writes vt = clamp_v(v + dt * clamp_a(a_press)),
   the value the old K_DFSPH_ApplyPressureVelocity gave the velocity, and
-  vt = v for STATIC particles.
+  vt = v for STATIC particles. a_press uses the symmetric fluid pair form
+  m_j * (p_i/rho_i + p_j/rho_j) and V_j * p_i for walls (bd-r5-review-n28.100).
 - K_DFSPH_DensitySolverUpdate predicts density from that vt with the Akinci
   wall volume m_j / rho0_i.
 
@@ -147,7 +148,12 @@ def test_pressure_accel_writes_clamped_vt(world, sim, p_scale, v_scale):
     gw = _pairs(pos, h)
     V = m / np.maximum(rho, RHO_EPSILON)
     p_j = np.where(wall, 0.0, p)
-    coef = -V[None, :] * (p[:, None] + p_j[None, :])
+    # Fluid j: symmetric m_j * (p_i/rho_i + p_j/rho_j) (bd-r5-review-n28.100).
+    # Wall j: plain volume V_j * p_i.
+    p_rho = p / np.maximum(rho, RHO_EPSILON)
+    coef = np.where(wall[None, :],
+                    -V[None, :] * p[:, None],
+                    -(m[None, :] * p_rho[:, None] + V[None, :] * p_j[None, :]))
     a = np.sum(coef[:, :, None] * gw, axis=1)
     a = _clamp_len(a, h / (dt * dt))
     ref = _clamp_len(vel[:, :3] + dt * a, v_limit)
