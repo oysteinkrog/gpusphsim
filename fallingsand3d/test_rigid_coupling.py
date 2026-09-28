@@ -123,11 +123,8 @@ def _pin_body(rbm, pos) -> None:
 def _quiet_surface_terms(sim, profile_name: str) -> None:
     """Turn off surface tension and vorticity confinement.
 
-    Vorticity confinement acts on single particles without a partner, so it
-    changes the fluid momentum on its own and would hide the fluid-body
-    balance. Surface tension is a fluid pair force (bd-r5-review-n28.125)
-    and adds no net momentum, but it is kept off so the check sees only
-    the fluid-body terms.
+    Both act on single particles without a partner, so they change the fluid
+    momentum on their own and would hide the fluid-body balance.
     """
     import step2
     if profile_name == "PBF":
