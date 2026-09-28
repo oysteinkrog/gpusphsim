@@ -972,6 +972,20 @@ and probing one cell, because the neighbourhood is symmetric; it replaces 27
 scattered atomics per marker with one store (bd-r5-review-n28.141). Hash
 collisions can only add wakes, never drop one.
 
+The probe's cost depends on the order the threads walk the particles, since
+each sleeper reads 27 table entries. When the solver's last kernel scattered
+to the unsorted arrays (PBF, DFSPH, and WCSPH substeps that do not integrate in
+place), `run_wake_propagation` gets the same `sort_perm[:n]` the scatter used:
+thread i handles particle `sort_perm[i]`, so a warp probes neighbouring cells,
+and it reads and writes `packed_info`, `position` and `sleep_counter` at that
+particle's unsorted slot. The wake rule and the result are unchanged
+(`test_wake.py` compares both walks bit for bit). At 1M settled SAND (WCSPH,
+full sort every substep, shared GPU) the kernel takes 43 us on the sorted
+buffers, 54 us on the unsorted arrays through `sort_perm`, and 57 us on the
+unsorted arrays in slot order; with the unsorted storage shuffled at random it
+takes 75 us through `sort_perm` against 608 us in slot order
+(bd-r5-review-n28.217).
+
 The table holds a generation stamp, not a 0/1 flag:
 ```
 stamp = frame_counter_d[0] + 1     (never 0, the value of a fresh table)

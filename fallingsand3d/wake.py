@@ -236,8 +236,9 @@ def wake_sleepers_and_clear_just_woke(
     sort_perm : cupy.ndarray, (>= n,) uint32, optional
         Sorted slot -> particle index, a permutation of [0, n). Thread i
         then works on particle sort_perm[i], so the 27-cell probe walks in
-        cell order (237 us -> about 50 us at 1M settled sand,
-        bd-r5-review-n28.217). The result is the same as without it.
+        cell order. At 1M settled sand in shuffled storage the kernel went
+        from 608 us to 75 us (bd-r5-review-n28.217). The result is the same
+        as without it.
     """
     n = num_particles if num_particles is not None else position.shape[0]
     if n == 0:
