@@ -15,7 +15,8 @@ the particle now in slot i. Every sort is a full sort, with
 deterministic_sort on, so the permutation changes between substeps. The scene
 has a STATIC floor, a falling water block and a sand pile, so the STATIC,
 FLUID, GRANULAR and (when some sand falls asleep) sleeping writebacks in
-K_PBF_Finalize are all covered.
+K_PBF_Finalize are all covered. The old sleeping writeback kept a stale .w
+and fails this check once sand sleeps (in the last 60 of the 600 substeps).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import cupy
 import numpy as np
 import pytest
 
-SUBSTEPS = 120
+SUBSTEPS = 600  # long enough for some sand to fall asleep
 SLEEP_BIT = 1 << 10
 
 
@@ -133,6 +134,9 @@ def test_pbf_density_in_follows_the_resort() -> None:
     )
     assert moved_total > 0, "no re-sort moved a slot; the check proves nothing"
     assert checked["STATIC"] > 0 and checked["FLUID"] > 0 and checked["GRANULAR"] > 0
+    assert checked["sleeping"] > 0, (
+        "no particle slept; the sleeping writeback is unchecked"
+    )
     assert worst[0] == 0, (
         f"substep {worst[1]}: {worst[0]}/{n} slots read another particle's "
         f"previous density"
