@@ -1679,6 +1679,12 @@ reorder (grid reuse, see `_capture_graph`).
   the device pointers change. It bumps `World.buffer_generation`, and
   `_sim_step` drops both graphs when that value changed, even if `n` came
   back to the same count (bd-r5-review-n28.149).
+- Capture waits for a stable `n`: `step_frame` records `n` at the start of
+  each frame and allows a capture only when it equals the previous frame's.
+  A frame that paints or spawns particles runs direct launches and never
+  instantiates a graph the next frame would drop. The first frame after
+  spawning stops captures each slot it uses. Direct `_sim_step` callers
+  capture as before (bd-r5-review-n28.204).
 - Capture uses a non-default stream (`cupy.cuda.Stream(non_blocking=True)`);
   replay launches on the default stream.
 - Constant memory is not part of a graph: kernel nodes read `__constant__`
