@@ -7,7 +7,8 @@ Foam particles are separate from SPH particles -- they have no neighbor
 loops and use simple ballistic/advection physics. Generated from FLUID
 particles based on velocity, surface proximity, and kinetic energy.
 
-Constant memory: c_foam and c_sim are uploaded here. c_sdf_objects and
+Constant memory: c_foam, c_sim and c_grid are uploaded here (c_grid lets
+K_FoamPhysics find its own cell in the SPH hash grid). c_sdf_objects and
 c_num_sdf_objects (used by K_FoamPhysics for SDF object collision) are
 uploaded by rigid_bodies.upload_sdf_objects, with the same data as the
 integrate and solver modules.
@@ -42,6 +43,8 @@ FOAM_PARAMS_DTYPE = np.dtype(
         ("max_foam", np.int32),
         ("dt", np.float32),
         ("k_rate", np.float32),
+        ("foam_buoyancy", np.float32),
+        ("foam_water_drag", np.float32),
     ],
     align=False,
 )
@@ -66,12 +69,18 @@ def build_foam_params(
     max_foam: int = 200_000,
     dt: float = 0.001,
     k_rate: float = 5.0,
+    foam_buoyancy: float = 1.5,
+    foam_water_drag: float = 10.0,
 ) -> np.ndarray:
     """Build FoamParams numpy struct for constant memory upload.
 
     k_rate is the emission rate per unit of (phi - threshold), in 1/s. The
     default 5.0 makes a surface particle with phi = 4 emit about 10 foam
     particles per second.
+
+    foam_buoyancy (m/s^2) and foam_water_drag (1/s) act on FOAM inside the
+    fluid. The defaults give a rise speed of 0.15 m/s, slow enough that
+    foam leaving the top cell overshoots by about 1 cm under 0.1 g.
     """
     params = np.zeros(1, dtype=FOAM_PARAMS_DTYPE)
     params[0]["k_ta"] = np.float32(k_ta)
@@ -88,6 +97,8 @@ def build_foam_params(
     params[0]["max_foam"] = np.int32(max_foam)
     params[0]["dt"] = np.float32(dt)
     params[0]["k_rate"] = np.float32(k_rate)
+    params[0]["foam_buoyancy"] = np.float32(foam_buoyancy)
+    params[0]["foam_water_drag"] = np.float32(foam_water_drag)
     return params
 
 
@@ -147,6 +158,13 @@ def upload_foam_params(params: np.ndarray) -> None:
     """Upload FoamParams to ``__constant__ FoamParams c_foam``."""
     module = _get_module()
     d_ptr = module.get_global("c_foam")
+    cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
+
+
+def upload_grid_params(params: np.ndarray) -> None:
+    """Upload GridParams to ``__constant__ GridParams c_grid``."""
+    module = _get_module()
+    d_ptr = module.get_global("c_grid")
     cupy.cuda.runtime.memcpy(int(d_ptr), params.ctypes.data, params.nbytes, 1)
 
 
@@ -222,8 +240,18 @@ def foam_physics(
     foam_velocity: cupy.ndarray,
     foam_count: cupy.ndarray,
     max_foam: int,
+    cell_start: Optional[cupy.ndarray] = None,
+    cell_end: Optional[cupy.ndarray] = None,
 ) -> None:
     """Launch K_FoamPhysics: simple physics for each foam particle.
+
+    cell_start and cell_end are the SPH hash grid tables built this substep
+    (Simulation passes its _cell_start and _cell_end). A foam particle
+    whose own cell is non-empty counts as inside fluid: FOAM there rises
+    back to the surface and a BUBBLE outside fluid turns into FOAM. Pass
+    None for both to run without fluid information (BUBBLE always rises,
+    FOAM always falls). The foam module needs c_grid for this
+    (upload_grid_params).
 
     The grid covers the whole pool (max_foam threads). The kernel reads the
     live count from the foam_count device pointer and threads past it exit at
@@ -252,6 +280,8 @@ def foam_physics(
             foam_position,
             foam_velocity,
             foam_count,
+            cell_start if cell_start is not None else _NULL,
+            cell_end if cell_end is not None else _NULL,
         ),
     )
 

@@ -639,6 +639,7 @@ class Simulation:
         self._foam_params = foam_params
         foam.upload_foam_params(foam_params)
         foam.upload_sim_params(sim_params)
+        foam.upload_grid_params(grid_params)  # K_FoamPhysics in-fluid test
 
         # --- implicit_st module: c_grid, c_sim, c_precalc, c_materials, c_ist ---
         implicit_st.upload_grid_params(grid_params)
@@ -1162,7 +1163,7 @@ class Simulation:
             # new particles get physics next substep. The kernel reads the
             # live count from foam_count on the device.
             foam.foam_physics(w.foam_position, w.foam_velocity, w.foam_count,
-                              w._max_foam)
+                              w._max_foam, self._cell_start, self._cell_end)
             mark("foam_physics")
 
     def _run_wcsph_body(self, n: int, mark: StageMark = _no_mark) -> None:

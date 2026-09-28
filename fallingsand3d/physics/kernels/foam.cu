@@ -34,6 +34,8 @@ struct FoamParams {
     int   max_foam;       // max foam particles (pool size)
     float dt;             // simulation timestep
     float k_rate;         // emission rate per unit (phi - threshold), 1/s
+    float foam_buoyancy;  // upward accel for FOAM inside fluid, m/s^2
+    float foam_water_drag;// vertical drag for FOAM inside fluid, 1/s
 };
 
 __constant__ FoamParams c_foam;
@@ -198,15 +200,29 @@ void K_FoamGenerate(
  * K_FoamPhysics -- per foam particle, simple physics (no SPH)
  *
  * SPRAY:  gravity + air drag (ballistic trajectory)
- * FOAM:   slow drift, lateral diffusion, fade
- * BUBBLE: buoyancy upward, dissolve after lifetime
+ * FOAM:   slow drift, lateral diffusion, fade. Inside fluid it gets
+ *         c_foam.foam_buoyancy up and c_foam.foam_water_drag on vy, so it
+ *         climbs back to the free surface; outside it falls at 0.1 g.
+ * BUBBLE: buoyancy upward, dissolve after lifetime. A BUBBLE outside fluid
+ *         becomes FOAM with vy = 0, so it stays at the surface instead of
+ *         rising to the ceiling.
+ *
+ * Inside fluid (bd-r5-review-n28.193) means the particle's own hash cell
+ * in the SPH grid built this substep holds at least one particle:
+ * cell_start[h] < cell_end[h] (no sentinel, see common.cuh). Two 4 B
+ * reads, no neighbour loop. Any SPH particle counts, and a hash collision
+ * with a far occupied cell reads as inside; both only keep a particle in
+ * its in-fluid state a little longer. With cell_start == NULL the kernel
+ * has no fluid information: BUBBLE always rises and FOAM always falls.
  * ====================================================================== */
 
 extern "C" __global__
 void K_FoamPhysics(
     float4* foam_position,
     float4* foam_velocity,
-    const uint* __restrict__ foam_count  // device pointer to current count
+    const uint* __restrict__ foam_count,  // device pointer to current count
+    const uint* __restrict__ cell_start,  // SPH hash grid, or NULL
+    const uint* __restrict__ cell_end
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int num_foam = (int)foam_count[0];
@@ -230,6 +246,19 @@ void K_FoamPhysics(
 
     float ax = 0.0f, ay = 0.0f, az = 0.0f;
 
+    // FOAM and BUBBLE need to know whether they are inside the fluid.
+    bool in_fluid = false;
+    bool have_grid = (cell_start != NULL);
+    if (have_grid && foam_type > 0.5f) {
+        uint h = spatialHash(calcGridCell(make_float3(pos.x, pos.y, pos.z)));
+        in_fluid = cell_start[h] < cell_end[h];
+    }
+    if (have_grid && foam_type > 1.5f && !in_fluid) {
+        // BUBBLE left the fluid: it is now surface FOAM at rest vertically.
+        foam_type = 1.0f;
+        vel.y = 0.0f;
+    }
+
     if (foam_type < 0.5f) {
         // SPRAY: gravity + air drag
         ax = -vel.x * c_foam.drag_coeff;
@@ -238,7 +267,9 @@ void K_FoamPhysics(
     } else if (foam_type < 1.5f) {
         // FOAM: gentle gravity + horizontal diffusion + damping
         ax = -vel.x * 2.0f;  // strong horizontal damping
-        ay = c_sim.gravity.y * 0.1f;  // weak gravity (sits on surface)
+        ay = in_fluid
+           ? c_foam.foam_buoyancy - vel.y * c_foam.foam_water_drag  // climb to surface
+           : c_sim.gravity.y * 0.1f;  // weak gravity (sits on surface)
         az = -vel.z * 2.0f;
     } else {
         // BUBBLE: buoyancy + gentle drag
