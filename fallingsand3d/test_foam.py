@@ -499,3 +499,109 @@ def test_sdf_replay_reaches_late_foam_module(world, sim):
     finally:
         rb.upload_sdf_objects(None, 0)
     assert n[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# In-fluid test from the SPH hash grid (bd-r5-review-n28.193)
+# ---------------------------------------------------------------------------
+def _host_cell_hash(sim, p: np.ndarray) -> int:
+    """calcGridCell + spatialHash from common.cuh, on the host."""
+    g = sim._grid_params[0]
+    gmin = np.asarray(g["grid_min"], dtype=np.float32)
+    delta = np.asarray(g["grid_delta"], dtype=np.float32)
+    c = np.floor((p.astype(np.float32) - gmin) * delta).astype(np.int64)
+    primes = (73856093, 19349669, 83492791)
+    h = sum((int(c[k]) & 0xFFFFFFFF) * primes[k] for k in range(3))
+    return int(h & 0xFFFFFFFF) & int(g["table_mask"])
+
+
+def _cell_tables(sim, occupied_hashes) -> tuple:
+    """Separate cell_start/cell_end arrays: one particle in each listed hash."""
+    size = int(sim._grid_params[0]["table_size"])
+    start = np.zeros(size, dtype=np.uint32)
+    end = np.zeros(size, dtype=np.uint32)
+    for h in occupied_hashes:
+        end[h] = 1
+    return cp.asarray(start), cp.asarray(end)
+
+
+def _step_one(world, sim, pos, vel, occupied):
+    _seed_foam(world, pos, vel)
+    cs, ce = _cell_tables(sim, occupied)
+    foam.foam_physics(world.foam_position, world.foam_velocity,
+                      world.foam_count, world._max_foam, cs, ce)
+    p = cp.asnumpy(world.foam_position[:pos.shape[0]])
+    v = cp.asnumpy(world.foam_velocity[:pos.shape[0]])
+    world.foam_count[:] = 0
+    return p, v
+
+
+def test_bubble_in_empty_cell_becomes_foam(world, sim):
+    """A BUBBLE in an empty cell becomes FOAM with vy = 0 after one step."""
+    mid = _mid(sim)
+    pos = np.zeros((1, 4), dtype=np.float32)
+    pos[0, :3] = mid
+    pos[0, 3] = 2.0  # BUBBLE
+    vel = np.zeros((1, 4), dtype=np.float32)
+    vel[0, 1] = 0.8
+    vel[0, 3] = 100.0
+    p, v = _step_one(world, sim, pos, vel, occupied=[])
+    assert p[0, 3] == 1.0, f"type {p[0, 3]}, want FOAM"
+    # vy is zeroed, then one substep of weak gravity (0.1 g dt).
+    g = float(sim._sim_params[0]["gravity"][1])
+    assert abs(v[0, 1] - 0.1 * g * sim.dt) < 1e-5
+
+
+def test_bubble_in_fluid_cell_stays_bubble(world, sim):
+    """A BUBBLE whose cell holds a particle keeps rising as a BUBBLE."""
+    mid = _mid(sim)
+    pos = np.zeros((1, 4), dtype=np.float32)
+    pos[0, :3] = mid
+    pos[0, 3] = 2.0
+    vel = np.zeros((1, 4), dtype=np.float32)
+    vel[0, 3] = 100.0
+    p, v = _step_one(world, sim, pos, vel, occupied=[_host_cell_hash(sim, mid)])
+    assert p[0, 3] == 2.0
+    assert v[0, 1] > 0.0
+
+
+def test_foam_in_fluid_cell_rises(world, sim):
+    """FOAM in a cell with fluid gets positive ay; in an empty cell it falls."""
+    mid = _mid(sim)
+    pos = np.zeros((1, 4), dtype=np.float32)
+    pos[0, :3] = mid
+    pos[0, 3] = 1.0  # FOAM
+    vel = np.zeros((1, 4), dtype=np.float32)
+    vel[0, 3] = 100.0
+    _, v_in = _step_one(world, sim, pos, vel,
+                        occupied=[_host_cell_hash(sim, mid)])
+    _, v_out = _step_one(world, sim, pos, vel, occupied=[])
+    assert v_in[0, 1] > 0.0, f"in-fluid FOAM vy {v_in[0, 1]}, want > 0"
+    assert v_out[0, 1] < 0.0
+
+
+def test_foam_rises_to_top_of_fluid_layer(world, sim):
+    """FOAM released at the bottom of a 3-cell fluid column ends near its top."""
+    mid = _mid(sim)
+    cell = 1.0 / float(sim._grid_params[0]["grid_delta"][0])
+    gmin = np.asarray(sim._grid_params[0]["grid_min"], dtype=np.float32)
+    # Snap to a cell centre so the column cells are exact.
+    base = gmin + (np.floor((mid - gmin) / cell) + 0.5) * cell
+    column = [base + np.array([0, k * cell, 0], dtype=np.float32) for k in range(3)]
+    occupied = [_host_cell_hash(sim, c) for c in column]
+    top = float(column[-1][1] + 0.5 * cell)
+
+    pos = np.zeros((1, 4), dtype=np.float32)
+    pos[0, :3] = column[0]
+    pos[0, 3] = 1.0
+    vel = np.zeros((1, 4), dtype=np.float32)
+    vel[0, 3] = 100.0
+    _seed_foam(world, pos, vel)
+    cs, ce = _cell_tables(sim, occupied)
+    for _ in range(int(2.0 / sim.dt)):
+        foam.foam_physics(world.foam_position, world.foam_velocity,
+                          world.foam_count, world._max_foam, cs, ce)
+    p = cp.asnumpy(world.foam_position[0])
+    world.foam_count[:] = 0
+    assert p[3] == 1.0
+    assert abs(p[1] - top) < 0.5 * cell, f"y {p[1]:.4f}, top {top:.4f}"
