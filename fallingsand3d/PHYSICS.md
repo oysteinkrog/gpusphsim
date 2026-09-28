@@ -2076,8 +2076,15 @@ Each item names its bead (`bd-r4fix-uup.N`).
     hash (10.12) moves more slots per re-sort, and a still zero-g DFSPH block
     then spread about 2.4 times faster (`test_dfsph_still_water_never_sleeps`:
     vmax 3.0 to 4.4 m/s at 2 s, 1.5 m/s with the fix).
-  - PBF fills it from `sorted_density`. This removes the race, but the values
-    are still in the previous sort order after a full re-sort.
+  - PBF fills it from `sorted_position.w` the same way (bd-r5-review-n28.216).
+    PBF never overwrites `.w` inside the substep. Every `K_PBF_Finalize`
+    writeback (STATIC and sleeping GRANULAR included) stores the particle's
+    density in the unsorted `position.w`. Until bd-r5-review-n28.216 it copied
+    `sorted_density`, which is in the previous substep's slot order, and the
+    sleeping writeback kept a stale `.w`. `test_pbf_density_prev.py` checks
+    that every slot of `density_in` holds the previous density of the particle
+    now in that slot, over 600 full-sort substeps with STATIC, FLUID, GRANULAR
+    and sleeping particles. The old snapshot failed at 13830 of 21600 slots.
   - Every read site (K_Step1, K_DFSPH_ComputeDensityAlpha,
     K_PBF_ComputeLambda; same-phase and cross-phase heat, and the PBF
     vorticity/normal sum) replaces a value `<= 0` with the
