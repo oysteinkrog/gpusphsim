@@ -18,7 +18,7 @@ C_poly6 = 315 / (64 * pi * h^9)
 
 With h=0.04: `C_poly6 = 315 / (64 * pi * 0.04^9) = 5.968e12`
 
-**Source**: `step1.py:132`, `step2.cu:114-117`
+**Source**: `step1.py:build_precalc_params` (`poly6_coeff`), `sph_shared.cuh:W_poly6`
 
 ### 1.2 Spiky Gradient (pressure force)
 
@@ -36,7 +36,7 @@ pressure_precalc = +45 / (pi * h^6)                    [positive, absorbs negati
 
 With h=0.04: `pressure_precalc = 45 / (pi * 0.04^6) = 3.497e9`
 
-**Source**: `step2.cu:93-101`, `step1.py:135`
+**Source**: `sph_shared.cuh:grad_spiky_variable`, `step1.py:build_precalc_params` (`spiky_grad_coeff`)
 
 ### 1.3 Viscosity Laplacian (viscosity force)
 
@@ -53,7 +53,7 @@ viscosity_lap_coeff = 45 / (pi * h^6) = 3.497e9
 viscosity_precalc = mu_0 * 45 / (pi * h^6)
 ```
 
-**Source**: `step2.cu:106-108`, `step1.py:134,136`
+**Source**: `sph_shared.cuh:lap_visc_variable`, `step1.py:build_precalc_params` (`viscosity_lap_coeff`)
 
 ---
 
@@ -89,7 +89,7 @@ rho_i = max(rho_i, 1.0)
   `position.w`, like every other particle. `K_UpdateBoundaryParticles` and
   `inject_boundary_particles` also write `.w = 2500`, so no reader sees 0.
 
-**Source**: `step1.cu:138-150` (inner loop), `step1.cu:224-225` (PostCalc)
+**Source**: `step1.cu:K_Step1` (neighbour loop and PostCalc)
 
 ### 2.2 Parent comparison
 
@@ -268,7 +268,7 @@ under water feels the same pressure acceleration as the water it displaces: at h
 balance its upward push is about |g|, not 7x or 50x |g|
 (`test_cross_force_scale.py::test_submerged_sand_not_ejected`, ratio sand/water = 1.0).
 
-**Source**: `step2.cu:315-321` (accumulation), `step2.cu:379-390` (PostCalc)
+**Source**: `step2.cu:step2_body` (neighbour loop and PostCalc)
 
 ### 3.3 Viscosity Force
 
@@ -462,7 +462,7 @@ step2 and integrate changes the sleeping bit, so the two kernels agree on which 
 were skipped. On a settled 1M SAND block this cut step2 from 0.045 to 0.008 ms.
 Test: `test_integrate.py::test_unwritten_force_and_veleval_rows_are_not_read`.
 
-**Source**: `step2.cu:392`
+**Source**: `step2.cu:step2_body` (`sph_force_out` and `veleval_out` writes)
 
 ### 3.6 Parent Step2 Output (CRITICAL DIFFERENCE)
 
@@ -605,7 +605,7 @@ than real time. WCSPH in fixed mode is not split.
 GRANULAR anti-creep: if `|v| < 0.01` AND `rho > 0.95*rho_0` AND `gamma_dot < 0.05`:
 set `v_new = 0`
 
-**Source**: `integrate.cu:338-376`
+**Source**: `integrate.cu:K_Integrate` (velocity update)
 
 ### 4.3 Position Update
 
@@ -630,7 +630,7 @@ PBF and DFSPH do their own position update in their Finalize kernels (PBF from t
 predicted position, DFSPH from the post-solve velocity plus XSPH), so they do not read
 `sorted_veleval` for advection.
 
-**Source**: `integrate.cu:279-294`
+**Source**: `integrate.cu:K_Integrate` (position update)
 
 ### 4.4 Parent Integration (Leapfrog)
 
@@ -661,7 +661,7 @@ All three solvers use this rule: WCSPH in `K_Integrate`, PBF in `K_PBF_Finalize`
 DFSPH in `K_DFSPH_Finalize`. PBF uses its own copy, `pbf_box_boundary`, where a
 particle exactly on the margin plane counts as contact (see 12.4).
 
-**Source**: `integrate.cu:70-174`, `integrate.cu:395-400`
+**Source**: `sph_shared.cuh:sdf_box_boundary`, `integrate.cu:K_Integrate` (its call)
 
 ---
 
@@ -681,7 +681,7 @@ to `shear_rate_out`. Step2 reads this as `shear_rate_in` via `__ldg()` — no re
 recomputation. Previously Step2 had its own neighbor pass for gamma_dot (simplified
 scalar formula); this was removed as it was redundant and wasted ~40-50% of Step2 time.
 
-**Source**: `step1.cu:168-236`, `step2.cu` (reads `shear_rate_in`)
+**Source**: `step1.cu:K_Step1` (strain-rate tensor), `step2.cu` (reads `shear_rate_in`)
 
 ### 5.2 Inertial Number
 
@@ -1012,7 +1012,7 @@ a few substeps. For WCSPH, `K_Integrate` keeps the MAT_RIGID boundary velocity
 (written by `K_UpdateBoundaryParticles`) in the unsorted velocity array, where
 other STATIC particles get zero.
 
-**Source**: `integrate.cu:54-59, 115-127, 280-302, 407-418`, `wake.cu`
+**Source**: `integrate.cu:K_Integrate` (wake trigger and sleep counter), `wake.cu`
 (`K_MarkWakeCells`, `K_MarkWakeCellsRigid`), `sph_shared.cuh`
 (`wake_stamp`, `wake_mark_own_cell`), `pbf_solver.cu` and `dfsph_solver.cu`
 (finalize kernels), `wake.py`, `simulation.py`
@@ -1085,7 +1085,7 @@ Where:
 
 STATIC particles still conduct heat (but don't move).
 
-**Source**: `integrate.cu:45-46`, `step1.cu:166-187`
+**Source**: `sph_shared.cuh` (`COOL_RATE`, `T_AMBIENT`), `integrate.cu:K_Integrate`, `step1.cu:K_Step1` (heat diffusion)
 
 ### 9.1 Cross-Material Heat Boost
 
@@ -1198,7 +1198,7 @@ under 0.1 s under all three solvers.
 | WATER+ICE | 20.0 | Melting/freezing |
 | FIRE+ICE | 25.0 | Moderate melting |
 
-**Source**: `materials.py:351-384`, `step1.cu:174-180`
+**Source**: `materials.py:build_interaction_matrix` (pair table), `step1.cu:K_Step1` (heat exchange)
 
 ### 9.3 Material Default Spawn Temperatures
 
@@ -1452,13 +1452,13 @@ The parent multiplies step2 output by `m_j = 0.02` and uses mass=0.02 for densit
    rest_density / 2500 (7.3).
 2. Added `force_scale = 0.02` in GranularParams, applied at step2 output.
    This matches the parent's `output * m_j` convention.
-**Source**: `world.py` (`PARTICLE_MASS`, `spawn_mass`), `step2.cu:48,393`, `step2.py:49,101`
+**Source**: `world.py` (`PARTICLE_MASS`, `spawn_mass`), `step2.cu:step2_body` (final `fs_i` multiply), `step2.py` (`DEFAULT_FORCE_SCALE`, `build_granular_params`)
 
 ### 10.3 CHANGED: XSPH in the FLUID position update (Game SPH)
 The parent advects with the new velocity only. Here FLUID adds the XSPH delta:
 `pos += (vel_new + epsilon * xsph_sum) * dt`, which smooths compression artifacts at
 larger dt. Other behaviors use `pos += vel_new * dt`. Both are symplectic Euler (4.3).
-**Source**: `integrate.cu:279-294`
+**Source**: `integrate.cu:K_Integrate` (position update)
 
 ### 10.4 FIXED: Viscous CFL did not match the viscosity form
 The adaptive timestep had a viscous CFL `accuracy * rho_min * h^2 / max_eta` built
@@ -1611,7 +1611,7 @@ The per-substep grid build is `counting_sort.counting_sort_full` (no physics cha
    0.78 ms, was 1.92 to 2.04 ms; host time per direct call 80 to 320 us, was
    700 to 980 us.
 4. **Reactions/spawn always run**: Previously conditionally skipped for non-reactive
-   materials; now always included for CUDA graph fixed topology (§10.9).
+   materials; now always included for CUDA graph fixed topology (§10.10).
    Non-reactive threads early-exit with negligible GPU cost.
 5. **Fused wake kernels**: K_WakeSleepers + K_ClearJustWoke merged into
    K_WakeSleepersAndClearJustWoke (3→2 kernel launches).
@@ -1642,6 +1642,17 @@ The per-substep grid build is `counting_sort.counting_sort_full` (no physics cha
    bd-r5-review-n28.215): an in-place `position.w` write let a neighbour read
    either density, and about 5,000 of 315,180 particles then differed after 3
    substeps (about 90,000 with the atomic order).
+9. **Array types**: FP16 or fixed point is used only for neighbour-read
+   mirrors that the reorder rebuilds every substep from an FP32 master:
+   `sorted_velocity_h` (half4) and `sorted_temperature_h` (uint16, 0.125 K).
+   State that a kernel updates in place (position, velocity, temperature,
+   kappa, kappa_v) stays FP32. Many per-substep updates are smaller than the
+   FP16 half-ulp of 2.4e-4 relative; ambient cooling, for example, moves T by
+   `COOL_RATE * dt` = 6.7e-5 of `T - T_AMBIENT` per substep at dt = 1/300 s.
+   An FP16 store would round such updates away and the state would stall
+   with no crash or NaN. Reorder bandwidth is cut by skipping fields the
+   solver does not read (NULL outputs, 20.4), not by shrinking them. The same
+   rule sits next to the FP16 helpers in `common.cuh`.
 
 **Source**: simulation.py, counting_sort.py/.cu, wake.py/.cu
 
@@ -1651,18 +1662,20 @@ compute advection CFL, forcing a GPU→CPU sync (device→host transfer) every f
 Adaptive dt now takes v_max from the drift value the per-frame async readback already
 copies (one frame late), and computes the accuracy bound and the velocity CFL on the
 CPU (see 4.2). There is no GPU sync in the hot path.
-**Source**: `simulation.py:151-175`
+**Source**: `simulation.py:_compute_adaptive_dt`
 
 ### 10.10 OPTIMIZATION: CUDA graph capture for SPH pipeline
-The per-substep pipeline launches ~14 GPU operations (memsets + kernel calls) with
-Python→CUDA round-trip overhead for each. CUDA graph capture records ops 3-14 into
-a single replayable graph, reducing CPU→GPU dispatches from 14 to 3.
+Each substep launches a few dozen GPU operations (memsets and kernels), each with
+Python-side launch overhead. `_capture_graph` records the whole substep body
+(`_run_graph_body`) into one CUDA graph, and later substeps replay it with one
+launch.
 
 **No split point**: the counting sort uses only its own kernels and makes no
 memory-pool allocation (10.8), so the whole substep, sort included, is
-captured. There
-are two graphs: one with the full counting sort and one with the gather-only
-reorder (grid reuse, see `_capture_graph`).
+captured. There is one graph for a full-sort substep and up to four for a
+grid-reuse substep (`_set_graph_slot`): the plain gather-only graph, plus three
+variants keyed by (skip reorder, integrate in place) in `_graph_reuse_variants`
+for the WCSPH in-place writeback (20.5).
 
 **Design details**:
 - Pre-allocated `_sort_perm` buffer: graph bakes pointer addresses, so the
@@ -1695,8 +1708,9 @@ reorder (grid reuse, see `_capture_graph`).
   (a pageable `cudaMemcpy` drains the queue first). These writes do not
   invalidate the graphs (bd-r5-review-n28.168).
 
-**Source**: `simulation.py:256-426`, `reactions.cu:80-81`, `reactions.py:106-186`,
-`spawn.py:118-120`
+**Source**: `simulation.py` (`_run_graph_body`, `_capture_graph`, `_set_graph_slot`),
+`reactions.cu:K_Reactions` (`frame` pointer), `reactions.py:compute_reactions`,
+`spawn.py:reset_freelist`
 
 ### 10.11 VISUAL: FLUID particle coloring (depth + foam + density)
 FLUID particles use `compute_fluid_color()` instead of the generic `compute_color()`.
@@ -1811,6 +1825,13 @@ Shared helper functions in common.cuh (used by all kernels):
 Neighbor loops no longer need bounds checking (`cx < 0 || cx >= rx`).
 Any integer cell coordinates produce a valid hash in [0, table_size).
 
+**Float32 world-size limit.** Positions are absolute world coordinates in
+float32. The spacing between float32 values (ulp) is 9.5e-7 m at |x| = 10 m,
+3.8e-6 m at 50 m and 7.6e-6 m at 100 m. A typical PBF position correction is
+about 2e-4 m, so at 100 m one ulp is about 4% of it; at 10 m it is 0.5%. No
+change is needed for worlds below about 50 m from the origin. Larger worlds
+would need positions relative to a local origin.
+
 **Source**: `common.cuh`, `counting_sort.cu`, `step1.cu`, `step2.cu`,
 `pbf_solver.cu`, `dfsph_solver.cu`, `wake.cu`, `grid_params.py`, `simulation.py`
 
@@ -1851,7 +1872,7 @@ External algorithmic review by GPT 5.2 Pro identified 9 issues. Fixes applied:
 4. **PBF GAS doesn't skip constraints** (HIGH → FIXED): GAS was going through full
    lambda+delta computation. GAS now has no density constraint. Its lambda slot
    holds the gas EOS term p/rho^2 and ComputeDelta applies only the GAS-GAS
-   pressure delta (see 12.5).
+   pressure delta (see 12.9).
 5. **PBF s_corr_n hardcoded to 4** (MEDIUM): Documented in code. At h=0.04, s_corr is
    disabled (k=0) so this has no practical impact.
 6. **DFSPH K_DFSPH_ComputeKappaFromVelocity uses m_j not m_j/rho_j** (HIGH if used):
@@ -1921,7 +1942,7 @@ Comprehensive fixes from GPT/Gemini cross-review of all physics kernels:
   see 21.3). DIRT reaches MUD via the wetting path (`exp_corrode > SAND_WET_THRESHOLD`)
   instead.
 
-**Source**: `reactions.cu:225-261`
+**Source**: `reactions.cu:K_Reactions` (DIRT wetting and the corrosion whitelist)
 
 ### 10.15 FIXED: Rigid body force/acceleration unit mismatch
 
@@ -2031,8 +2052,8 @@ Each item names its bead (`bd-r4fix-uup.N`).
     neighbour position it already loads (bd-r5-review-n28.163, see 20.1).
     `position.w` holds the previous density and is re-ordered with the
     position, so the values match the current sort order.
-    K_Step1 writes the density into sorted `.w`, and `K_Integrate` carries it to
-    the unsorted `position.w` for awake particles (STATIC and sleeping particles
+    `compute_step1` copies the density into sorted `.w` after K_Step1, and
+    `K_Integrate` carries it to the unsorted `position.w` for awake particles (STATIC and sleeping particles
     pass `.w` through unchanged). Until 2026-09-24 `K_Integrate` wrote `.w = 1.0`
     for awake particles, so from the second substep every awake neighbour had
     `rho_j = 1` and every `m_j / rho_j` term in step1 was about 1000 to 2500
@@ -2280,9 +2301,9 @@ Switching solvers resets the scene (avoids "physics shock" from different densit
 
 | Solver | Algorithm | Substeps/frame | Inner iterations | Best for |
 |--------|-----------|---------------|-----------------|----------|
-| WCSPH | Weakly Compressible SPH | 10-25 at dt=0.001 | N/A | Accuracy, multi-material |
-| PBF | Position Based Fluids | 1-2 at dt=1/60 | 4 constraint iters | Fast fluids |
-| DFSPH | Divergence-Free SPH | 5 at dt=1/300 | 3 div + 4 dens iters | Quality + speed |
+| WCSPH | Weakly Compressible SPH | up to 40, adaptive dt 0.5 ms (Fast: 1 ms) | N/A | Accuracy, multi-material |
+| PBF | Position Based Fluids | up to 4 at dt=1/120 | 6 constraint iters (Fast: 4) | Fast fluids |
+| DFSPH | Divergence-Free SPH | up to 10 at dt=1/300 (Fast: 7 at 1/200) | 3 div + 4 dens iters (Fast: 2 + 3) | Quality + speed |
 
 Each solver has its own CuPy RawModule with separate constant memory.
 Shared constants (`c_grid`, `c_sim`, `c_precalc`, `c_materials`) are uploaded
@@ -2298,8 +2319,8 @@ All three solvers now support the complete material behavior set:
 |---------|-------|-----|-------|
 | Pressure solve | Tait EOS | Density constraint | Div+Dens iters |
 | Viscosity (FLUID) | Laplacian (per-material) | XSPH (per-material scaled) | Laplacian (per-material)/rho_i |
-| Viscosity (GRANULAR) | mu(I) in Step2 | XSPH*10 + DP friction | mu(I) in NonPressure |
-| XSPH smoothing | Step2, FLUID only (eps=0.8, profile) | Finalize (c=0.05) | NonPressure (eps=0.1) |
+| Viscosity (GRANULAR) | mu(I) in Step2 | XSPH (x3, capped at 0.15) + DP friction | mu(I) in NonPressure |
+| XSPH smoothing | Step2, FLUID only (eps=0.8, profile) | Finalize (c=0.05 x base_viscosity) | Finalize (eps=0.1) |
 | GAS buoyancy | Integrate | Predict (v+=) | NonPressure (accel) |
 | GAS pressure (gas EOS, GAS pairs, x force_scale) | Step2 | ComputeDelta (dx = dt^2 a / iters) | NonPressure (accel) |
 | GAS phase separation | Step1 (skip GAS) | ComputeLambda (skip GAS) | DensityAlpha (skip GAS) |
@@ -2311,7 +2332,7 @@ All three solvers now support the complete material behavior set:
 | Vorticity confinement | Step2 (eps=0.05) | Finalize (eps=0.001) | NonPressure (eps=0.05) |
 | Surface normals | Step1 | ComputeLambda | DensityAlpha |
 | Surface tension | Step2 (gamma=1.0) | Finalize (gamma=0.0) | NonPressure (gamma=1.0) |
-| Drucker-Prager friction | Step2 (force-space) | Finalize (vel-space) | NonPressure (force-space) |
+| Drucker-Prager friction | none (GRANULAR uses mu(I)) | Finalize (vel-space) | none (GRANULAR uses mu(I)) |
 | Sleep/wake system | Integrate | Finalize | Finalize |
 | Temperature/reactions | Integrate | Finalize | Finalize |
 
@@ -2558,13 +2579,16 @@ sort and not scattered back to unsorted order.
 ```
 v_new += c_scaled * SUM_j (m_j / rho_avg_ij) * (v_j - v_i) * W_poly6(x*_ij)
 
-c_scaled = c_pbf.xsph_c * c_materials[mat_id].base_viscosity
+c_scaled = min(c_pbf.xsph_c * c_materials[mat_id].base_viscosity, 0.5)
+GRANULAR: c_scaled = min(3 * c_scaled, 0.15)
 ```
 
-`c_pbf.xsph_c` (default 0.05) is scaled by per-material `base_viscosity` so that
-viscous fluids (OIL=5.0, LAVA=10.0) get proportionally more XSPH smoothing than
-WATER (1.0). GRANULAR additionally multiplies by 10x for strong artificial viscosity.
-Applied in K_PBF_Finalize.
+`c_pbf.xsph_c` is 0.05 in both PBF profiles (the `SolverProfile` field default is
+0.01). It is scaled by per-material `base_viscosity`, so viscous fluids get more
+XSPH smoothing than WATER (1.0 gives 0.05): OIL (5.0) gets 0.25, and LAVA (100.0)
+hits the 0.5 cap. GRANULAR takes 3 times its own value, capped at 0.15; SAND
+(0.5) gets 0.075. FLUID and GRANULAR get XSPH, GAS does not. Applied in
+K_PBF_Finalize.
 
 GAS neighbours are skipped. A STONE (fixed wall) neighbour has `v_j = 0`, which
 gives wall friction. A MAT_RIGID neighbour uses the body surface velocity
@@ -2573,32 +2597,6 @@ gives wall friction. A MAT_RIGID neighbour uses the body surface velocity
 (22.5, PBF fluid-rigid drag).
 
 **Source**: `pbf_solver.cu:K_PBF_Finalize`
-
-### 12.5 PBF Multi-Material Handling
-
-- **FLUID**: Full PBF constraint solve (density constraint + XSPH)
-- **GRANULAR**: Participates in density constraint (lambda, dx) for volume exclusion.
-  Drucker-Prager friction is applied in K_PBF_Finalize (velocity-space, once per
-  substep) using pressure normals from K_PBF_ComputeLambda (see §12.7).
-  High artificial viscosity prevents granular from flowing like water.
-- **GAS**: No density constraint. Predict uses gravity + buoyancy + drag.
-  GAS is a compressible phase and gets the WCSPH gas EOS pressure inside its
-  own phase (bd-r5-review-n28.91). The first (do_heat) K_PBF_ComputeLambda
-  call writes `lambda_i = p_i / rho_i^2`, with `p_i = k * max(rho_i - rho0, 0)`
-  from `compute_pressure`, into the GAS lambda slot; later iterations keep it.
-  K_PBF_ComputeDelta spreads the step2 acceleration over the iterations:
-  ```
-  a_i  = -fs * SUM_j(GAS) m_j * (lambda_i + lambda_j) * grad_spiky(x*_ij)
-  dx_i = dt^2 * a_i / num_iterations        (fs = c_granular.force_scale = 0.02)
-  ```
-  so Finalize's `(x* - x) / dt` adds `dt * a_i` to the velocity, as WCSPH
-  does. The 0.5h delta clamp still applies. GAS never pairs with FLUID,
-  GRANULAR or STATIC here, so their lambda and delta are unchanged.
-  Steam spawned by `K_SpawnGas` after Predict gets its predicted position
-  written by the spawn (`x + dt * v`, see 10.21).
-- **STATIC**: Lambda always forced to 0 (Akinci one-way boundary). STATIC
-  contributes to neighbor density sums. On do_heat path, exposure and heat
-  are accumulated but lambda is still 0.
 
 ### 12.6 PBF Sleep System
 
@@ -2633,7 +2631,7 @@ grad_len = |grad_ci|
 if grad_len > 1e-8:
     pressure_normal = grad_ci / grad_len    (unit vector)
 else:
-    pressure_normal = (0, 1, 0)             (fallback to gravity direction)
+    pressure_normal = (0, 0, 0)             (no normal: Finalize skips friction, 12.7.2)
 ```
 
 The `.w` component stores `grad_len` (magnitude of density gradient).
@@ -2715,7 +2713,7 @@ available from the PBF constraint computation.
 
 ---
 
-## 12.8 Surface Velocity Smoothing (Quality Mode)
+### 12.8 Surface Velocity Smoothing (Quality Mode)
 
 Iterative Jacobi smoothing of FLUID surface particle velocities. This is
 XSPH-style smoothing restricted to surface particles. It is not surface
@@ -2789,6 +2787,32 @@ change cancels out of this substep's position update: positions move by
 reaches positions from the next substep. With `sigma = 0`, IST on matches IST off.
 
 **Source**: `implicit_st.cu:K_IST_Iterate`, `implicit_st.py`, `simulation.py`
+
+### 12.9 PBF Multi-Material Handling
+
+- **FLUID**: Full PBF constraint solve (density constraint + XSPH)
+- **GRANULAR**: Participates in density constraint (lambda, dx) for volume exclusion.
+  Drucker-Prager friction is applied in K_PBF_Finalize (velocity-space, once per
+  substep) using pressure normals from K_PBF_ComputeLambda (see §12.7).
+  XSPH at 3 times the material value (capped at 0.15, see 12.5) damps the flow.
+- **GAS**: No density constraint. Predict uses gravity + buoyancy + drag.
+  GAS is a compressible phase and gets the WCSPH gas EOS pressure inside its
+  own phase (bd-r5-review-n28.91). The first (do_heat) K_PBF_ComputeLambda
+  call writes `lambda_i = p_i / rho_i^2`, with `p_i = k * max(rho_i - rho0, 0)`
+  from `compute_pressure`, into the GAS lambda slot; later iterations keep it.
+  K_PBF_ComputeDelta spreads the step2 acceleration over the iterations:
+  ```
+  a_i  = -fs * SUM_j(GAS) m_j * (lambda_i + lambda_j) * grad_spiky(x*_ij)
+  dx_i = dt^2 * a_i / num_iterations        (fs = c_granular.force_scale = 0.02)
+  ```
+  so Finalize's `(x* - x) / dt` adds `dt * a_i` to the velocity, as WCSPH
+  does. The 0.5h delta clamp still applies. GAS never pairs with FLUID,
+  GRANULAR or STATIC here, so their lambda and delta are unchanged.
+  Steam spawned by `K_SpawnGas` after Predict gets its predicted position
+  written by the spawn (`x + dt * v`, see 10.21).
+- **STATIC**: Lambda always forced to 0 (Akinci one-way boundary). STATIC
+  contributes to neighbor density sums. On do_heat path, exposure and heat
+  are accumulated but lambda is still 0.
 
 ---
 
@@ -3389,6 +3413,11 @@ memory above 0 B is a spill or a stack array.
 | K_DFSPH_DensitySolverUpdate_NL | (256, 4) | 54 | 0 B | |
 | K_DFSPH_Finalize | (256, 4) | 56 | 0 B | |
 
+Kernels not measured in the table: `K_PBF_ComputeLambdaLean` uses
+`(256, LAMBDA_LEAN_MIN_BLOCKS)` = (256, 6) (12.1), `K_Integrate` and
+`K_IST_Iterate` use (256, 4), `K_ComputeColor` uses (256), and the counting
+sort scan kernels use `(SCAN_THREADS)`.
+
 K_Step1 does not spill at (256, 4), so its GRANULAR strain and FLUID
 omega/normal accumulators stay separate. K_PBF_ComputeLambda and
 K_DFSPH_ComputeDensityAlpha stay at (256, 3), because (256, 4) makes them spill.
@@ -3759,12 +3788,12 @@ Foam rendered as separate draw call after main scene (both point sprite and SSFR
 
 ### 20.1 Pack Density into position.w (OPT-4.1)
 
-At the end of each particle, `K_Step1` writes `density[i]` into
-`sorted_position[i].w`. Step2 then reads `rho_j = position[j].w` instead of
+After K_Step1, `compute_step1` copies `density_out` into
+`sorted_position.w`. Step2 then reads `rho_j = position[j].w` instead of
 issuing a separate `__ldg(&density[j])` load per neighbor. This eliminates one
 global memory load per neighbor interaction in the Step2 inner loop.
 
-Pipeline order: Step1 (writes density and `.w`) → Step2
+Pipeline order: K_Step1 (writes `density_out`) → `.w` copy → K_Step2
 
 Applied to WCSPH path only. PBF computes density from predicted positions. DFSPH
 keeps density in a separate buffer and puts the neighbour volume (not the density)
@@ -3803,8 +3832,11 @@ In all neighbor loop inner loops, `__ldg()` loads for neighbor data (position,
 packed_info, velocity, mass, density, kappa) are issued BEFORE the distance
 check. All loads go through the texture cache with ~200 cycle L2 latency.
 By issuing them in parallel before the branch, the loads overlap and latency
-is hidden. Approximately 30% of loads are wasted (out-of-range neighbors),
-but the latency savings on in-range neighbors more than compensate.
+is hidden. Most of these loads are wasted: a sphere of radius h fills 15.5% of
+the 3x3x3 block of h-sized cells, so about 85% of candidates fail the distance
+test, more with hash collisions. Only the position load is needed for the test;
+the others are issued early only to hide their latency. The latency savings on
+in-range neighbors still more than compensate.
 
 Pattern:
 ```cuda
@@ -4258,7 +4290,7 @@ remove that dependence.
 No kernel code changes needed — existing per-material property lookups handle everything:
 
 - **WCSPH**: step2 reads `c_materials[mat_id].friction_coeff`; WET_SAND (0.75) > SAND (0.6). MUD uses FLUID viscosity path.
-- **PBF**: Drucker-Prager uses global `c_granular.tan_phi_f`. Differentiation via XSPH damping from base_viscosity.
+- **PBF**: Drucker-Prager uses the material's `friction_coeff` as the friction slope, with `c_granular.tan_phi_f` as the fallback when it is 0 (12.7.3). XSPH damping scales with base_viscosity (12.5).
 - **DFSPH**: MUD transitions to FLUID → incompressibility corrections + high viscosity.
 
 **Source**: `materials.py`, `reactions.cu`
@@ -4695,7 +4727,7 @@ The divisor 3 applies to half-extents; divisor 12 applies only when the formula 
 full side lengths (e.g., `l = 2*hx`). Using 12 with half-extents would underestimate
 inertia by 4x, making boxes spin unrealistically fast under torques.
 
-**Source**: `rigid_bodies.py:480-487`, `integrate.cu:K_IntegrateRigidBodies`
+**Source**: `rigid_bodies.py:RigidBodyManager.add_rigid_body` (box inverse inertia), `integrate.cu:K_IntegrateRigidBodies`
 
 ### 22.8 Rigid-Rigid and Rigid-SDF Collision
 
