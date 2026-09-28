@@ -769,9 +769,24 @@ material's `mu_s` for that one substep.
 Measured on a resting sand block, WCSPH, K_Step2 per-pair eta to carried eta:
 0.88 to 0.81 ms at 340K particles and 2.11 to 1.97 ms at 830K (shared GPU);
 K_Step1 time unchanged.
-DFSPH NonPressureForces still computes eta per pair.
 
-**Source**: `step1.cu` (PostCalc eta), `step2.cu` (mu(I) eta_i, GRANULAR pair force)
+DFSPH does the same with its own inputs (section 13, GRANULAR confining pressure).
+K_DFSPH_PackVolume writes eta per GRANULAR particle (0 for the rest) into
+`world.sorted_eta`, and K_DFSPH_NonPressureForces reads `eta_i` and `eta_j` from
+`eta_in` (bd-r5-review-n28.219). Both call one helper, `dfsph_muI_eta`, with the
+stored shear rate, `p_prev` and density, so the result matches the per-pair path.
+PackVolume, not ComputeDensityAlpha, writes eta because it runs after reactions and
+spawn: a slot that spawn reuses, or a particle a reaction turns GRANULAR, gets the
+eta of its current material, shear rate and kappa. K_DFSPH_NonPressureForces keeps
+the WCSPH fallback: a carried eta that is not above 0, or `eta_in` NULL, recomputes
+eta from `shear_rate` and `p_prev`.
+Measured on a resting 970K-particle sand block, DFSPH, K_DFSPH_NonPressureForces
+per-pair eta to carried eta: 1.63 to 1.39 ms (shared GPU); K_DFSPH_PackVolume
+0.036 to 0.038 ms. On Sand Castle over 300 substeps the pile shape with carried eta
+stays within the run-to-run noise of the per-pair path (`test_dfsph_muI_eta.py`).
+
+**Source**: `step1.cu` (PostCalc eta), `step2.cu` (mu(I) eta_i, GRANULAR pair force),
+`dfsph_solver.cu` (`dfsph_muI_eta`, K_DFSPH_PackVolume eta, K_DFSPH_NonPressureForces)
 
 ---
 
@@ -3297,6 +3312,8 @@ yet when this kernel runs.
 Each particle's eta uses its own stored shear rate (from ComputeDensityAlpha)
 and its own pressure, so eta_ij computed by i equals eta_ji computed by j and
 the GRANULAR pair force is antisymmetric (`test_dfsph_mui_friction.py`).
+K_DFSPH_PackVolume computes that eta once per particle and the kernel reads it
+per pair (section 5.5, bd-r5-review-n28.219).
 
 Sand Castle, 5 s, g = 4 (`eval_dfsph_mui.py`): mean GRANULAR eta rises with
 depth, 300 Pa.s in the top 0.14 m to 450 Pa.s at 0.64 m depth, with mean
