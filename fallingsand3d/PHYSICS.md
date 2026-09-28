@@ -1726,31 +1726,48 @@ arbitrarily large world sizes without memory blowup.
 - For world_half_size=1.0, h=0.04: grid_res=50, num_cells=125K (500KB)
 - For world_half_size=10.0: grid_res=500, num_cells=125M (500MB!) → OOM
 
-**New approach** (spatial hash):
+**New approach** (Morton order inside 8x8x8-cell blocks):
 ```
-hash = ((uint)cx * 73856093u + (uint)cy * 19349669u + (uint)cz * 83492791u) & TABLE_MASK
+lo   = morton3(cx & 7, cy & 7, cz & 7)                       // 9 bits
+hi   = (cx>>3)*73856093u + (cy>>3)*19349669u + (cz>>3)*83492791u
+hash = (lo + (hi << 9)) & TABLE_MASK
 ```
+- The counting sort orders particles by hash, so inside a block the
+  particles lie in Z-order: the cells a warp reads are spatial neighbours
+  and their 27-cell stencils share cache lines. A/B on `bench_substep.py`
+  (WCSPH, full sort every substep, RTX 5070 Ti): step1+step2 at 1M
+  3.98 -> 2.73 ms, at 524K 1.86 -> 1.23 ms, at 262K 0.95 -> 0.75 ms,
+  against the plain prime hash of the whole cell. PBF and DFSPH totals at
+  1M drop about 35%. (bd-r5-review-n28.201)
+- The block is 8 cells wide, not 64. Part-filled blocks waste table
+  slots, since every cell of a block with the same `hi` bits aliases: a
+  64-cell block made a wide 2-layer water slab (480K particles, world
+  half size 10) 2.7x slower in step1+step2, where the 8-cell block is
+  4% faster than the plain hash.
+- `hi` stays a linear prime sum. A nonlinear mixer spread lattice-shaped
+  scenes worse in a host model of bucket loads.
 - `grid_params.compute_table_size(N)` rounds `max(N/2, 2^18)` up to a power
   of 2 and caps it at 2^20: 2^18 up to about 524K particles, 2^19 up to about 1M,
   2^20 above. `TABLE_SIZE = 2^18` is the default for tests.
 - The cell offsets table (§10.8) has table_size + 1 entries (~1MB at 2^18)
-- The products and the sum wrap in 32-bit unsigned arithmetic, so negative
-  cell coordinates are well defined
-- **Stencil cells never share a bucket.** The combiner is addition, so
-  `hash(c + d1) - hash(c + d2) = (d1 - d2) . P (mod table_size)` does not
-  depend on the cell `c`. No difference `d1 - d2` in {-2..2}^3 is 0 mod 2^18,
-  2^19 or 2^20, so the 27 cells of every 3x3x3 neighbour stencil land in 27
-  distinct buckets and no particle is counted twice. `test_hash_sort.py`
-  checks this on K_HashHistogram for world edges, faces, interior and negative cells.
-- Why not XOR: `P ^ (-P)` has the same low 18 bits (0x3FFFE) for all three
-  primes, so for a cell with two coordinates at 0 (the first in-world layer,
-  since `grid_min = world_min`) offsets (a,-1,-1) and (a,+1,+1) shared a
-  bucket. Particles in the 0.04 m strip along those world edges scanned cell
-  (a,1,1) twice: +3 to +12% density and +23 to +120% Tait pressure.
-- Far-apart cells can still share a bucket. That costs extra distance checks
-  but never misses or double-counts a neighbour. The hash is linear, so two
-  cells collide only when their offset `d` has `d . P = 0 mod table_size`;
-  at 2^18 the shortest such offset is (18, 47, 45) cells.
+- The block products and sum wrap in 32-bit unsigned arithmetic and `>> 3`
+  is an arithmetic shift, so negative cell coordinates are well defined
+- **Stencil cells never share a bucket.** Along each axis the 3 cells of a
+  stencil have 3 distinct values mod 8, so the 27 cells have 27 distinct
+  in-block triples and 27 distinct `lo` codes, and `hi << 9` never touches
+  the low 9 bits. This holds for any table of 2^9 or more, so no particle
+  is counted twice. `test_hash_sort.py` checks this on K_HashHistogram for
+  world edges, faces, block corners, interior and negative cells.
+- Why the block hash is a sum and not XOR: `P ^ (-P)` has the same low 18
+  bits (0x3FFFE) for all three primes, so an XOR combiner of whole-cell
+  products put two stencil cells of a world-edge cell in one bucket, and
+  particles along those edges were counted twice (+3 to +12% density).
+- Far-apart cells can still share a bucket: two cells collide when they
+  have the same place in their block and their blocks agree in the hash
+  bits above bit 9. That costs extra distance checks but never misses or
+  double-counts a neighbour.
+- `grid_params.spatial_hash_np` is the host copy of `spatialHash` that
+  tests use.
 - CuPy's kernel disk cache keys on the `.cu` source text and options, not on
   included headers. After changing `spatialHash` or anything else in
   `common.cuh`, clear `~/.cupy/kernel_cache`, or modules whose `.cu` file did
